@@ -756,6 +756,49 @@ public:
 	UPROPERTY(EditAnywhere, Category="Surface", meta=(ClampMin=0, ClampMax=1))
 	float WaterGridDarkness = 0.3f;
 
+	/** Share of the tint of a cover (UHexPlanetObjectSet::FarCover) the ground keeps under its objects close by, darker under a forest */
+	UPROPERTY(EditAnywhere, Category="Canopy", meta=(ClampMin=0, ClampMax=1))
+	float CanopyNearShare = 0.35f;
+
+	/** Distance from the camera from which the tint grows to all of it, at CanopyFadeEnd, about where the forests are culled */
+	UPROPERTY(EditAnywhere, Category="Canopy", meta=(ClampMin=0))
+	float CanopyFadeStart = 3500.0f;
+
+	UPROPERTY(EditAnywhere, Category="Canopy", meta=(ClampMin=0))
+	float CanopyFadeEnd = 6500.0f;
+
+	/** Where the tint ends towards a side whose neighbor has none, as U of the cell, 1 on the side */
+	UPROPERTY(EditAnywhere, Category="Canopy", meta=(ClampMin=0, ClampMax=1.2))
+	float CanopyEdge = 0.95f;
+
+	/** Width over which it fades out there */
+	UPROPERTY(EditAnywhere, Category="Canopy", meta=(ClampMin=0.01, ClampMax=1))
+	float CanopyEdgeSoftness = 0.3f;
+
+	/** How far a noise moves that edge, so the edge of a forest is ragged */
+	UPROPERTY(EditAnywhere, Category="Canopy", meta=(ClampMin=0))
+	float CanopyEdgeNoise = 0.35f;
+
+	/** Size of the noise of the edge, in world units */
+	UPROPERTY(EditAnywhere, Category="Canopy", meta=(ClampMin=1))
+	float CanopyEdgeNoiseScale = 45.0f;
+
+	/** How much a noise lightens and darkens the tint, so a forest from far away is not one flat color */
+	UPROPERTY(EditAnywhere, Category="Canopy", meta=(ClampMin=0, ClampMax=1))
+	float CanopyMottle = 0.3f;
+
+	/** Size of that noise, in world units */
+	UPROPERTY(EditAnywhere, Category="Canopy", meta=(ClampMin=1))
+	float CanopyMottleScale = 30.0f;
+
+	/** Color of the light of the sky, the same from every direction (AHexPlanet::SkyLight), which lights what the sun does not reach */
+	UPROPERTY(EditAnywhere, Category="Light")
+	FLinearColor SkyLightColor = FLinearColor(0.62f, 0.74f, 1.0f, 1.0f);
+
+	/** Intensity of the light of the sky */
+	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=0))
+	float SkyLightIntensity = 1.0f;
+
 	/** Light the surface gives by itself, so the night side is not black */
 	UPROPERTY(EditAnywhere, Category="Surface", meta=(ClampMin=0))
 	float Ambient = 0.06f;

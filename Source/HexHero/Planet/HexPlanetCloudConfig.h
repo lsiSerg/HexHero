@@ -177,4 +177,41 @@ public:
 	/** Brightness of the bottom of a cloud as a share of its top, which takes CloudShadeColor */
 	UPROPERTY(EditAnywhere, Category="Volume", meta=(ClampMin=0, ClampMax=1))
 	float CloudVolumeBaseShade = 0.5f;
+
+	/** Thickness of the air above the sea, whose haze M_HexPlanetHaze lays over the land and the space around the planet, and the water and the
+	 *  clouds over themselves (HAZE_CODE in Tools/create_planet_assets.py) */
+	UPROPERTY(EditAnywhere, Category="Haze", meta=(ClampMin=1))
+	float HazeHeight = 2000.0f;
+
+	/** Height over which the air thins to a third, so the haze lies low and the views along the ground take the most */
+	UPROPERTY(EditAnywhere, Category="Haze", meta=(ClampMin=1))
+	float HazeFalloff = 500.0f;
+
+	/** Haze per unit of view through air at the height of the sea */
+	UPROPERTY(EditAnywhere, Category="Haze", meta=(ClampMin=0))
+	float HazeDensity = 0.0004f;
+
+	/** Distance from the camera within which the air is clear, so what is close keeps its colors */
+	UPROPERTY(EditAnywhere, Category="Haze", meta=(ClampMin=0))
+	float HazeStart = 600.0f;
+
+	/** Distance past HazeStart over which the air grows to its full density */
+	UPROPERTY(EditAnywhere, Category="Haze", meta=(ClampMin=1))
+	float HazeStartFade = 1500.0f;
+
+	/** Most of the color the haze may cover, so the far land still shows through it */
+	UPROPERTY(EditAnywhere, Category="Haze", meta=(ClampMin=0, ClampMax=1))
+	float HazeMax = 0.85f;
+
+	/** Color of the haze in full sun, in the units of the unlit water and clouds, as the exposure is fixed */
+	UPROPERTY(EditAnywhere, Category="Haze")
+	FLinearColor HazeColor = FLinearColor(0.38f, 0.5f, 0.72f);
+
+	/** Color of the haze on the night side */
+	UPROPERTY(EditAnywhere, Category="Haze")
+	FLinearColor HazeNightColor = FLinearColor(0.005f, 0.008f, 0.02f);
+
+	/** How sharply the haze darkens across the terminator: the light of a point is the sine of the height of the sun times this, plus a half */
+	UPROPERTY(EditAnywhere, Category="Haze", meta=(ClampMin=0.1))
+	float HazeSunWrap = 2.0f;
 };

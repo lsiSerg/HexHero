@@ -6,6 +6,8 @@
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Engine/DirectionalLight.h"
 #include "Engine/GameViewportClient.h"
+#include "Components/PostProcessComponent.h"
+#include "Components/SkyLightComponent.h"
 #include "Styling/CoreStyle.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/SBoxPanel.h"
@@ -521,6 +523,53 @@ AHexPlanet::AHexPlanet()
 	HoverWireframe->SetCastShadow(false);
 	HoverWireframe->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	HoverWireframe->SetTranslucentSortPriority(4);
+
+	SkyLight = CreateDefaultSubobject<USkyLightComponent>(TEXT("SkyLight"));
+	SkyLight->SetupAttachment(Surface);
+	SkyLight->SetMobility(EComponentMobility::Movable);
+	SkyLight->SourceType = SLS_SpecifiedCubemap;
+	// the planet itself is below every point, so nothing of the sky is cut off by a hemisphere of the world
+	SkyLight->bLowerHemisphereIsBlack = false;
+	SkyLight->CubemapResolution = 16;
+
+	HazeVolume = CreateDefaultSubobject<UPostProcessComponent>(TEXT("HazeVolume"));
+	HazeVolume->SetupAttachment(Surface);
+	HazeVolume->bUnbound = true;
+}
+
+void AHexPlanet::CreateHaze()
+{
+	UMaterialInterface* Base = HazeMaterialAsset.LoadSynchronous();
+	if (!Base)
+	{
+		UE_LOG(LogHexHero, Warning, TEXT("Planet: haze material %s is missing, run Tools/create_planet_assets.py"), *HazeMaterialAsset.ToString());
+		return;
+	}
+
+	HazeMaterial = UMaterialInstanceDynamic::Create(Base, this);
+	SetCloudParameters(HazeMaterial);
+	HazeVolume->Settings.WeightedBlendables.Array.Add(FWeightedBlendable(1.0f, HazeMaterial));
+}
+
+void AHexPlanet::CreateSkyLight()
+{
+	const int32 Size = 4;
+	SkyCubemap = UTextureCube::CreateTransient(Size, Size, PF_B8G8R8A8, MakeUniqueObjectName(GetTransientPackage(), UTextureCube::StaticClass(), TEXT("PlanetSky")));
+	SkyCubemap->SRGB = false;
+	SkyCubemap->NeverStream = true;
+	FTexture2DMipMap& Mip = SkyCubemap->GetPlatformData()->Mips[0];
+	FColor* Pixels = static_cast<FColor*>(Mip.BulkData.Lock(LOCK_READ_WRITE));
+	for (int32 Index = 0; Index < 6 * Size * Size; ++Index)
+	{
+		Pixels[Index] = FColor::White;
+	}
+	Mip.BulkData.Unlock();
+	SkyCubemap->UpdateResource();
+
+	SkyLight->SetCubemap(SkyCubemap);
+	SkyLight->SetLightColor(Settings->SkyLightColor);
+	SkyLight->SetIntensity(Settings->SkyLightIntensity);
+	SkyLight->RecaptureSky();
 }
 
 void AHexPlanet::BeginPlay()
@@ -659,6 +708,8 @@ void AHexPlanet::BuildPlanet()
 	WriteGeneratedFiles(!bHadLevels, !bHadBiomes && !BiomeConfigs.IsEmpty(), Objects->WasGenerated() && !Objects->GetSets().IsEmpty());
 	CreateCellMarks();
 	CreateBiomeTexture();
+	// before the materials of the surface are made, which take the texture
+	UpdateCanopy();
 	LayerParamsTexture = GetDefault<UHexMapSettings>()->LoadTerrainLayers()->CreateParamsTexture();
 
 	// a component per chunk, so what lies behind the planet or off the screen is culled, and a rebuild of changed levels recreates the render
@@ -708,6 +759,8 @@ void AHexPlanet::BuildPlanet()
 		Sun = *It;
 		break;
 	}
+	CreateSkyLight();
+	CreateHaze();
 
 	UE_LOG(LogHexHero, Log, TEXT("Planet %s: %d cells, radius %.0f, hex area from %.3f to %.3f of the mean (x%.3f), worst sides x%.3f, grid %.2f s, mesh %.2f s, sea field %.2f s"),
 		PlanetFolder.IsEmpty() ? TEXT("(not saved)") : *PlanetFolder, Grid.GetCells().Num(), Radius, SmallestArea / MeanCellArea, LargestArea / MeanCellArea, LargestArea / SmallestArea, WorstSides,
@@ -1054,7 +1107,7 @@ void AHexPlanet::Tick(float DeltaTime)
 		// the water and the clouds are lit by it, and the shadows of the clouds fall along it
 		const FLinearColor SunDirection(-Sun->GetActorForwardVector());
 
-		for (UMaterialInstanceDynamic* Instance : { WaterMaterial.Get(), WaterGridMaterial.Get(), CloudMaterial.Get(), SkyCloudMaterial.Get(), SurfaceMaterial.Get(), SurfaceCutMaterial.Get(), LodNearMaterial.Get(), LodFarMaterial.Get() })
+		for (UMaterialInstanceDynamic* Instance : { WaterMaterial.Get(), WaterGridMaterial.Get(), CloudMaterial.Get(), SkyCloudMaterial.Get(), SurfaceMaterial.Get(), SurfaceCutMaterial.Get(), LodNearMaterial.Get(), LodFarMaterial.Get(), HazeMaterial.Get() })
 		{
 			if (Instance)
 			{
@@ -1507,6 +1560,10 @@ void AHexPlanet::SetBiomeLayers(UMaterialInstanceDynamic* Target) const
 		return;
 	}
 	Target->SetTextureParameterValue(TEXT("CellBiomes"), CellBiomeTexture);
+	if (CellCanopyTexture)
+	{
+		Target->SetTextureParameterValue(TEXT("CellCanopy"), CellCanopyTexture);
+	}
 	if (LayerParamsTexture)
 	{
 		Target->SetTextureParameterValue(TEXT("LayerParams"), LayerParamsTexture);
@@ -2226,7 +2283,86 @@ void AHexPlanet::WriteBiomePixels(int32 Cell)
 		Seas |= IsSea(Each.Neighbors[Index]) ? uint8(1 << Index) : uint8(0);
 	}
 	BiomePixels[Pixel] = FColor(uint8(Terrain), uint8(Rock), Mountains, Seas);
-	BiomePixels[Pixel + 1] = FColor(Near[0], Near[1], Near[2], 0);
+	BiomePixels[Pixel + 1] = FColor(Near[0], Near[1], Near[2], BiomePixels[Pixel + 1].A);
+}
+
+namespace
+{
+	/** Sends pixels to a texture of that size, as a copy the render thread frees once it has it */
+	void UploadPixels(UTexture2D* Texture, const TArray<FColor>& Pixels, int32 Columns)
+	{
+		const int32 Rows = Pixels.Num() / Columns;
+		uint8* Data = static_cast<uint8*>(FMemory::Malloc(Pixels.Num() * sizeof(FColor)));
+		FMemory::Memcpy(Data, Pixels.GetData(), Pixels.Num() * sizeof(FColor));
+		FUpdateTextureRegion2D* Region = new FUpdateTextureRegion2D(0, 0, 0, 0, Columns, Rows);
+		Texture->UpdateTextureRegions(0, 1, Region, Columns * sizeof(FColor), sizeof(FColor), Data,
+			[](uint8* InData, const FUpdateTextureRegion2D* InRegion)
+			{
+				FMemory::Free(InData);
+				delete InRegion;
+			});
+	}
+}
+
+void AHexPlanet::UploadBiomePixels()
+{
+	if (CellBiomeTexture)
+	{
+		UploadPixels(CellBiomeTexture, BiomePixels, HexPlanetSurface::MarkColumns * 2);
+	}
+}
+
+void AHexPlanet::UpdateCanopy()
+{
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+	if (Cells.IsEmpty() || BiomePixels.IsEmpty())
+	{
+		return;
+	}
+
+	const int32 Rows = FMath::DivideAndRoundUp(Cells.Num(), HexPlanetSurface::MarkColumns);
+	CanopyPixels.Init(FColor(0, 0, 0, 0), HexPlanetSurface::MarkColumns * Rows);
+
+	for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+	{
+		FLinearColor Color;
+		float Cover = 0.0f;
+		if (Objects->GetCellCanopy(Cell, Color, Cover))
+		{
+			// the root of the linear color, as eight bits of it are too coarse for dark greens
+			const auto Encode = [](float Value) { return uint8(FMath::RoundToInt32(FMath::Sqrt(FMath::Clamp(Value, 0.0f, 1.0f)) * 255.0f)); };
+			CanopyPixels[Cell] = FColor(Encode(Color.R), Encode(Color.G), Encode(Color.B), uint8(FMath::RoundToInt32(FMath::Clamp(Cover, 0.0f, 1.0f) * 255.0f)));
+		}
+	}
+
+	for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+	{
+		uint8 Bits = 0;
+		for (int32 Index = 0; Index < Cells[Cell].Neighbors.Num() && Index < 6; ++Index)
+		{
+			Bits |= CanopyPixels[Cells[Cell].Neighbors[Index]].A > 0 ? uint8(1 << Index) : uint8(0);
+		}
+		const int32 Pixel = (Cell / HexPlanetSurface::MarkColumns) * HexPlanetSurface::MarkColumns * 2 + (Cell % HexPlanetSurface::MarkColumns) * 2;
+		BiomePixels[Pixel + 1].A = Bits;
+	}
+
+	if (!CellCanopyTexture)
+	{
+		CellCanopyTexture = UTexture2D::CreateTransient(HexPlanetSurface::MarkColumns, Rows, PF_B8G8R8A8,
+			MakeUniqueObjectName(GetTransientPackage(), UTexture2D::StaticClass(), TEXT("PlanetCellCanopy")));
+		CellCanopyTexture->SRGB = false;
+		CellCanopyTexture->Filter = TF_Nearest;
+		CellCanopyTexture->NeverStream = true;
+		FTexture2DMipMap& Mip = CellCanopyTexture->GetPlatformData()->Mips[0];
+		FMemory::Memcpy(Mip.BulkData.Lock(LOCK_READ_WRITE), CanopyPixels.GetData(), CanopyPixels.Num() * CanopyPixels.GetTypeSize());
+		Mip.BulkData.Unlock();
+		CellCanopyTexture->UpdateResource();
+	}
+	else
+	{
+		UploadPixels(CellCanopyTexture, CanopyPixels, HexPlanetSurface::MarkColumns);
+	}
+	UploadBiomePixels();
 }
 
 void AHexPlanet::UpdateBiomePixels(TConstArrayView<int32> ChangedCells)
@@ -2244,23 +2380,8 @@ void AHexPlanet::UpdateBiomePixels(TConstArrayView<int32> ChangedCells)
 	// boulders take the rock of the biome of their mountain
 	UpdateBoulders();
 
-	if (!CellBiomeTexture)
-	{
-		return;
-	}
-
-	// the whole texture goes up, about half a megabyte, which the render thread frees once it has it
-	const int32 Columns = HexPlanetSurface::MarkColumns * 2;
-	const int32 Rows = BiomePixels.Num() / Columns;
-	uint8* Data = static_cast<uint8*>(FMemory::Malloc(BiomePixels.Num() * sizeof(FColor)));
-	FMemory::Memcpy(Data, BiomePixels.GetData(), BiomePixels.Num() * sizeof(FColor));
-	FUpdateTextureRegion2D* Region = new FUpdateTextureRegion2D(0, 0, 0, 0, Columns, Rows);
-	CellBiomeTexture->UpdateTextureRegions(0, 1, Region, Columns * sizeof(FColor), sizeof(FColor), Data,
-		[](uint8* InData, const FUpdateTextureRegion2D* InRegion)
-		{
-			FMemory::Free(InData);
-			delete InRegion;
-		});
+	// the whole texture goes up, about half a megabyte
+	UploadBiomePixels();
 }
 
 void AHexPlanet::LoadLevels()

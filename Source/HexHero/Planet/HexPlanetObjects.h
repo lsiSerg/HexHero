@@ -73,6 +73,9 @@ public:
 	/** Returns a line for the info at the cursor: what stands on a cell */
 	FString GetCellText(int32 Cell) const;
 
+	/** Gives how the cover of a cell tints its ground from far away (UHexPlanetObjectSet::FarCover, FarColor). Returns false if it does not */
+	bool GetCellCanopy(int32 Cell, FLinearColor& OutColor, float& OutCover) const;
+
 private:
 
 	/** A mesh of a kind of object, drawn by a component per chunk */

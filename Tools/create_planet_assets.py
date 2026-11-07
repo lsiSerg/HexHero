@@ -32,6 +32,50 @@ SHADOW_PARAMETERS = ['CloudShadowStrength', 'CloudShadowReach']
 SHELL_PARAMETERS = ['CloudOpacity', 'CloudBrightness', 'CloudDuskColor', 'CloudDuskWidth', 'CloudNightBrightness', 'CloudEdgeOnFade', 'CloudEdgeOnFadeNear', 'CloudDetailFade', 'CloudSkyHeight', 'CloudSkySwitch', 'CloudSkySwitchFade', 'CloudThickness', 'CloudVolumeSteps',
     'CloudVolumeStep', 'CloudVolumeDensity', 'CloudVolumeRound', 'CloudVolumeBaseShade',
     'CloudFadeStart', 'CloudFadeEnd', 'CloudNearOpacity', 'CloudFarHeight', 'CloudRelief', 'CloudLightStep', 'CloudShadeBias', 'CloudShadeColor', 'CloudSunlitBoost']
+# the haze of the air, values of UHexPlanetCloudConfig too, as AHexPlanet gives that config to every material that needs them
+HAZE_PARAMETERS = ['HazeHeight', 'HazeFalloff', 'HazeDensity', 'HazeStart', 'HazeStartFade', 'HazeMax', 'HazeColor', 'HazeNightColor', 'HazeSunWrap']
+
+# The air of the planet is a shell HazeHeight thick, densest at the sea and thinner by exp(-height / HazeFalloff), so a view along the ground
+# towards the horizon goes through much of it and one from orbit straight down through little, while at the rim of the planet the views that
+# miss it pass through the most and glow. Its haze takes the length of the view through it, from the camera at hazeCam along hazeDir up to
+# hazeEnd, in eight steps, each of thicker air the lower it lies, nothing within HazeStart of the camera and all of it HazeStartFade further,
+# so what is close stays clear; it is lit by the sun where each step lies, wrapped over the terminator by HazeSunWrap. M_HexPlanetHaze, a
+# post process before the translucency, lays it over the opaque scene and the space behind the planet, and the water and the clouds, which
+# are drawn after it, lay it over themselves
+HAZE_CODE = r'''
+float hazeAmount = 0.0;
+float3 hazeColor = HazeColor.rgb;
+{
+    float hazeTop = PlanetRadius + HazeHeight;
+    float hazeB = dot(hazeCam, hazeDir);
+    float hazeDisc = hazeB * hazeB - (dot(hazeCam, hazeCam) - hazeTop * hazeTop);
+    if (hazeDisc > 0.0 && PlanetRadius > 0.0)
+    {
+        float hazeRoot = sqrt(hazeDisc);
+        float hazeIn = max(-hazeB - hazeRoot, 0.0);
+        float hazeOut = min(-hazeB + hazeRoot, hazeEnd);
+        if (hazeOut > hazeIn)
+        {
+            float3 hazeSun = normalize(SunDirection.xyz);
+            float hazeStep = (hazeOut - hazeIn) / 8.0;
+            float hazeDepth = 0.0;
+            float hazeLit = 0.0;
+            for (int hazeIndex = 0; hazeIndex < 8; ++hazeIndex)
+            {
+                float hazeT = hazeIn + (hazeIndex + 0.5) * hazeStep;
+                float3 hazeP = hazeCam + hazeDir * hazeT;
+                float hazeR = length(hazeP);
+                float hazeAir = exp(-max(hazeR - PlanetRadius, 0.0) / max(HazeFalloff, 1.0)) * saturate((hazeT - HazeStart) / max(HazeStartFade, 1.0));
+                hazeDepth += hazeAir;
+                hazeLit += hazeAir * saturate(dot(hazeP / hazeR, hazeSun) * HazeSunWrap + 0.5);
+            }
+            hazeColor = lerp(HazeNightColor.rgb, HazeColor.rgb, hazeLit / max(hazeDepth, 1e-6));
+            hazeAmount = HazeMax * (1.0 - exp(-hazeDepth * hazeStep * HazeDensity));
+        }
+    }
+}
+'''
+
 CLOUD_CODE = r'''
 struct FCloudNoise
 {
@@ -198,8 +242,13 @@ float volumeShade = volumeLight / max(volumeOpacity, 1e-4);
 float3 bottomTint = lerp(CloudShadeColor.rgb, float3(1.0, 1.0, 1.0), volumeShade);
 OutOpacity = volumeOpacity * CloudOpacity * heightOpacity * aboveSea * switchFade
     * smoothstep(-0.25, 0.1, sunUp) * smoothstep(edgeOnFade * 0.07, edgeOnFade, abs(dot(cloudDir, viewRay)));
-return tint * light * shade * bottomTint * (1.0 + CloudSunlitBoost * facing) * CloudBrightness;
-'''
+float3 cloudColor = tint * light * shade * bottomTint * (1.0 + CloudSunlitBoost * facing) * CloudBrightness;
+float3 hazeCam = CameraPos;
+float hazeEnd = length(WorldPos - CameraPos);
+float3 hazeDir = (WorldPos - CameraPos) / max(hazeEnd, 1e-3);
+HAZE_CODE
+return lerp(cloudColor, hazeColor, hazeAmount);
+'''.replace('HAZE_CODE', HAZE_CODE)
 
 # the shell is built at CloudHeight and moves to the side of the thickness of the clouds towards the camera: the top of it below the camera,
 # and the bottom of it for the copy with CloudSkyLayer 1, which moves out to CloudSkyHeight, above the close camera
@@ -795,9 +844,30 @@ RUNUP_PARAMETERS = ['TileSize', 'SurfReach', 'SurfWobble', 'SurfPeriod', 'SurfRu
     'SurfBorderEnd', 'SurfLength', 'ShoreLaceScale', 'RollerChance', 'RollerScale', 'RunupHeight', 'RunupRiseTime', 'RunupFallTime', 'RunupEdge',
     'RunupFoam', 'WetDarkening', 'ShoreFoamColor', 'ShoreFarStart', 'ShoreFarEnd']
 
+# Forests from far away: the objects are culled there, so the ground of a cell takes the color of its cover (CellCanopy, one pixel per cell,
+# the root of the linear color and its share, AHexPlanet::UpdateCanopy), all of it from CanopyFadeEnd and CanopyNearShare of it close by,
+# where it darkens the ground under the trees. It goes right up to a side whose neighbor has a cover too (bits in the alpha of the second
+# pixel of the cell in CellBiomes), and fades out before another side, along a ragged line, and a noise mottles it
+CANOPY_PARAMETERS = ['CanopyNearShare', 'CanopyFadeStart', 'CanopyFadeEnd', 'CanopyEdge', 'CanopyEdgeSoftness', 'CanopyEdgeNoise',
+    'CanopyEdgeNoiseScale', 'CanopyMottle', 'CanopyMottleScale']
+CANOPY_CODE = r'''
+float4 canopy = CellCanopy.Load(int3(biomeCell, 0));
+[branch] if (canopy.a > 0.0)
+{
+    float canopyAngle = atan2(LocalUV.y, LocalUV.x);
+    int canopySide = ((int)round(canopyAngle / biomeTurn) + biomeSides) % biomeSides;
+    bool canopyNext = ((biomeNear.a >> canopySide) & 1u) != 0u;
+    float canopyEdge = CanopyEdge + (cloudNoise.Value(WorldPos / max(CanopyEdgeNoiseScale, 1.0) + 5.3) - 0.5) * 2.0 * CanopyEdgeNoise;
+    float canopyInside = canopyNext ? 1.0 : 1.0 - smoothstep(canopyEdge - CanopyEdgeSoftness, canopyEdge, U);
+    float canopyFar = lerp(CanopyNearShare, 1.0, smoothstep(CanopyFadeStart, max(CanopyFadeEnd, CanopyFadeStart + 1.0), distance(CameraPos, WorldPos)));
+    float canopyMottle = 1.0 + (cloudNoise.Value(WorldPos / max(CanopyMottleScale, 1.0) + 1.7) - 0.5) * 2.0 * CanopyMottle;
+    albedo = lerp(albedo, canopy.rgb * canopy.rgb * canopyMottle, saturate(canopy.a * canopyInside * canopyFar));
+}
+'''
+
 # below the sea the line of the seabed fades out over GridSeaFade, as M_HexPlanetWaterGrid draws it on the water, and so do the outlines,
 # but where the debug view hides the water, which hides that strip too, the seabed draws both
-PLANET_CODE = CLOUD_SHADOW_CODE + GRID_LINE_CODE + MARK_CODE.replace('MARK_HOLE_BITS', '0u') + BIOME_CODE + RUNUP_CODE + r'''
+PLANET_CODE = CLOUD_SHADOW_CODE + GRID_LINE_CODE + MARK_CODE.replace('MARK_HOLE_BITS', '0u') + BIOME_CODE + RUNUP_CODE + CANOPY_CODE + r'''
 float seaFade = lerp(saturate(1.0 + PeakShare / GridSeaFade), 1.0, waterHidden);
 float opacity = GridOpacity * (1.0 - smoothstep(GridFadeStart, max(GridFadeEnd, GridFadeStart + 1e-3), PeakShare)) * seaFade;
 float3 color = lerp(albedo, albedo * GridDarkness, gridLine * opacity);
@@ -1008,6 +1078,12 @@ if (waterDepth < max(BackwashDepth, filmDepth) * 1.5 || surfZone * stretchFoam >
 
 // unlit water keeps its colors, so it darkens by itself where the sun is low or gone, and under clouds, which also dim its glints
 color *= lerp(NightBrightness, 1.0, smoothstep(NightStart, NightEnd, sunUp)) * cloudShadow;
+// the haze of the air over it, as it is drawn after the post process that lays it over the land (HAZE_CODE)
+float3 hazeCam = CameraPos;
+float hazeEnd = length(WorldPos - CameraPos);
+float3 hazeDir = (WorldPos - CameraPos) / max(hazeEnd, 1e-3);
+HAZE_SNIPPET
+color = lerp(color, hazeColor, hazeAmount);
 OutOpacity = opacity;
 HIDE_CODE
 return color;
@@ -1024,7 +1100,7 @@ WATER_CODE = WATER_CODE.replace('HIDE_CODE', '''if (HideCount > 0.5)
     float hideBest = -2.0;
     float hideIndex = 99.0;
 ''' + ''.join('    if (dot(planetUp, HideCell%d.xyz) > hideBest) { hideBest = dot(planetUp, HideCell%d.xyz); hideIndex = %d.0; }\n' % (i, i, i) for i in range(HIDE_CELLS)) + '''    OutOpacity = hideIndex < HideCount ? 0.0 : OutOpacity;
-}''')
+}''').replace('HAZE_SNIPPET', HAZE_CODE)
 
 # the mask of M_HexPlanet_Cut, which AHexPlanet uses while only the triangles of the cells around the cursor are drawn, so the rest keeps its normal render:
 # 0 in the first HideCount of the cells, found by the nearest center as the water does. M_HexPlanet is opaque and ignores it
@@ -1150,6 +1226,7 @@ WATER_MATERIAL = FOLDER + '/M_HexPlanetWater'
 WIRE_MATERIAL = FOLDER + '/M_HexPlanetWireframe'
 WATER_GRID_MATERIAL = FOLDER + '/M_HexPlanetWaterGrid'
 CLOUD_MATERIAL = FOLDER + '/M_HexPlanetClouds'
+HAZE_MATERIAL = FOLDER + '/M_HexPlanetHaze'
 CONFIGS = [(FOLDER + '/DA_HexPlanet', unreal.HexPlanetConfig), (FOLDER + '/DA_HexPlanetWater', unreal.HexPlanetWaterConfig),
     (FOLDER + '/DA_HexPlanetClouds', unreal.HexPlanetCloudConfig), (FOLDER + '/DA_HexPlanetCamera', unreal.HexPlanetCameraConfig)]
 
@@ -1297,12 +1374,15 @@ def build_material():
         ('PreviewTile', add_scalar(library, material, 'PreviewTile', 0.0, 3500), ''),
         # the share of the faces of high ground, X of the second UV
         ('FacetShare', add_uv_channel(library, material, 1, 'r', 3525), ''),
-        ('CreviceShare', add_uv_channel(library, material, 1, 'g', 3540), '')
+        ('CreviceShare', add_uv_channel(library, material, 1, 'g', 3540), ''),
+        # the tint of the covers of the cells from far away (CANOPY_CODE), read with Load
+        ('CellCanopy', add_texture(library, material, DEFAULT_MARKS, 'CellCanopy', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 3542), ''),
+        ('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1000, 3543), '')
         # the beach and the rock of each layer of the biome textures, which AHexPlanet::SetBiomeLayers gives from the biomes; these defaults are
         # those of create_biome_assets.py
         ] + [('%sLayers%d' % (kind, group), add_vector4(library, material, '%sLayers%d' % (kind, group), unreal.LinearColor(*table[group * 4:group * 4 + 4]),
             3545 + group * 5), '') for kind, table in (('Beach', BEACH_LAYERS), ('Rock', ROCK_LAYERS), ('Seabed', SEABED_LAYERS)) for group in range(3)
-        ] + add_config_parameters(library, material, unreal.HexPlanetConfig, BIOME_PARAMETERS, 3550) + add_config_parameters(library, material, unreal.HexPlanetWaterConfig, RUNUP_PARAMETERS, 5500)
+        ] + add_config_parameters(library, material, unreal.HexPlanetConfig, BIOME_PARAMETERS + CANOPY_PARAMETERS, 3550) + add_config_parameters(library, material, unreal.HexPlanetWaterConfig, RUNUP_PARAMETERS, 5500)
 
     inputs = []
     for name, _, _ in connections:
@@ -1667,7 +1747,7 @@ def build_water():
         ('Colors', add_texture(library, material, COLORS, 'Colors', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 700), ''),
         ('HexNoise', add_texture(library, material, NOISE, 'HexNoise', unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_GRAYSCALE, 710), ''),
         ('Normals', add_texture(library, material, NORMALS, 'Normals', unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL, 800), ''),
-        ('HideCount', add_scalar(library, material, 'HideCount', 0.0, 900), '')] + add_cloud_parameters(library, material, -700, SHADOW_PARAMETERS)
+        ('HideCount', add_scalar(library, material, 'HideCount', 0.0, 900), '')] + add_cloud_parameters(library, material, -700, SHADOW_PARAMETERS + HAZE_PARAMETERS)
     for index in range(HIDE_CELLS):
         connections.append(('HideCell%d' % index, add_vector(library, material, 'HideCell%d' % index, unreal.LinearColor(0.0, 0.0, 0.0, 0.0), 950 + index * 50), ''))
     custom = add_custom(library, material, WATER_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, connections, 0,
@@ -1808,7 +1888,7 @@ def build_clouds():
         # 1 on the copy that AHexPlanet draws as the sky
         ('CloudSkyLayer', add_scalar(library, material, 'CloudSkyLayer', 0.0, -400), ''),
         ('Time', library.create_material_expression(material, unreal.MaterialExpressionTime, -1000, -100), ''),
-        ('SunDirection', add_sun(library, material, -50), '')] + add_cloud_parameters(library, material, 0, SHELL_PARAMETERS)
+        ('SunDirection', add_sun(library, material, -50), '')] + add_cloud_parameters(library, material, 0, SHELL_PARAMETERS + HAZE_PARAMETERS)
     custom = add_custom(library, material, CLOUDS_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, connections, 0,
         ('OutOpacity', unreal.CustomMaterialOutputType.CMOT_FLOAT1))
     library.connect_material_property(custom, '', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
@@ -1818,6 +1898,44 @@ def build_clouds():
 
     library.recompile_material(material)
     assets.save_asset(CLOUD_MATERIAL)
+    return material
+
+
+# the haze over the opaque scene and over the space behind the planet, before the translucency (the water, the clouds and the auroras draw
+# after the depth of field and lay their own haze over themselves); a pixel with nothing on it is a view that goes on for ever
+HAZE_POST_CODE = r'''
+float3 hazeCam = CameraPos;
+float3 hazeDir = -normalize(CameraVector);
+float hazeEnd = SceneDepth > 1e6 ? 1e9 : length(WorldPos - CameraPos);
+HAZE_CODE
+return lerp(SceneColor.rgb, hazeColor, hazeAmount);
+'''.replace('HAZE_CODE', HAZE_CODE)
+
+
+def build_haze():
+    library = unreal.MaterialEditingLibrary
+    assets = unreal.EditorAssetLibrary
+    material = unreal.load_asset(HAZE_MATERIAL) if assets.does_asset_exist(HAZE_MATERIAL) else unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+        HAZE_MATERIAL.split('/')[-1], FOLDER, unreal.Material, unreal.MaterialFactoryNew())
+    clear_expressions(material)
+    material.set_editor_property('material_domain', unreal.MaterialDomain.MD_POST_PROCESS)
+    material.set_editor_property('blendable_location', unreal.BlendableLocation.BL_SCENE_COLOR_BEFORE_DOF)
+
+    scene = library.create_material_expression(material, unreal.MaterialExpressionSceneTexture, -1000, -400)
+    scene.set_editor_property('scene_texture_id', unreal.SceneTextureId.PPI_POST_PROCESS_INPUT0)
+    connections = [('SceneColor', scene, 'Color'),
+        ('SceneDepth', library.create_material_expression(material, unreal.MaterialExpressionSceneDepth, -1000, -300), ''),
+        ('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1000, -250), ''),
+        ('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1000, -200), ''),
+        ('CameraVector', library.create_material_expression(material, unreal.MaterialExpressionCameraVectorWS, -1000, -150), ''),
+        ('SunDirection', add_sun(library, material, -100), ''),
+        ('PlanetRadius', add_scalar(library, material, 'PlanetRadius', 0.0, -50), '')
+        ] + add_config_parameters(library, material, unreal.HexPlanetCloudConfig, HAZE_PARAMETERS, 0)
+    custom = add_custom(library, material, HAZE_POST_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, connections, 0)
+    library.connect_material_property(custom, '', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+
+    library.recompile_material(material)
+    assets.save_asset(HAZE_MATERIAL)
     return material
 
 
@@ -1988,6 +2106,7 @@ def main():
     water_material = build_water()
     water_grid_material = build_water_grid()
     build_clouds()
+    build_haze()
     build_auroras()
     build_boulder_material()
     build_floe_material()

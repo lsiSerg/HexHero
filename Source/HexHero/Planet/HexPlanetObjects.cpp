@@ -377,6 +377,30 @@ bool UHexPlanetObjects::IsAllowed(int32 Set, int32 Level) const
 	return Sets.IsValidIndex(Set) && Sets[Set]->AllowedLevels.Contains(Level);
 }
 
+bool UHexPlanetObjects::GetCellCanopy(int32 Cell, FLinearColor& OutColor, float& OutCover) const
+{
+	const FHexCellObjects Objects = GetCell(Cell);
+	const int32 Set = int32(Objects.Cover) - 1;
+	if (Set < 0 || !IsAllowed(Set, Planet->GetCellLevel(Cell)) || Sets[Set]->FarCover <= 0.0f)
+	{
+		return false;
+	}
+
+	const UHexPlanetObjectSet& Kind = *Sets[Set];
+	const FHexObjectVariant* Variant = Kind.FindVariant(Planet->GetCellBiomeLetter(Cell));
+	if (!Variant)
+	{
+		return false;
+	}
+
+	// a sparse cover a little lighter than a dense one, as the cells of a forest differ in density and much more drew a mosaic of hexes
+	const int32 MaxDensity = FMath::Max(Kind.CountByDensity.Num(), 1);
+	const float Dense = MaxDensity > 1 ? float(FMath::Clamp(int32(Objects.Density), 1, MaxDensity) - 1) / float(MaxDensity - 1) : 1.0f;
+	OutCover = Kind.FarCover * FMath::Lerp(0.8f, 1.0f, Dense);
+	OutColor = FMath::Lerp(Kind.FarColor, FLinearColor::White, FMath::Clamp(Variant->Snow, 0.0f, 1.0f) * Kind.FarSnowShare);
+	return true;
+}
+
 bool UHexPlanetObjects::BlocksMovement(int32 Cell) const
 {
 	const FHexCellObjects Objects = GetCell(Cell);
@@ -464,6 +488,9 @@ void UHexPlanetObjects::RebuildChunks(TConstArrayView<int32> Chunks)
 		UE_LOG(LogHexHero, Log, TEXT("Planet: placed %d objects in %d chunks in %.1f ms, shown in %.1f ms"), Total, Chunks.Num(),
 			(ApplyTime - StartTime) * 1000.0, (FPlatformTime::Seconds() - ApplyTime) * 1000.0);
 	}
+
+	// the ground of the cells shows their covers from far away, which changes with the objects, their biomes and their levels
+	Planet->UpdateCanopy();
 }
 
 TArray<UHexPlanetObjects::FInstance> UHexPlanetObjects::PlaceChunk(int32 Chunk) const

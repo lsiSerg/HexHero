@@ -18,6 +18,8 @@ class UMaterialParameterCollection;
 class UNiagaraComponent;
 class UNiagaraSystem;
 class UProceduralMeshComponent;
+class UPostProcessComponent;
+class USkyLightComponent;
 class UTexture2D;
 class UTextureCube;
 class UHexPlanetKitConfig;
@@ -109,6 +111,30 @@ class AHexPlanet : public AActor
 	/** Triangles of the cell under the mouse and its neighbors, drawn by hex.Wireframe in their own colors over the others */
 	UPROPERTY(VisibleAnywhere, Category="Components")
 	TObjectPtr<UProceduralMeshComponent> HoverWireframe;
+
+	/** Light of the sky, the same from every direction, as up differs over the planet and a sky light lights by directions of the world, so
+	 *  shadows are not black (SkyLightColor, SkyLightIntensity of DA_HexPlanet); Lumen shades it by what covers each point */
+	UPROPERTY(VisibleAnywhere, Category="Components")
+	TObjectPtr<USkyLightComponent> SkyLight;
+
+	/** The plain white cubemap the sky light takes */
+	UPROPERTY(Transient)
+	TObjectPtr<UTextureCube> SkyCubemap;
+
+	/** Lays the haze of the air over every view, unbound, with HazeMaterial */
+	UPROPERTY(VisibleAnywhere, Category="Components")
+	TObjectPtr<UPostProcessComponent> HazeVolume;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> HazeMaterial;
+
+public:
+
+	/** Post process of the haze of the air, from Tools/create_planet_assets.py, with the Haze* values of DA_HexPlanetClouds */
+	UPROPERTY(EditAnywhere, Category="Planet")
+	TSoftObjectPtr<UMaterialInterface> HazeMaterialAsset = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/HexPlanet/M_HexPlanetHaze.M_HexPlanetHaze")));
+
+private:
 
 	/** Material of the cells, whose grid lines can be hidden */
 	UPROPERTY(Transient)
@@ -363,6 +389,12 @@ private:
 	/** Builds the grid, the surface, the objects, the sea and the sky, which takes a second or two on a large planet */
 	void BuildPlanet();
 
+	/** Gives the sky light its plain cubemap and the color and intensity of DA_HexPlanet */
+	void CreateSkyLight();
+
+	/** Puts the haze of the air into HazeVolume, with the values of DA_HexPlanetClouds */
+	void CreateHaze();
+
 	/** Shows and hides the loading screen over the viewport while the planet is built */
 	void ShowLoadingScreen();
 	void HideLoadingScreen();
@@ -436,8 +468,25 @@ private:
 	/** Writes the pixels of cells into BiomePixels and uploads the texture */
 	void UpdateBiomePixels(TConstArrayView<int32> ChangedCells);
 
-	/** Writes the two pixels of a cell into BiomePixels */
+	/** Writes the two pixels of a cell into BiomePixels, keeping the alpha of the second, which UpdateCanopy writes */
 	void WriteBiomePixels(int32 Cell);
+
+	/** Sends BiomePixels to CellBiomeTexture */
+	void UploadBiomePixels();
+
+	/** One pixel per cell in the layout of CellMarks: how the cover of a cell tints its ground from far away, its color as the root of the
+	 *  linear color and its share in alpha (UHexPlanetObjects::GetCellCanopy), which M_HexPlanet draws (CANOPY_CODE); the alpha of the second
+	 *  pixel of a cell in CellBiomeTexture holds which of its neighbors have it, so a forest goes on across their side */
+	UPROPERTY(Transient)
+	TObjectPtr<UTexture2D> CellCanopyTexture;
+	TArray<FColor> CanopyPixels;
+
+public:
+
+	/** Writes CellCanopyTexture and the bits of its neighbors from the objects of every cell, making the texture the first time */
+	void UpdateCanopy();
+
+private:
 
 	/** Radius of the sea */
 	double Radius = 0.0;

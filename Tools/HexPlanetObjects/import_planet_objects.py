@@ -27,12 +27,12 @@ TREES = {'G': ['Broadleaf_0', 'Broadleaf_1', 'Broadleaf_2', 'Spruce_0', 'Pine_0'
 SETS = [
     {'id': 'Forest', 'name': 'Forest', 'order': 10, 'color': (0.05, 0.2, 0.06), 'layer': 'cover', 'blocks': True, 'levels': [0, 1],
      'counts': [10, 24, 46], 'scale': (1.15, 1.7), 'giant': (0.03, 1.8), 'spacing': 10.0, 'reach': 1.0, 'min_up': 0.72, 'align': 0.1, 'tilt': 4.0,
-     'sink': 1.0, 'shadow': True, 'cull': 5000.0,
+     'sink': 1.0, 'shadow': True, 'cull': 5000.0, 'far': (0.9, (0.03, 0.065, 0.025)),
      'variants': [('G', TREES['G'], 0.0, 1.0, 1.0, 0.33), ('N', TREES['N'], 0.85, 0.9, 1.0, 0.25), ('T', TREES['T'], 0.0, 0.75, 0.7, 0.3),
                   ('M', TREES['M'], 0.0, 0.9, 0.6, 0.3), ('P', TREES['P'], 0.0, 0.9, 0.45, 0.07), ('D', TREES['D'], 0.0, 0.85, 0.3, 0.03)]},
     {'id': 'Bushes', 'name': 'Bushes', 'order': 20, 'color': (0.3, 0.4, 0.1), 'layer': 'cover', 'blocks': False, 'levels': [0, 1],
      'counts': [10, 22, 40], 'scale': (1.0, 1.6), 'giant': (0.0, 1.0), 'spacing': 7.0, 'reach': 1.0, 'min_up': 0.6, 'align': 0.4, 'tilt': 6.0,
-     'sink': 0.5, 'shadow': False, 'cull': 3500.0,
+     'sink': 0.5, 'shadow': False, 'cull': 3500.0, 'far': (0.35, (0.07, 0.085, 0.03)),
      'variants': [('G', ['Bush_0', 'Bush_1', 'Bush_2'], 0.0, 1.0, 1.0, 0.12), ('N', ['Bush_0', 'Bush_2'], 0.9, 0.9, 1.0, 0.08),
                   ('T', ['TundraShrub_0', 'TundraShrub_1'], 0.0, 1.0, 1.0, 0.25), ('M', ['Reeds_0', 'Reeds_1', 'Bush_2'], 0.0, 1.0, 1.0, 0.3),
                   ('P', ['DryBush_0', 'DryBush_1', 'Bush_1'], 0.0, 1.0, 1.0, 0.25), ('D', ['DryBush_0', 'DryBush_1'], 0.0, 0.9, 0.5, 0.15)]},
@@ -147,6 +147,10 @@ def make_set(entry):
     config.set_editor_property('sink', entry['sink'])
     config.set_editor_property('cast_shadow', entry['shadow'])
     config.set_editor_property('cull_distance', entry['cull'])
+    # how the cover tints its ground from far away, where the objects are culled (M_HexPlanet, CANOPY_CODE)
+    if 'far' in entry:
+        config.set_editor_property('far_cover', entry['far'][0])
+        config.set_editor_property('far_color', unreal.LinearColor(*entry['far'][1], 1.0))
     variants = []
     for biomes, meshes, snow, scale, count, share in entry['variants']:
         variant = unreal.HexObjectVariant()

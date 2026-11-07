@@ -154,6 +154,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering", meta=(ClampMin=0))
 	float CullDistance = 9000.0f;
 
+	/** Share of the ground a cover of this kind shades at its densest, by which M_HexPlanet tints the ground of its cells with FarColor, fully
+	 *  from far away where the objects are culled and a little under them, so forests show from orbit; 0 for kinds that do not show (CellCanopy) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Far", meta=(ClampMin=0, ClampMax=1))
+	float FarCover = 0.0f;
+
+	/** Color of the ground under a cover of this kind from far away */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Far")
+	FLinearColor FarColor = FLinearColor(0.035f, 0.07f, 0.03f);
+
+	/** How far the snow of a variant turns FarColor to white */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Far", meta=(ClampMin=0, ClampMax=1))
+	float FarSnowShare = 0.6f;
+
 	/** Returns the variant a biome draws, its own or the one for every biome, else null */
 	const FHexObjectVariant* FindVariant(TCHAR BiomeLetter) const;
 
