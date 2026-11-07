@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "Terra",
+  "description": "The planet of the prototype, generated from its seed, as large as a map of 256 x 256.",
+  "frequency": 80,
+  "seed": 7,
+  "sortOrder": 0,
+  "generation": {
+    "start": "Random",
+    "landShare": 0.558233,
+    "shallowsShare": 0.308411,
+    "hillShare": 0.357871,
+    "mountainShare": 0.101433,
+    "continentSize": 1.0,
+    "coastDetail": 5
+  }
+}

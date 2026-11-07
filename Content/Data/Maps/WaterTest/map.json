@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "Water test",
+  "description": "Deep water, two kinds of shallows, ice on both water levels, land and mountains right beside deep water.",
+  "width": 24,
+  "height": 20,
+  "sortOrder": 110
+}

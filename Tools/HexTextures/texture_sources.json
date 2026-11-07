@@ -1,0 +1,19 @@
+{
+  "comment": "Photo-scanned texture sets of the terrain layers, all CC0: from Poly Haven (https://polyhaven.com/license) unless source is ambientcg (https://ambientcg.com, CC0 too). fetch_texture_sources.ps1 downloads them to Saved/TextureSources/<source>/<id> as <id>_color.jpg, <id>_normal.jpg and <id>_height.jpg, import_texture_sources.py imports them and puts them into DA_HexTerrainLayers, but only into a layer that has no texture yet or still the generated one, and sets tileSize, scree and gravel only on a layer it adds or fills, so what an artist set there stays. Each set gives a color, a DirectX normal and a height.",
+  "resolution": "2k",
+  "sets": [
+    { "layer": "Snow", "id": "Snow008A", "source": "ambientcg", "tileSize": 220 },
+    { "layer": "GrayRock", "id": "marble_cliff_05", "tileSize": 260, "scree": "GrayScree", "gravel": "GrayGravel" },
+    { "layer": "GrayScree", "id": "rocks_ground_06", "tileSize": 110 },
+    { "layer": "GrayGravel", "id": "gray_rocks", "tileSize": 70 },
+    { "layer": "RedRock", "id": "cliff_side", "tileSize": 200, "scree": "RedScree", "gravel": "RedGravel" },
+    { "layer": "RedScree", "id": "gravel_road", "tileSize": 110 },
+    { "layer": "RedGravel", "id": "red_laterite_soil_stones", "tileSize": 80 },
+    { "layer": "OchreRock", "id": "marble_cliff_03", "tileSize": 240, "scree": "OchreScree", "gravel": "OchreGravel" },
+    { "layer": "OchreScree", "id": "rocky_trail", "tileSize": 110 },
+    { "layer": "OchreGravel", "id": "rock_ground_02", "tileSize": 80 },
+    { "layer": "Basalt", "id": "dark_rock_02", "tileSize": 200, "scree": "BasaltScree", "gravel": "BasaltGravel" },
+    { "layer": "BasaltScree", "id": "dark_rock", "tileSize": 130 },
+    { "layer": "BasaltGravel", "id": "coast_sand_05", "tileSize": 80 }
+  ]
+}

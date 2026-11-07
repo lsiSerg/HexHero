@@ -1,0 +1,18 @@
+{
+	"version": 1,
+	"name": "water only large",
+	"description": "",
+	"frequency": 48,
+	"seed": 881801,
+	"sortOrder": 40,
+	"generation":
+	{
+		"start": "Water",
+		"landShare": 0.55823299999999998,
+		"shallowsShare": 0.30841099999999999,
+		"hillShare": 0.35787099999999999,
+		"mountainShare": 0.101433,
+		"continentSize": 1,
+		"coastDetail": 5
+	}
+}

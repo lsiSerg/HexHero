@@ -1,0 +1,18 @@
+{
+	"version": 1,
+	"name": "Small",
+	"description": "",
+	"frequency": 20,
+	"seed": 610401,
+	"sortOrder": 20,
+	"generation":
+	{
+		"start": "Random",
+		"landShare": 0.55823299999999998,
+		"shallowsShare": 0.30841099999999999,
+		"hillShare": 0.35787099999999999,
+		"mountainShare": 0.101433,
+		"continentSize": 1,
+		"coastDetail": 5
+	}
+}

@@ -1,0 +1,14 @@
+{
+    "_comment": "Shared values of the mountain meshes. The generator and Blender build the meshes from them, and assign_hex_mountains.py copies what the game needs into the mountain level asset. Run rebuild_hex_mountains.ps1 after a change.",
+    "hex_radius": 100.0,
+    "foot_height": -75.0,
+    "peak_height": 60.0,
+    "saddle_height": 18.0,
+    "notch_height": -30.0,
+    "notch_fill": 0.5,
+    "foot_fade": 25.0,
+    "rim_fade_height": 55.0,
+    "massif_step": 0.4,
+    "massif_rise": 100.0,
+    "massif_max_steps": 4
+}

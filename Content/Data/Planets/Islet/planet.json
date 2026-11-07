@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "Islet",
+  "description": "A small planet with the same cells, as large as a map of 100 x 100, with more sea and smaller islands.",
+  "frequency": 32,
+  "seed": 3,
+  "sortOrder": 10,
+  "generation": {
+    "start": "Random",
+    "landShare": 0.35,
+    "shallowsShare": 0.3,
+    "hillShare": 0.3,
+    "mountainShare": 0.08,
+    "continentSize": 0.7,
+    "coastDetail": 5
+  }
+}

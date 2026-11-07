@@ -1,0 +1,28 @@
+# Unreal generated folders
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+Build/
+Plugins/**/Binaries/
+Plugins/**/Intermediate/
+
+# Visual Studio and generated project files
+.vs/
+*.sln
+*.slnx
+*.suo
+*.user
+*.VC.db
+*.opendb
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# OS
+Thumbs.db
+Desktop.ini
+__pycache__/
+
+# worktrees of agents
+.claude/worktrees/

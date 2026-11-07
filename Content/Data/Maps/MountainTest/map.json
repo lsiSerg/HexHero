@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "Mountain test",
+  "description": "Every kind of mountain chain: straight lines along the three axes, a north-south zigzag, a ring, forks, a block, single hexes and chains beside deep water.",
+  "width": 40,
+  "height": 32,
+  "sortOrder": 100
+}
