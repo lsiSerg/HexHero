@@ -1494,6 +1494,97 @@ def build_floe_material():
     return material
 
 
+# the trees, bushes, flowers and decor of UHexPlanetObjects: the color of the vertices, whose alpha is how leafy a vertex is and how much it sways,
+# lighter or darker and warmer or cooler by instance (FoliageTint, FoliageHueShift), the leaves broken into clumps by a noise and lit through on
+# the side away from the sun (FoliageTranslucency), and snow of the snow layer on what faces up, as much as the second custom data of an instance
+# says (the Snow of its variant), broken by the noise
+FOLIAGE_CODE = r"""
+float3 n = normalize(VertexNormal);
+float3 up = normalize(WorldPos);
+float3 planes = pow(abs(n), TriplanarSharpness);
+planes /= planes.x + planes.y + planes.z;
+float3 np = WorldPos / FoliageNoiseScale;
+float3 ndx = PosDdx / FoliageNoiseScale;
+float3 ndy = PosDdy / FoliageNoiseScale;
+float noise = HexNoise.SampleGrad(HexNoiseSampler, np.yz, ndx.yz, ndy.yz).r * planes.x
+    + HexNoise.SampleGrad(HexNoiseSampler, np.xz, ndx.xz, ndy.xz).r * planes.y
+    + HexNoise.SampleGrad(HexNoiseSampler, np.xy, ndx.xy, ndy.xy).r * planes.z;
+float leafy = saturate(VertexAlpha * 1.5);
+float3 color = VertexRGB.rgb * (1.0 + (InstanceRandom * 2.0 - 1.0) * FoliageTint);
+float warm = frac(InstanceRandom * 7.31) * 2.0 - 1.0;
+color *= float3(1.0 + warm * FoliageHueShift, 1.0, 1.0 - warm * FoliageHueShift);
+color *= lerp(1.0, 0.55 + noise * 0.9, FoliageNoiseStrength * leafy);
+color *= 1.0 + FoliageTranslucency * leafy * saturate(-dot(n, SunDirection.xyz));
+float3 pos = WorldPos / BiomeTileSize;
+float3 dx = PosDdx / BiomeTileSize;
+float3 dy = PosDdy / BiomeTileSize;
+float3 snow = Colors.SampleGrad(ColorsSampler, float3(pos.yz, 3.0), dx.yz, dy.yz).rgb * planes.x
+    + Colors.SampleGrad(ColorsSampler, float3(pos.xz, 3.0), dx.xz, dy.xz).rgb * planes.y
+    + Colors.SampleGrad(ColorsSampler, float3(pos.xy, 3.0), dx.xy, dy.xy).rgb * planes.z;
+float snowCover = smoothstep(FoliageSnowUpStart, FoliageSnowUpEnd, dot(n, up)) * Snow;
+snowCover = saturate(snowCover * (1.0 + (noise - 0.5) * 2.0 * FoliageSnowBreakup) * 1.3);
+return lerp(color, snow, snowCover);
+"""
+# the tops sway around the foot of an instance across the up of the planet, in gusts, each at its own phase
+FOLIAGE_OFFSET_CODE = r"""
+float3 up = normalize(ObjectPos);
+float3 side = normalize(cross(up, float3(0.0, 0.0, 1.0)) + float3(1.0e-4, 0.0, 0.0));
+float3 across = cross(up, side);
+float phase = Time * WindSpeed + InstanceRandom * 6.2831 + dot(ObjectPos, float3(0.002, 0.003, 0.0025));
+float gust = 0.6 + 0.4 * sin(Time * WindSpeed * 0.37 + dot(ObjectPos, float3(0.0007, 0.0005, 0.0006)));
+float sway = sin(phase) * gust * WindStrength * VertexAlpha;
+return side * sway + across * sway * 0.4 * sin(phase * 1.7);
+"""
+FOLIAGE_MATERIAL = FOLDER + '/M_HexPlanetFoliage'
+
+
+def build_foliage_material(collection):
+    library = unreal.MaterialEditingLibrary
+    assets = unreal.EditorAssetLibrary
+    material = unreal.load_asset(FOLIAGE_MATERIAL) if assets.does_asset_exist(FOLIAGE_MATERIAL) else unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+        FOLIAGE_MATERIAL.split('/')[-1], FOLDER, unreal.Material, unreal.MaterialFactoryNew())
+    clear_expressions(material)
+    material.set_editor_property('used_with_instanced_static_meshes', True)
+
+    position = library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1100, 0)
+    position_ddx = library.create_material_expression(material, unreal.MaterialExpressionDDX, -900, 0)
+    position_ddy = library.create_material_expression(material, unreal.MaterialExpressionDDY, -900, 50)
+    library.connect_material_expressions(position, '', position_ddx, '')
+    library.connect_material_expressions(position, '', position_ddy, '')
+    vertex_color = library.create_material_expression(material, unreal.MaterialExpressionVertexColor, -1000, 150)
+    snow = library.create_material_expression(material, unreal.MaterialExpressionPerInstanceCustomData, -900, 200)
+    snow.set_editor_property('data_index', 1)
+    sun = library.create_material_expression(material, unreal.MaterialExpressionCollectionParameter, -1000, 240)
+    sun.set_editor_property('collection', collection)
+    sun.set_editor_property('parameter_name', 'SunDirection')
+    connections = [('WorldPos', position, ''), ('PosDdx', position_ddx, ''), ('PosDdy', position_ddy, ''),
+        ('VertexNormal', library.create_material_expression(material, unreal.MaterialExpressionVertexNormalWS, -1000, 100), ''),
+        ('VertexRGB', vertex_color, ''), ('VertexAlpha', vertex_color, 'A'), ('Snow', snow, ''), ('SunDirection', sun, ''),
+        ('InstanceRandom', library.create_material_expression(material, unreal.MaterialExpressionPerInstanceRandom, -900, 220), ''),
+        ('Colors', add_texture(library, material, COLORS, 'Colors', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 250), ''),
+        ('HexNoise', add_texture(library, material, NOISE, 'HexNoise', unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_GRAYSCALE, 260), '')
+        ] + add_config_parameters(library, material, unreal.HexPlanetConfig,
+        ['BiomeTileSize', 'TriplanarSharpness', 'FoliageTint', 'FoliageHueShift', 'FoliageNoiseScale', 'FoliageNoiseStrength', 'FoliageTranslucency',
+         'FoliageSnowUpStart', 'FoliageSnowUpEnd', 'FoliageSnowBreakup'], 300)
+    custom = add_custom(library, material, FOLIAGE_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, connections, 0)
+    library.connect_material_property(custom, '', unreal.MaterialProperty.MP_BASE_COLOR)
+    roughness = add_config_parameters(library, material, unreal.HexPlanetConfig, ['Roughness'], 700)[0][1]
+    library.connect_material_property(roughness, '', unreal.MaterialProperty.MP_ROUGHNESS)
+
+    offset_color = library.create_material_expression(material, unreal.MaterialExpressionVertexColor, -1100, 1000)
+    offset_connections = [
+        ('ObjectPos', library.create_material_expression(material, unreal.MaterialExpressionObjectPositionWS, -1100, 1100), ''),
+        ('VertexAlpha', offset_color, 'A'),
+        ('Time', library.create_material_expression(material, unreal.MaterialExpressionTime, -1100, 1150), ''),
+        ('InstanceRandom', library.create_material_expression(material, unreal.MaterialExpressionPerInstanceRandom, -1100, 1200), '')
+        ] + add_config_parameters(library, material, unreal.HexPlanetConfig, ['WindStrength', 'WindSpeed'], 1250)
+    offset = add_custom(library, material, FOLIAGE_OFFSET_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, offset_connections, 1000)
+    library.connect_material_property(offset, '', unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
+    library.recompile_material(material)
+    assets.save_asset(FOLIAGE_MATERIAL)
+    return material
+
+
 def add_texture(library, material, path, name, sampler_type, y):
     node = library.create_material_expression(material, unreal.MaterialExpressionTextureObjectParameter, -700, y)
     node.set_editor_property('parameter_name', name)
@@ -1813,6 +1904,11 @@ def build_parameter_collection():
     assets = unreal.EditorAssetLibrary
     collection = unreal.load_asset(PARAMETER_COLLECTION) if assets.does_asset_exist(PARAMETER_COLLECTION) else unreal.AssetToolsHelpers.get_asset_tools().create_asset(
         PARAMETER_COLLECTION.split('/')[-1], FOLDER, unreal.MaterialParameterCollection, unreal.MaterialParameterCollectionFactoryNew())
+    # parameters made again would get new ids, and the materials that read them by id would fail to compile
+    names = [str(each.get_editor_property('parameter_name')) for each in collection.get_editor_property('scalar_parameters')] + \
+        [str(each.get_editor_property('parameter_name')) for each in collection.get_editor_property('vector_parameters')]
+    if 'PlanetRadius' in names and 'SunDirection' in names:
+        return collection
     radius = unreal.CollectionScalarParameter()
     radius.set_editor_property('parameter_name', 'PlanetRadius')
     # 0 until AHexPlanet sets it, so the preview of a material that hides what lies under the sea shows it
@@ -1888,6 +1984,7 @@ def main():
     build_auroras()
     build_boulder_material()
     build_floe_material()
+    build_foliage_material(build_parameter_collection())
     wire_material = build_wireframe()
     build_level(material, water_material, water_grid_material, wire_material)
     unreal.log('PLANET assets created')

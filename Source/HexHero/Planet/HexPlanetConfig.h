@@ -401,6 +401,46 @@ public:
 	UPROPERTY(EditAnywhere, Category="Colors|Boulders", meta=(ClampMin=0, ClampMax=1))
 	float BoulderTint = 0.18f;
 
+	/** Scale of the noise whose highs get the forests, bushes and other covers of a generated planet (FHexObjectVariant::GenerateShare), on the
+	 *  unit sphere of a planet of ReferenceFrequency, so they lie in patches of a few cells; a second octave twice as fine breaks their edges */
+	UPROPERTY(EditAnywhere, Category="Objects", meta=(ClampMin=0.1))
+	float ObjectNoiseScale = 9.0f;
+
+	/** How much lighter or darker each tree, bush or flower is at most, and how much its hue moves (M_HexPlanetFoliage) */
+	UPROPERTY(EditAnywhere, Category="Objects", meta=(ClampMin=0, ClampMax=1))
+	float FoliageTint = 0.22f;
+
+	UPROPERTY(EditAnywhere, Category="Objects", meta=(ClampMin=0, ClampMax=1))
+	float FoliageHueShift = 0.12f;
+
+	/** Size in world units and strength of the noise that breaks the leaves into lighter and darker clumps */
+	UPROPERTY(EditAnywhere, Category="Objects", meta=(ClampMin=0.1))
+	float FoliageNoiseScale = 9.0f;
+
+	UPROPERTY(EditAnywhere, Category="Objects", meta=(ClampMin=0, ClampMax=1))
+	float FoliageNoiseStrength = 0.45f;
+
+	/** Leaves facing the sun get lighter, those facing away darker, as a canopy scatters light (FoliageTranslucency on the dark side) */
+	UPROPERTY(EditAnywhere, Category="Objects", meta=(ClampMin=0, ClampMax=1))
+	float FoliageTranslucency = 0.25f;
+
+	/** Snow on objects whose variant has snow: from how much the surface faces up it starts and is full, and how much a noise breaks it */
+	UPROPERTY(EditAnywhere, Category="Objects", meta=(ClampMin=-1, ClampMax=1))
+	float FoliageSnowUpStart = 0.05f;
+
+	UPROPERTY(EditAnywhere, Category="Objects", meta=(ClampMin=-1, ClampMax=1))
+	float FoliageSnowUpEnd = 0.55f;
+
+	UPROPERTY(EditAnywhere, Category="Objects", meta=(ClampMin=0, ClampMax=1))
+	float FoliageSnowBreakup = 0.35f;
+
+	/** Sway of the tops of trees and bushes in the wind, in world units, and its speed; the alpha of the vertex color says how much a vertex sways */
+	UPROPERTY(EditAnywhere, Category="Objects", meta=(ClampMin=0))
+	float WindStrength = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category="Objects", meta=(ClampMin=0))
+	float WindSpeed = 1.3f;
+
 	/** Share of the frozen sea that floes cover on the edge of the ice, next to open sea, and FloeDenseRings cells further in, between which it
 	 *  grows. The sea between them stays open, so ships pass anywhere */
 	UPROPERTY(EditAnywhere, Category="Floes", meta=(ClampMin=0, ClampMax=1))

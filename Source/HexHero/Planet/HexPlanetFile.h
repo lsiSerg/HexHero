@@ -105,6 +105,39 @@ struct FHexReliefFile
 	TArray<FHexReliefCell> Cells;
 };
 
+/** The objects of one cell, a line of objects.json: its cover and decor by the Id of their UHexPlanetObjectSet, None for none */
+USTRUCT()
+struct FHexObjectCell
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	int32 Cell = 0;
+
+	UPROPERTY()
+	FName Cover;
+
+	/** Density of the cover, 1 to 3 */
+	UPROPERTY()
+	int32 Density = 0;
+
+	UPROPERTY()
+	FName Decor;
+};
+
+/** objects.json of a planet: the cells with forests, bushes, stones and decor, a list only of them, which Git can merge */
+USTRUCT()
+struct FHexObjectsFile
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	int32 Version = 1;
+
+	UPROPERTY()
+	TArray<FHexObjectCell> Cells;
+};
+
 /**
  *  Description of a planet, stored as planet.json in its folder in Content/Data/Planets. The planet takes its levels from levels.txt next to it,
  *  or generates them from Seed when that file is missing.
@@ -265,6 +298,18 @@ namespace HexPlanetFile
 
 	/** Reads relief.json of a folder; no file is no cells */
 	bool LoadRelief(const FString& Folder, TArray<FHexReliefCell>& OutCells, FString& OutError);
+
+	/** objects.json holds the forests, bushes, stones and decor of the cells; a planet without it generates them and writes it, even empty */
+	constexpr const TCHAR* ObjectsFile = TEXT("objects.json");
+
+	/** Returns true if the folder has objects.json */
+	bool HasObjects(const FString& Folder);
+
+	/** Reads objects.json of a folder */
+	bool LoadObjects(const FString& Folder, TArray<FHexObjectCell>& OutCells, FString& OutError);
+
+	/** Writes objects.json of a folder, sorted by cell */
+	bool SaveObjects(const FString& Folder, const TArray<FHexObjectCell>& Cells, FString& OutError);
 
 	/** Writes relief.json of a folder, or deletes it when there are no cells */
 	bool SaveRelief(const FString& Folder, const TArray<FHexReliefCell>& Cells, FString& OutError);

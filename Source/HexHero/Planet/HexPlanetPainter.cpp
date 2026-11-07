@@ -4,6 +4,7 @@
 #include "HexPlanet.h"
 #include "HexPlanetConfig.h"
 #include "HexBiomeConfig.h"
+#include "HexPlanetObjectSet.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
@@ -70,6 +71,35 @@ FLinearColor UHexPlanetPainter::GetBiomeColor(int32 InBiome) const
 	return Planet && Planet->GetBiomes().IsValidIndex(InBiome) ? FLinearColor(Planet->GetBiomes()[InBiome]->FileColor) : FLinearColor::Gray;
 }
 
+void UHexPlanetPainter::ClearTool()
+{
+	if (bPainting)
+	{
+		EndStroke();
+	}
+	Tool = EHexPaintTool::None;
+}
+
+int32 UHexPlanetPainter::GetNumObjectSets() const
+{
+	return Planet && Planet->GetObjects() ? Planet->GetObjects()->GetSets().Num() : 0;
+}
+
+FText UHexPlanetPainter::GetObjectSetName(int32 Set) const
+{
+	return Set < GetNumObjectSets() ? FText::FromString(Planet->GetObjects()->GetSets()[Set]->DisplayName) : FText::GetEmpty();
+}
+
+FLinearColor UHexPlanetPainter::GetObjectSetColor(int32 Set) const
+{
+	return Set < GetNumObjectSets() ? Planet->GetObjects()->GetSets()[Set]->PaletteColor : FLinearColor::Gray;
+}
+
+bool UHexPlanetPainter::IsObjectSetCover(int32 Set) const
+{
+	return Set < GetNumObjectSets() && Planet->GetObjects()->GetSets()[Set]->Layer == EHexObjectLayer::Cover;
+}
+
 FText UHexPlanetPainter::GetLevelName(int32 InLevel)
 {
 	switch (InLevel)
@@ -89,7 +119,7 @@ int32 UHexPlanetPainter::GetPaintedLevel(int32 Cell, int32 InLevel) const
 
 void UHexPlanetPainter::BeginStroke(int32 Cell)
 {
-	if (!Planet || !bActive)
+	if (!Planet || !bActive || Tool == EHexPaintTool::None)
 	{
 		return;
 	}
@@ -162,8 +192,53 @@ void UHexPlanetPainter::PaintAround(int32 Cell)
 		RingStart = RingEnd;
 	}
 
+	// objects go to the planet at once, once per cell and stroke, a kind only to the cells whose level allows it
+	if (Tool == EHexPaintTool::Object || Tool == EHexPaintTool::Eraser)
+	{
+		UHexPlanetObjects* Objects = Planet->GetObjects();
+		TMap<int32, FHexCellObjects> Changed;
+		for (const int32 Painted : Brush)
+		{
+			if (Stroke.NewObjects.Contains(Painted))
+			{
+				continue;
+			}
+			const FHexCellObjects Old = Objects->GetCell(Painted);
+			FHexCellObjects New = Old;
+			if (Tool == EHexPaintTool::Eraser)
+			{
+				New = FHexCellObjects();
+			}
+			else if (Objects->IsAllowed(ObjectSet, Planet->GetCellLevel(Painted)))
+			{
+				if (IsObjectSetCover(ObjectSet))
+				{
+					New.Cover = uint8(ObjectSet + 1);
+					New.Density = uint8(ObjectDensity);
+				}
+				else
+				{
+					New.Decor = uint8(ObjectSet + 1);
+				}
+			}
+			if (!(New == Old))
+			{
+				Stroke.OldObjects.Add(Painted, Old);
+				Stroke.NewObjects.Add(Painted, New);
+				Changed.Add(Painted, New);
+			}
+		}
+
+		if (!Changed.IsEmpty())
+		{
+			Objects->SetCells(Changed);
+			Planet->MarkLevelsEdited();
+		}
+		return;
+	}
+
 	// relief goes to the planet at once, once per cell and stroke, only to cells with a piece the tool can change
-	if (bPaintRelief)
+	if (Tool == EHexPaintTool::Relief)
 	{
 		HexPlanetSurface::FReliefOverrides Changed;
 		for (const int32 Painted : Brush)
@@ -186,7 +261,7 @@ void UHexPlanetPainter::PaintAround(int32 Cell)
 	}
 
 	// biomes go to the planet at once, only to the cells whose level allows them
-	if (bPaintBiomes)
+	if (Tool == EHexPaintTool::Biome)
 	{
 		TMap<int32, int32> Changed;
 		for (const int32 Painted : Brush)
@@ -252,7 +327,7 @@ void UHexPlanetPainter::EndStroke()
 		}
 	}
 
-	if (Stroke.NewLevels.IsEmpty() && Stroke.NewBiomes.IsEmpty() && Stroke.NewRelief.IsEmpty())
+	if (Stroke.NewLevels.IsEmpty() && Stroke.NewBiomes.IsEmpty() && Stroke.NewRelief.IsEmpty() && Stroke.NewObjects.IsEmpty())
 	{
 		UpdatePreview();
 		return;
@@ -292,7 +367,7 @@ void UHexPlanetPainter::Undo()
 	}
 
 	FStep Step = UndoSteps.Pop();
-	Apply(Step.OldLevels, Step.OldBiomes, Step.OldRelief);
+	Apply(Step.OldLevels, Step.OldBiomes, Step.OldRelief, Step.OldObjects);
 	RedoSteps.Add(MoveTemp(Step));
 }
 
@@ -304,7 +379,7 @@ void UHexPlanetPainter::Redo()
 	}
 
 	FStep Step = RedoSteps.Pop();
-	Apply(Step.NewLevels, Step.NewBiomes, Step.NewRelief);
+	Apply(Step.NewLevels, Step.NewBiomes, Step.NewRelief, Step.NewObjects);
 	UndoSteps.Add(MoveTemp(Step));
 }
 
@@ -366,8 +441,14 @@ bool UHexPlanetPainter::GetToolRelief(int32 Cell, HexPlanetSurface::FReliefOverr
 	}
 }
 
-void UHexPlanetPainter::Apply(const TMap<int32, int32>& Levels, const TMap<int32, int32>& Biomes, const HexPlanetSurface::FReliefOverrides& Relief)
+void UHexPlanetPainter::Apply(const TMap<int32, int32>& Levels, const TMap<int32, int32>& Biomes, const HexPlanetSurface::FReliefOverrides& Relief,
+	const TMap<int32, FHexCellObjects>& Objects)
 {
+	if (!Objects.IsEmpty())
+	{
+		Planet->GetObjects()->SetCells(Objects);
+	}
+
 	if (!Relief.IsEmpty())
 	{
 		Planet->SetReliefOverrides(Relief);

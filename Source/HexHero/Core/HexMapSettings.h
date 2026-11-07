@@ -13,6 +13,7 @@ class UHexBiomeConfig;
 class UHexLevelConfig;
 class UHexMapConfig;
 class UHexTerrainLayersConfig;
+class UHexPlanetObjectSet;
 
 /**
  *  Project settings of the hex world map. Stored in Config/DefaultGame.ini.
@@ -52,6 +53,10 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category="Map")
 	TSoftObjectPtr<UHexTerrainLayersConfig> TerrainLayers;
 
+	/** Folder with one asset per kind of object of the planet (UHexPlanetObjectSet). It must be listed in the directories to always cook, as nothing refers to the assets */
+	UPROPERTY(Config, EditAnywhere, Category="Planet", meta=(ContentDir))
+	FDirectoryPath PlanetObjectsFolder;
+
 	/** Loads the terrain levels, lowest first */
 	TArray<const UHexLevelConfig*> LoadLevels() const;
 
@@ -72,4 +77,7 @@ public:
 
 	/** Loads the texture layers. Without a valid asset it logs an error and returns the default values, which have no layers */
 	const UHexTerrainLayersConfig* LoadTerrainLayers() const;
+
+	/** Loads the kinds of objects of the planet, ordered by asset name */
+	TArray<const UHexPlanetObjectSet*> LoadPlanetObjectSets() const;
 };

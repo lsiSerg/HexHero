@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "HexPlanetObjects.h"
 #include "HexPlanetSurface.h"
 #include "UObject/Object.h"
 #include "HexPlanetPainter.generated.h"
@@ -18,8 +19,23 @@ class UProceduralMeshComponent;
  *  AHexPlanet::SetCells, which rebuilds the surface around them in the background; the tiles go once it is shown. A cell whose new level does
  *  not allow its biome takes a fitting one. Biomes show at once, as the planet only uploads them to a texture, so a biome stroke goes to the
  *  planet while it is painted, and only to the cells whose level allows that biome. Each stroke is one step of Undo and Redo, with the levels
- *  and biomes it changed. The pentagons are never mountains, so a mountain brush paints them as hills.
+ *  and biomes it changed. The pentagons are never mountains, so a mountain brush paints them as hills. It also puts forests, bushes, stones
+ *  and decor on cells and takes them off (UHexPlanetObjects), and with no tool the left button drags the planet while the palette stays.
  */
+/** What the left button does while painting is on */
+enum class EHexPaintTool : uint8
+{
+	/** Nothing: it drags the planet, as with painting off, while the palette stays */
+	None,
+	Level,
+	Biome,
+	Relief,
+	/** Puts the chosen kind of object on the cells (UHexPlanetObjects) */
+	Object,
+	/** Takes the cover and decor off the cells */
+	Eraser,
+};
+
 /** What a click of the brush in relief mode does to the mountains and hills under it, once per cell and stroke */
 enum class EHexReliefTool : uint8
 {
@@ -62,29 +78,58 @@ public:
 	/** Returns the level the brush paints */
 	int32 GetLevel() const { return Level; }
 
-	/** Returns true while the brush paints levels, the one tool of the brush chosen with the levels */
-	bool IsPaintingLevels() const { return !bPaintBiomes && !bPaintRelief; }
+	/** Returns the tool of the left button; one is chosen at a time, and choosing one clears the others */
+	EHexPaintTool GetTool() const { return Tool; }
+
+	/** Returns true while the left button paints with a tool, rather than dragging the planet */
+	bool HasTool() const { return Tool != EHexPaintTool::None; }
+
+	/** Puts the tool down, so the left button drags the planet while the palette stays */
+	void ClearTool();
+
+	/** Returns true while the brush paints levels */
+	bool IsPaintingLevels() const { return Tool == EHexPaintTool::Level; }
 
 	/** Sets the level the brush paints, and makes it paint levels */
-	void SetLevel(int32 InLevel) { Level = FMath::Clamp(InLevel, MinLevel, MaxLevel); bPaintBiomes = false; bPaintRelief = false; }
+	void SetLevel(int32 InLevel) { Level = FMath::Clamp(InLevel, MinLevel, MaxLevel); Tool = EHexPaintTool::Level; }
 
-	/** Returns true while the brush paints biomes rather than levels */
-	bool IsPaintingBiomes() const { return bPaintBiomes && !bPaintRelief; }
+	/** Returns true while the brush paints biomes */
+	bool IsPaintingBiomes() const { return Tool == EHexPaintTool::Biome; }
 
-	/** Returns true while the brush sets the relief of mountains and hills rather than levels or biomes */
-	bool IsPaintingRelief() const { return bPaintRelief; }
+	/** Returns true while the brush sets the relief of mountains and hills */
+	bool IsPaintingRelief() const { return Tool == EHexPaintTool::Relief; }
+
+	/** Returns the kinds of objects that can be put on cells, their names, colors and whether they are a cover */
+	int32 GetNumObjectSets() const;
+	FText GetObjectSetName(int32 Set) const;
+	FLinearColor GetObjectSetColor(int32 Set) const;
+	bool IsObjectSetCover(int32 Set) const;
+
+	/** Returns the kind of object the brush puts, an index into UHexPlanetObjects::GetSets */
+	int32 GetObjectSet() const { return ObjectSet; }
+
+	/** Sets the kind of object the brush puts, and makes it put objects */
+	void SetObjectSet(int32 InSet) { ObjectSet = InSet; Tool = EHexPaintTool::Object; }
+
+	/** Returns the density a cover is put at, 1 to 3 */
+	int32 GetObjectDensity() const { return ObjectDensity; }
+	void SetObjectDensity(int32 InDensity) { ObjectDensity = FMath::Clamp(InDensity, 1, 3); }
+
+	/** Returns true while the brush takes objects off cells */
+	bool IsErasing() const { return Tool == EHexPaintTool::Eraser; }
+	void SetEraser() { Tool = EHexPaintTool::Eraser; }
 
 	/** Returns the tool of relief */
 	EHexReliefTool GetReliefTool() const { return ReliefTool; }
 
 	/** Sets the tool of relief, and makes the brush set relief */
-	void SetReliefTool(EHexReliefTool InTool) { ReliefTool = InTool; bPaintRelief = true; bPaintBiomes = false; }
+	void SetReliefTool(EHexReliefTool InTool) { ReliefTool = InTool; Tool = EHexPaintTool::Relief; }
 
 	/** Returns the biome the brush paints, an index into AHexPlanet::GetBiomes */
 	int32 GetBiome() const { return Biome; }
 
 	/** Sets the biome the brush paints, and makes it paint biomes */
-	void SetBiome(int32 InBiome) { Biome = InBiome; bPaintBiomes = true; bPaintRelief = false; }
+	void SetBiome(int32 InBiome) { Biome = InBiome; Tool = EHexPaintTool::Biome; }
 
 	/** Returns the number of biomes that can be painted, their names and their colors, the FileColor of their asset */
 	int32 GetNumBiomes() const;
@@ -137,6 +182,8 @@ private:
 		TMap<int32, int32> NewBiomes;
 		HexPlanetSurface::FReliefOverrides OldRelief;
 		HexPlanetSurface::FReliefOverrides NewRelief;
+		TMap<int32, FHexCellObjects> OldObjects;
+		TMap<int32, FHexCellObjects> NewObjects;
 	};
 
 	/** Planet painted */
@@ -157,8 +204,9 @@ private:
 
 	bool bActive = false;
 	bool bPainting = false;
-	bool bPaintBiomes = false;
-	bool bPaintRelief = false;
+	EHexPaintTool Tool = EHexPaintTool::Level;
+	int32 ObjectSet = 0;
+	int32 ObjectDensity = 3;
 	EHexReliefTool ReliefTool = EHexReliefTool::Version;
 	int32 Level = 0;
 	int32 Biome = 0;
@@ -180,7 +228,8 @@ private:
 	void PaintAround(int32 Cell);
 
 	/** Gives the planet the levels and biomes of a step and shows the levels as tiles until it is rebuilt */
-	void Apply(const TMap<int32, int32>& Levels, const TMap<int32, int32>& Biomes, const HexPlanetSurface::FReliefOverrides& Relief = {});
+	void Apply(const TMap<int32, int32>& Levels, const TMap<int32, int32>& Biomes, const HexPlanetSurface::FReliefOverrides& Relief = {},
+		const TMap<int32, FHexCellObjects>& Objects = {});
 
 	/** Returns the relief a click of the tool gives a cell, or false if it cannot change it, as it has no piece or its neighbors fix it */
 	bool GetToolRelief(int32 Cell, HexPlanetSurface::FReliefOverride& OutRelief) const;

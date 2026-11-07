@@ -18,6 +18,7 @@
 #include "HexPlanetCloudConfig.h"
 #include "HexPlanetConfig.h"
 #include "HexPlanetKitConfig.h"
+#include "HexPlanetObjects.h"
 #include "HexPlanetSeaField.h"
 #include "HexPlanetWaterConfig.h"
 #include "HexTerrainLayersConfig.h"
@@ -37,6 +38,9 @@ namespace
 
 	TAutoConsoleVariable<float> CVarHexPlanetCoarseBand(TEXT("hex.PlanetCoarseBand"), 0.0f,
 		TEXT("Half the width of the band over which the planet dissolves its chunks into their coarse meshes, in place of CoarseBand of DA_HexPlanet. 0 keeps that one."));
+
+	TAutoConsoleVariable<bool> CVarHexPlanetObjects(TEXT("hex.PlanetObjects"), true,
+		TEXT("Draws the forests, bushes, stones and decor of the planet (1) or hides them (0), to see what they cost."));
 
 	const TCHAR* LevelNames[] = {TEXT("deep sea"), TEXT("shallows"), TEXT("plains"), TEXT("hills"), TEXT("mountains")};
 
@@ -467,6 +471,9 @@ AHexPlanet::AHexPlanet()
 	Surface = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("Surface"));
 	RootComponent = Surface;
 
+	Objects = CreateDefaultSubobject<UHexPlanetObjects>(TEXT("Objects"));
+	Objects->SetupAttachment(Surface);
+
 	Water = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("Water"));
 	Water->SetupAttachment(Surface);
 	Water->SetCastShadow(false);
@@ -583,7 +590,9 @@ void AHexPlanet::BeginPlay()
 	LoadBiomeConfigs();
 	LoadBiomes();
 	LoadRelief();
-	WriteGeneratedFiles(!bHadLevels, !bHadBiomes && !BiomeConfigs.IsEmpty());
+	// the objects are placed on the surface as it is built, so they are read first
+	Objects->Init(this, Settings);
+	WriteGeneratedFiles(!bHadLevels, !bHadBiomes && !BiomeConfigs.IsEmpty(), Objects->WasGenerated() && !Objects->GetSets().IsEmpty());
 	CreateCellMarks();
 	CreateBiomeTexture();
 	LayerParamsTexture = GetDefault<UHexMapSettings>()->LoadTerrainLayers()->CreateParamsTexture();
@@ -719,6 +728,8 @@ void AHexPlanet::SetCells(const TMap<int32, int32>& NewLevels, const TMap<int32,
 	if (!BiomeCells.IsEmpty())
 	{
 		UpdateBiomePixels(BiomeCells);
+		// objects take the variant of their biome, and stand on the surface shown until a rebuild of the levels places them again
+		Objects->RebuildCells(BiomeCells);
 	}
 
 	if (NumChanged > 0 || bFreezeChanged)
@@ -926,6 +937,11 @@ void AHexPlanet::Tick(float DeltaTime)
 		FinishRebuild();
 		StartRebuild();
 		OnLevelsRebuilt.Broadcast();
+	}
+
+	if (Objects->IsVisible() != CVarHexPlanetObjects.GetValueOnGameThread())
+	{
+		Objects->SetVisibility(CVarHexPlanetObjects.GetValueOnGameThread(), true);
 	}
 
 	const APlayerController* PlayerController = GetWorld()->GetFirstPlayerController();
@@ -1740,7 +1756,7 @@ bool AHexPlanet::SaveAs(const FString& Name, FString& OutError)
 
 	// the levels and biomes are always written, painted or generated, so the planet does not change when the generation does
 	if (!HexPlanetFile::SaveLevels(Folder, Levels, OutError) || !HexPlanetFile::SaveBiomes(Folder, CellBiomes, BiomeLetters, OutError)
-		|| !SaveRelief(Folder, OutError))
+		|| !SaveRelief(Folder, OutError) || !Objects->Save(Folder, OutError))
 	{
 		return false;
 	}
@@ -1751,7 +1767,7 @@ bool AHexPlanet::SaveAs(const FString& Name, FString& OutError)
 	return true;
 }
 
-void AHexPlanet::WriteGeneratedFiles(bool bLevels, bool bBiomes)
+void AHexPlanet::WriteGeneratedFiles(bool bLevels, bool bBiomes, bool bObjects)
 {
 	if (!IsSaved())
 	{
@@ -1781,6 +1797,45 @@ void AHexPlanet::WriteGeneratedFiles(bool bLevels, bool bBiomes)
 		{
 			UE_LOG(LogHexHero, Warning, TEXT("Planet: %s"), *Error);
 		}
+	}
+
+	if (bObjects)
+	{
+		if (Objects->Save(PlanetFolder, Error))
+		{
+			UE_LOG(LogHexHero, Log, TEXT("Planet: wrote the generated objects to %s"), *HexPlanetFile::GetFilePath(PlanetFolder, HexPlanetFile::ObjectsFile));
+		}
+		else
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("Planet: %s"), *Error);
+		}
+	}
+}
+
+int32 AHexPlanet::GetCellRockLayer(int32 Cell) const
+{
+	const int32 Biome = GetCellBiome(Cell);
+	return BiomeConfigs.IsValidIndex(Biome) && BiomeConfigs[Biome] ? FMath::Clamp(BiomeConfigs[Biome]->MountainRockLayer, 0, 255) : 2;
+}
+
+void AHexPlanet::GetCellTriangles(int32 Cell, TArray<FVector3f>& OutCorners) const
+{
+	OutCorners.Reset();
+	if (!CellMeshes.IsValidIndex(Cell))
+	{
+		return;
+	}
+	const FCellMeshRange& Range = CellMeshes[Cell];
+	const FProcMeshSection* Section = Range.Section == INDEX_NONE ? nullptr : GetSurfaceSection(Range.Section);
+	if (!Section)
+	{
+		return;
+	}
+	OutCorners.Reserve(Range.NumIndices);
+	for (int32 Index = Range.FirstIndex; Index < Range.FirstIndex + Range.NumIndices && Section->ProcIndexBuffer.IsValidIndex(Index); ++Index)
+	{
+		const uint32 Vertex = Section->ProcIndexBuffer[Index];
+		OutCorners.Add(Section->ProcVertexBuffer.IsValidIndex(int32(Vertex)) ? FVector3f(Section->ProcVertexBuffer[Vertex].Position) : FVector3f::ZeroVector);
 	}
 }
 
@@ -1874,7 +1929,7 @@ bool AHexPlanet::SaveLevels(FString& OutError)
 	}
 
 	if (!HexPlanetFile::SaveLevels(PlanetFolder, Levels, OutError) || !HexPlanetFile::SaveBiomes(PlanetFolder, CellBiomes, BiomeLetters, OutError)
-		|| !SaveRelief(PlanetFolder, OutError))
+		|| !SaveRelief(PlanetFolder, OutError) || !Objects->Save(PlanetFolder, OutError))
 	{
 		return false;
 	}
@@ -2317,6 +2372,9 @@ void AHexPlanet::ApplySurface(HexPlanetSurface::FBuild& Build)
 		}
 		UpdateBoulders();
 	}
+
+	// the objects stand on the ground of their cells, which these chunks changed
+	Objects->RebuildChunks(Build.Chunks);
 
 	// the factor of the height depends on the place and the level of a cell alone, so a build of some chunks gives it for all
 	if (Build.CellRelief.Num() == CellRelief.Num())
@@ -2853,7 +2911,7 @@ FString AHexPlanet::GetCellDebugText(int32 Cell) const
 		ReliefText = FString::Printf(TEXT(", set by hand: %s"), *FString::Join(Parts, TEXT(", ")));
 	}
 
-	return FString::Printf(TEXT("Cell %d (%s)\nLevel: %s\nBiome: %s\nPiece: %s\nFace: %d, chunk %d\nLatitude %.1f, longitude %.1f\nArea: %.1f%% of the mean\nSides: longest x%.3f of shortest"),
-		Cell, Each.IsPentagon() ? TEXT("pentagon") : TEXT("hexagon"), LevelNames[GetCellLevel(Cell) + 2], *BiomeName, *(PieceText + ReliefText), Each.Face, Each.Chunk,
+	return FString::Printf(TEXT("Cell %d (%s)\nLevel: %s\nBiome: %s\nObjects: %s\nPiece: %s\nFace: %d, chunk %d\nLatitude %.1f, longitude %.1f\nArea: %.1f%% of the mean\nSides: longest x%.3f of shortest"),
+		Cell, Each.IsPentagon() ? TEXT("pentagon") : TEXT("hexagon"), LevelNames[GetCellLevel(Cell) + 2], *BiomeName, *Objects->GetCellText(Cell), *(PieceText + ReliefText), Each.Face, Each.Chunk,
 		Latitude, Longitude, Grid.GetCellArea(Cell) / MeanCellArea * 100.0, Grid.GetCellSideRatio(Cell));
 }

@@ -532,8 +532,8 @@ void AHexPlanetCameraPawn::OnTurnKeys(const FInputActionValue& Value)
 
 void AHexPlanetCameraPawn::OnDragStarted()
 {
-	// while painting is on the left button paints, and the camera moves with the keys, the edges of the screen and the other buttons
-	if (AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController()); PlayerController && PlayerController->IsPaintModeOn())
+	// while a tool of the brush is chosen the left button paints, and the camera moves with the keys, the edges of the screen and the other buttons
+	if (AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController()); PlayerController && PlayerController->IsBrushArmed())
 	{
 		PlayerController->BeginPaintStroke();
 		return;

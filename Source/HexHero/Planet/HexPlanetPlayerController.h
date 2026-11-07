@@ -66,8 +66,11 @@ public:
 	/** Asks whether to save a planet that is not saved before its camera is copied, as the copied command could not open it */
 	void OpenCopyCameraDialog();
 
-	/** Returns true while the left button paints the levels of the planet */
+	/** Returns true while painting is on, with its palette */
 	bool IsPaintModeOn() const;
+
+	/** Returns true while the left button paints with a tool of the brush, rather than dragging the planet */
+	bool IsBrushArmed() const;
 
 	/** Turns painting on or off, with its palette */
 	void SetPaintMode(bool bOn);

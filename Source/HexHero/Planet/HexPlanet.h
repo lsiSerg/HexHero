@@ -25,6 +25,7 @@ class UHierarchicalInstancedStaticMeshComponent;
 class UHexBiomeConfig;
 class UHexPlanetCloudConfig;
 class UHexPlanetConfig;
+class UHexPlanetObjects;
 class UHexPlanetWaterConfig;
 struct FProcMeshSection;
 
@@ -60,6 +61,10 @@ class AHexPlanet : public AActor
 	 *  biome of their mountain as the first custom data of each instance (UpdateBoulders) */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> BoulderComponents;
+
+	/** Forests, bushes, flowers, stones and decor on the cells, drawn as instances on the ground of their cells (objects.json) */
+	UPROPERTY(VisibleAnywhere, Category="Components")
+	TObjectPtr<UHexPlanetObjects> Objects;
 
 	/** Floes of sea ice on the frozen sea, one component per mesh of FHexPlanetFloes (UpdateFloes), which M_HexPlanetFloe moves */
 	UPROPERTY(Transient)
@@ -278,6 +283,19 @@ public:
 	/** Returns the biome of every cell, in the order of the grid */
 	const TArray<uint8>& GetCellBiomes() const { return CellBiomes; }
 
+	/** Returns the PlanetLetter of the biome of a cell, or 0 */
+	TCHAR GetCellBiomeLetter(int32 Cell) const { return CellBiomes.IsValidIndex(Cell) && BiomeLetters.IsValidIndex(CellBiomes[Cell]) ? BiomeLetters[CellBiomes[Cell]] : TEXT('\0'); }
+
+	/** Returns the rock layer of the biome of a cell, as the surface draws it on slopes and mountains */
+	int32 GetCellRockLayer(int32 Cell) const;
+
+	/** Gives the triangles of the surface of a cell as shown now, three corners each, empty before it is built. Reads only, so any thread may
+	 *  call it while the surface does not change */
+	void GetCellTriangles(int32 Cell, TArray<FVector3f>& OutCorners) const;
+
+	/** Returns the forests, bushes, stones and decor of the cells */
+	UHexPlanetObjects* GetObjects() const { return Objects; }
+
 	/** Returns true if a biome, an index into GetBiomes, may lie on a level */
 	bool IsBiomeAllowed(int32 Biome, int32 Level) const;
 
@@ -384,8 +402,8 @@ private:
 	/** Takes the biomes from biomes.txt of the planet, or generates them when it has none or it is not valid, and fits them to the levels */
 	void LoadBiomes();
 
-	/** Writes the generated levels and biomes of a saved planet that had no such files, so it keeps them when the generation changes */
-	void WriteGeneratedFiles(bool bLevels, bool bBiomes);
+	/** Writes the generated levels, biomes and objects of a saved planet that had no such files, so it keeps them when the generation changes */
+	void WriteGeneratedFiles(bool bLevels, bool bBiomes, bool bObjects);
 
 	/** Returns the biome a cell takes on its level when its own is not allowed there: the one most of its neighbors have that it allows,
 	 *  else the default of the level, else the first allowed */

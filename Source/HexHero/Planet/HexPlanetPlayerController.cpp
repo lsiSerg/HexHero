@@ -306,7 +306,7 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 		Painter->ContinueStroke(Cell);
 	}
 
-	Planet->SetHoveredCell(Cell, IsPaintModeOn() ? Painter->GetBrushSize() : 0);
+	Planet->SetHoveredCell(Cell, IsBrushArmed() ? Painter->GetBrushSize() : 0);
 
 	// the panel follows hex.HoverInfo of the flat map
 	static const IConsoleVariable* HoverInfoVariable = IConsoleManager::Get().FindConsoleVariable(TEXT("hex.HoverInfo"));
@@ -519,6 +519,11 @@ bool AHexPlanetPlayerController::IsPaintModeOn() const
 	return Painter && Painter->IsActive();
 }
 
+bool AHexPlanetPlayerController::IsBrushArmed() const
+{
+	return IsPaintModeOn() && Painter->HasTool();
+}
+
 void AHexPlanetPlayerController::SetPaintMode(bool bOn)
 {
 	UHexPlanetPainter* Brush = GetPainter();
@@ -571,7 +576,7 @@ void AHexPlanetPlayerController::CycleBrushSize()
 
 void AHexPlanetPlayerController::BeginPaintStroke()
 {
-	if (IsPaintModeOn())
+	if (IsBrushArmed())
 	{
 		Painter->BeginStroke(MouseCell);
 	}

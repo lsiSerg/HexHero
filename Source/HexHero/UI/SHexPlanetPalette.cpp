@@ -7,6 +7,7 @@
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/Layout/SUniformGridPanel.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
@@ -15,7 +16,7 @@
 
 namespace
 {
-	const float PaletteWidth = 220.0f;
+	const float PaletteWidth = 250.0f;
 	const float SwatchSize = 18.0f;
 	const FLinearColor ChosenColor(1.0f, 0.75f, 0.1f, 1.0f);
 	const FLinearColor ButtonColor(0.3f, 0.3f, 0.3f, 1.0f);
@@ -70,6 +71,17 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 			SNew(STextBlock)
 			.Text(FText::Format(LOCTEXT("Title", "Paint ({0})"), FText::FromString(InArgs._PaintModeKeys)))
 			.Font(FCoreStyle::GetDefaultFontStyle("Bold", 12))
+		]
+
+		// no tool: the left button drags the planet, while the palette stays to pick a tool again
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0.0f, 0.0f, 0.0f, 8.0f)
+		[
+			MakeButton(
+				SNew(STextBlock).Text(LOCTEXT("NoTool", "Move the planet (no tool)")).Font(Font).Justification(ETextJustify::Center),
+				[](UHexPlanetPainter& Each) { Each.ClearTool(); },
+				[](const UHexPlanetPainter& Each) { return !Each.HasTool(); })
 		];
 
 	// the levels, highest first, with the number keys that choose them
@@ -231,6 +243,98 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 		.Text(LOCTEXT("ReliefHelp", "Click a cell, Ctrl+click to go back or lower. Version and Turn only offer what keeps the sides joined to the neighbors, so a cell whose neighbors fix it stays as it is; the info at the cursor shows how many it has. Mirror and the height always fit. The middle button moves the planet."))
 	];
 
+	// the kinds of objects, two to a row, which only go on the cells whose level allows them, the density of a cover, and the eraser
+	const int32 NumSets = Painter.IsValid() ? Painter->GetNumObjectSets() : 0;
+	if (NumSets > 0)
+	{
+		TSharedRef<SUniformGridPanel> ObjectGrid = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
+		for (int32 Set = 0; Set < NumSets; ++Set)
+		{
+			const FLinearColor Color = Painter->GetObjectSetColor(Set);
+			const TSharedRef<SButton> Button = MakeButton(
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				.Padding(0.0f, 0.0f, 6.0f, 0.0f)
+				[
+					SNew(SBox)
+					.WidthOverride(SwatchSize * 0.75f)
+					.HeightOverride(SwatchSize * (Painter->IsObjectSetCover(Set) ? 0.75f : 0.4f))
+					[
+						SNew(SImage)
+						.Image(White)
+						.ColorAndOpacity(FLinearColor(Color.R, Color.G, Color.B, 1.0f))
+					]
+				]
+				+ SHorizontalBox::Slot()
+				.FillWidth(1.0f)
+				.VAlign(VAlign_Center)
+				[
+					SNew(STextBlock)
+					.Text(Painter->GetObjectSetName(Set))
+					.Font(Small)
+				],
+				[Set](UHexPlanetPainter& Each) { Each.SetObjectSet(Set); },
+				[Set](const UHexPlanetPainter& Each) { return Each.GetTool() == EHexPaintTool::Object && Each.GetObjectSet() == Set; });
+			Button->SetToolTipText(Painter->IsObjectSetCover(Set)
+				? LOCTEXT("CoverTip", "Fills the cells at the density below; a cell holds one cover")
+				: LOCTEXT("DecorTip", "A piece of decor near the middle of the cell; a cell holds one, beside its cover"));
+			ObjectGrid->AddSlot(Set % 2, Set / 2)
+			[
+				Button
+			];
+		}
+
+		Content->AddSlot()
+		.AutoHeight()
+		.Padding(0.0f, 8.0f, 0.0f, 3.0f)
+		[
+			SNew(STextBlock)
+			.Text(LOCTEXT("Objects", "Objects"))
+			.Font(Font)
+		];
+
+		Content->AddSlot()
+		.AutoHeight()
+		[
+			ObjectGrid
+		];
+
+		TSharedRef<SHorizontalBox> Densities = SNew(SHorizontalBox);
+		for (int32 Density = 1; Density <= 3; ++Density)
+		{
+			const FText Labels[] = {LOCTEXT("Sparse", "Sparse"), LOCTEXT("Medium", "Medium"), LOCTEXT("Dense", "Dense")};
+			Densities->AddSlot()
+			.FillWidth(1.0f)
+			.Padding(Density == 1 ? 0.0f : 3.0f, 0.0f, 0.0f, 0.0f)
+			[
+				MakeButton(
+					SNew(STextBlock).Text(Labels[Density - 1]).Font(Small).Justification(ETextJustify::Center),
+					[Density](UHexPlanetPainter& Each) { Each.SetObjectDensity(Density); },
+					[Density](const UHexPlanetPainter& Each) { return Each.GetObjectDensity() == Density; })
+			];
+		}
+
+		Content->AddSlot()
+		.AutoHeight()
+		.Padding(0.0f, 0.0f, 0.0f, 3.0f)
+		[
+			Densities
+		];
+
+		const TSharedRef<SButton> Eraser = MakeButton(
+			SNew(STextBlock).Text(LOCTEXT("Eraser", "Eraser")).Font(Small).Justification(ETextJustify::Center),
+			[](UHexPlanetPainter& Each) { Each.SetEraser(); },
+			[](const UHexPlanetPainter& Each) { return Each.IsErasing(); });
+		Eraser->SetToolTipText(LOCTEXT("EraserTip", "Takes the cover and the decor off the cells"));
+		Content->AddSlot()
+		.AutoHeight()
+		[
+			Eraser
+		];
+	}
+
 	// the size of the brush
 	TSharedRef<SHorizontalBox> Sizes = SNew(SHorizontalBox);
 	for (int32 Size = 1; Size <= UHexPlanetPainter::MaxBrushSize; ++Size)
@@ -306,14 +410,19 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 			{
 				return LOCTEXT("Rebuilding", "Rebuilding the surface...");
 			}
+			if (WeakPainter.IsValid() && !WeakPainter->HasTool())
+			{
+				return FText::Format(LOCTEXT("HintNoTool", "The left button moves the planet; pick a tool to paint. Save with {0}."), FText::FromString(SaveKeys));
+			}
 			return FText::Format(LOCTEXT("Hint", "The left button paints. Save with {0}."), FText::FromString(SaveKeys));
 		})
 	];
 
+	// a palette taller than the screen scrolls
 	ChildSlot
 	.HAlign(HAlign_Left)
 	.VAlign(VAlign_Center)
-	.Padding(16.0f, 0.0f, 0.0f, 0.0f)
+	.Padding(16.0f, 16.0f, 0.0f, 16.0f)
 	[
 		SNew(SBorder)
 		.BorderImage(White)
@@ -323,7 +432,11 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 			SNew(SBox)
 			.WidthOverride(PaletteWidth)
 			[
-				Content
+				SNew(SScrollBox)
+				+ SScrollBox::Slot()
+				[
+					Content
+				]
 			]
 		]
 	];

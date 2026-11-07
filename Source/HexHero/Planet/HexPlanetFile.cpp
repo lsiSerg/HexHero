@@ -363,6 +363,59 @@ bool HexPlanetFile::SaveRelief(const FString& Folder, const TArray<FHexReliefCel
 	return true;
 }
 
+bool HexPlanetFile::HasObjects(const FString& Folder)
+{
+	return IFileManager::Get().FileExists(*GetFilePath(Folder, ObjectsFile));
+}
+
+bool HexPlanetFile::LoadObjects(const FString& Folder, TArray<FHexObjectCell>& OutCells, FString& OutError)
+{
+	OutCells.Reset();
+	const FString FilePath = GetFilePath(Folder, ObjectsFile);
+	FString Text;
+	FHexObjectsFile File;
+	if (!FFileHelper::LoadFileToString(Text, *FilePath) || !FJsonObjectConverter::JsonObjectStringToUStruct(Text, &File))
+	{
+		OutError = FString::Printf(TEXT("could not read %s"), *FilePath);
+		return false;
+	}
+	OutCells = MoveTemp(File.Cells);
+	return true;
+}
+
+bool HexPlanetFile::SaveObjects(const FString& Folder, const TArray<FHexObjectCell>& Cells, FString& OutError)
+{
+	const FString FilePath = GetFilePath(Folder, ObjectsFile);
+	FHexObjectsFile File;
+	File.Cells = Cells;
+	File.Cells.Sort([](const FHexObjectCell& A, const FHexObjectCell& B) { return A.Cell < B.Cell; });
+
+	// a line per cell with only what it has, so an edit changes only the lines of its cells and Git merges them
+	FString Text = FString::Printf(TEXT("{\n\t\"version\": %d,\n\t\"cells\": ["), File.Version);
+	for (int32 Index = 0; Index < File.Cells.Num(); ++Index)
+	{
+		const FHexObjectCell& Cell = File.Cells[Index];
+		FString Line = FString::Printf(TEXT("{\"cell\": %d"), Cell.Cell);
+		if (!Cell.Cover.IsNone())
+		{
+			Line += FString::Printf(TEXT(", \"cover\": \"%s\", \"density\": %d"), *Cell.Cover.ToString(), Cell.Density);
+		}
+		if (!Cell.Decor.IsNone())
+		{
+			Line += FString::Printf(TEXT(", \"decor\": \"%s\""), *Cell.Decor.ToString());
+		}
+		Text += FString::Printf(TEXT("%s\n\t\t%s}"), Index == 0 ? TEXT("") : TEXT(","), *Line);
+	}
+	Text += File.Cells.IsEmpty() ? TEXT("]\n}\n") : TEXT("\n\t]\n}\n");
+
+	if (!FFileHelper::SaveStringToFile(Text, *FilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+	{
+		OutError = FString::Printf(TEXT("could not write %s"), *FilePath);
+		return false;
+	}
+	return true;
+}
+
 bool HexPlanetFile::SaveLevels(const FString& Folder, TConstArrayView<int8> Levels, FString& OutError)
 {
 	const FString FilePath = GetFilePath(Folder, LevelsFile);

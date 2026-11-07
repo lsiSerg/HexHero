@@ -11,6 +11,7 @@
 #include "HexLevelConfig.h"
 #include "HexMapConfig.h"
 #include "HexTerrainLayersConfig.h"
+#include "HexPlanetObjectSet.h"
 
 namespace
 {
@@ -112,4 +113,9 @@ const UHexKeyLegendConfig* UHexMapSettings::LoadKeyLegend() const
 const UHexTerrainLayersConfig* UHexMapSettings::LoadTerrainLayers() const
 {
 	return LoadConfigAsset(TerrainLayers);
+}
+
+TArray<const UHexPlanetObjectSet*> UHexMapSettings::LoadPlanetObjectSets() const
+{
+	return LoadFolderAssets<UHexPlanetObjectSet>(PlanetObjectsFolder);
 }
