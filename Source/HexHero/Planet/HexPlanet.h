@@ -347,15 +347,33 @@ public:
 	/** Turns the water cap to the point under the camera and gives the water the direction of the sun */
 	virtual void Tick(float DeltaTime) override;
 
+	/** Returns true once the planet is built, a few frames after it begins to play; until then the grid is empty and the radius 0 */
+	bool IsBuilt() const { return bBuilt; }
+
 protected:
 
-	/** Builds the grid and the mesh */
+	/** Reads the configs and the manifest and shows the loading screen, so the build that follows does not freeze a blank window */
 	virtual void BeginPlay() override;
 
 	/** Waits for a rebuild that still runs, as it reads the grid */
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
+
+	/** Builds the grid, the surface, the objects, the sea and the sky, which takes a second or two on a large planet */
+	void BuildPlanet();
+
+	/** Shows and hides the loading screen over the viewport while the planet is built */
+	void ShowLoadingScreen();
+	void HideLoadingScreen();
+
+	/** True once BuildPlanet ran */
+	bool bBuilt = false;
+
+	/** Frames ticked before the build, so the loading screen has been drawn when the build holds the game thread */
+	int32 FramesBeforeBuild = 0;
+
+	TSharedPtr<SWidget> LoadingScreen;
 
 	/** Grid of the cells */
 	FHexSphereGrid Grid;
@@ -446,8 +464,22 @@ private:
 	/** Creates CellMarks with no marks */
 	void CreateCellMarks();
 
-	/** Marks cells, cell -> mark, and clears the marks of the other cells */
+	/** Marks cells, cell -> mark, and clears the marks of the other cells; the blue of the marks is left to SetWaterHiddenCells */
 	void SetCellMarks(const TMap<int32, FColor>& Marks);
+
+	/** Sets blue of CellMarks in the cells whose water the debug view hides, every cell when bAll, so the surface draws the grid lines and
+	 *  outlines on their seabed, as the strip of the water grid that draws them on the water is hidden with it */
+	void SetWaterHiddenCells(TConstArrayView<int32> Cells, bool bAll);
+
+	/** Cells whose blue SetWaterHiddenCells set, and whether it set all */
+	TArray<int32> WaterHiddenCells;
+	bool bAllWaterHidden = false;
+
+	/** Cells whose alpha of CellMarks holds sides of the rim of the hidden water, which the water grid outlines */
+	TArray<int32> WaterRimCells;
+
+	/** Sends MarkPixels to CellMarks */
+	void UploadCellMarks();
 
 	/** Pieces of the kits, read once and shared with the rebuilds in the background */
 	TSharedPtr<const HexPlanetSurface::FKit> SurfaceKit;

@@ -591,6 +591,14 @@ public:
 	UPROPERTY(EditAnywhere, Category="Colors", meta=(ClampMin=0, ClampMax=1))
 	float SnowFlatEnd = 0.8f;
 
+	/** Background of the loading screen shown while the planet is built */
+	UPROPERTY(EditAnywhere, Category="Loading")
+	FLinearColor LoadingBackgroundColor = FLinearColor(0.004f, 0.006f, 0.012f, 1.0f);
+
+	/** Text of the loading screen */
+	UPROPERTY(EditAnywhere, Category="Loading")
+	FLinearColor LoadingTextColor = FLinearColor(0.75f, 0.8f, 0.9f, 1.0f);
+
 	/** Outline of the cell under the mouse */
 	UPROPERTY(EditAnywhere, Category="Highlight")
 	FLinearColor OutlineColor = FLinearColor(1.0f, 1.0f, 1.0f, 1.0f);
@@ -598,6 +606,11 @@ public:
 	/** Outlines of its neighbors, while the debug wireframe draws them too */
 	UPROPERTY(EditAnywhere, Category="Highlight")
 	FLinearColor NeighborOutlineColor = FLinearColor(0.05f, 0.7f, 1.0f, 1.0f);
+
+	/** Outline of the hole that hex.Water 3 makes in the water around the cell under the mouse, drawn on the water around it, while the
+	 *  seabed shows the outline of the cell itself */
+	UPROPERTY(EditAnywhere, Category="Highlight")
+	FLinearColor WaterHideOutlineColor = FLinearColor(0.55f, 0.9f, 1.0f, 1.0f);
 
 	/** Outline of the edge of the brush while painting */
 	UPROPERTY(EditAnywhere, Category="Highlight")

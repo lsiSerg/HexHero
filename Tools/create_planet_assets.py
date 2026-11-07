@@ -227,10 +227,15 @@ float gridLine = saturate((U - (1.0 - width)) / pixel) * saturate(1.5 - pixel * 
 # It needs pixel from GRID_LINE_CODE
 MARK_CODE = r'''
 float2 markCell = round(CellUV);
-uint2 markBits = (uint2)round(CellMarks.Load(int3(markCell, 0)).rg * 255.0);
+float4 markPixel = CellMarks.Load(int3(markCell, 0));
+uint2 markBits = (uint2)round(markPixel.rg * 255.0);
+// blue is 1 in the cells whose water the debug view hex.Water hides (AHexPlanet::SetWaterHiddenCells), and alpha holds the bits of the rim
+// of that hole, which only the water grid draws (MARK_HOLE_BITS), so the seabed keeps the outline of the cell alone
+float waterHidden = markPixel.b;
+uint holeBits = MARK_HOLE_BITS;
 float markLine = 0.0;
 float3 markColor = MarkPrimaryColor.rgb;
-if (any(markBits > 0u))
+if (any(markBits > 0u) || holeBits > 0u)
 {
     int sides = markCell.y < 0.5 && markCell.x < 11.5 ? 5 : 6;
     float sideTurn = 6.2831853 / sides;
@@ -246,8 +251,9 @@ if (any(markBits > 0u))
     float miter = saturate((towardsOther - (1.0 - markWidth)) / pixel);
     float primary = max((float)((markBits.r >> side) & 1u), (float)((markBits.r >> other) & 1u) * miter);
     float secondary = max((float)((markBits.g >> side) & 1u), (float)((markBits.g >> other) & 1u) * miter);
-    markLine = band * max(primary, secondary);
-    markColor = primary > 0.0 ? MarkPrimaryColor.rgb : NeighborOutlineColor.rgb;
+    float hole = max((float)((holeBits >> side) & 1u), (float)((holeBits >> other) & 1u) * miter);
+    markLine = band * max(max(primary, secondary), hole);
+    markColor = primary > 0.0 ? MarkPrimaryColor.rgb : secondary > 0.0 ? NeighborOutlineColor.rgb : WaterHideOutlineColor.rgb;
 }
 '''
 
@@ -789,13 +795,14 @@ RUNUP_PARAMETERS = ['TileSize', 'SurfReach', 'SurfWobble', 'SurfPeriod', 'SurfRu
     'SurfBorderEnd', 'SurfLength', 'ShoreLaceScale', 'RollerChance', 'RollerScale', 'RunupHeight', 'RunupRiseTime', 'RunupFallTime', 'RunupEdge',
     'RunupFoam', 'WetDarkening', 'ShoreFoamColor', 'ShoreFarStart', 'ShoreFarEnd']
 
-# below the sea the line of the seabed fades out over GridSeaFade, as M_HexPlanetWaterGrid draws it on the water, and so do the outlines
-PLANET_CODE = CLOUD_SHADOW_CODE + GRID_LINE_CODE + MARK_CODE + BIOME_CODE + RUNUP_CODE + r'''
-float seaFade = saturate(1.0 + PeakShare / GridSeaFade);
+# below the sea the line of the seabed fades out over GridSeaFade, as M_HexPlanetWaterGrid draws it on the water, and so do the outlines,
+# but where the debug view hides the water, which hides that strip too, the seabed draws both
+PLANET_CODE = CLOUD_SHADOW_CODE + GRID_LINE_CODE + MARK_CODE.replace('MARK_HOLE_BITS', '0u') + BIOME_CODE + RUNUP_CODE + r'''
+float seaFade = lerp(saturate(1.0 + PeakShare / GridSeaFade), 1.0, waterHidden);
 float opacity = GridOpacity * (1.0 - smoothstep(GridFadeStart, max(GridFadeEnd, GridFadeStart + 1e-3), PeakShare)) * seaFade;
 float3 color = lerp(albedo, albedo * GridDarkness, gridLine * opacity);
 // under the sea the outline is hidden at once, as clear water would show it on the seabed, apart from the one M_HexPlanetWaterGrid draws
-float markOpacity = markLine * smoothstep(-0.01, 0.0, PeakShare);
+float markOpacity = markLine * lerp(smoothstep(-0.01, 0.0, PeakShare), 1.0, waterHidden);
 OutEmissive = lerp(color * (Ambient + Glow * Alpha), markColor * MarkGlow, markOpacity);
 color = lerp(color, markColor, markOpacity);
 return color * lerp(cloudShadow, 1.0, markOpacity);
@@ -1046,7 +1053,7 @@ CUT_CODE = CUT_CODE.replace('LOD_MASK\n', '')
 # the grid lines of the cells of the sea over the water, from the strips of AHexPlanet::BuildWaterGrid: translucent black, so the water keeps
 # WaterGridDarkness of its color under a line, as the surface keeps GridDarkness, and hidden with the water of the cells that hex.Water hides
 # and the outlines of marked cells of the sea, in their colors (MARK_CODE)
-WATER_GRID_CODE = GRID_LINE_CODE + MARK_CODE + '''
+WATER_GRID_CODE = GRID_LINE_CODE + MARK_CODE.replace('MARK_HOLE_BITS', '(uint)round(markPixel.a * 255.0)') + '''
 float lineOpacity = gridLine * GridOpacity * (1.0 - WaterGridDarkness);
 float opacity = lerp(lineOpacity, 1.0, markLine);
 OutColor = markColor * markLine / max(opacity, 1e-4);
@@ -1138,7 +1145,7 @@ NOISE = '/Game/HexMap/Textures/T_HexNoise'
 DEFAULT_CUBE = '/Engine/EngineResources/GrayTextureCube'
 # AHexPlanet gives the materials its CellMarks, read with Load, so the default only has to be a 2D texture
 DEFAULT_MARKS = '/Engine/EngineResources/Black'
-MARK_PARAMETERS = ['NeighborOutlineColor', 'MarkWidth', 'MarkMinPixels', 'MarkGlow']
+MARK_PARAMETERS = ['NeighborOutlineColor', 'WaterHideOutlineColor', 'MarkWidth', 'MarkMinPixels', 'MarkGlow']
 WATER_MATERIAL = FOLDER + '/M_HexPlanetWater'
 WIRE_MATERIAL = FOLDER + '/M_HexPlanetWireframe'
 WATER_GRID_MATERIAL = FOLDER + '/M_HexPlanetWaterGrid'

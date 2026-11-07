@@ -291,7 +291,7 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 			: bSaved ? FString() : FString::Printf(TEXT("View not saved (%s)"), *SaveKeys));
 	}
 
-	if (!Planet)
+	if (!Planet || !Planet->IsBuilt())
 	{
 		return;
 	}

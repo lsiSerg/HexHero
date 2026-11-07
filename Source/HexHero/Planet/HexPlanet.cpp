@@ -5,6 +5,11 @@
 #include "Camera/PlayerCameraManager.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Engine/DirectionalLight.h"
+#include "Engine/GameViewportClient.h"
+#include "Styling/CoreStyle.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/STextBlock.h"
 #include "Engine/Texture2D.h"
 #include "Engine/TextureCube.h"
 #include "EngineUtils.h"
@@ -237,7 +242,8 @@ namespace
 		AHexPlanet* Planet = nullptr;
 		for (TActorIterator<AHexPlanet> It(World); It; ++It)
 		{
-			Planet = *It;
+			// the commands of -ExecCmds may come before it is built
+			Planet = It->IsBuilt() ? *It : nullptr;
 			break;
 		}
 
@@ -298,7 +304,8 @@ namespace
 		AHexPlanet* Planet = nullptr;
 		for (TActorIterator<AHexPlanet> It(World); It; ++It)
 		{
-			Planet = *It;
+			// the commands of -ExecCmds may come before it is built
+			Planet = It->IsBuilt() ? *It : nullptr;
 			break;
 		}
 
@@ -352,7 +359,8 @@ namespace
 		AHexPlanet* Planet = nullptr;
 		for (TActorIterator<AHexPlanet> It(World); It; ++It)
 		{
-			Planet = *It;
+			// the commands of -ExecCmds may come before it is built
+			Planet = It->IsBuilt() ? *It : nullptr;
 			break;
 		}
 
@@ -377,7 +385,8 @@ namespace
 		AHexPlanet* Planet = nullptr;
 		for (TActorIterator<AHexPlanet> It(World); It; ++It)
 		{
-			Planet = *It;
+			// the commands of -ExecCmds may come before it is built
+			Planet = It->IsBuilt() ? *It : nullptr;
 			break;
 		}
 
@@ -556,6 +565,61 @@ void AHexPlanet::BeginPlay()
 		UE_LOG(LogHexHero, Error, TEXT("Planet: %s"), *ManifestError);
 	}
 
+	ShowLoadingScreen();
+}
+
+void AHexPlanet::ShowLoadingScreen()
+{
+	UGameViewportClient* Viewport = GetWorld()->GetGameViewport();
+	if (!Viewport)
+	{
+		return;
+	}
+
+	const FString Name = !Manifest.Name.IsEmpty() ? Manifest.Name : !PlanetFolder.IsEmpty() ? PlanetFolder : FString(TEXT("New planet"));
+	LoadingScreen = SNew(SBorder)
+		.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+		.BorderBackgroundColor(Settings->LoadingBackgroundColor)
+		.HAlign(HAlign_Center)
+		.VAlign(VAlign_Center)
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text(FText::Format(NSLOCTEXT("HexPlanet", "LoadingPlanet", "Loading {0}..."), FText::FromString(Name)))
+				.Font(FCoreStyle::GetDefaultFontStyle("Regular", 28))
+				.ColorAndOpacity(Settings->LoadingTextColor)
+			]
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.HAlign(HAlign_Center)
+			.Padding(0.0f, 12.0f, 0.0f, 0.0f)
+			[
+				SNew(STextBlock)
+				.Text(FText::Format(NSLOCTEXT("HexPlanet", "LoadingCells", "{0} cells: surface, forests, sea and sky"), FText::AsNumber(FHexSphereGrid::CountCells(Manifest.Frequency))))
+				.Font(FCoreStyle::GetDefaultFontStyle("Regular", 14))
+				.ColorAndOpacity(Settings->LoadingTextColor * FLinearColor(1.0f, 1.0f, 1.0f, 0.6f))
+			]
+		];
+	// over the map menu and every other widget of the game
+	Viewport->AddViewportWidgetContent(LoadingScreen.ToSharedRef(), 1000);
+}
+
+void AHexPlanet::HideLoadingScreen()
+{
+	UGameViewportClient* Viewport = GetWorld() ? GetWorld()->GetGameViewport() : nullptr;
+	if (Viewport && LoadingScreen.IsValid())
+	{
+		Viewport->RemoveViewportWidgetContent(LoadingScreen.ToSharedRef());
+	}
+	LoadingScreen.Reset();
+}
+
+void AHexPlanet::BuildPlanet()
+{
 	const double StartTime = FPlatformTime::Seconds();
 	Grid = FHexSphereGrid::Build(Manifest.Frequency, Settings->ChunkSteps);
 	const double GridTime = FPlatformTime::Seconds();
@@ -648,6 +712,10 @@ void AHexPlanet::BeginPlay()
 	UE_LOG(LogHexHero, Log, TEXT("Planet %s: %d cells, radius %.0f, hex area from %.3f to %.3f of the mean (x%.3f), worst sides x%.3f, grid %.2f s, mesh %.2f s, sea field %.2f s"),
 		PlanetFolder.IsEmpty() ? TEXT("(not saved)") : *PlanetFolder, Grid.GetCells().Num(), Radius, SmallestArea / MeanCellArea, LargestArea / MeanCellArea, LargestArea / SmallestArea, WorstSides,
 		GridTime - StartTime, MeshTime - GridTime, FPlatformTime::Seconds() - MeshTime);
+	UE_LOG(LogHexHero, Log, TEXT("Planet built in %.2f s behind the loading screen"), FPlatformTime::Seconds() - StartTime);
+
+	bBuilt = true;
+	HideLoadingScreen();
 }
 
 void AHexPlanet::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -659,6 +727,7 @@ void AHexPlanet::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	}
 	Rebuild.Reset();
 	bLevelsPending = false;
+	HideLoadingScreen();
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -929,6 +998,16 @@ void AHexPlanet::FinishRebuild()
 void AHexPlanet::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	// the build waits until the loading screen has been drawn, as it holds the game thread for a second or two
+	if (!bBuilt)
+	{
+		if (++FramesBeforeBuild >= 3)
+		{
+			BuildPlanet();
+		}
+		return;
+	}
 
 	// a rebuild of changed levels that has ended is shown, and the changes made while it ran start the next
 	if (RebuildTask.IsValid() && RebuildTask.IsCompleted())
@@ -1304,7 +1383,9 @@ void AHexPlanet::UpdateWaterHide(const FHexDebugViewSettings& View)
 		Count = 1 + Grid.GetCells()[Cell].Neighbors.Num();
 	}
 
-	if (!WaterMaterial || (Count == AppliedWaterHideCount && (Count == 0 || Cell == AppliedWaterHideCell)))
+	const bool bAll = View.Water == EHexWaterView::Hidden;
+
+	if (!WaterMaterial || (bAll == bAllWaterHidden && Count == AppliedWaterHideCount && (Count == 0 || Cell == AppliedWaterHideCell)))
 	{
 		return;
 	}
@@ -1312,6 +1393,18 @@ void AHexPlanet::UpdateWaterHide(const FHexDebugViewSettings& View)
 	AppliedWaterHideCell = Cell;
 	AppliedWaterHideCount = Count;
 	SetHideCells(WaterMaterial, Cell, Count);
+
+	// the surface draws the grid lines and the outline on the seabed of these cells, as their strip of the water grid is hidden too
+	TArray<int32, TInlineAllocator<7>> Hidden;
+	if (Count > 0)
+	{
+		Hidden.Add(Cell);
+		if (Count > 1)
+		{
+			Hidden.Append(Grid.GetCells()[Cell].Neighbors);
+		}
+	}
+	SetWaterHiddenCells(Hidden, bAll);
 
 	if (WaterGridMaterial)
 	{
@@ -2388,28 +2481,77 @@ void AHexPlanet::ApplySurface(HexPlanetSurface::FBuild& Build)
 
 int32 AHexPlanet::FindCellAlongRay(const FVector& Origin, const FVector& Direction) const
 {
-	const FVector RayDirection = Direction.GetSafeNormal();
-	double Distance = FHexSphereGrid::IntersectSphere(Origin, RayDirection, Radius + 3.0 * Settings->LevelHeight);
-
-	if (Distance < 0.0)
+	if (Radius <= 0.0 || !Settings)
 	{
 		return INDEX_NONE;
 	}
 
-	int32 Cell = Grid.FindCell(Origin + RayDirection * Distance);
+	const FVector RayDirection = Direction.GetSafeNormal();
+	const double Start = FHexSphereGrid::IntersectSphere(Origin, RayDirection, Radius + 3.0 * Settings->LevelHeight);
 
-	// the ray goes on to the top of the cell it reaches, which may lie lower and further on
-	for (int32 Pass = 0; Pass < 3 && Cell != INDEX_NONE; ++Pass)
+	if (Start < 0.0)
 	{
-		const double Top = FHexSphereGrid::IntersectSphere(Origin, RayDirection, GetCellTopRadius(Cell));
-
-		if (Top < 0.0)
-		{
-			break;
-		}
-		Cell = Grid.FindCell(Origin + RayDirection * Top, Cell);
+		return INDEX_NONE;
 	}
-	return Cell;
+
+	// the ray ends on the water, or where it leaves the sphere of the highest tops again when it passes over the sea
+	double End = FHexSphereGrid::IntersectSphere(Origin, RayDirection, Radius);
+	if (End < 0.0)
+	{
+		End = 2.0 * FVector::DotProduct(-Origin, RayDirection) - Start;
+	}
+
+	// the sea is seen at its water, whose grid lines and outlines are drawn there, and not at its bed, which a slanted ray would reach cells
+	// further on; land at the top of its level
+	const auto IsUnderTop = [this, &Origin, &RayDirection](double Distance, int32& InOutCell)
+	{
+		const FVector Point = Origin + RayDirection * Distance;
+		InOutCell = Grid.FindCell(Point, InOutCell);
+		// a little above, as the last step lies on the water, where rounding alone could leave it outside and lose the cell for a frame
+		return InOutCell != INDEX_NONE && Point.Size() <= (GetCellLevel(InOutCell) < 0 ? Radius : GetCellTopRadius(InOutCell)) + 0.01;
+	};
+
+	// steps of a quarter of a cell find the first cell whose top the ray goes under, so a high cell in front hides a low one behind it,
+	// and halving the last step finds where
+	const double Step = FMath::Max(Settings->HexRadius * 0.25, 1.0);
+	int32 Cell = INDEX_NONE;
+	double Previous = Start;
+
+	for (double Distance = Start; ; Distance = FMath::Min(Distance + Step, End))
+	{
+		int32 Hit = Cell;
+
+		if (IsUnderTop(Distance, Hit))
+		{
+			double Low = Previous;
+			double High = Distance;
+
+			for (int32 Halving = 0; Halving < 6 && High - Low > 1.0; ++Halving)
+			{
+				const double Middle = 0.5 * (Low + High);
+				int32 MiddleCell = Hit;
+
+				if (IsUnderTop(Middle, MiddleCell))
+				{
+					High = Middle;
+					Hit = MiddleCell;
+				}
+				else
+				{
+					Low = Middle;
+				}
+			}
+			return Hit;
+		}
+
+		Cell = Hit;
+		Previous = Distance;
+
+		if (Distance >= End)
+		{
+			return INDEX_NONE;
+		}
+	}
 }
 
 void AHexPlanet::CreateBoulderComponents(const UHexPlanetKitConfig* Config)
@@ -2759,8 +2901,9 @@ void AHexPlanet::SetCellMarks(const TMap<int32, FColor>& Marks)
 	{
 		if (!Marks.Contains(Cell))
 		{
-			MarkPixels[Cell] = FColor(0, 0, 0, 0);
-			bChanged = true;
+			FColor& Pixel = MarkPixels[Cell];
+			bChanged |= Pixel.R != 0 || Pixel.G != 0;
+			Pixel.R = Pixel.G = 0;
 		}
 	}
 
@@ -2769,13 +2912,89 @@ void AHexPlanet::SetCellMarks(const TMap<int32, FColor>& Marks)
 	{
 		if (MarkPixels.IsValidIndex(Mark.Key))
 		{
-			bChanged |= MarkPixels[Mark.Key] != Mark.Value;
-			MarkPixels[Mark.Key] = Mark.Value;
+			FColor& Pixel = MarkPixels[Mark.Key];
+			bChanged |= Pixel.R != Mark.Value.R || Pixel.G != Mark.Value.G;
+			Pixel.R = Mark.Value.R;
+			Pixel.G = Mark.Value.G;
 			MarkedCells.Add(Mark.Key);
 		}
 	}
 
-	if (!bChanged || !CellMarks)
+	if (bChanged)
+	{
+		UploadCellMarks();
+	}
+}
+
+void AHexPlanet::SetWaterHiddenCells(TConstArrayView<int32> Cells, bool bAll)
+{
+	if (MarkPixels.IsEmpty())
+	{
+		return;
+	}
+
+	if (bAllWaterHidden || bAll)
+	{
+		for (FColor& Pixel : MarkPixels)
+		{
+			Pixel.B = bAll ? 255 : 0;
+		}
+	}
+	else
+	{
+		for (const int32 Cell : WaterHiddenCells)
+		{
+			MarkPixels[Cell].B = 0;
+		}
+	}
+
+	for (const int32 Cell : WaterRimCells)
+	{
+		MarkPixels[Cell].A = 0;
+	}
+	WaterRimCells.Reset();
+
+	WaterHiddenCells.Reset();
+	if (!bAll)
+	{
+		for (const int32 Cell : Cells)
+		{
+			if (MarkPixels.IsValidIndex(Cell))
+			{
+				MarkPixels[Cell].B = 255;
+				WaterHiddenCells.Add(Cell);
+			}
+		}
+	}
+
+	// the rim of a hole of more than one cell, in alpha, as the outlines mark the sides of an edge in both cells, of which only the water grid
+	// outside the hole draws its half
+	const TArray<FHexSphereCell>& GridCells = Grid.GetCells();
+	if (WaterHiddenCells.Num() > 1)
+	{
+		for (const int32 Inside : WaterHiddenCells)
+		{
+			for (int32 Side = 0; Side < GridCells[Inside].Neighbors.Num(); ++Side)
+			{
+				const int32 Outside = GridCells[Inside].Neighbors[Side];
+				if (!WaterHiddenCells.Contains(Outside))
+				{
+					MarkPixels[Inside].A |= uint8(1 << Side);
+					MarkPixels[Outside].A |= uint8(1 << GridCells[Outside].Neighbors.Find(Inside));
+					WaterRimCells.AddUnique(Inside);
+					WaterRimCells.AddUnique(Outside);
+				}
+			}
+		}
+	}
+
+	bAllWaterHidden = bAll;
+	UploadCellMarks();
+}
+
+void AHexPlanet::UploadCellMarks()
+{
+	if (!CellMarks)
 	{
 		return;
 	}
