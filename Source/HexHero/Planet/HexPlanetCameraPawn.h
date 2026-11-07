@@ -42,7 +42,8 @@ struct FHexPlanetCameraPlacement
  *  around the point it looks at, and the focus key glides to the cell under the mouse. The mouse at the screen edge moves it unless hex.EdgeScroll is 0.
  *  The camera modes of hex.Camera are those of the flat map: the free camera stays turned, and the top-down one turns at most MaxCameraTurn of DA_HexCamera
  *  away from north and turns back to it when the turn input is released.
- *  The sun follows the camera unless the console variable hex.PlanetSun is 0, so the half that it sees is lit.
+ *  The sun follows the point the camera looks at, from a compass direction of that place, lazily so shadows stand still while the view stays
+ *  about where it is, unless the console variable hex.PlanetSun is 0.
  *  hex.CopyCamera and its input copy the commands that open the planet and put the camera back where it is, with hex.PlanetSetCamera.
  */
 UCLASS()
@@ -247,6 +248,25 @@ private:
 	/** Rolls the planet under the camera, so the point under it moves towards a direction */
 	void RotateTowards(const FVector& From, const FVector& To, double Alpha = 1.0);
 
-	/** Places the camera and the sun */
+	/** Places the camera */
 	void UpdateCameraPosition();
+
+	/** Returns the direction the sun should shine from for the view now: SunAzimuth and an elevation by the distance over the point under the camera */
+	FVector GetIdealSunFrom() const;
+
+	/** Moves the sun lazily towards GetIdealSunFrom: it stands still while it lags less than SunLagShare of the view, then moves over SunMoveTime */
+	void UpdateSun(float DeltaTime);
+
+	/** Direction the sun shines from now, zero until it is first placed, which puts it where it should stand at once */
+	FVector SunFrom = FVector::ZeroVector;
+
+	/** Direction the sun moves from and how far it is along the move, from 0 to 1; 1 while it stands still */
+	FVector SunMoveStart = FVector::ZeroVector;
+	float SunMoveAlpha = 1.0f;
+
+	/** How long the camera has stood still, in seconds */
+	float StillTime = 0.0f;
+
+	/** True once the sun was first placed */
+	bool bSunPlaced = false;
 };

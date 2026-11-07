@@ -70,7 +70,37 @@ public:
 	UPROPERTY(EditAnywhere, Category="Light")
 	float ExposureBias = -1.0f;
 
-	/** Direction of the sunlight in the frame of the camera: forward, right and up, where it comes from */
-	UPROPERTY(EditAnywhere, Category="Light")
-	FVector SunFromCamera = FVector(-0.3, 0.6, 1.0);
+	/** Direction the sun shines from over the point the camera looks at, in degrees from north towards the right of the screen of a camera
+	 *  facing north, so turning the camera turns no shadow; 120 is from behind and to the right of the usual view */
+	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=-360, ClampMax=360))
+	float SunAzimuth = 120.0f;
+
+	/** Height of the sun over the horizon of that point with the camera at its closest, in degrees, low so shadows are long */
+	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=1, ClampMax=90))
+	float SunCloseElevation = 40.0f;
+
+	/** Height of the sun with the camera at its farthest, in degrees, high so all of the half it sees is lit */
+	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=1, ClampMax=90))
+	float SunFarElevation = 60.0f;
+
+	/** How far the sun may lag behind where it should stand for the view before it moves, as the distance the point the camera looks at
+	 *  travelled over the distance of the camera, so it waits longer from far away; while it lags less, shadows stand still */
+	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=0))
+	float SunLagShare = 0.5f;
+
+	/** Most the sun may lag before it moves, in degrees, so from far away it does not leave part of the view in the dark */
+	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=0, ClampMax=90))
+	float SunLagMaxDegrees = 8.0f;
+
+	/** How long the camera must stand still before a sun that lags too far moves, in seconds, so it does not move while the camera does */
+	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=0))
+	float SunSettleTime = 0.3f;
+
+	/** Lag at which the sun moves even while the camera still moves, as a multiple of the lag allowed, so it never falls far behind */
+	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=1))
+	float SunMaxLagFactor = 3.0f;
+
+	/** How long the sun takes to move to where it should stand, in seconds */
+	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=0.01))
+	float SunMoveTime = 1.5f;
 };

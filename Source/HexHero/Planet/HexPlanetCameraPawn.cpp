@@ -28,7 +28,7 @@
 namespace
 {
 	TAutoConsoleVariable<bool> CVarHexPlanetSun(TEXT("hex.PlanetSun"), true,
-		TEXT("Moves the sun of the planet with the camera, so the half it sees is lit. 0 leaves it where it is."));
+		TEXT("Moves the sun of the planet lazily after the point the camera looks at, so the half it sees is lit. 0 leaves it where it is."));
 
 	void PlanetFocusCommand(const TArray<FString>& Args, UWorld* World)
 	{
@@ -421,6 +421,7 @@ void AHexPlanetCameraPawn::Tick(float DeltaTime)
 	}
 
 	UpdateCameraPosition();
+	UpdateSun(DeltaTime);
 }
 
 void AHexPlanetCameraPawn::UpdateTopDownHeading(float DeltaTime)
@@ -464,7 +465,6 @@ void AHexPlanetCameraPawn::UpdateCameraPosition()
 {
 	const FVector Up = Orientation.GetAxisZ();
 	const FVector Forward = Orientation.GetAxisX();
-	const FVector Right = Orientation.GetAxisY();
 
 	const double Pitch = FMath::DegreesToRadians(GetPitchAtDistance(CurrentDistance));
 	const FVector Target = Up * Planet->GetRadius();
@@ -473,11 +473,79 @@ void AHexPlanetCameraPawn::UpdateCameraPosition()
 	// looking straight down, the forward direction of the screen stays the forward direction of the orientation
 	const FVector ScreenUp = (Up * FMath::Cos(Pitch) + Forward * FMath::Sin(Pitch)).GetSafeNormal();
 	SetActorLocationAndRotation(Location, FRotationMatrix::MakeFromXZ(Target - Location, ScreenUp).Rotator());
+}
 
-	if (Sun && CVarHexPlanetSun.GetValueOnGameThread())
+FVector AHexPlanetCameraPawn::GetIdealSunFrom() const
+{
+	const UHexPlanetCameraConfig* Config = Settings();
+	const FVector Up = Orientation.GetAxisZ();
+	const FVector North = GetNorthAt(Up);
+	// the right of the screen of a camera facing north, as the orientation has it
+	const FVector Right = FVector::CrossProduct(Up, North);
+
+	// the elevation changes with the zoom as the pitch does
+	const double MaxDistance = FMath::Max(GetMaxDistance(), Config->MinDistance * 1.01);
+	const double Alpha = FMath::Clamp(FMath::Loge(FMath::Max(CurrentDistance, 1.0) / Config->MinDistance) / FMath::Loge(MaxDistance / Config->MinDistance), 0.0, 1.0);
+	const double Elevation = FMath::DegreesToRadians(FMath::Lerp(Config->SunCloseElevation, Config->SunFarElevation, Alpha));
+	const double Azimuth = FMath::DegreesToRadians(Config->SunAzimuth);
+
+	const FVector Horizontal = North * FMath::Cos(Azimuth) + Right * FMath::Sin(Azimuth);
+	return (Horizontal * FMath::Cos(Elevation) + Up * FMath::Sin(Elevation)).GetSafeNormal();
+}
+
+void AHexPlanetCameraPawn::UpdateSun(float DeltaTime)
+{
+	if (!Sun || !Planet || !CVarHexPlanetSun.GetValueOnGameThread())
 	{
-		const FVector SunFrom = (Forward * Settings()->SunFromCamera.X + Right * Settings()->SunFromCamera.Y + Up * Settings()->SunFromCamera.Z).GetSafeNormal();
-		Sun->SetActorRotation(FRotationMatrix::MakeFromX(-SunFrom).Rotator());
+		// a fixed sun moves on from where it stands once it follows again
+		SunFrom = FVector::ZeroVector;
+		return;
+	}
+
+	const UHexPlanetCameraConfig* Config = Settings();
+	const FVector Ideal = GetIdealSunFrom();
+
+	if (SunFrom.IsZero())
+	{
+		// placed at once the first time, and when it follows again it moves on from where the light stands, so L does not make it jump
+		SunFrom = SunMoveStart = bSunPlaced ? FVector(-Sun->GetActorForwardVector()) : Ideal;
+		SunMoveAlpha = bSunPlaced ? 0.0f : 1.0f;
+		bSunPlaced = true;
+	}
+
+	const bool bMoving = bDragging || bFocusing || !AngularVelocity.IsZero() || FMath::Abs(CurrentDistance - TargetDistance) > TargetDistance * 0.01;
+	StillTime = bMoving ? 0.0f : StillTime + DeltaTime;
+
+	if (SunMoveAlpha >= 1.0f)
+	{
+		// the lag allowed is a share of what the camera sees, so it waits for a move of about the same part of the screen at any distance
+		const double Allowed = FMath::Min(Config->SunLagShare * CurrentDistance / Planet->GetRadius(), FMath::DegreesToRadians(double(Config->SunLagMaxDegrees)));
+		const double Lag = FMath::Acos(FMath::Clamp(FVector::DotProduct(SunFrom, Ideal), -1.0, 1.0));
+
+		if ((Lag > Allowed && StillTime >= Config->SunSettleTime) || Lag > Allowed * Config->SunMaxLagFactor)
+		{
+			SunMoveStart = SunFrom;
+			SunMoveAlpha = 0.0f;
+			UE_LOG(LogHexHero, Verbose, TEXT("Sun moves by %.1f degrees; it will shine from forward %.2f, right %.2f, up %.2f of the camera, heading %.1f"),
+				FMath::RadiansToDegrees(Lag), FVector::DotProduct(Ideal, Orientation.GetAxisX()), FVector::DotProduct(Ideal, Orientation.GetAxisY()),
+				FVector::DotProduct(Ideal, Orientation.GetAxisZ()), FHexPlanetCameraPlacement::FromOrientation(Orientation, CurrentDistance).Heading);
+		}
+	}
+
+	if (SunMoveAlpha < 1.0f)
+	{
+		// eases in and out towards where it should stand now, which may still change while it moves
+		SunMoveAlpha = FMath::Min(SunMoveAlpha + DeltaTime / Config->SunMoveTime, 1.0f);
+		const float Eased = FMath::SmoothStep(0.0f, 1.0f, SunMoveAlpha);
+		SunFrom = FQuat::Slerp(FQuat::Identity, FQuat::FindBetweenNormals(SunMoveStart, Ideal), Eased).RotateVector(SunMoveStart).GetSafeNormal();
+	}
+
+	const FRotator Rotation = FRotationMatrix::MakeFromX(-SunFrom).Rotator();
+
+	// a light that does not move keeps the cached shadows
+	if (!Sun->GetActorRotation().Equals(Rotation, 1.0e-4))
+	{
+		Sun->SetActorRotation(Rotation);
 	}
 }
 
