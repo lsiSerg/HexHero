@@ -62,6 +62,11 @@ public:
 	UPROPERTY(EditAnywhere, Category="Camera", meta=(ClampMin=0.1))
 	float FocusInterpSpeed = 5.0f;
 
+	/** How long a jump of the camera to another place (hex.PlanetSetCamera) waits at most, in seconds, while the planet builds the pieces of
+	 *  the chunks around that place, so it lands on a whole surface rather than coarse meshes with gaps between them */
+	UPROPERTY(EditAnywhere, Category="Camera", meta=(ClampMin=0))
+	float JumpWaitMax = 2.0f;
+
 	/** Width of the zone at the screen edge where the mouse moves the camera, in pixels */
 	UPROPERTY(EditAnywhere, Category="Camera", meta=(ClampMin=1))
 	float EdgeScrollMargin = 80.0f;

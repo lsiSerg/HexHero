@@ -26,7 +26,7 @@ public class HexHero : ModuleRules
 			"Niagara"
 		});
 
-		PrivateDependencyModuleNames.AddRange(new string[] { "ImageCore" });
+		PrivateDependencyModuleNames.AddRange(new string[] { "ImageCore", "RenderCore", "RHI" });
 
 		PublicIncludePaths.AddRange(new string[] {
 			"HexHero",

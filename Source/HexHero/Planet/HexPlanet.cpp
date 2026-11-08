@@ -39,6 +39,13 @@
 #include "HAL/IConsoleManager.h"
 #include "ProceduralMeshComponent.h"
 #include "Misc/ScopeExit.h"
+#include "Containers/Ticker.h"
+#include "DynamicRHI.h"
+#include "HAL/PlatformMemory.h"
+#include "RenderTimer.h"
+#include "Algo/BinarySearch.h"
+#include "Async/ParallelFor.h"
+#include "HexPlanetMeshComponent.h"
 
 namespace
 {
@@ -50,6 +57,37 @@ namespace
 
 	TAutoConsoleVariable<bool> CVarHexPlanetObjects(TEXT("hex.PlanetObjects"), true,
 		TEXT("Draws the forests, bushes, stones and decor of the planet (1) or hides them (0), to see what they cost."));
+
+	TAutoConsoleVariable<bool> CVarHexPlanetStreamPieces(TEXT("hex.PlanetStreamPieces"), true,
+		TEXT("Keeps the pieces of only the chunks of the planet near the camera on the GPU (1), building them again as it comes near, or of every chunk (0), to compare."));
+
+	/** Prepares a section of a build for UHexPlanetMeshComponent, named as the component of its chunk, so the ray tracing geometry shows whose it is */
+	FHexPlanetMeshSectionRef PrepareChunkSection(const HexPlanetSurface::FSection& Section, const TCHAR* Kind, int32 Chunk)
+	{
+		FHexPlanetMeshSource Source;
+		Source.Positions = Section.Positions;
+		Source.Normals = Section.Normals;
+		Source.UVs[0] = Section.GridUVs;
+		Source.UVs[1] = Section.MeshUVs;
+		Source.UVs[2] = Section.CellUVs;
+		Source.UVs[3] = Section.LocalUVs;
+		Source.Triangles = Section.Triangles;
+		return UHexPlanetMeshComponent::PrepareSection(Source, FName(*FString::Printf(TEXT("%s%d"), Kind, Chunk)));
+	}
+
+	/** Returns the bounds of the two sections of pieces of a chunk of a build */
+	FBoxSphereBounds GetPieceBounds(const HexPlanetSurface::FBuild& Build, int32 Slot)
+	{
+		FBox3f Box(ForceInit);
+		for (int32 Part = 0; Part < 2; ++Part)
+		{
+			for (const FVector3f& Position : Build.Sections[Slot * 2 + Part].Positions)
+			{
+				Box += Position;
+			}
+		}
+		return Box.IsValid ? FBoxSphereBounds(FBox(Box)) : FBoxSphereBounds(ForceInit);
+	}
 
 	const TCHAR* LevelNames[] = {TEXT("deep sea"), TEXT("shallows"), TEXT("plains"), TEXT("hills"), TEXT("mountains")};
 
@@ -475,6 +513,160 @@ namespace
 	FAutoConsoleCommandWithWorldAndArgs SetLevelConsoleCommand(TEXT("hex.PlanetSetLevel"),
 		TEXT("hex.PlanetSetLevel <Cell> <Level> [Rings] [ToCell]: sets the level of a cell of the planet, -2 deep sea to 2 mountains, and of the cells up to Rings around it, or of a line of cells to ToCell and Rings around it"),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&SetLevelCommand));
+
+	/** A measurement of hex.PlanetMemory: it waits until the planet is built and Delay seconds more, times the frames of MemoryProbeSeconds,
+	 *  logs them with the memory, and quits QuitAfter seconds later if asked, so a script can read the counters of the process meanwhile */
+	struct FMemoryProbe
+	{
+		TWeakObjectPtr<UWorld> World;
+		double Delay = 0.0;
+		bool bQuit = false;
+		double ReadyTime = -1.0;
+		double TimingStart = -1.0;
+		double QuitTime = -1.0;
+		int32 Frames = 0;
+		double GpuMs = 0.0;
+		double RenderMs = 0.0;
+		double GameMs = 0.0;
+		double WorstGpuMs = 0.0;
+	};
+	constexpr double MemoryProbeSeconds = 5.0;
+	constexpr double MemoryProbeQuitAfter = 15.0;
+	TOptional<FMemoryProbe> MemoryProbe;
+
+	bool TickMemoryProbe(float)
+	{
+		if (!MemoryProbe.IsSet())
+		{
+			return false;
+		}
+		FMemoryProbe& Probe = MemoryProbe.GetValue();
+		UWorld* World = Probe.World.Get();
+		if (!World)
+		{
+			MemoryProbe.Reset();
+			return false;
+		}
+
+		const double Now = FPlatformTime::Seconds();
+		if (Probe.QuitTime >= 0.0)
+		{
+			if (Now < Probe.QuitTime)
+			{
+				return true;
+			}
+			MemoryProbe.Reset();
+			GEngine->Exec(World, TEXT("quit"));
+			return false;
+		}
+
+		AHexPlanet* Planet = nullptr;
+		for (TActorIterator<AHexPlanet> It(World); It; ++It)
+		{
+			Planet = It->IsBuilt() ? *It : nullptr;
+			break;
+		}
+		if (!Planet)
+		{
+			return true;
+		}
+		if (Probe.ReadyTime < 0.0)
+		{
+			Probe.ReadyTime = Now;
+		}
+		if (Now - Probe.ReadyTime < Probe.Delay)
+		{
+			return true;
+		}
+		if (Probe.TimingStart < 0.0)
+		{
+			Probe.TimingStart = Now;
+			return true;
+		}
+
+		// the times of the frame before, as stat unit shows them
+		const double GpuMs = FPlatformTime::ToMilliseconds(RHIGetGPUFrameCycles(0));
+		Probe.GpuMs += GpuMs;
+		Probe.WorstGpuMs = FMath::Max(Probe.WorstGpuMs, GpuMs);
+		Probe.RenderMs += FPlatformTime::ToMilliseconds(GRenderThreadTime);
+		Probe.GameMs += FPlatformTime::ToMilliseconds(GGameThreadTime);
+		++Probe.Frames;
+		if (Now - Probe.TimingStart < MemoryProbeSeconds)
+		{
+			return true;
+		}
+
+		const double Frames = FMath::Max(Probe.Frames, 1);
+		Planet->LogMemory(FString::Printf(TEXT("%d frames over %.0f s: GPU %.2f ms (worst %.2f), render thread %.2f ms, game thread %.2f ms, %.1f fps"),
+			Probe.Frames, Now - Probe.TimingStart, Probe.GpuMs / Frames, Probe.WorstGpuMs, Probe.RenderMs / Frames, Probe.GameMs / Frames,
+			Probe.Frames / FMath::Max(Now - Probe.TimingStart, 0.001)));
+		if (Probe.bQuit)
+		{
+			UE_LOG(LogHexHero, Log, TEXT("Planet memory: quitting in %.0f s"), MemoryProbeQuitAfter);
+			Probe.QuitTime = Now + MemoryProbeQuitAfter;
+			return true;
+		}
+		MemoryProbe.Reset();
+		return false;
+	}
+
+	/** Measures the memory of the surface and the times of frames, now or after a delay once the planet is built, and quits after it if asked */
+	void MemoryCommand(const TArray<FString>& Args, UWorld* World)
+	{
+		double Delay = 0.0;
+		if ((!Args.IsEmpty() && !LexTryParseString(Delay, *Args[0])) || !World)
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("Usage: hex.PlanetMemory [Delay] [quit]: logs the memory of the planet Delay seconds after it is built, and quits a little later with quit"));
+			return;
+		}
+		const bool bStart = !MemoryProbe.IsSet();
+		MemoryProbe.Emplace();
+		MemoryProbe->World = World;
+		MemoryProbe->Delay = FMath::Max(Delay, 0.0);
+		MemoryProbe->bQuit = Args.Num() >= 2 && Args[1].Equals(TEXT("quit"), ESearchCase::IgnoreCase);
+		if (bStart)
+		{
+			FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateStatic(&TickMemoryProbe), 0.0f);
+		}
+	}
+
+	/** Runs a console command after a delay, for scripted tests of what happens while the game runs, such as a jump of the camera */
+	void LaterCommand(const TArray<FString>& Args, UWorld* World)
+	{
+		double Delay = 0.0;
+		if (Args.Num() < 2 || !LexTryParseString(Delay, *Args[0]) || !World)
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("Usage: hex.Later <Seconds> <Command>: runs a console command after a delay"));
+			return;
+		}
+		const FString Command = FString::Join(TConstArrayView<FString>(Args).RightChop(1), TEXT(" "));
+		const TWeakObjectPtr<UWorld> WeakWorld(World);
+		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([WeakWorld, Command](float)
+		{
+			if (UWorld* Target = WeakWorld.Get())
+			{
+				// through the player as the console runs it, so commands of the viewport such as HighResShot work too
+				UE_LOG(LogHexHero, Log, TEXT("hex.Later: %s"), *Command);
+				if (APlayerController* Player = Target->GetFirstPlayerController())
+				{
+					Player->ConsoleCommand(Command);
+				}
+				else
+				{
+					GEngine->Exec(Target, *Command);
+				}
+			}
+			return false;
+		}), float(FMath::Max(Delay, 0.0)));
+	}
+
+	FAutoConsoleCommandWithWorldAndArgs LaterConsoleCommand(TEXT("hex.Later"),
+		TEXT("hex.Later <Seconds> <Command>: runs a console command after a delay, for scripted tests while the game runs"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&LaterCommand));
+
+	FAutoConsoleCommandWithWorldAndArgs MemoryConsoleCommand(TEXT("hex.PlanetMemory"),
+		TEXT("hex.PlanetMemory [Delay] [quit]: logs the memory of the surface of the planet, its triangles, its copies on the CPU and the GPU and its ray tracing geometry, with the times of five seconds of frames, Delay seconds after the planet is built; with quit it quits 15 s later"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&MemoryCommand));
 }
 
 /** What a rebuild of changed levels reads, all of it copied when it starts, and what it makes */
@@ -508,6 +700,23 @@ struct AHexPlanet::FLevelRebuild
 	double SeaFieldMs = 0.0;
 	double WaterGridMs = 0.0;
 	double StartTime = 0.0;
+};
+
+/** The pieces of chunks near the camera that a stream builds in the background, from copies of the state of the surface shown */
+struct AHexPlanet::FChunkStream
+{
+	/** The chunks, ascending, and how many times a build had shown each when the stream started */
+	TArray<int32> Chunks;
+	TArray<uint32> Generations;
+
+	/** Two sections a chunk, in the order of Chunks, ready for the GPU */
+	TArray<FHexPlanetMeshSectionRef> Pieces;
+
+	/** The sections themselves, kept only while the wireframe draws the whole surface, for its copies */
+	TArray<HexPlanetSurface::FSection> WireSections;
+
+	double StartTime = 0.0;
+	double BuildMs = 0.0;
 };
 
 AHexPlanet::AHexPlanet()
@@ -756,7 +965,7 @@ void AHexPlanet::BuildPlanet()
 	// state of its chunks alone
 	for (int32 Chunk = 0; Chunk < Grid.GetNumChunks(); ++Chunk)
 	{
-		UProceduralMeshComponent* ChunkMesh = NewObject<UProceduralMeshComponent>(this, *FString::Printf(TEXT("SurfaceChunk%d"), Chunk));
+		UHexPlanetMeshComponent* ChunkMesh = NewObject<UHexPlanetMeshComponent>(this, *FString::Printf(TEXT("SurfaceChunk%d"), Chunk));
 		ChunkMesh->SetupAttachment(Surface);
 		ChunkMesh->RegisterComponent();
 		SurfaceChunks.Add(ChunkMesh);
@@ -764,13 +973,16 @@ void AHexPlanet::BuildPlanet()
 		// far away the chunk draws its coarse mesh, which UpdateChunkLod shows and hides
 		if (Settings->CoarseDistance > 0.0f)
 		{
-			UProceduralMeshComponent* CoarseMesh = NewObject<UProceduralMeshComponent>(this, *FString::Printf(TEXT("CoarseChunk%d"), Chunk));
+			UHexPlanetMeshComponent* CoarseMesh = NewObject<UHexPlanetMeshComponent>(this, *FString::Printf(TEXT("CoarseChunk%d"), Chunk));
 			CoarseMesh->SetupAttachment(Surface);
 			CoarseMesh->SetVisibility(false);
 			CoarseMesh->RegisterComponent();
 			CoarseChunks.Add(CoarseMesh);
 		}
 	}
+	ChunkPieces.Init(0, Grid.GetNumChunks());
+	ChunkBounds.Init(FBoxSphereBounds(ForceInit), Grid.GetNumChunks());
+	ChunkGenerations.Init(0, Grid.GetNumChunks());
 
 	BuildSurface();
 	const double MeshTime = FPlatformTime::Seconds();
@@ -818,7 +1030,15 @@ void AHexPlanet::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		RebuildTask.Wait();
 		RebuildTask = UE::Tasks::FTask();
 	}
+	if (StreamTask.IsValid())
+	{
+		StreamTask.Wait();
+		StreamTask = UE::Tasks::FTask();
+	}
 	Rebuild.Reset();
+	Stream.Reset();
+	StartupSurface.Reset();
+	TriangleSource = nullptr;
 	bLevelsPending = false;
 	HideLoadingScreen();
 	Super::EndPlay(EndPlayReason);
@@ -1065,6 +1285,16 @@ void AHexPlanet::FinishRebuild()
 
 	// the objects placed again with the surface keep out of the rivers it shows; the line also changes with the coast at a mouth
 	Rivers->SetShownNet(Rebuild->Rivers, Rebuild->RiverCurve);
+
+	// what the surface is built from goes first, as whatever needs the ground of a cell that no build holds builds it again from that
+	// (GetCellTriangles), such as the bridges below
+	// the floes move with the ice, and with the coast, as a cell of frozen sea that became land keeps its frozen mark for the sea field
+	const bool bFloesChanged = !Rebuild->SeaPixels.IsEmpty() || Rebuild->Rivers != Rebuild->OldRivers;
+	ShownLevels = MoveTemp(Rebuild->Levels);
+	ShownMassifSteps = MoveTemp(Rebuild->MassifSteps);
+	ShownFrozen = MoveTemp(Rebuild->Frozen);
+	ShownReliefOverrides = MoveTemp(Rebuild->Overrides);
+
 	if (!Rebuild->Chunks.IsEmpty())
 	{
 		ApplySurface(Rebuild->Surface);
@@ -1081,12 +1311,6 @@ void AHexPlanet::FinishRebuild()
 			Rebuild->WaterGrid.CellUVs, Rebuild->WaterGrid.LocalUVs, {}, {}, false);
 	}
 
-	// the floes move with the ice, and with the coast, as a cell of frozen sea that became land keeps its frozen mark for the sea field
-	const bool bFloesChanged = !Rebuild->SeaPixels.IsEmpty() || Rebuild->Rivers != Rebuild->OldRivers;
-	ShownLevels = MoveTemp(Rebuild->Levels);
-	ShownMassifSteps = MoveTemp(Rebuild->MassifSteps);
-	ShownFrozen = MoveTemp(Rebuild->Frozen);
-	ShownReliefOverrides = MoveTemp(Rebuild->Overrides);
 	if (bFloesChanged)
 	{
 		UpdateFloes();
@@ -1126,6 +1350,13 @@ void AHexPlanet::Tick(float DeltaTime)
 		OnLevelsRebuilt.Broadcast();
 	}
 
+	// and the pieces of chunks that came near the camera, after it, so a rebuild that made a chunk anew drops what the stream built of it
+	if (StreamTask.IsValid() && StreamTask.IsCompleted())
+	{
+		StreamTask = UE::Tasks::FTask();
+		FinishStream();
+	}
+
 	if (Objects->IsVisible() != CVarHexPlanetObjects.GetValueOnGameThread())
 	{
 		Objects->SetVisibility(CVarHexPlanetObjects.GetValueOnGameThread(), true);
@@ -1155,7 +1386,10 @@ void AHexPlanet::Tick(float DeltaTime)
 		Clouds->SetVisibility(CameraHeight > Switch - Fade);
 		SkyClouds->SetVisibility(CameraHeight < Switch + Fade);
 
-		UpdateChunkLod(CameraManager->GetCameraLocation());
+		// the view target stands where the camera is in this frame, the camera manager where it was in the frame before, which after a jump
+		// would draw a frame of the new place with the chunks of the old one
+		const AActor* ViewTarget = PlayerController->GetViewTarget();
+		UpdateChunkLod(ViewTarget ? ViewTarget->GetActorLocation() : CameraManager->GetCameraLocation());
 	}
 
 	if (Sun)
@@ -1220,33 +1454,130 @@ void AHexPlanet::UpdateChunkLod(const FVector& CameraLocation)
 	}
 
 	ChunkLodStates.SetNum(SurfaceChunks.Num());
+	LodCamera = CameraLocation;
+	bHasLodCamera = true;
 
 	// the console can move the band to try other distances while the game runs
-	const float OverrideDistance = CVarHexPlanetCoarseDistance.GetValueOnGameThread();
-	const float OverrideBand = CVarHexPlanetCoarseBand.GetValueOnGameThread();
-	const float CoarseDistance = OverrideDistance > 0.0f ? OverrideDistance : Settings->CoarseDistance;
-	const float CoarseBand = OverrideBand > 0.0f ? OverrideBand : Settings->CoarseBand;
-	const double Near = CoarseDistance - CoarseBand;
-	const double Far = CoarseDistance + CoarseBand;
+	double Near, Far;
+	GetLodBand(Near, Far);
 
 	for (UMaterialInstanceDynamic* Instance : { LodNearMaterial.Get(), LodFarMaterial.Get() })
 	{
 		if (Instance)
 		{
 			Instance->SetVectorParameterValue(TEXT("LodCamera"), FLinearColor(CameraLocation));
-			Instance->SetScalarParameterValue(TEXT("CoarseDistance"), CoarseDistance);
-			Instance->SetScalarParameterValue(TEXT("CoarseBand"), CoarseBand);
+			Instance->SetScalarParameterValue(TEXT("CoarseDistance"), float((Near + Far) * 0.5));
+			Instance->SetScalarParameterValue(TEXT("CoarseBand"), float((Far - Near) * 0.5));
 		}
+	}
+
+	// the pieces are built ahead of the camera within PieceStreamAhead past the band and freed past PieceStreamKeep further, as from there
+	// on a chunk draws its coarse mesh alone; the distances run to the bounds of its pieces, which stay while it has none
+	const bool bStream = CVarHexPlanetStreamPieces.GetValueOnGameThread();
+	const double Ahead = Far + Settings->PieceStreamAhead;
+	const double Keep = Ahead + Settings->PieceStreamKeep;
+	TArray<double> Distances;
+	TArray<double> Reaches;
+	Distances.SetNum(SurfaceChunks.Num());
+	Reaches.SetNum(SurfaceChunks.Num());
+	TArray<TPair<double, int32>> Wanted;
+	int32 NumPrefetched = 0;
+
+	for (int32 Chunk = 0; Chunk < SurfaceChunks.Num(); ++Chunk)
+	{
+		const FBoxSphereBounds& Bounds = ChunkBounds[Chunk];
+		Reaches[Chunk] = FMath::Max(Bounds.SphereRadius, CoarseChunks[Chunk]->Bounds.SphereRadius);
+		Distances[Chunk] = FVector::Distance(CameraLocation, Bounds.Origin);
+		const double NearEdge = Distances[Chunk] - Reaches[Chunk];
+
+		// a jump of the camera waits for the chunks that draw their pieces where it goes, which come first, all at once, and keep them
+		const double PrefetchEdge = PrefetchCamera.IsSet() ? FVector::Distance(PrefetchCamera.GetValue(), Bounds.Origin) - Reaches[Chunk] : TNumericLimits<double>::Max();
+		const bool bPrefetched = PrefetchEdge < Far;
+		if (ChunkPieces[Chunk] == 0 && (!bStream || NearEdge < Ahead || bPrefetched))
+		{
+			Wanted.Emplace(bPrefetched ? PrefetchEdge - 1.0e9 : NearEdge, Chunk);
+			NumPrefetched += bPrefetched ? 1 : 0;
+		}
+		else if (ChunkPieces[Chunk] == 2 && bStream && NearEdge > Keep && PrefetchEdge > Keep && !StartupSurface)
+		{
+			DropChunkPieces(Chunk);
+		}
+	}
+
+	if (!Wanted.IsEmpty())
+	{
+		Wanted.Sort([](const TPair<double, int32>& A, const TPair<double, int32>& B) { return A.Key < B.Key; });
+		if (StartupSurface)
+		{
+			// in the first frames, while the camera finds its place, the build of the start still holds them, so they go to the GPU at once
+			TArray<FHexPlanetMeshSectionRef> Prepared;
+			Prepared.SetNum(Wanted.Num() * 2);
+			ParallelFor(Prepared.Num(), [&](int32 Index)
+			{
+				const int32 Chunk = Wanted[Index / 2].Value;
+				const int32 Slot = Algo::BinarySearch(StartupSurface->Chunks, Chunk);
+				if (Slot != INDEX_NONE)
+				{
+					Prepared[Index] = PrepareChunkSection(StartupSurface->Sections[Slot * 2 + Index % 2], TEXT("SurfaceChunk"), Chunk);
+				}
+			});
+			for (int32 Index = 0; Index < Wanted.Num(); ++Index)
+			{
+				SetChunkPieces(Wanted[Index].Value, MoveTemp(Prepared[Index * 2]), MoveTemp(Prepared[Index * 2 + 1]));
+			}
+		}
+		else if (!StreamTask.IsValid())
+		{
+			const int32 Count = NumPrefetched > 0 ? NumPrefetched : FMath::Max(Settings->PieceStreamChunks, 1);
+			TArray<int32> Chunks;
+			for (int32 Index = 0; Index < Wanted.Num() && Index < Count; ++Index)
+			{
+				Chunks.Add(Wanted[Index].Value);
+			}
+			StartStream(MoveTemp(Chunks));
+		}
+	}
+
+	// a chunk the camera came near without its pieces, after a jump that did not wait for them or a move faster than the stream, gets them
+	// at once, as its coarse mesh next to the pieces of its neighbors would leave gaps; what a stream builds of it meanwhile is dropped
+	if (!StartupSurface)
+	{
+		TArray<int32> Urgent;
+		for (int32 Chunk = 0; Chunk < SurfaceChunks.Num(); ++Chunk)
+		{
+			if (ChunkPieces[Chunk] != 2 && Distances[Chunk] - Reaches[Chunk] < Near)
+			{
+				Urgent.Add(Chunk);
+			}
+		}
+		if (!Urgent.IsEmpty())
+		{
+			BuildPiecesNow(MoveTemp(Urgent));
+		}
+	}
+	if (StartupSurface && --StartupFramesLeft <= 0)
+	{
+		if (TriangleSource == StartupSurface.Get())
+		{
+			TriangleSource = nullptr;
+		}
+		StartupSurface.Reset();
+
+		// the build of every chunk took about a gigabyte, which the allocator may keep for reuse, so it is asked to give back what it can, as
+		// the engine does after loading a map; mimalloc of the editor gives back only what the game thread freed, a packaged game more
+		FMemory::Trim(true);
+		UE_LOG(LogHexHero, Log, TEXT("Planet: freed the build of the start, %d chunks took their pieces from it"),
+			ChunkPieces.FilterByPredicate([](uint8 State) { return State == 2; }).Num());
 	}
 
 	for (int32 Chunk = 0; Chunk < SurfaceChunks.Num(); ++Chunk)
 	{
 		// the pieces where all of the chunk is nearer than the band, the coarse mesh where all of it is further, and both where it reaches into it,
-		// with the LOD materials, which keep the pixels of each by their own distance across the band
-		const FBoxSphereBounds& Bounds = SurfaceChunks[Chunk]->Bounds;
-		const double Reach = FMath::Max(Bounds.SphereRadius, CoarseChunks[Chunk]->Bounds.SphereRadius);
-		const double Distance = FVector::Distance(CameraLocation, Bounds.Origin);
-		const uint8 State = Distance + Reach < Near ? 0 : Distance - Reach > Far ? 2 : 1;
+		// with the LOD materials, which keep the pixels of each by their own distance across the band. A chunk whose pieces are not on the GPU
+		// yet draws its coarse mesh alone
+		const double Reach = Reaches[Chunk];
+		const double Distance = Distances[Chunk];
+		const uint8 State = ChunkPieces[Chunk] != 2 ? 2 : Distance + Reach < Near ? 0 : Distance - Reach > Far ? 2 : 1;
 
 		if (State == ChunkLodStates[Chunk] && SurfaceChunks[Chunk]->IsVisible() == (State != 2))
 		{
@@ -1268,6 +1599,239 @@ void AHexPlanet::UpdateChunkLod(const FVector& CameraLocation)
 		}
 		CoarseChunks[Chunk]->SetMaterial(0, GetChunkMaterial(Chunk, 2, bAppliedCut, AppliedView.Target));
 	}
+}
+
+void AHexPlanet::GetLodBand(double& OutNear, double& OutFar) const
+{
+	const float OverrideDistance = CVarHexPlanetCoarseDistance.GetValueOnGameThread();
+	const float OverrideBand = CVarHexPlanetCoarseBand.GetValueOnGameThread();
+	const float CoarseDistance = OverrideDistance > 0.0f ? OverrideDistance : Settings->CoarseDistance;
+	const float CoarseBand = OverrideBand > 0.0f ? OverrideBand : Settings->CoarseBand;
+	OutNear = CoarseDistance - CoarseBand;
+	OutFar = CoarseDistance + CoarseBand;
+}
+
+bool AHexPlanet::ArePiecesReadyAt(const FVector& CameraLocation) const
+{
+	// without coarse meshes every chunk keeps its pieces, and without a kit there are none to build; in the first frames the build of the
+	// start gives any chunk its pieces in the frame the camera comes, as UpdateChunkLod measures from where the camera is in that frame
+	if (CoarseChunks.IsEmpty() || CoarseChunks.Num() != SurfaceChunks.Num() || !SurfaceKit || ChunkBounds.Num() != SurfaceChunks.Num() || StartupSurface)
+	{
+		return true;
+	}
+	double Near, Far;
+	GetLodBand(Near, Far);
+	for (int32 Chunk = 0; Chunk < SurfaceChunks.Num(); ++Chunk)
+	{
+		const FBoxSphereBounds& Bounds = ChunkBounds[Chunk];
+		const double Reach = FMath::Max(Bounds.SphereRadius, CoarseChunks[Chunk]->Bounds.SphereRadius);
+		if (ChunkPieces[Chunk] != 2 && FVector::Distance(CameraLocation, Bounds.Origin) - Reach < Far)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+void AHexPlanet::BuildPiecesNow(TArray<int32> Chunks)
+{
+	if (Chunks.IsEmpty() || !SurfaceKit)
+	{
+		return;
+	}
+	const double Start = FPlatformTime::Seconds();
+	Chunks.Sort();
+	HexPlanetSurface::FBuildOptions Options;
+	Options.bPiecesOnly = true;
+	Options.CornerLow = ShownCornerLow;
+	Options.Relief = CellRelief;
+	const HexPlanetSurface::FBuild Built = HexPlanetSurface::Build(Grid, *SurfaceKit, SurfaceParams, ShownLevels, ShownMassifSteps, Chunks, MeanPeak,
+		&ShownReliefOverrides, Rivers->GetShownCurve().Get(), Options);
+	TArray<FHexPlanetMeshSectionRef> Prepared;
+	Prepared.SetNum(Built.Sections.Num());
+	ParallelFor(Prepared.Num(), [&](int32 Index)
+	{
+		Prepared[Index] = PrepareChunkSection(Built.Sections[Index], TEXT("SurfaceChunk"), Built.Chunks[Index / 2]);
+	});
+	for (int32 Slot = 0; Slot < Built.Chunks.Num(); ++Slot)
+	{
+		const int32 Chunk = Built.Chunks[Slot];
+		SetChunkPieces(Chunk, MoveTemp(Prepared[Slot * 2]), MoveTemp(Prepared[Slot * 2 + 1]));
+		SetWireSection(Chunk, 0, &Built.Sections[Slot * 2]);
+		SetWireSection(Chunk, 1, &Built.Sections[Slot * 2 + 1]);
+	}
+	UE_LOG(LogHexHero, Log, TEXT("Planet: built the pieces of %d chunks at once, as the camera came near them before they streamed in, in %.1f ms"),
+		Built.Chunks.Num(), (FPlatformTime::Seconds() - Start) * 1000.0);
+}
+
+bool AHexPlanet::WantsPieces(int32 Chunk) const
+{
+	// without coarse meshes or with the streaming off every chunk keeps its pieces, and so does every chunk until the camera is measured from
+	if (CoarseChunks.IsEmpty() || CoarseChunks.Num() != SurfaceChunks.Num() || !ChunkBounds.IsValidIndex(Chunk) || !bHasLodCamera
+		|| !CVarHexPlanetStreamPieces.GetValueOnGameThread())
+	{
+		return true;
+	}
+	double Near, Far;
+	GetLodBand(Near, Far);
+	const FBoxSphereBounds& Bounds = ChunkBounds[Chunk];
+	const double Reach = FMath::Max(Bounds.SphereRadius, CoarseChunks[Chunk]->Bounds.SphereRadius);
+	return FVector::Distance(LodCamera, Bounds.Origin) - Reach < Far + Settings->PieceStreamAhead;
+}
+
+void AHexPlanet::SetChunkPieces(int32 Chunk, FHexPlanetMeshSectionRef Land, FHexPlanetMeshSectionRef Mountains)
+{
+	UHexPlanetMeshComponent* ChunkMesh = SurfaceChunks[Chunk];
+	ChunkMesh->SetSection(0, MoveTemp(Land));
+	ChunkMesh->SetSection(1, MoveTemp(Mountains));
+	for (int32 Part = 0; Part < 2; ++Part)
+	{
+		ChunkMesh->SetMaterial(Part, GetChunkMaterial(Chunk, Part, bAppliedCut, AppliedView.Target));
+	}
+	ChunkPieces[Chunk] = 2;
+}
+
+void AHexPlanet::DropChunkPieces(int32 Chunk)
+{
+	SurfaceChunks[Chunk]->ClearAllSections();
+	ChunkPieces[Chunk] = 0;
+	SetWireSection(Chunk, 0, nullptr);
+	SetWireSection(Chunk, 1, nullptr);
+}
+
+void AHexPlanet::StartStream(TArray<int32> Chunks)
+{
+	if (Chunks.IsEmpty() || !SurfaceKit || StreamTask.IsValid())
+	{
+		return;
+	}
+	Chunks.Sort();
+	Stream = MakeShared<FChunkStream>();
+	Stream->Chunks = MoveTemp(Chunks);
+	Stream->StartTime = FPlatformTime::Seconds();
+	for (const int32 Chunk : Stream->Chunks)
+	{
+		Stream->Generations.Add(ChunkGenerations[Chunk]);
+		ChunkPieces[Chunk] = 1;
+	}
+
+	// from copies of what the surface shown was built from, so a rebuild of levels may run meanwhile; the heights of the corners and of the
+	// relief are those of that build, so they are not found again for the whole planet
+	HexPlanetSurface::FBuildOptions Options;
+	Options.bPiecesOnly = true;
+	StreamTask = UE::Tasks::Launch(UE_SOURCE_LOCATION,
+		[Work = Stream, GridPtr = &Grid, Kit = SurfaceKit.ToSharedRef(), Params = SurfaceParams, Levels = ShownLevels, MassifSteps = ShownMassifSteps,
+			Overrides = ShownReliefOverrides, Curve = Rivers->GetShownCurve(), CornerLow = ShownCornerLow, Relief = CellRelief, FixedPeak = MeanPeak,
+			Options, bWire = AppliedWireTarget.IsSet()]() mutable
+		{
+			Options.CornerLow = CornerLow;
+			Options.Relief = Relief;
+			HexPlanetSurface::FBuild Built = HexPlanetSurface::Build(*GridPtr, *Kit, Params, Levels, MassifSteps, Work->Chunks, FixedPeak, &Overrides, Curve.Get(), Options);
+			Work->Pieces.SetNum(Built.Sections.Num());
+			ParallelFor(Built.Sections.Num(), [&](int32 Index)
+			{
+				Work->Pieces[Index] = PrepareChunkSection(Built.Sections[Index], TEXT("SurfaceChunk"), Work->Chunks[Index / 2]);
+			});
+			if (bWire)
+			{
+				Work->WireSections = MoveTemp(Built.Sections);
+			}
+			Work->BuildMs = (FPlatformTime::Seconds() - Work->StartTime) * 1000.0;
+		});
+}
+
+void AHexPlanet::FinishStream()
+{
+	if (!Stream)
+	{
+		return;
+	}
+	const double ApplyStart = FPlatformTime::Seconds();
+	int32 Shown = 0;
+	for (int32 Slot = 0; Slot < Stream->Chunks.Num(); ++Slot)
+	{
+		const int32 Chunk = Stream->Chunks[Slot];
+		// a build of levels that showed the chunk meanwhile also gave it its pieces, or freed them
+		if (ChunkPieces[Chunk] != 1 || ChunkGenerations[Chunk] != Stream->Generations[Slot] || !Stream->Pieces.IsValidIndex(Slot * 2 + 1))
+		{
+			continue;
+		}
+		SetChunkPieces(Chunk, MoveTemp(Stream->Pieces[Slot * 2]), MoveTemp(Stream->Pieces[Slot * 2 + 1]));
+		if (Stream->WireSections.IsValidIndex(Slot * 2 + 1))
+		{
+			SetWireSection(Chunk, 0, &Stream->WireSections[Slot * 2]);
+			SetWireSection(Chunk, 1, &Stream->WireSections[Slot * 2 + 1]);
+		}
+		++Shown;
+	}
+	UE_LOG(LogHexHero, Verbose, TEXT("Planet: built the pieces of %d chunks near the camera in %.1f ms in the background, shown %d in %.1f ms"),
+		Stream->Chunks.Num(), Stream->BuildMs, Shown, (FPlatformTime::Seconds() - ApplyStart) * 1000.0);
+	Stream.Reset();
+}
+
+void AHexPlanet::SetWireSection(int32 Chunk, int32 Part, const HexPlanetSurface::FSection* Section)
+{
+	UProceduralMeshComponent* Wire = Part == 2 ? (WireCoarseChunks.IsValidIndex(Chunk) ? WireCoarseChunks[Chunk].Get() : nullptr)
+		: (WireChunks.IsValidIndex(Chunk) ? WireChunks[Chunk].Get() : nullptr);
+	if (!Wire)
+	{
+		return;
+	}
+	const int32 WireSection = Part == 2 ? 0 : Part;
+	Wire->ClearMeshSection(WireSection);
+
+	// a coarse mesh counts as terrain
+	if (Section && AppliedWireTarget.IsSet() && IsWireTarget(Part == 2 ? 0 : Part, AppliedWireTarget.GetValue()) && !Section->Triangles.IsEmpty())
+	{
+		TArray<FVector> Positions;
+		Positions.Reserve(Section->Positions.Num());
+		for (const FVector3f& Position : Section->Positions)
+		{
+			Positions.Add(FVector(Position));
+		}
+		Wire->CreateMeshSection_LinearColor(WireSection, Positions, Section->Triangles, {}, {}, {}, {}, false);
+		Wire->SetMeshSectionVisible(WireSection, true);
+		Wire->SetMaterial(WireSection, WireframeMaterial);
+	}
+}
+
+void AHexPlanet::BuildWireSections()
+{
+	for (int32 Chunk = 0; Chunk < WireChunks.Num(); ++Chunk)
+	{
+		WireChunks[Chunk]->ClearAllMeshSections();
+	}
+	for (int32 Chunk = 0; Chunk < WireCoarseChunks.Num(); ++Chunk)
+	{
+		WireCoarseChunks[Chunk]->ClearAllMeshSections();
+	}
+	if (!AppliedWireTarget.IsSet() || !SurfaceKit)
+	{
+		return;
+	}
+
+	// the surface keeps its meshes on the GPU alone, so the debug view builds them again from what the surface shown was built from: every
+	// coarse mesh, and the pieces of the chunks that hold them
+	const double Start = FPlatformTime::Seconds();
+	HexPlanetSurface::FBuildOptions Options;
+	Options.CornerLow = ShownCornerLow;
+	Options.Relief = CellRelief;
+	const HexPlanetSurface::FBuild Built = HexPlanetSurface::Build(Grid, *SurfaceKit, SurfaceParams, ShownLevels, ShownMassifSteps, HexPlanetSurface::GetAllChunks(Grid),
+		MeanPeak, &ShownReliefOverrides, Rivers->GetShownCurve().Get(), Options);
+	for (int32 Slot = 0; Slot < Built.Chunks.Num(); ++Slot)
+	{
+		const int32 Chunk = Built.Chunks[Slot];
+		if (ChunkPieces.IsValidIndex(Chunk) && ChunkPieces[Chunk] == 2)
+		{
+			SetWireSection(Chunk, 0, &Built.Sections[Slot * 2]);
+			SetWireSection(Chunk, 1, &Built.Sections[Slot * 2 + 1]);
+		}
+		if (Built.CoarseSections.IsValidIndex(Slot))
+		{
+			SetWireSection(Chunk, 2, &Built.CoarseSections[Slot]);
+		}
+	}
+	UE_LOG(LogHexHero, Log, TEXT("Planet: built the copies of the wireframe in %.0f ms"), (FPlatformTime::Seconds() - Start) * 1000.0);
 }
 
 void AHexPlanet::UpdateDebugView()
@@ -1299,13 +1863,9 @@ void AHexPlanet::UpdateDebugView()
 		SetGridVisible(bGridVisible);
 	}
 
-	// a rebuilt section is visible again and its copy in the wireframe is old
+	// a rebuilt section takes its materials and visibility again; ApplySurface updated its copy in the wireframe
 	const bool bSurfaceChangedNow = bSurfaceChanged;
 	bSurfaceChanged = false;
-	if (bSurfaceChangedNow)
-	{
-		AppliedWireTarget.Reset();
-	}
 
 	if (View.Mode != AppliedView.Mode || View.Target != AppliedView.Target || bCut != bAppliedCut || bSurfaceChangedNow)
 	{
@@ -1315,15 +1875,15 @@ void AHexPlanet::UpdateDebugView()
 		const bool bCoarseChosen = IsWireTarget(0, View.Target);
 		for (int32 Chunk = 0; Chunk < CoarseChunks.Num(); ++Chunk)
 		{
-			CoarseChunks[Chunk]->SetMeshSectionVisible(0, !(View.Mode == EHexWireframeMode::Only && !bCut && bCoarseChosen));
+			CoarseChunks[Chunk]->SetSectionVisible(0, !(View.Mode == EHexWireframeMode::Only && !bCut && bCoarseChosen));
 			CoarseChunks[Chunk]->SetMaterial(0, GetChunkMaterial(Chunk, 2, bCut, View.Target));
 		}
 
 		for (int32 Section = 0; Section < SurfaceChunks.Num() * 2; ++Section)
 		{
 			const bool bChosen = IsWireTarget(Section, View.Target);
-			UProceduralMeshComponent* ChunkMesh = SurfaceChunks[Section / 2];
-			ChunkMesh->SetMeshSectionVisible(Section % 2, !(View.Mode == EHexWireframeMode::Only && !bCut && bChosen));
+			UHexPlanetMeshComponent* ChunkMesh = SurfaceChunks[Section / 2];
+			ChunkMesh->SetSectionVisible(Section % 2, !(View.Mode == EHexWireframeMode::Only && !bCut && bChosen));
 			ChunkMesh->SetMaterial(Section % 2, GetChunkMaterial(Section / 2, Section % 2, bCut, View.Target));
 		}
 	}
@@ -1383,34 +1943,8 @@ void AHexPlanet::UpdateDebugView()
 			}
 		}
 
-		for (int32 Section = 0; Section < WireChunks.Num() * 2; ++Section)
-		{
-			UProceduralMeshComponent* Wire = WireChunks[Section / 2];
-			const FProcMeshSection* Source = GetSurfaceSection(Section);
-			Wire->ClearMeshSection(Section % 2);
-
-			if (WireTarget.IsSet() && IsWireTarget(Section, WireTarget.GetValue()) && Source && !Source->ProcVertexBuffer.IsEmpty())
-			{
-				// the copy keeps the visibility of the source, which only the triangles hide
-				Wire->SetProcMeshSection(Section % 2, *Source);
-				Wire->SetMeshSectionVisible(Section % 2, true);
-				Wire->SetMaterial(Section % 2, WireframeMaterial);
-			}
-		}
-
-		for (int32 Chunk = 0; Chunk < WireCoarseChunks.Num(); ++Chunk)
-		{
-			UProceduralMeshComponent* Wire = WireCoarseChunks[Chunk];
-			const FProcMeshSection* Source = CoarseChunks[Chunk]->GetProcMeshSection(0);
-			Wire->ClearAllMeshSections();
-
-			if (WireTarget.IsSet() && IsWireTarget(0, WireTarget.GetValue()) && Source && !Source->ProcVertexBuffer.IsEmpty())
-			{
-				Wire->SetProcMeshSection(0, *Source);
-				Wire->SetMeshSectionVisible(0, true);
-				Wire->SetMaterial(0, WireframeMaterial);
-			}
-		}
+		// the copies keep the visibility of their sources, which only the triangles hide
+		BuildWireSections();
 	}
 
 	if (View.Mode != AppliedView.Mode || View.Scope != AppliedView.Scope || View.Target != AppliedView.Target || HoveredCell != AppliedWireCell || bSurfaceChangedNow)
@@ -1446,28 +1980,21 @@ void AHexPlanet::BuildHoverWireframe(const FHexDebugViewSettings& View)
 	TArray<FVector> Positions;
 	TArray<int32> Triangles;
 	TArray<FLinearColor> Colors;
+	TArray<FVector3f> Corners;
 
 	for (const TPair<int32, FLinearColor>& Each : Chosen)
 	{
+		// the surface keeps its meshes on the GPU alone, so the triangles of the cells come from building them again
 		const FCellMeshRange& Range = CellMeshes[Each.Key];
-		const FProcMeshSection* Source = Range.Section != INDEX_NONE ? GetSurfaceSection(Range.Section) : nullptr;
-
-		if (!Source || !IsWireTarget(Range.Section, View.Target))
+		if (Range.Section == INDEX_NONE || !IsWireTarget(Range.Section, View.Target))
 		{
 			continue;
 		}
-
-		const int32 First = Positions.Num();
-
-		for (int32 Vertex = 0; Vertex < Range.NumVertices; ++Vertex)
+		GetCellTriangles(Each.Key, Corners);
+		for (const FVector3f& Corner : Corners)
 		{
-			Positions.Add(FVector(Source->ProcVertexBuffer[Range.FirstVertex + Vertex].Position));
+			Triangles.Add(Positions.Add(FVector(Corner)));
 			Colors.Add(Each.Value);
-		}
-
-		for (int32 Index = 0; Index < Range.NumIndices; ++Index)
-		{
-			Triangles.Add(First + int32(Source->ProcIndexBuffer[Range.FirstIndex + Index]) - Range.FirstVertex);
 		}
 	}
 
@@ -1551,11 +2078,6 @@ void AHexPlanet::SetHideCells(UMaterialInstanceDynamic* Target, int32 Cell, int3
 	}
 
 	Target->SetScalarParameterValue(TEXT("HideCount"), float(Count));
-}
-
-const FProcMeshSection* AHexPlanet::GetSurfaceSection(int32 Section) const
-{
-	return SurfaceChunks.IsValidIndex(Section / 2) ? SurfaceChunks[Section / 2]->GetProcMeshSection(Section % 2) : nullptr;
 }
 
 void AHexPlanet::BuildSeaField()
@@ -2044,22 +2566,31 @@ int32 AHexPlanet::GetCellRockLayer(int32 Cell) const
 void AHexPlanet::GetCellTriangles(int32 Cell, TArray<FVector3f>& OutCorners) const
 {
 	OutCorners.Reset();
-	if (!CellMeshes.IsValidIndex(Cell))
+	if (!CellMeshes.IsValidIndex(Cell) || !SurfaceKit)
 	{
 		return;
 	}
-	const FCellMeshRange& Range = CellMeshes[Cell];
-	const FProcMeshSection* Section = Range.Section == INDEX_NONE ? nullptr : GetSurfaceSection(Range.Section);
-	if (!Section)
+
+	// from the build being shown, which holds the meshes of the cells of its chunks
+	if (TriangleSource && TriangleSource->CellMeshes.IsValidIndex(Cell))
 	{
-		return;
+		const HexPlanetSurface::FCellMesh& Range = TriangleSource->CellMeshes[Cell];
+		const int32 Slot = Range.Section == INDEX_NONE ? INDEX_NONE : Algo::BinarySearch(TriangleSource->Chunks, Range.Section / 2);
+		const HexPlanetSurface::FSection* Section = Slot == INDEX_NONE ? nullptr : &TriangleSource->Sections[Slot * 2 + Range.Section % 2];
+		if (Section && Range.FirstIndex + Range.NumIndices <= Section->Triangles.Num())
+		{
+			OutCorners.Reserve(Range.NumIndices);
+			for (int32 Index = Range.FirstIndex; Index < Range.FirstIndex + Range.NumIndices; ++Index)
+			{
+				OutCorners.Add(FVector3f(Section->Positions[Section->Triangles[Index]]));
+			}
+			return;
+		}
 	}
-	OutCorners.Reserve(Range.NumIndices);
-	for (int32 Index = Range.FirstIndex; Index < Range.FirstIndex + Range.NumIndices && Section->ProcIndexBuffer.IsValidIndex(Index); ++Index)
-	{
-		const uint32 Vertex = Section->ProcIndexBuffer[Index];
-		OutCorners.Add(Section->ProcVertexBuffer.IsValidIndex(int32(Vertex)) ? FVector3f(Section->ProcVertexBuffer[Vertex].Position) : FVector3f::ZeroVector);
-	}
+
+	// else built again, as the surface keeps its meshes on the GPU alone, from what the surface shown was built from
+	HexPlanetSurface::BuildCellTriangles(Grid, *SurfaceKit, SurfaceParams, ShownLevels, ShownMassifSteps, ShownCornerLow, CellRelief, &ShownReliefOverrides,
+		Rivers->GetShownCurve().Get(), Cell, OutCorners);
 }
 
 void AHexPlanet::LoadRelief()
@@ -2596,8 +3127,21 @@ void AHexPlanet::BuildSurface()
 	CellVersions.Init(FIntPoint::ZeroValue, Grid.GetCells().Num());
 	CellTurnChoices.Init(FIntPoint::ZeroValue, Grid.GetCells().Num());
 	BouldersByChunk.SetNum(Grid.GetNumChunks());
-	ApplySurface(Build);
+
+	// the camera finds its place only in the next frames, so the build stays for them, and the chunks it wants then take their pieces from it
+	// (UpdateChunkLod), while whatever stands on the ground reads it meanwhile; without coarse meshes every chunk takes them now
+	const bool bDeferPieces = !CoarseChunks.IsEmpty();
+	const int32 FlatTiles = Build.FlatTiles;
+	StartupSurface = MakeUnique<HexPlanetSurface::FBuild>(MoveTemp(Build));
+	TriangleSource = StartupSurface.Get();
+	StartupFramesLeft = 10;
+	ApplySurface(*StartupSurface, bDeferPieces);
 	Rivers->UpdateBridges();
+	if (!bDeferPieces)
+	{
+		TriangleSource = nullptr;
+		StartupSurface.Reset();
+	}
 
 	int32 LevelCounts[5] = {};
 	for (int32 Cell = 0; Cell < Grid.GetCells().Num(); ++Cell)
@@ -2606,14 +3150,25 @@ void AHexPlanet::BuildSurface()
 	}
 
 	UE_LOG(LogHexHero, Log, TEXT("Planet: %d pieces from %d kits (%d unread), %d flat tiles, %d triangles, %d vertices, cells by level from -2: %d %d %d %d %d, mean peak %.1f, level height %.1f"),
-		SurfaceKit->Pieces.Num(), SurfaceKit->Levels.Num(), SurfaceKit->UnreadMeshes, Build.FlatTiles, NumTriangles, NumVertices, LevelCounts[0], LevelCounts[1], LevelCounts[2],
+		SurfaceKit->Pieces.Num(), SurfaceKit->Levels.Num(), SurfaceKit->UnreadMeshes, FlatTiles, NumTriangles, NumVertices, LevelCounts[0], LevelCounts[1], LevelCounts[2],
 		LevelCounts[3], LevelCounts[4], MeanPeak, Settings->LevelHeight);
 	UE_LOG(LogHexHero, Log, TEXT("Planet: kit read in %.0f ms, surface of %d chunks, %d coarse triangles, built in %.0f ms, shown in %.0f ms"),
 		(BuildStart - KitStart) * 1000.0, Grid.GetNumChunks(), NumCoarseTriangles, (ApplyStart - BuildStart) * 1000.0, (FPlatformTime::Seconds() - ApplyStart) * 1000.0);
 }
 
-void AHexPlanet::ApplySurface(HexPlanetSurface::FBuild& Build)
+void AHexPlanet::ApplySurface(HexPlanetSurface::FBuild& Build, bool bStartup)
 {
+	// what the cells are built from, by which the triangles of a cell are built again when no build holds them (GetCellTriangles): the factor
+	// of the height depends on the place and the level of a cell alone, so a build of some chunks gives it for all, as the heights of the corners
+	if (Build.CellRelief.Num() == CellRelief.Num())
+	{
+		CellRelief = Build.CellRelief;
+	}
+	if (Build.CornerLow.Num() == Grid.GetCorners().Num())
+	{
+		ShownCornerLow = Build.CornerLow;
+	}
+
 	// the real coast of these chunks, for the sea field
 	ChunkCoasts.SetNum(Grid.GetNumChunks());
 	for (int32 Slot = 0; Slot < Build.Chunks.Num() && Slot < Build.Coasts.Num(); ++Slot)
@@ -2621,26 +3176,56 @@ void AHexPlanet::ApplySurface(HexPlanetSurface::FBuild& Build)
 		ChunkCoasts[Build.Chunks[Slot]] = MoveTemp(Build.Coasts[Slot]);
 	}
 
-	for (int32 Slot = 0; Slot < Build.Chunks.Num(); ++Slot)
+	// every chunk gets its coarse mesh and keeps the bounds of its pieces, and those near the camera their pieces, packed for the GPU in
+	// parallel; at the start UpdateChunkLod gives them their pieces once the camera has its place
+	const int32 NumSlots = Build.Chunks.Num();
+	TArray<uint8> WantedSlots;
+	WantedSlots.Init(0, NumSlots);
+	for (int32 Slot = 0; Slot < NumSlots; ++Slot)
 	{
-		UProceduralMeshComponent* ChunkMesh = SurfaceChunks[Build.Chunks[Slot]];
-
-		// a whole chunk is replaced, as the counts of its vertices change, which recreates the render state of this chunk alone
-		for (int32 Part = 0; Part < 2; ++Part)
+		const int32 Chunk = Build.Chunks[Slot];
+		ChunkBounds[Chunk] = GetPieceBounds(Build, Slot);
+		WantedSlots[Slot] = !bStartup && (ChunkPieces[Chunk] == 2 || WantsPieces(Chunk)) ? 1 : 0;
+	}
+	TArray<FHexPlanetMeshSectionRef> Prepared;
+	Prepared.SetNum(NumSlots * 3);
+	ParallelFor(NumSlots * 3, [&](int32 Index)
+	{
+		const int32 Slot = Index / 3;
+		const int32 Part = Index % 3;
+		if (Part == 2 && Build.CoarseSections.IsValidIndex(Slot) && CoarseChunks.IsValidIndex(Build.Chunks[Slot]))
 		{
-			HexPlanetSurface::FSection& Section = Build.Sections[Slot * 2 + Part];
-			ChunkMesh->CreateMeshSection_LinearColor(Part, Section.Positions, Section.Triangles, Section.Normals, Section.GridUVs, Section.MeshUVs,
-				Section.CellUVs, Section.LocalUVs, Section.Colors, {}, false);
-			ChunkMesh->SetMaterial(Part, GetChunkMaterial(Build.Chunks[Slot], Part, bAppliedCut, AppliedView.Target));
+			Prepared[Index] = PrepareChunkSection(Build.CoarseSections[Slot], TEXT("CoarseChunk"), Build.Chunks[Slot]);
+		}
+		else if (Part < 2 && WantedSlots[Slot])
+		{
+			Prepared[Index] = PrepareChunkSection(Build.Sections[Slot * 2 + Part], TEXT("SurfaceChunk"), Build.Chunks[Slot]);
+		}
+	});
+
+	for (int32 Slot = 0; Slot < NumSlots; ++Slot)
+	{
+		// a whole chunk is replaced, as the counts of its vertices change, which recreates the render state of this chunk alone, and pieces
+		// that a stream builds of it now are dropped
+		const int32 Chunk = Build.Chunks[Slot];
+		++ChunkGenerations[Chunk];
+		if (WantedSlots[Slot])
+		{
+			SetChunkPieces(Chunk, MoveTemp(Prepared[Slot * 3]), MoveTemp(Prepared[Slot * 3 + 1]));
+			SetWireSection(Chunk, 0, &Build.Sections[Slot * 2]);
+			SetWireSection(Chunk, 1, &Build.Sections[Slot * 2 + 1]);
+		}
+		else
+		{
+			DropChunkPieces(Chunk);
 		}
 
-		if (CoarseChunks.IsValidIndex(Build.Chunks[Slot]))
+		if (CoarseChunks.IsValidIndex(Chunk) && Build.CoarseSections.IsValidIndex(Slot))
 		{
-			UProceduralMeshComponent* CoarseMesh = CoarseChunks[Build.Chunks[Slot]];
-			HexPlanetSurface::FSection& Section = Build.CoarseSections[Slot];
-			CoarseMesh->CreateMeshSection_LinearColor(0, Section.Positions, Section.Triangles, Section.Normals, Section.GridUVs, Section.MeshUVs,
-				Section.CellUVs, Section.LocalUVs, Section.Colors, {}, false);
-			CoarseMesh->SetMaterial(0, GetChunkMaterial(Build.Chunks[Slot], 2, bAppliedCut, AppliedView.Target));
+			UHexPlanetMeshComponent* CoarseMesh = CoarseChunks[Chunk];
+			CoarseMesh->SetSection(0, MoveTemp(Prepared[Slot * 3 + 2]));
+			CoarseMesh->SetMaterial(0, GetChunkMaterial(Chunk, 2, bAppliedCut, AppliedView.Target));
+			SetWireSection(Chunk, 2, &Build.CoarseSections[Slot]);
 		}
 	}
 
@@ -2672,17 +3257,104 @@ void AHexPlanet::ApplySurface(HexPlanetSurface::FBuild& Build)
 		UpdateBoulders();
 	}
 
-	// the objects stand on the ground of their cells, which these chunks changed
+	// the objects stand on the ground of their cells, which these chunks changed, read from this build
+	const HexPlanetSurface::FBuild* OldSource = TriangleSource;
+	TriangleSource = &Build;
 	Objects->RebuildChunks(Build.Chunks);
+	TriangleSource = OldSource;
 
-	// the factor of the height depends on the place and the level of a cell alone, so a build of some chunks gives it for all
-	if (Build.CellRelief.Num() == CellRelief.Num())
+	// the debug view puts its materials and visibility on the sections again
+	bSurfaceChanged = true;
+}
+
+void AHexPlanet::LogMemory(const FString& FrameTimes)
+{
+	UE_LOG(LogHexHero, Log, TEXT("Planet memory: %s"), *FrameTimes);
+
+	// the pieces by level, as the cells hold them
+	int64 LevelTriangles[5] = {};
+	for (int32 Cell = 0; Cell < CellMeshes.Num() && Cell < ShownLevels.Num(); ++Cell)
 	{
-		CellRelief = Build.CellRelief;
+		LevelTriangles[FMath::Clamp(int32(ShownLevels[Cell]) + 2, 0, 4)] += CellMeshes[Cell].NumIndices / 3;
 	}
 
-	// the debug view puts its materials and visibility on the sections again and copies them anew
-	bSurfaceChanged = true;
+	// the copies of the meshes: the components keep them on the GPU alone, with their vertex and index buffers, and the copies the wireframe
+	// draws keep theirs on the CPU too, as UProceduralMeshComponent does
+	struct FCopies
+	{
+		int64 Sections = 0;
+		int64 Vertices = 0;
+		int64 Indices = 0;
+		int64 GpuBytes = 0;
+	};
+	const auto Measure = [](const TArray<TObjectPtr<UHexPlanetMeshComponent>>& Chunks)
+	{
+		FCopies Copies;
+		for (const UHexPlanetMeshComponent* Chunk : Chunks)
+		{
+			for (int32 Index = 0; Chunk && Index < Chunk->GetNumSections(); ++Index)
+			{
+				const UHexPlanetMeshComponent::FSectionStats Stats = Chunk->GetSectionStats(Index);
+				if (Stats.Indices > 0)
+				{
+					++Copies.Sections;
+					Copies.Vertices += Stats.Vertices;
+					Copies.Indices += Stats.Indices;
+					Copies.GpuBytes += Stats.GpuBytes;
+				}
+			}
+		}
+		return Copies;
+	};
+	const FCopies Pieces = Measure(SurfaceChunks);
+	const FCopies Coarse = Measure(CoarseChunks);
+	int64 WireBytes = 0;
+	for (const TArray<TObjectPtr<UProceduralMeshComponent>>* Wires : { &WireChunks, &WireCoarseChunks })
+	{
+		for (UProceduralMeshComponent* Wire : *Wires)
+		{
+			for (int32 Index = 0; Wire && Index < Wire->GetNumSections(); ++Index)
+			{
+				const FProcMeshSection* Section = Wire->GetProcMeshSection(Index);
+				WireBytes += Section ? Section->ProcVertexBuffer.GetAllocatedSize() + Section->ProcIndexBuffer.GetAllocatedSize() : 0;
+			}
+		}
+	}
+
+	int32 LodCounts[3] = {};
+	for (const uint8 State : ChunkLodStates)
+	{
+		++LodCounts[FMath::Min<int32>(State, 2)];
+	}
+	int32 PieceCounts[3] = {};
+	for (const uint8 State : ChunkPieces)
+	{
+		++PieceCounts[FMath::Min<int32>(State, 2)];
+	}
+	int64 SurfaceTriangles = 0;
+	for (const int64 Count : LevelTriangles)
+	{
+		SurfaceTriangles += Count;
+	}
+
+	const double MB = 1024.0 * 1024.0;
+	UE_LOG(LogHexHero, Log, TEXT("Planet memory: %d chunks, %d drawing their pieces, %d both in the band, %d their coarse meshes; %d hold their pieces on the GPU, %d are building them, %d have none"),
+		SurfaceChunks.Num(), LodCounts[0], LodCounts[1], LodCounts[2], PieceCounts[2], PieceCounts[1], PieceCounts[0]);
+	UE_LOG(LogHexHero, Log, TEXT("Planet memory: the surface has %lld triangles, by level from the deep sea %lld %lld %lld %lld %lld; on the GPU pieces in %lld sections, %lld triangles and %lld vertices, coarse meshes in %lld sections, %lld triangles and %lld vertices"),
+		SurfaceTriangles, LevelTriangles[0], LevelTriangles[1], LevelTriangles[2], LevelTriangles[3], LevelTriangles[4], Pieces.Sections, Pieces.Indices / 3, Pieces.Vertices,
+		Coarse.Sections, Coarse.Indices / 3, Coarse.Vertices);
+	UE_LOG(LogHexHero, Log, TEXT("Planet memory: pieces 0.0 MB on the CPU in the components, 0.0 MB on the CPU in their scene proxies, %.1f MB of vertices and indices on the GPU; coarse meshes 0.0, 0.0 and %.1f MB; copies of the wireframe %.1f MB on the CPU"),
+		Pieces.GpuBytes / MB, Coarse.GpuBytes / MB, WireBytes / MB);
+
+	const FPlatformMemoryStats Stats = FPlatformMemory::GetStats();
+	UE_LOG(LogHexHero, Log, TEXT("Planet memory: process %.0f MB in use (peak %.0f), %.0f MB committed (peak %.0f)"),
+		Stats.UsedPhysical / MB, Stats.PeakUsedPhysical / MB, Stats.UsedVirtual / MB, Stats.PeakUsedVirtual / MB);
+
+	// the acceleration structures of ray tracing of the chunks, and all the memory of the RHI
+	GEngine->Exec(GetWorld(), TEXT("D3D12.DumpRayTracingGeometries all SurfaceChunk"));
+	GEngine->Exec(GetWorld(), TEXT("D3D12.DumpRayTracingGeometries all CoarseChunk"));
+	GEngine->Exec(GetWorld(), TEXT("rhi.DumpMemory"));
+	UE_LOG(LogHexHero, Log, TEXT("Planet memory: done"));
 }
 
 int32 AHexPlanet::FindCellAlongRay(const FVector& Origin, const FVector& Direction, FVector* OutPoint) const

@@ -23,16 +23,16 @@ namespace
 		return Hash ^ (Hash >> 16);
 	}
 
-	/** A section while it is built, with the normals still summed */
+	/** A section while it is built, with the normals still summed, and its positions in doubles, for the normals and the coast */
 	struct FRawSection
 	{
 		TArray<FVector> Positions;
 		TArray<int32> Triangles;
 		TArray<FVector3d> NormalSums;
-		TArray<FVector2D> GridUVs;
-		TArray<FVector2D> MeshUVs;
-		TArray<FVector2D> CellUVs;
-		TArray<FVector2D> LocalUVs;
+		TArray<FVector2f> GridUVs;
+		TArray<FVector2f> MeshUVs;
+		TArray<FVector2f> CellUVs;
+		TArray<FVector2f> LocalUVs;
 		/** Level + 2 of the cell of each vertex, plus 8 on a pentagon, which chooses its colors */
 		TArray<uint8> Looks;
 
@@ -75,8 +75,8 @@ namespace
 		const HexPlanetSurface::FParams& Params;
 		TConstArrayView<int8> Levels;
 		TConstArrayView<int32> MassifSteps;
-		TArray<double> CornerLow;
-		TArray<float> Relief;
+		TConstArrayView<double> CornerLow;
+		TConstArrayView<float> Relief;
 		const HexPlanetSurface::FReliefOverrides* Overrides = nullptr;
 		/** The line of the rivers, null for none */
 		const HexPlanetRivers::FCurve* Rivers = nullptr;
@@ -149,10 +149,10 @@ namespace
 				Target.Shared->Add({Target.Tag, Section.Positions.Num(), GetKey(Position)});
 			}
 			Section.NormalSums.Add(FVector3d::ZeroVector);
-			Section.GridUVs.Add(FVector2D(GridU, 0.0));
-			Section.MeshUVs.Add(FVector2D::ZeroVector);
-			Section.CellUVs.Add(HexPlanetSurface::GetCellUV(Cell));
-			Section.LocalUVs.Add(HexPlanetSurface::GetLocalUV(NumSides, Side, WFrom, WTo));
+			Section.GridUVs.Add(FVector2f(GridU, 0.0f));
+			Section.MeshUVs.Add(FVector2f::ZeroVector);
+			Section.CellUVs.Add(FVector2f(HexPlanetSurface::GetCellUV(Cell)));
+			Section.LocalUVs.Add(FVector2f(HexPlanetSurface::GetLocalUV(NumSides, Side, WFrom, WTo)));
 			Section.Looks.Add(Look);
 			return Section.Positions.Add(FVector(Position));
 		};
@@ -422,11 +422,11 @@ namespace
 				}
 				Section.Positions.Add(FVector(Position));
 				Section.NormalSums.Add(FVector3d::ZeroVector);
-				Section.GridUVs.Add(FVector2D(Vertex.GridU, 0.0));
+				Section.GridUVs.Add(FVector2f(float(Vertex.GridU), 0.0f));
 				// Y of the second UV: how much of a gully the vertex is, X the faces, from its height below
-				Section.MeshUVs.Add(FVector2D(0.0, Crevice));
-				Section.CellUVs.Add(HexPlanetSurface::GetCellUV(Cell));
-				Section.LocalUVs.Add(HexPlanetSurface::GetLocalUV(NumSides, Side, WFrom, WTo));
+				Section.MeshUVs.Add(FVector2f(0.0f, float(Crevice)));
+				Section.CellUVs.Add(FVector2f(HexPlanetSurface::GetCellUV(Cell)));
+				Section.LocalUVs.Add(FVector2f(HexPlanetSurface::GetLocalUV(NumSides, Side, WFrom, WTo)));
 				Section.Looks.Add(Look);
 			}
 
@@ -822,7 +822,8 @@ TArray<int32> HexPlanetSurface::FindChangedOverrides(const FReliefOverrides& Old
 }
 
 HexPlanetSurface::FBuild HexPlanetSurface::Build(const FHexSphereGrid& Grid, const FKit& Kit, const FParams& Params, TConstArrayView<int8> Levels,
-	TConstArrayView<int32> MassifSteps, TConstArrayView<int32> Chunks, double MeanPeak, const FReliefOverrides* Overrides, const HexPlanetRivers::FCurve* Rivers)
+	TConstArrayView<int32> MassifSteps, TConstArrayView<int32> Chunks, double MeanPeak, const FReliefOverrides* Overrides, const HexPlanetRivers::FCurve* Rivers,
+	const FBuildOptions& Options)
 {
 	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
 
@@ -836,11 +837,22 @@ HexPlanetSurface::FBuild HexPlanetSurface::Build(const FHexSphereGrid& Grid, con
 	Result.CellVersions.Init(FIntPoint::ZeroValue, Cells.Num());
 	Result.CellTurnChoices.Init(FIntPoint::ZeroValue, Cells.Num());
 
-	FContext Context{Grid, Kit, Params, Levels, MassifSteps, {}, {}};
-	Context.CornerLow = HexPlanetKit::FindCornerHeights(Grid, [&](int32 Cell) { return Params.GetTop(Levels[Cell]); });
+	// the heights of the corners and the factors of the heights depend on the levels alone, so a build of the same levels may give them
+	const bool bGivenCorners = Options.CornerLow.Num() == Grid.GetCorners().Num();
+	const bool bGivenRelief = Options.Relief.Num() == Cells.Num();
+	if (!bGivenCorners)
+	{
+		Result.CornerLow = HexPlanetKit::FindCornerHeights(Grid, [&](int32 Cell) { return Params.GetTop(Levels[Cell]); });
+	}
+	if (!bGivenRelief)
+	{
+		Result.CellRelief = FindRelief(Grid, Kit, Params, Levels, Overrides);
+	}
+	FContext Context{Grid, Kit, Params, Levels, MassifSteps, bGivenCorners ? Options.CornerLow : TConstArrayView<double>(Result.CornerLow),
+		bGivenRelief ? Options.Relief : TConstArrayView<float>(Result.CellRelief)};
 	Context.Overrides = Overrides;
 	Context.Rivers = Rivers && Rivers->CellSegments.Num() == Cells.Num() ? Rivers : nullptr;
-	Context.Relief = FindRelief(Grid, Kit, Params, Levels, Overrides);
+	const bool bPiecesOnly = Options.bPiecesOnly;
 
 	// the slot of each chunk built, whose sections are Slot * 2 and Slot * 2 + 1 of the result
 	TArray<int32> ChunkSlots;
@@ -888,7 +900,7 @@ HexPlanetSurface::FBuild HexPlanetSurface::Build(const FHexSphereGrid& Grid, con
 	{
 		if (Slot == NumSlots)
 		{
-			const FTarget CoarseHalo{&RawSections[CoarseHaloSection], CoarseHaloSection, &CoarseSharedBySlot[Slot]};
+			const FTarget CoarseHalo = bPiecesOnly ? FTarget() : FTarget{&RawSections[CoarseHaloSection], CoarseHaloSection, &CoarseSharedBySlot[Slot]};
 			for (const int32 Cell : Halo)
 			{
 				BuildCell(Context, Cell, RawSections[HaloSection], HaloSection, SharedBySlot[Slot], CoarseHalo);
@@ -896,7 +908,7 @@ HexPlanetSurface::FBuild HexPlanetSurface::Build(const FHexSphereGrid& Grid, con
 			return;
 		}
 
-		const FTarget Coarse{&RawSections[CoarseFirst + Slot], CoarseFirst + Slot, &CoarseSharedBySlot[Slot]};
+		const FTarget Coarse = bPiecesOnly ? FTarget() : FTarget{&RawSections[CoarseFirst + Slot], CoarseFirst + Slot, &CoarseSharedBySlot[Slot]};
 		for (const int32 Cell : CellsBySlot[Slot])
 		{
 			const int32 SectionIndex = Slot * 2 + (Levels[Cell] == MountainLevel ? 1 : 0);
@@ -918,7 +930,7 @@ HexPlanetSurface::FBuild HexPlanetSurface::Build(const FHexSphereGrid& Grid, con
 
 	// boulders at the foot of the mountains on the edge of a range, on the ground of the neighbor near the side, as a flat tile of it would lie
 	Result.Boulders.SetNum(NumSlots);
-	if (Kit.BoulderMeshes > 0 && Kit.BoulderMaxPerSide > 0)
+	if (Kit.BoulderMeshes > 0 && Kit.BoulderMaxPerSide > 0 && !bPiecesOnly)
 	{
 		ParallelFor(NumSlots, [&](int32 Slot)
 		{
@@ -984,7 +996,7 @@ HexPlanetSurface::FBuild HexPlanetSurface::Build(const FHexSphereGrid& Grid, con
 	}
 
 	// every point of such a side is built by both cells, so in a build of every chunk each comes twice
-	if (NumSlots == Grid.GetNumChunks())
+	if (NumSlots == Grid.GetNumChunks() && !bPiecesOnly)
 	{
 		TMap<FIntVector, int32> RidgeCounts;
 		for (const TArray<FIntVector>& Keys : RidgeKeysBySlot)
@@ -1066,60 +1078,15 @@ HexPlanetSurface::FBuild HexPlanetSurface::Build(const FHexSphereGrid& Grid, con
 		MeanPeak = NumPeaks > 0 ? FMath::Max(PeakSum / NumPeaks, 1.0) : 1.0;
 	}
 	Result.MeanPeak = MeanPeak;
-	Result.CellRelief = MoveTemp(Context.Relief);
 
-	Result.Sections.SetNum(RawSections.Num());
-
-	ParallelFor(RawSections.Num(), [&](int32 Index)
-	{
-		FRawSection& Raw = RawSections[Index];
-		FSection& Section = Result.Sections[Index];
-		Section.Normals.SetNumUninitialized(Raw.Positions.Num());
-		Section.Colors.SetNumUninitialized(Raw.Positions.Num());
-
-		for (int32 Vertex = 0; Vertex < Raw.Positions.Num(); ++Vertex)
-		{
-			const FVector3d Up = FVector3d(Raw.Positions[Vertex]).GetSafeNormal();
-			const FVector3d Normal = Raw.NormalSums[Vertex].GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, Up);
-			Section.Normals[Vertex] = FVector(Normal);
-
-			const int32 Look = Raw.Looks[Vertex] & 7;
-			const double Height = FVector3d(Raw.Positions[Vertex]).Length() - Params.Radius;
-			const double FacetLow = Params.FacetLow[Look];
-			const double FacetHigh = Params.FacetHigh[Look];
-			Raw.MeshUVs[Vertex].X = FacetHigh > FacetLow ? FMath::SmoothStep(FacetLow, FacetHigh, Height + Params.Radius) : 0.0;
-
-			// the painted tiles draw colors of their own, the surface none
-			Section.Colors[Vertex] = FLinearColor(0.0f, 0.0f, 0.0f, 0.0f);
-
-			// V of the first UV is the height above the sea as a share of the mean peak of mountains, by which M_HexPlanet fades the grid line
-			// between GridFadeStart and GridFadeEnd, as on mountains it only clutters the rock, and below the sea over GridSeaFade, as the water
-			// draws its own grid lines (WaterGrid)
-			Raw.GridUVs[Vertex].Y = float(Height / MeanPeak);
-		}
-
-		Section.Positions = MoveTemp(Raw.Positions);
-		Section.Triangles = MoveTemp(Raw.Triangles);
-		Section.GridUVs = MoveTemp(Raw.GridUVs);
-		Section.MeshUVs = MoveTemp(Raw.MeshUVs);
-		Section.CellUVs = MoveTemp(Raw.CellUVs);
-		Section.LocalUVs = MoveTemp(Raw.LocalUVs);
-		Raw = FRawSection();
-	});
-
-	for (int32 Slot = 0; Slot < NumSlots; ++Slot)
-	{
-		Result.CoarseSections.Add(MoveTemp(Result.Sections[CoarseFirst + Slot]));
-	}
-	Result.Sections.SetNum(CoarseFirst);
-
-	// the real coast: on each edge of a triangle with one end above the sea and one below, the point between them at the sea, each edge once
-	Result.Coasts.SetNum(NumSlots);
-	ParallelFor(NumSlots, [&](int32 Slot)
+	// the real coast: on each edge of a triangle with one end above the sea and one below, the point between them at the sea, each edge once,
+	// from the positions in doubles, as their heights at the sea are near nothing
+	Result.Coasts.SetNum(bPiecesOnly ? 0 : NumSlots);
+	ParallelFor(Result.Coasts.Num(), [&](int32 Slot)
 	{
 		for (int32 Part = 0; Part < 2; ++Part)
 		{
-			const FSection& Section = Result.Sections[Slot * 2 + Part];
+			const FRawSection& Section = RawSections[Slot * 2 + Part];
 			TSet<uint64> Edges;
 			for (int32 Index = 0; Index + 2 < Section.Triangles.Num(); Index += 3)
 			{
@@ -1144,5 +1111,73 @@ HexPlanetSurface::FBuild HexPlanetSurface::Build(const FHexSphereGrid& Grid, con
 		}
 	});
 
+	// the sections in floats, as the GPU takes them, each freeing its doubles as it goes
+	Result.Sections.SetNum(RawSections.Num());
+	ParallelFor(RawSections.Num(), [&](int32 Index)
+	{
+		FRawSection& Raw = RawSections[Index];
+		FSection& Section = Result.Sections[Index];
+		Section.Positions.SetNumUninitialized(Raw.Positions.Num());
+		Section.Normals.SetNumUninitialized(Raw.Positions.Num());
+
+		for (int32 Vertex = 0; Vertex < Raw.Positions.Num(); ++Vertex)
+		{
+			const FVector3d Position(Raw.Positions[Vertex]);
+			const FVector3d Up = Position.GetSafeNormal();
+			Section.Positions[Vertex] = FVector3f(Position);
+			Section.Normals[Vertex] = FVector3f(Raw.NormalSums[Vertex].GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, Up));
+
+			const int32 Look = Raw.Looks[Vertex] & 7;
+			const double Height = Position.Length() - Params.Radius;
+			const double FacetLow = Params.FacetLow[Look];
+			const double FacetHigh = Params.FacetHigh[Look];
+			Raw.MeshUVs[Vertex].X = FacetHigh > FacetLow ? float(FMath::SmoothStep(FacetLow, FacetHigh, Height + Params.Radius)) : 0.0f;
+
+			// V of the first UV is the height above the sea as a share of the mean peak of mountains, by which M_HexPlanet fades the grid line
+			// between GridFadeStart and GridFadeEnd, as on mountains it only clutters the rock, and below the sea over GridSeaFade, as the water
+			// draws its own grid lines (WaterGrid)
+			Raw.GridUVs[Vertex].Y = float(Height / MeanPeak);
+		}
+
+		Section.Triangles = MoveTemp(Raw.Triangles);
+		Section.GridUVs = MoveTemp(Raw.GridUVs);
+		Section.MeshUVs = MoveTemp(Raw.MeshUVs);
+		Section.CellUVs = MoveTemp(Raw.CellUVs);
+		Section.LocalUVs = MoveTemp(Raw.LocalUVs);
+		Raw = FRawSection();
+	});
+
+	for (int32 Slot = 0; Slot < NumSlots && !bPiecesOnly; ++Slot)
+	{
+		Result.CoarseSections.Add(MoveTemp(Result.Sections[CoarseFirst + Slot]));
+	}
+	Result.Sections.SetNum(CoarseFirst);
+
 	return Result;
+}
+
+void HexPlanetSurface::BuildCellTriangles(const FHexSphereGrid& Grid, const FKit& Kit, const FParams& Params, TConstArrayView<int8> Levels,
+	TConstArrayView<int32> MassifSteps, TConstArrayView<double> CornerLow, TConstArrayView<float> Relief, const FReliefOverrides* Overrides,
+	const HexPlanetRivers::FCurve* Rivers, int32 Cell, TArray<FVector3f>& OutCorners)
+{
+	OutCorners.Reset();
+	if (!Grid.GetCells().IsValidIndex(Cell) || Levels.Num() != Grid.GetCells().Num() || CornerLow.Num() != Grid.GetCorners().Num()
+		|| Relief.Num() != Grid.GetCells().Num())
+	{
+		return;
+	}
+
+	// the cell alone, as Build makes it, without its coarse mesh; the normals summed across its sides do not change where its points lie
+	FContext Context{Grid, Kit, Params, Levels, MassifSteps, CornerLow, Relief};
+	Context.Overrides = Overrides;
+	Context.Rivers = Rivers && Rivers->CellSegments.Num() == Grid.GetCells().Num() ? Rivers : nullptr;
+	FRawSection Section;
+	TArray<FSharedVertex> Shared;
+	BuildCell(Context, Cell, Section, 0, Shared, FTarget());
+
+	OutCorners.Reserve(Section.Triangles.Num());
+	for (const int32 Vertex : Section.Triangles)
+	{
+		OutCorners.Add(FVector3f(Section.Positions[Vertex]));
+	}
 }

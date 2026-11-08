@@ -40,6 +40,19 @@ public:
 	UPROPERTY(EditAnywhere, Category="Grid", meta=(ClampMin=1))
 	float CoarseBand = 1500.0f;
 
+	/** Only the chunks near the camera keep their pieces on the GPU, as the others draw their coarse meshes: a chunk whose nearest point
+	 *  comes within this much past CoarseDistance + CoarseBand has them built in the background, ahead of the camera */
+	UPROPERTY(EditAnywhere, Category="Grid", meta=(ClampMin=0))
+	float PieceStreamAhead = 1500.0f;
+
+	/** How much further than that a chunk keeps its pieces before they are freed, so a camera that moves to and fro does not build them again */
+	UPROPERTY(EditAnywhere, Category="Grid", meta=(ClampMin=0))
+	float PieceStreamKeep = 1500.0f;
+
+	/** How many chunks one build of pieces in the background takes at most, the nearest first */
+	UPROPERTY(EditAnywhere, Category="Grid", meta=(ClampMin=1))
+	int32 PieceStreamChunks = 8;
+
 	/** Height of one level of land above the sea */
 	UPROPERTY(EditAnywhere, Category="Grid", meta=(ClampMin=0))
 	float LevelHeight = 25.0f;

@@ -203,21 +203,20 @@ namespace HexPlanetSurface
 		int32 NumIndices = 0;
 	};
 
-	/** Mesh of one section, ready for a procedural mesh */
+	/** Mesh of one section, ready for UHexPlanetMeshComponent, which draws no vertex colors, as only the tiles of painting have colors of their
+	 *  own. In floats, as the GPU takes it, which halves what a build of the whole planet holds; the build finds them in doubles */
 	struct FSection
 	{
-		TArray<FVector> Positions;
+		TArray<FVector3f> Positions;
 		TArray<int32> Triangles;
-		TArray<FVector> Normals;
-		TArray<FVector2D> GridUVs;
+		TArray<FVector3f> Normals;
+		TArray<FVector2f> GridUVs;
 		/** The second UV: in X the share of the faces of high ground (FHexPlanetKit::FacetHeightStart), which M_HexPlanet shades flat, and in
 		 *  Y how much of a gully a vertex is (FHexPlanetKit::GullyHeight), which it darkens and lets snow lie in */
-		TArray<FVector2D> MeshUVs;
+		TArray<FVector2f> MeshUVs;
 		/** The cell of each vertex and where it lies in it, see GetCellUV and GetLocalUV */
-		TArray<FVector2D> CellUVs;
-		TArray<FVector2D> LocalUVs;
-		/** Black, as only the tiles of painting draw colors of their own */
-		TArray<FLinearColor> Colors;
+		TArray<FVector2f> CellUVs;
+		TArray<FVector2f> LocalUVs;
 	};
 
 	/** Result of a build */
@@ -242,9 +241,13 @@ namespace HexPlanetSurface
 		TArray<FIntPoint> CellVersions;
 		TArray<FIntPoint> CellTurnChoices;
 
-		/** By cell, set for the cells of the chunks built: whether its piece is mirrored, and the factor of its height */
+		/** By cell, set for the cells of the chunks built: whether its piece is mirrored, and the factor of its height, the latter for every
+		 *  cell, as it depends on the place and the level alone; empty when FBuildOptions gave it */
 		TArray<bool> CellMirrored;
 		TArray<float> CellRelief;
+
+		/** The heights the corners of the cells meet at, for every corner (HexPlanetKit::FindCornerHeights); empty when FBuildOptions gave them */
+		TArray<double> CornerLow;
 
 		/** Boulders by chunk of Chunks, in their order */
 		TArray<TArray<FBoulder>> Boulders;
@@ -285,11 +288,34 @@ namespace HexPlanetSurface
 	/** Returns every chunk of the grid */
 	TArray<int32> GetAllChunks(const FHexSphereGrid& Grid);
 
+	/** How Build works beside what it builds */
+	struct FBuildOptions
+	{
+		/** Builds only the two sections of pieces of each chunk, without its coarse section, its boulders and its coast, for the pieces of
+		 *  chunks that come near the camera again (AHexPlanet streams them) */
+		bool bPiecesOnly = false;
+
+		/** The heights of the corners and the factors of the heights of the cells, from a build of the same levels (FBuild::CornerLow,
+		 *  FBuild::CellRelief), so they need not be found again for the whole planet; empty to find them */
+		TConstArrayView<double> CornerLow;
+		TConstArrayView<float> Relief;
+	};
+
 	/**
 	 *  Builds the sections of some chunks in parallel. A MeanPeak of 0 or less measures it from the mountains, which needs every chunk. Rivers is
-	 *  the line of the rivers (HexPlanetRivers::BuildCurve), by which the ground lowers into a valley along each river and the vertices know
-	 *  where its water lies, a function of the place and that line alone, so the cells that share a point lower it alike; null for none
+	 *  the line of the rivers (HexPlanetRivers::BuildCurve), by which the ground lowers into a valley along each river, a function of the place
+	 *  and that line alone, so the cells that share a point lower it alike; null for none
 	 */
 	FBuild Build(const FHexSphereGrid& Grid, const FKit& Kit, const FParams& Params, TConstArrayView<int8> Levels, TConstArrayView<int32> MassifSteps,
-		TConstArrayView<int32> Chunks, double MeanPeak, const FReliefOverrides* Overrides = nullptr, const HexPlanetRivers::FCurve* Rivers = nullptr);
+		TConstArrayView<int32> Chunks, double MeanPeak, const FReliefOverrides* Overrides = nullptr, const HexPlanetRivers::FCurve* Rivers = nullptr,
+		const FBuildOptions& Options = FBuildOptions());
+
+	/**
+	 *  Builds the triangles of one cell as Build does, three corners each in the space of the planet, from what a build of the same levels
+	 *  read and found: the heights of its corners (FBuild::CornerLow) and the factors of the heights (FBuild::CellRelief). For what stands on
+	 *  the ground of a cell, as the surface keeps its meshes on the GPU alone. Reads only its arguments, so any thread may call it
+	 */
+	void BuildCellTriangles(const FHexSphereGrid& Grid, const FKit& Kit, const FParams& Params, TConstArrayView<int8> Levels, TConstArrayView<int32> MassifSteps,
+		TConstArrayView<double> CornerLow, TConstArrayView<float> Relief, const FReliefOverrides* Overrides, const HexPlanetRivers::FCurve* Rivers, int32 Cell,
+		TArray<FVector3f>& OutCorners);
 }

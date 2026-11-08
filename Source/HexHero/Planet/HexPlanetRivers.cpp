@@ -2,6 +2,7 @@
 
 #include "HexPlanetRivers.h"
 #include "Algo/Reverse.h"
+#include "Async/ParallelFor.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
@@ -1504,17 +1505,26 @@ void UHexPlanetRivers::UpdateBridges()
 	const FBox MeshBounds = Bridges->GetStaticMesh()->GetBoundingBox();
 	const double MeshLength = FMath::Max(MeshBounds.GetSize().X, 1.0);
 	const double Scale = Settings->BridgeLength / MeshLength;
-	TArray<FVector3f> Triangles;
-	TArray<FTransform> Transforms;
 
+	// the sides with a bridge, placed in parallel, as the planet may build the ground of their cells again for it (AHexPlanet::GetCellTriangles)
+	TArray<TPair<int32, int32>> BridgeSides;
 	for (const TPair<uint64, uint8>& Each : Edges)
 	{
 		int32 A, B;
 		HexPlanetRivers::GetEdgeCells(Each.Key, A, B);
-		if (Each.Value < 2 || !IsEdgeAllowed(A, B))
+		if (Each.Value >= 2 && IsEdgeAllowed(A, B))
 		{
-			continue;
+			BridgeSides.Emplace(A, B);
 		}
+	}
+	TArray<FTransform> Transforms;
+	Transforms.SetNum(BridgeSides.Num());
+
+	ParallelFor(BridgeSides.Num(), [&](int32 Index)
+	{
+		const int32 A = BridgeSides[Index].Key;
+		const int32 B = BridgeSides[Index].Value;
+		TArray<FVector3f> Triangles;
 		const int32 Side = Cells[A].Neighbors.IndexOfByKey(B);
 		int32 From, To;
 		GetSideCorners(Cells[A], Side, From, To);
@@ -1545,8 +1555,8 @@ void UHexPlanetRivers::UpdateBridges()
 		Across *= FVector3d::DotProduct(Across, Cells[B].Center - Cells[A].Center) < 0.0 ? -1.0 : 1.0;
 		const FVector3d Along = FVector3d::CrossProduct(Up, Across);
 		const FMatrix Axes(FVector(Across), FVector(Along), FVector(Up), FVector::ZeroVector);
-		Transforms.Add(FTransform(Axes.ToQuat(), FVector(Ground - Up * Settings->BridgeSink), FVector(Scale)));
-	}
+		Transforms[Index] = FTransform(Axes.ToQuat(), FVector(Ground - Up * Settings->BridgeSink), FVector(Scale));
+	});
 
 	Bridges->AddInstances(Transforms, false, false, false);
 	for (int32 Instance = 0; Instance < Transforms.Num(); ++Instance)

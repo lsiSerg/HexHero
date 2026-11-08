@@ -496,31 +496,38 @@ void UHexPlanetObjects::RebuildChunks(TConstArrayView<int32> Chunks)
 
 TArray<UHexPlanetObjects::FInstance> UHexPlanetObjects::PlaceChunk(int32 Chunk) const
 {
-	TArray<FInstance> Instances;
-	TArray<FVector3f> Triangles;
+	// the cells with something to place, whose ground is found in parallel, as the planet may build it again for that, keeping its surface on
+	// the GPU alone (AHexPlanet::GetCellTriangles)
+	TArray<int32> Placed;
 	for (const int32 Cell : ChunkCells[Chunk])
 	{
 		const FHexCellObjects& Objects = CellObjects[Cell];
-		if (Objects.IsEmpty())
-		{
-			continue;
-		}
 		const int32 Level = Planet->GetCellLevel(Cell);
-		const bool bCover = Objects.Cover != 0 && IsAllowed(Objects.Cover - 1, Level);
-		const bool bDecor = Objects.Decor != 0 && IsAllowed(Objects.Decor - 1, Level);
-		if (!bCover && !bDecor)
+		if (!Objects.IsEmpty() && ((Objects.Cover != 0 && IsAllowed(Objects.Cover - 1, Level)) || (Objects.Decor != 0 && IsAllowed(Objects.Decor - 1, Level))))
 		{
-			continue;
+			Placed.Add(Cell);
 		}
+	}
+	TArray<TArray<FVector3f>> Grounds;
+	Grounds.SetNum(Placed.Num());
+	ParallelFor(Placed.Num(), [&](int32 Index)
+	{
+		Planet->GetCellTriangles(Placed[Index], Grounds[Index]);
+	});
 
-		Planet->GetCellTriangles(Cell, Triangles);
-		if (bCover)
+	TArray<FInstance> Instances;
+	for (int32 Index = 0; Index < Placed.Num(); ++Index)
+	{
+		const int32 Cell = Placed[Index];
+		const FHexCellObjects& Objects = CellObjects[Cell];
+		const int32 Level = Planet->GetCellLevel(Cell);
+		if (Objects.Cover != 0 && IsAllowed(Objects.Cover - 1, Level))
 		{
-			PlaceInCell(Cell, Objects.Cover - 1, Objects.Density, false, Triangles, Instances);
+			PlaceInCell(Cell, Objects.Cover - 1, Objects.Density, false, Grounds[Index], Instances);
 		}
-		if (bDecor)
+		if (Objects.Decor != 0 && IsAllowed(Objects.Decor - 1, Level))
 		{
-			PlaceInCell(Cell, Objects.Decor - 1, 1, true, Triangles, Instances);
+			PlaceInCell(Cell, Objects.Decor - 1, 1, true, Grounds[Index], Instances);
 		}
 	}
 	return Instances;

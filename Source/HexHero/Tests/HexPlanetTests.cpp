@@ -17,6 +17,31 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+namespace
+{
+	/** Returns how many cells, built again on their own as the planet builds them when no build holds their mesh (BuildCellTriangles), give
+	 *  other triangles than a build of every chunk, which must have found the heights of the corners and the relief itself */
+	int32 CountCellsBuiltOtherwise(const FHexSphereGrid& Grid, const HexPlanetSurface::FKit& Kit, const HexPlanetSurface::FParams& Params, TConstArrayView<int8> Levels,
+		TConstArrayView<int32> Massif, const HexPlanetSurface::FBuild& Full, const HexPlanetSurface::FReliefOverrides* Overrides, const HexPlanetRivers::FCurve* Rivers)
+	{
+		int32 Otherwise = 0;
+		TArray<FVector3f> Corners;
+		for (int32 Cell = 0; Cell < Grid.GetCells().Num(); ++Cell)
+		{
+			const HexPlanetSurface::FCellMesh& Range = Full.CellMeshes[Cell];
+			const HexPlanetSurface::FSection& Section = Full.Sections[Range.Section];
+			HexPlanetSurface::BuildCellTriangles(Grid, Kit, Params, Levels, Massif, Full.CornerLow, Full.CellRelief, Overrides, Rivers, Cell, Corners);
+			bool bSame = Corners.Num() == Range.NumIndices && Range.NumIndices > 0;
+			for (int32 Index = 0; bSame && Index < Range.NumIndices; ++Index)
+			{
+				bSame = Corners[Index].Equals(FVector3f(Section.Positions[Section.Triangles[Range.FirstIndex + Index]]), 1.0e-3f);
+			}
+			Otherwise += bSame ? 0 : 1;
+		}
+		return Otherwise;
+	}
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHexSphereGridBlendTest, "HexHero.Planet.Grid.Blend",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
@@ -813,8 +838,8 @@ bool FHexPlanetSurfaceRebuildTest::RunTest(const FString& Parameters)
 		}
 		for (int32 Vertex = 0; Vertex < A.Positions.Num(); ++Vertex)
 		{
-			if (!A.Positions[Vertex].Equals(B.Positions[Vertex], 1.0e-6) || !A.Normals[Vertex].Equals(B.Normals[Vertex], 1.0e-4)
-				|| !A.Colors[Vertex].Equals(B.Colors[Vertex], 1.0e-4f) || !A.GridUVs[Vertex].Equals(B.GridUVs[Vertex], 1.0e-5))
+			if (!A.Positions[Vertex].Equals(B.Positions[Vertex], 1.0e-3f) || !A.Normals[Vertex].Equals(B.Normals[Vertex], 1.0e-4f)
+				|| !A.GridUVs[Vertex].Equals(B.GridUVs[Vertex], 1.0e-5f) || !A.LocalUVs[Vertex].Equals(B.LocalUVs[Vertex], 1.0e-5f))
 			{
 				AddError(FString::Printf(TEXT("%s: vertex %d differs, normal %s and %s"), *What, Vertex, *A.Normals[Vertex].ToString(), *B.Normals[Vertex].ToString()));
 				return;
@@ -851,6 +876,27 @@ bool FHexPlanetSurfaceRebuildTest::RunTest(const FString& Parameters)
 	}
 
 	AddInfo(FString::Printf(TEXT("%d pieces, %d of %d chunks rebuilt"), Kit->Pieces.Num(), Chunks.Num(), Grid.GetNumChunks()));
+
+	// the pieces alone, from the heights of the corners and the relief of a build of the same levels, as the planet streams them back to the
+	// GPU near the camera, are those of the full build
+	HexPlanetSurface::FBuildOptions PiecesOnly;
+	PiecesOnly.bPiecesOnly = true;
+	PiecesOnly.CornerLow = Full.CornerLow;
+	PiecesOnly.Relief = Full.CellRelief;
+	const HexPlanetSurface::FBuild Pieces = HexPlanetSurface::Build(Grid, *Kit, Params, NewLevels, NewMassif, Chunks, Old.MeanPeak, &Overrides, nullptr, PiecesOnly);
+	TestTrue(TEXT("A build of the pieces alone has no coarse sections, coasts nor heights of its own"),
+		Pieces.CoarseSections.IsEmpty() && Pieces.Coasts.IsEmpty() && Pieces.CornerLow.IsEmpty() && Pieces.CellRelief.IsEmpty());
+	for (int32 Slot = 0; Slot < Chunks.Num(); ++Slot)
+	{
+		for (int32 Part = 0; Part < 2; ++Part)
+		{
+			Compare(Pieces.Sections[Slot * 2 + Part], Full.Sections[Chunks[Slot] * 2 + Part], FString::Printf(TEXT("Pieces alone of section %d"), Chunks[Slot] * 2 + Part));
+		}
+	}
+
+	// and each cell built again on its own gives the triangles it has in the full build
+	TestEqual(TEXT("Every cell built again on its own has the triangles of the full build"),
+		CountCellsBuiltOtherwise(Grid, *Kit, Params, NewLevels, NewMassif, Full, &Overrides, nullptr), 0);
 
 	// the pieces of mountains, mirrored, turned and stretched by cell, meet their neighbors exactly on their shared sides
 	TestEqual(TEXT("Every point on a side between mountains is built by both cells"), Full.UnmatchedRidgePoints, 0);
@@ -1118,8 +1164,8 @@ bool FHexPlanetRiversTest::RunTest(const FString& Parameters)
 			bool bSame = A.Positions.Num() == B.Positions.Num();
 			for (int32 Vertex = 0; bSame && Vertex < A.Positions.Num(); ++Vertex)
 			{
-				bSame = A.Positions[Vertex].Equals(B.Positions[Vertex], 1.0e-6) && A.Normals[Vertex].Equals(B.Normals[Vertex], 1.0e-4)
-					&& A.Colors[Vertex].Equals(B.Colors[Vertex], 1.0e-4f);
+				bSame = A.Positions[Vertex].Equals(B.Positions[Vertex], 1.0e-3f) && A.Normals[Vertex].Equals(B.Normals[Vertex], 1.0e-4f)
+					&& A.GridUVs[Vertex].Equals(B.GridUVs[Vertex], 1.0e-5f);
 			}
 			if (!bSame)
 			{
@@ -1127,6 +1173,10 @@ bool FHexPlanetRiversTest::RunTest(const FString& Parameters)
 			}
 		}
 	}
+
+	// a cell built again on its own lies in the valleys of the rivers as in the full build
+	TestEqual(TEXT("Every cell built again on its own has the triangles of the full build, with the rivers"),
+		CountCellsBuiltOtherwise(Grid, *Kit, Params, Levels, Massif, Full, nullptr, &Curve.Get()), 0);
 	return true;
 }
 

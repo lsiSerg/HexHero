@@ -105,7 +105,8 @@ public:
 	/** Returns where the camera is */
 	FHexPlanetCameraPlacement GetPlacement() const;
 
-	/** Puts the camera at a place at once */
+	/** Puts the camera at a place at once, as a cut: the sun stands where it should there at once, and the renderer drops what it kept of
+	 *  the frames before */
 	void SetPlacement(const FHexPlanetCameraPlacement& Placement);
 
 	/** Copies to the clipboard the console commands hex.LoadPlanet and hex.PlanetSetCamera, which open the planet and put the camera where it is now */
@@ -250,6 +251,12 @@ private:
 
 	/** Places the camera */
 	void UpdateCameraPosition();
+
+	/** Returns where the camera stands for an orientation and a distance, as UpdateCameraPosition puts it */
+	FVector GetCameraLocationAt(const FQuat& InOrientation, double Distance) const;
+
+	/** How long the jump asked for by hex.PlanetSetCamera has waited for the planet to build the pieces around the place it goes to */
+	float JumpWaitTime = 0.0f;
 
 	/** Returns the direction the sun should shine from for the view now: SunAzimuth and an elevation by the distance over the point under the camera */
 	FVector GetIdealSunFrom() const;

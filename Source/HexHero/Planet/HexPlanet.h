@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "HexPlanetFile.h"
+#include "HexPlanetMeshComponent.h"
 #include "HexPlanetSurface.h"
 #include "HexSphereGrid.h"
 #include "HexWorldMap.h"
@@ -30,7 +31,6 @@ class UHexPlanetConfig;
 class UHexPlanetObjects;
 class UHexPlanetRivers;
 class UHexPlanetWaterConfig;
-struct FProcMeshSection;
 
 /**
  *  Prototype of the world map as a planet: a hex sphere whose cells get a level from noise. Each cell is a piece of the kit of its level,
@@ -51,14 +51,14 @@ class AHexPlanet : public AActor
 	TObjectPtr<UProceduralMeshComponent> Surface;
 
 	/** Cells of the planet, one component per chunk of the grid with two sections, the second with the mountains, so a chunk is culled on its
-	 *  own and rebuilding it recreates the render state of that chunk alone */
+	 *  own and rebuilding it recreates the render state of that chunk alone. Only the chunks near the camera hold them (ChunkPieces) */
 	UPROPERTY(Transient)
-	TArray<TObjectPtr<UProceduralMeshComponent>> SurfaceChunks;
+	TArray<TObjectPtr<UHexPlanetMeshComponent>> SurfaceChunks;
 
 	/** The coarse mesh of each chunk, drawn beyond CoarseDistance of DA_HexPlanet in place of its SurfaceChunks, and with them in the band
 	 *  around it, where they dissolve into each other (UpdateChunkLod), also in the debug views */
 	UPROPERTY(Transient)
-	TArray<TObjectPtr<UProceduralMeshComponent>> CoarseChunks;
+	TArray<TObjectPtr<UHexPlanetMeshComponent>> CoarseChunks;
 
 	/** Boulders at the foot of the mountains on the edge of ranges, one component per mesh of FHexPlanetBoulders, with the rock layer of the
 	 *  biome of their mountain as the first custom data of each instance (UpdateBoulders) */
@@ -159,6 +159,65 @@ private:
 
 	/** By chunk: 0 while it draws only its pieces, 1 in the band where it draws both, 2 while it draws only its coarse mesh */
 	TArray<uint8> ChunkLodStates;
+
+	/**
+	 *  By chunk, whether its pieces are on the GPU (2), being built in the background (1) or neither (0). The surface keeps them nowhere else,
+	 *  so a chunk that comes within PieceStreamAhead past the band of DA_HexPlanet has them built again (StartStream) and one further than
+	 *  PieceStreamKeep past that frees them, as it draws its coarse mesh there (UpdateChunkLod)
+	 */
+	TArray<uint8> ChunkPieces;
+
+	/** The bounds of the pieces of each chunk, kept while it has none, by which UpdateChunkLod measures how far it is */
+	TArray<FBoxSphereBounds> ChunkBounds;
+
+	/** By chunk, how many times a build of every kind showed it, so pieces built in the background before a rebuild of levels made the
+	 *  chunk anew are dropped */
+	TArray<uint32> ChunkGenerations;
+
+	/** Where UpdateChunkLod last measured from, by which a rebuild of levels gives pieces only to the chunks that want them */
+	FVector LodCamera = FVector::ZeroVector;
+	bool bHasLodCamera = false;
+
+	/** Where the camera is about to jump to, whose chunks get their pieces first (SetPiecePrefetch) */
+	TOptional<FVector> PrefetchCamera;
+
+	/** Builds the pieces of chunks on the game thread, in parallel, for a camera that came near chunks without them, as their coarse meshes
+	 *  next to the pieces of their neighbors would leave gaps */
+	void BuildPiecesNow(TArray<int32> Chunks);
+
+	/** The build of every chunk at the start, whose pieces go to the GPU for the chunks the camera wants in the first frames, while it finds
+	 *  its place, and then is freed */
+	TUniquePtr<HexPlanetSurface::FBuild> StartupSurface;
+	int32 StartupFramesLeft = 0;
+
+	/** A build that holds the meshes of the cells of its chunks while ApplySurface shows it or StartupSurface lives, from which
+	 *  GetCellTriangles reads them instead of building them again */
+	const HexPlanetSurface::FBuild* TriangleSource = nullptr;
+
+	/** The pieces of chunks near the camera, built in the background from the state of the surface shown */
+	struct FChunkStream;
+	UE::Tasks::FTask StreamTask;
+	TSharedPtr<FChunkStream> Stream;
+
+	/** Starts building in the background the pieces of chunks that want them */
+	void StartStream(TArray<int32> Chunks);
+
+	/** Shows the pieces the stream built, of the chunks that no build showed anew meanwhile */
+	void FinishStream();
+
+	/** Sends the two sections of pieces of a chunk to the GPU, or frees them */
+	void SetChunkPieces(int32 Chunk, FHexPlanetMeshSectionRef Land, FHexPlanetMeshSectionRef Mountains);
+	void DropChunkPieces(int32 Chunk);
+
+	/** Returns the distances around CoarseDistance where the pieces of a chunk dissolve into its coarse mesh, of DA_HexPlanet or the console */
+	void GetLodBand(double& OutNear, double& OutFar) const;
+
+	/** Returns true if a chunk wants its pieces on the GPU from where UpdateChunkLod last measured */
+	bool WantsPieces(int32 Chunk) const;
+
+	/** The heights of the corners of the cells the surface shown was built with (HexPlanetSurface::FBuild::CornerLow), from which
+	 *  GetCellTriangles builds the triangles of a cell again */
+	TArray<double> ShownCornerLow;
 
 	/** Material of the wireframe of the whole surface */
 	UPROPERTY(Transient)
@@ -320,8 +379,9 @@ public:
 	/** Returns the rock layer of the biome of a cell, as the surface draws it on slopes and mountains */
 	int32 GetCellRockLayer(int32 Cell) const;
 
-	/** Gives the triangles of the surface of a cell as shown now, three corners each, empty before it is built. Reads only, so any thread may
-	 *  call it while the surface does not change */
+	/** Gives the triangles of the surface of a cell as shown now, three corners each, empty before it is built: from the build being shown
+	 *  when it holds the cell, else built again from what the surface shown was built from, as its meshes are on the GPU alone. Reads only,
+	 *  so any thread may call it while the surface does not change */
 	void GetCellTriangles(int32 Cell, TArray<FVector3f>& OutCorners) const;
 
 	/** Returns the forests, bushes, stones and decor of the cells */
@@ -396,6 +456,23 @@ public:
 
 	/** Returns true once the planet is built, a few frames after it begins to play; until then the grid is empty and the radius 0 */
 	bool IsBuilt() const { return bBuilt; }
+
+	/**
+	 *  Returns true if every chunk that draws its pieces from a camera at a place has them on the GPU, so the camera may jump there without
+	 *  landing on coarse meshes with gaps between them and its pieces; the pieces stream only near the camera
+	 */
+	bool ArePiecesReadyAt(const FVector& CameraLocation) const;
+
+	/** Builds first, all at once in the background, the pieces of the chunks around a place the camera is about to jump to, and keeps them
+	 *  until it has; unset once it jumped (AHexPlanetCameraPawn waits for ArePiecesReadyAt) */
+	void SetPiecePrefetch(TOptional<FVector> CameraLocation) { PrefetchCamera = CameraLocation; }
+
+	/**
+	 *  Logs what the surface holds in memory, after the times of frames the caller measured: its triangles by level, the copies of the meshes
+	 *  of its chunks on the CPU and the GPU, the memory of the process, and the ray tracing geometry of the chunks and the memory of the RHI
+	 *  (D3D12.DumpRayTracingGeometries, rhi.DumpMemory). hex.PlanetMemory calls it
+	 */
+	void LogMemory(const FString& FrameTimes);
 
 protected:
 
@@ -632,11 +709,15 @@ private:
 	/** Returns true if a section of the surface holds mountains, which the wireframe does not count as terrain */
 	static bool IsMountainSection(int32 Section) { return Section % 2 == 1; }
 
-	/** Returns a section of the surface, two per chunk, or null before it is built */
-	const FProcMeshSection* GetSurfaceSection(int32 Section) const;
-
 	/** Returns true if the wireframe draws a section for a target */
 	static bool IsWireTarget(int32 Section, EHexWireframeTarget Target);
+
+	/** Sets the copy of a part of a chunk that the wireframe of the whole surface draws, 0 and 1 its pieces and 2 its coarse mesh, from the
+	 *  section of a build, or clears it with none or while that wireframe is not drawn */
+	void SetWireSection(int32 Chunk, int32 Part, const HexPlanetSurface::FSection* Section);
+
+	/** Builds every copy the wireframe of the whole surface draws, from a build of the surface shown, as the surface keeps its meshes on the GPU alone */
+	void BuildWireSections();
 
 	/** Follows the console variables of the debug view: the wireframe and the water */
 	void UpdateDebugView();
@@ -668,8 +749,11 @@ private:
 	/** Reads the kit and builds two mesh sections per chunk of the grid, the second of them with the mountains */
 	void BuildSurface();
 
-	/** Shows the sections of the faces of a build, and keeps where its cells lie in them */
-	void ApplySurface(HexPlanetSurface::FBuild& Build);
+	/**
+	 *  Shows a build: the coarse meshes of its chunks, the pieces of those that want them (WantsPieces), or none at the start, when
+	 *  StartupSurface keeps them for UpdateChunkLod, and keeps where its cells lie in its sections
+	 */
+	void ApplySurface(HexPlanetSurface::FBuild& Build, bool bStartup = false);
 
 	/** Reads relief.json of the planet into ReliefOverrides */
 	void LoadRelief();

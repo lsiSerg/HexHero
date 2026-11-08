@@ -2,6 +2,7 @@
 
 #include "HexPlanetCameraPawn.h"
 #include "Camera/CameraComponent.h"
+#include "Camera/PlayerCameraManager.h"
 #include "Components/SceneComponent.h"
 #include "Engine/DirectionalLight.h"
 #include "Engine/LocalPlayer.h"
@@ -305,9 +306,30 @@ void AHexPlanetCameraPawn::Tick(float DeltaTime)
 
 	if (PendingPlanetPlacement.IsSet() && !(WorldContext && !WorldContext->TravelURL.IsEmpty()))
 	{
+		// the camera jumps once the planet has built the pieces of the chunks around the place it goes to, which it keeps them only near the
+		// camera, so it lands on a whole surface; until then it stays where it is, at most JumpWaitMax
 		const FHexPlanetCameraPlacement Placement = PendingPlanetPlacement.GetValue();
-		PendingPlanetPlacement.Reset();
-		SetPlacement(Placement);
+		const double Distance = Placement.Distance > 0.0 ? FMath::Clamp(Placement.Distance, double(Settings()->MinDistance), GetMaxDistance()) : TargetDistance;
+		const FVector Target = GetCameraLocationAt(Placement.ToOrientation(), Distance);
+		const bool bReady = Planet->ArePiecesReadyAt(Target);
+
+		if (!bReady && JumpWaitTime < Settings()->JumpWaitMax)
+		{
+			Planet->SetPiecePrefetch(Target);
+			JumpWaitTime += DeltaTime;
+		}
+		else
+		{
+			if (JumpWaitTime > 0.0f)
+			{
+				UE_LOG(LogHexHero, Log, TEXT("The planet camera jumps after %.0f ms, while the planet built the pieces around its place%s"), JumpWaitTime * 1000.0f,
+					bReady ? TEXT("") : TEXT(", not all of them"));
+			}
+			PendingPlanetPlacement.Reset();
+			Planet->SetPiecePrefetch({});
+			JumpWaitTime = 0.0f;
+			SetPlacement(Placement);
+		}
 	}
 
 	// a focus asked for at startup puts the camera there at once, without a glide
@@ -461,6 +483,14 @@ double AHexPlanetCameraPawn::GetPitchAtDistance(double Distance) const
 	return FMath::Lerp(Settings()->ClosePitch, Settings()->FarPitch, Alpha);
 }
 
+FVector AHexPlanetCameraPawn::GetCameraLocationAt(const FQuat& InOrientation, double Distance) const
+{
+	const FVector Up = InOrientation.GetAxisZ();
+	const FVector Forward = InOrientation.GetAxisX();
+	const double Pitch = FMath::DegreesToRadians(GetPitchAtDistance(Distance));
+	return Up * (Planet ? Planet->GetRadius() : 0.0) + (Up * FMath::Sin(Pitch) - Forward * FMath::Cos(Pitch)) * Distance;
+}
+
 void AHexPlanetCameraPawn::UpdateCameraPosition()
 {
 	const FVector Up = Orientation.GetAxisZ();
@@ -468,7 +498,7 @@ void AHexPlanetCameraPawn::UpdateCameraPosition()
 
 	const double Pitch = FMath::DegreesToRadians(GetPitchAtDistance(CurrentDistance));
 	const FVector Target = Up * Planet->GetRadius();
-	const FVector Location = Target + (Up * FMath::Sin(Pitch) - Forward * FMath::Cos(Pitch)) * CurrentDistance;
+	const FVector Location = GetCameraLocationAt(Orientation, CurrentDistance);
 
 	// looking straight down, the forward direction of the screen stays the forward direction of the orientation
 	const FVector ScreenUp = (Up * FMath::Cos(Pitch) + Forward * FMath::Sin(Pitch)).GetSafeNormal();
@@ -780,6 +810,21 @@ void AHexPlanetCameraPawn::SetPlacement(const FHexPlanetCameraPlacement& Placeme
 	}
 
 	UpdateCameraPosition();
+
+	// a cut: the lazy sun stands where it should over the new place at once, as it did the first time, rather than gliding there in the dark,
+	// and the renderer does not blend the frames of the old place into the new one
+	if (CVarHexPlanetSun.GetValueOnGameThread())
+	{
+		SunFrom = FVector::ZeroVector;
+		bSunPlaced = false;
+	}
+	if (const APlayerController* PlayerController = Cast<APlayerController>(GetController()))
+	{
+		if (PlayerController->PlayerCameraManager)
+		{
+			PlayerController->PlayerCameraManager->SetGameCameraCutThisFrame();
+		}
+	}
 
 	const int32 Cell = Planet ? Planet->GetGrid().FindCell(FVector3d(Orientation.GetAxisZ())) : INDEX_NONE;
 	UE_LOG(LogHexHero, Log, TEXT("Put the planet camera over cell %d at %.4f %.4f, heading %.1f at %.0f"),
