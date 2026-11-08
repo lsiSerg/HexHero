@@ -7,6 +7,7 @@
 #include "HexMeshBuilder.h"
 #include "HexPlanetConfig.h"
 #include "HexPlanetKitConfig.h"
+#include "HexPlanetRivers.h"
 #include "HexSphereGrid.h"
 
 namespace
@@ -34,6 +35,7 @@ namespace
 		TArray<FVector2D> LocalUVs;
 		/** Level + 2 of the cell of each vertex, plus 8 on a pentagon, which chooses its colors */
 		TArray<uint8> Looks;
+
 	};
 
 	/** A vertex on the side of a cell, whose normal is summed with those of the neighbors at the same place */
@@ -76,7 +78,24 @@ namespace
 		TArray<double> CornerLow;
 		TArray<float> Relief;
 		const HexPlanetSurface::FReliefOverrides* Overrides = nullptr;
+		/** The line of the rivers, null for none */
+		const HexPlanetRivers::FCurve* Rivers = nullptr;
 	};
+
+	/** Lowers a point of a cell into the valley of the nearest river, a function of the point and the line of the rivers alone, so the cells that
+	 *  share a point lower it alike */
+	FVector3d CarveRiver(const FContext& Context, int32 Cell, const FVector3d& Position)
+	{
+		const HexPlanetSurface::FParams& Params = Context.Params;
+		const FVector3d Up = Position.GetSafeNormal();
+		HexPlanetRivers::FCurveHit Hit;
+		if (!Context.Rivers || !HexPlanetRivers::FindNearest(*Context.Rivers, Cell, Up, Hit))
+		{
+			return Position;
+		}
+		const double Share = 1.0 - FMath::SmoothStep(Params.RiverValleyBottom, Params.RiverValleyBottom + FMath::Max(Params.RiverValleySlope, 1.0), Hit.Distance);
+		return Share > 0.0 ? Position - Up * (Params.RiverValleyDepth * Share) : Position;
+	}
 
 	/** The mask of a piece mirrored across the line through its corners 0 and 3: direction N goes to 5 - N */
 	int32 MirrorMask(int32 Mask)
@@ -124,7 +143,7 @@ namespace
 
 		const auto AddVertex = [&](int32 Side, double WCenter, double WFrom, double WTo, double Z, float GridU, bool bShared)
 		{
-			const FVector3d Position = HexPlanetKit::PlaceVertex(Grid, Cell, Frame, Placement, Side, WCenter, WFrom, WTo, Z);
+			const FVector3d Position = CarveRiver(Context, Cell, HexPlanetKit::PlaceVertex(Grid, Cell, Frame, Placement, Side, WCenter, WFrom, WTo, Z));
 			if (bShared)
 			{
 				Target.Shared->Add({Target.Tag, Section.Positions.Num(), GetKey(Position)});
@@ -388,7 +407,7 @@ namespace
 				const double WFrom = bMirrored ? Vertex.WTo : Vertex.WFrom;
 				const double WTo = bMirrored ? Vertex.WFrom : Vertex.WTo;
 				double Crevice = 0.0;
-				const FVector3d Position = HexPlanetKit::PlaceVertex(Grid, Cell, Frame, Placement, Side, Vertex.WCenter, WFrom, WTo, Vertex.Z, &Crevice);
+				const FVector3d Position = CarveRiver(Context, Cell, HexPlanetKit::PlaceVertex(Grid, Cell, Frame, Placement, Side, Vertex.WCenter, WFrom, WTo, Vertex.Z, &Crevice));
 
 				if (Vertex.bOnSide)
 				{
@@ -575,6 +594,9 @@ HexPlanetSurface::FParams HexPlanetSurface::FParams::Make(const UHexPlanetConfig
 		Params.SlopeColors[Level + 2] = Loaded ? Loaded->SlopeColor : LevelColor * Config.SlopeDarkening;
 	}
 
+	Params.RiverValleyDepth = Config.RiverValleyDepth;
+	Params.RiverValleyBottom = Config.RiverValleyBottom;
+	Params.RiverValleySlope = Config.RiverValleySlope;
 	Params.SandColor = Config.SandColor;
 	Params.SnowColor = Config.SnowColor;
 	Params.SlopeStart = Config.SlopeStart;
@@ -800,7 +822,7 @@ TArray<int32> HexPlanetSurface::FindChangedOverrides(const FReliefOverrides& Old
 }
 
 HexPlanetSurface::FBuild HexPlanetSurface::Build(const FHexSphereGrid& Grid, const FKit& Kit, const FParams& Params, TConstArrayView<int8> Levels,
-	TConstArrayView<int32> MassifSteps, TConstArrayView<int32> Chunks, double MeanPeak, const FReliefOverrides* Overrides)
+	TConstArrayView<int32> MassifSteps, TConstArrayView<int32> Chunks, double MeanPeak, const FReliefOverrides* Overrides, const HexPlanetRivers::FCurve* Rivers)
 {
 	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
 
@@ -817,6 +839,7 @@ HexPlanetSurface::FBuild HexPlanetSurface::Build(const FHexSphereGrid& Grid, con
 	FContext Context{Grid, Kit, Params, Levels, MassifSteps, {}, {}};
 	Context.CornerLow = HexPlanetKit::FindCornerHeights(Grid, [&](int32 Cell) { return Params.GetTop(Levels[Cell]); });
 	Context.Overrides = Overrides;
+	Context.Rivers = Rivers && Rivers->CellSegments.Num() == Cells.Num() ? Rivers : nullptr;
 	Context.Relief = FindRelief(Grid, Kit, Params, Levels, Overrides);
 
 	// the slot of each chunk built, whose sections are Slot * 2 and Slot * 2 + 1 of the result
@@ -931,6 +954,14 @@ HexPlanetSurface::FBuild HexPlanetSurface::Build(const FHexSphereGrid& Grid, con
 						const double S = Random.FRandRange(0.12, 0.88);
 						const double Out = Random.FRand() * Kit.BoulderSpread;
 						const FVector3d Position = HexPlanetKit::PlaceVertex(Grid, Neighbor, NeighborFrame, Ground, NeighborSide, Out, (1.0 - Out) * S, (1.0 - Out) * (1.0 - S), 0.0);
+
+						// not in the valley of a river
+						HexPlanetRivers::FCurveHit Hit;
+						if (Context.Rivers && HexPlanetRivers::FindNearest(*Context.Rivers, Neighbor, Position.GetSafeNormal(), Hit)
+							&& Hit.Distance < Params.RiverValleyBottom + Params.RiverValleySlope)
+						{
+							continue;
+						}
 
 						FBoulder Boulder;
 						Boulder.Mesh = Random.RandRange(0, Kit.BoulderMeshes - 1);
@@ -1057,24 +1088,9 @@ HexPlanetSurface::FBuild HexPlanetSurface::Build(const FHexSphereGrid& Grid, con
 			const double FacetLow = Params.FacetLow[Look];
 			const double FacetHigh = Params.FacetHigh[Look];
 			Raw.MeshUVs[Vertex].X = FacetHigh > FacetLow ? FMath::SmoothStep(FacetLow, FacetHigh, Height + Params.Radius) : 0.0;
-			const float Flatness = float(FVector3d::DotProduct(Normal, Up));
 
-			FLinearColor Color = FMath::Lerp(Params.FlatColors[Look], Params.SlopeColors[Look], 1.0f - FMath::SmoothStep(Params.SlopeStart, Params.SlopeEnd, Flatness));
-			if (Look == 4)
-			{
-				Color = FMath::Lerp(Color, Params.SnowColor, FMath::SmoothStep(Params.SnowHeight, Params.SnowHeight + Params.SnowFade, float(Height))
-					* FMath::SmoothStep(Params.SnowFlatStart, Params.SnowFlatEnd, Flatness));
-			}
-			if (Height < 0.0)
-			{
-				Color = FMath::Lerp(Params.SandColor, Params.FlatColors[0], FMath::SmoothStep(0.0f, float(Params.DeepDepth), float(-Height)));
-			}
-			else
-			{
-				Color = FMath::Lerp(Params.SandColor, Color, FMath::SmoothStep(Params.BeachHeight, Params.BeachHeight + Params.BeachFade, float(Height)));
-			}
-			Color.A = 0.0f;
-			Section.Colors[Vertex] = Color;
+			// the painted tiles draw colors of their own, the surface none
+			Section.Colors[Vertex] = FLinearColor(0.0f, 0.0f, 0.0f, 0.0f);
 
 			// V of the first UV is the height above the sea as a share of the mean peak of mountains, by which M_HexPlanet fades the grid line
 			// between GridFadeStart and GridFadeEnd, as on mountains it only clutters the rock, and below the sea over GridSeaFade, as the water

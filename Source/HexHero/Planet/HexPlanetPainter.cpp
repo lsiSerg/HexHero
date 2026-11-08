@@ -5,6 +5,8 @@
 #include "HexPlanetConfig.h"
 #include "HexBiomeConfig.h"
 #include "HexPlanetObjectSet.h"
+#include "HexPlanetRivers.h"
+#include "HexSphereGrid.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
@@ -126,13 +128,24 @@ void UHexPlanetPainter::BeginStroke(int32 Cell)
 
 	bPainting = true;
 	LastCell = INDEX_NONE;
+	LastCorner = INDEX_NONE;
 	Stroke = FStep();
 	ContinueStroke(Cell);
 }
 
 void UHexPlanetPainter::ContinueStroke(int32 Cell)
 {
-	if (!bPainting || !Planet->GetGrid().GetCells().IsValidIndex(Cell) || Cell == LastCell)
+	if (!bPainting || !Planet->GetGrid().GetCells().IsValidIndex(Cell))
+	{
+		return;
+	}
+	// rivers follow the corners under the cursor, which change within a cell
+	if (Tool == EHexPaintTool::River || Tool == EHexPaintTool::Bridge)
+	{
+		PaintRiver(Cell);
+		return;
+	}
+	if (Cell == LastCell)
 	{
 		return;
 	}
@@ -299,6 +312,149 @@ void UHexPlanetPainter::PaintAround(int32 Cell)
 	}
 }
 
+TArray<uint64> UHexPlanetPainter::FindCornerPath(int32 From, int32 To)
+{
+	const FHexSphereGrid& Grid = Planet->GetGrid();
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+	if (CornerCells.IsEmpty())
+	{
+		CornerCells.SetNum(Grid.GetCorners().Num());
+		for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+		{
+			for (const int32 Corner : Cells[Cell].Corners)
+			{
+				CornerCells[Corner].Add(Cell);
+			}
+		}
+	}
+
+	// a search outwards from From, which a fast mouse keeps short, as it runs every frame
+	TMap<int32, TPair<int32, uint64>> Came;
+	TArray<int32> Queue{From};
+	Came.Add(From, {INDEX_NONE, 0});
+	for (int32 Index = 0; Index < Queue.Num() && !Came.Contains(To) && Queue.Num() < 4000; ++Index)
+	{
+		const int32 Corner = Queue[Index];
+		const TArray<int32, TInlineAllocator<3>>& Around = CornerCells[Corner];
+		for (int32 First = 0; First < Around.Num(); ++First)
+		{
+			for (int32 Second = First + 1; Second < Around.Num(); ++Second)
+			{
+				const FHexSphereCell& Cell = Cells[Around[First]];
+				const int32 Side = Cell.Neighbors.IndexOfByKey(Around[Second]);
+				if (Side == INDEX_NONE)
+				{
+					continue;
+				}
+				const int32 NumSides = Cell.Corners.Num();
+				const int32 SideFrom = Cell.Corners[(Side + NumSides - 1) % NumSides];
+				const int32 Next = SideFrom == Corner ? Cell.Corners[Side] : SideFrom;
+				if (!Came.Contains(Next))
+				{
+					Came.Add(Next, {Corner, HexPlanetRivers::GetEdgeKey(Around[First], Around[Second])});
+					Queue.Add(Next);
+				}
+			}
+		}
+	}
+
+	TArray<uint64> Path;
+	if (!Came.Contains(To))
+	{
+		return Path;
+	}
+	for (int32 Corner = To; Corner != From; Corner = Came[Corner].Key)
+	{
+		Path.Add(Came[Corner].Value);
+	}
+	return Path;
+}
+
+void UHexPlanetPainter::PaintRiver(int32 Cell)
+{
+	UHexPlanetRivers* Rivers = Planet->GetRivers();
+	if (!Rivers)
+	{
+		return;
+	}
+	const FHexSphereGrid& Grid = Planet->GetGrid();
+	const FHexSphereCell& Each = Grid.GetCells()[Cell];
+	const FVector3d Direction = FVector3d(CursorPoint).GetSafeNormal();
+	const bool bRemove = FSlateApplication::IsInitialized() && FSlateApplication::Get().GetModifierKeys().IsControlDown();
+	TMap<uint64, uint8> Changed;
+
+	const auto Change = [&](uint64 Key, uint8 New)
+	{
+		const uint8 Old = Rivers->GetEdge(Key);
+		if (Old != New)
+		{
+			Stroke.OldRivers.FindOrAdd(Key, Old);
+			Stroke.NewRivers.Add(Key, New);
+			Changed.Add(Key, New);
+		}
+	};
+
+	if (Tool == EHexPaintTool::Bridge)
+	{
+		// the side whose middle lies nearest the cursor, once per stroke
+		int32 Best = 0;
+		double BestDistance = TNumericLimits<double>::Max();
+		const int32 NumSides = Each.Corners.Num();
+		for (int32 Side = 0; Side < NumSides; ++Side)
+		{
+			const FVector3d Middle = (Grid.GetCorners()[Each.Corners[(Side + NumSides - 1) % NumSides]] + Grid.GetCorners()[Each.Corners[Side]]).GetSafeNormal();
+			const double Distance = FVector3d::DistSquared(Middle, Direction);
+			if (Distance < BestDistance)
+			{
+				BestDistance = Distance;
+				Best = Side;
+			}
+		}
+		const uint64 Key = HexPlanetRivers::GetEdgeKey(Cell, Each.Neighbors[Best]);
+		if (!Stroke.NewRivers.Contains(Key) && Rivers->GetEdge(Key) > 0)
+		{
+			Change(Key, bRemove ? 1 : 2);
+		}
+	}
+	else
+	{
+		int32 Nearest = INDEX_NONE;
+		double NearestDistance = TNumericLimits<double>::Max();
+		for (const int32 Corner : Each.Corners)
+		{
+			const double Distance = FVector3d::DistSquared(Grid.GetCorners()[Corner], Direction);
+			if (Distance < NearestDistance)
+			{
+				NearestDistance = Distance;
+				Nearest = Corner;
+			}
+		}
+		if (LastCorner != INDEX_NONE && Nearest != LastCorner)
+		{
+			for (const uint64 Key : FindCornerPath(LastCorner, Nearest))
+			{
+				int32 A, B;
+				HexPlanetRivers::GetEdgeCells(Key, A, B);
+				// a bridge stays on a river that is laid again
+				if (bRemove)
+				{
+					Change(Key, 0);
+				}
+				else if (Rivers->IsEdgeAllowed(A, B))
+				{
+					Change(Key, FMath::Max<uint8>(Rivers->GetEdge(Key), 1));
+				}
+			}
+		}
+		LastCorner = Nearest;
+	}
+
+	if (!Changed.IsEmpty())
+	{
+		Rivers->SetEdges(Changed);
+	}
+}
+
 void UHexPlanetPainter::EndStroke()
 {
 	if (!bPainting)
@@ -327,7 +483,16 @@ void UHexPlanetPainter::EndStroke()
 		}
 	}
 
-	if (Stroke.NewLevels.IsEmpty() && Stroke.NewBiomes.IsEmpty() && Stroke.NewRelief.IsEmpty() && Stroke.NewObjects.IsEmpty())
+	for (auto It = Stroke.NewRivers.CreateIterator(); It; ++It)
+	{
+		if (Stroke.OldRivers[It.Key()] == It.Value())
+		{
+			Stroke.OldRivers.Remove(It.Key());
+			It.RemoveCurrent();
+		}
+	}
+
+	if (Stroke.NewLevels.IsEmpty() && Stroke.NewBiomes.IsEmpty() && Stroke.NewRelief.IsEmpty() && Stroke.NewObjects.IsEmpty() && Stroke.NewRivers.IsEmpty())
 	{
 		UpdatePreview();
 		return;
@@ -367,7 +532,7 @@ void UHexPlanetPainter::Undo()
 	}
 
 	FStep Step = UndoSteps.Pop();
-	Apply(Step.OldLevels, Step.OldBiomes, Step.OldRelief, Step.OldObjects);
+	Apply(Step.OldLevels, Step.OldBiomes, Step.OldRelief, Step.OldObjects, Step.OldRivers);
 	RedoSteps.Add(MoveTemp(Step));
 }
 
@@ -379,7 +544,7 @@ void UHexPlanetPainter::Redo()
 	}
 
 	FStep Step = RedoSteps.Pop();
-	Apply(Step.NewLevels, Step.NewBiomes, Step.NewRelief, Step.NewObjects);
+	Apply(Step.NewLevels, Step.NewBiomes, Step.NewRelief, Step.NewObjects, Step.NewRivers);
 	UndoSteps.Add(MoveTemp(Step));
 }
 
@@ -442,11 +607,16 @@ bool UHexPlanetPainter::GetToolRelief(int32 Cell, HexPlanetSurface::FReliefOverr
 }
 
 void UHexPlanetPainter::Apply(const TMap<int32, int32>& Levels, const TMap<int32, int32>& Biomes, const HexPlanetSurface::FReliefOverrides& Relief,
-	const TMap<int32, FHexCellObjects>& Objects)
+	const TMap<int32, FHexCellObjects>& Objects, const TMap<uint64, uint8>& Rivers)
 {
 	if (!Objects.IsEmpty())
 	{
 		Planet->GetObjects()->SetCells(Objects);
+	}
+
+	if (!Rivers.IsEmpty() && Planet->GetRivers())
+	{
+		Planet->GetRivers()->SetEdges(Rivers);
 	}
 
 	if (!Relief.IsEmpty())

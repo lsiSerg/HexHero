@@ -786,8 +786,11 @@ float stretchCrest = stretchTime < stretchFarTime ? SurfReach - stretchFast * st
 # then slowly back over RunupFallTime, a rim of foam at its edge and a laced sheet behind it, and the foam it left above slides down after it in
 # thinning streaks while the sand it wet dries. So the foam is born just where and when the wave meets the real shore, wherever that lies
 # against the coast line of the field. A roller runs RollerScale higher, and towards the ends of its stretch it runs lower. Faded from far away
-# as the waves of the water
+# as the waves of the water. It only finds the foam and the wet sand (runupFoam, runupWet), which RUNUP_APPLY_CODE lays on after the rivers, as
+# a river and its banks keep them off, so the foam of the sea does not roll up a river
 RUNUP_CODE = SHORE_HASH_CODE + r'''
+float runupWet = 0.0;
+float runupFoam = 0.0;
 {
     float3 shoreUp = normalize(WorldPos);
     float3 shorePlanes = pow(abs(shoreUp), 8.0);
@@ -830,13 +833,18 @@ RUNUP_CODE = SHORE_HASH_CODE + r'''
             // under the sheet of foam looked like a shadow
             float wet = (age > rise && height >= reach) ? (1.0 - fall) * cycleEnd : 0.0;
             float onLand = smoothstep(-0.5, 0.0, height) * (1.0 - runFar);
-            albedo *= lerp(1.0, WetDarkening, wet * stretchEnds * onLand);
-            albedo = lerp(albedo, ShoreFoamColor.rgb, saturate(runFoam * RunupFoam) * onLand);
+            runupWet = wet * stretchEnds * onLand;
+            runupFoam = saturate(runFoam * RunupFoam) * onLand;
         }
     }
 #undef SHORE_NOISE
 #undef SHORE_CREST_TIME
 }
+'''
+
+RUNUP_APPLY_CODE = r'''
+albedo *= lerp(1.0, WetDarkening, runupWet * (1.0 - riverKeep));
+albedo = lerp(albedo, ShoreFoamColor.rgb, runupFoam * (1.0 - riverKeep));
 '''
 
 # the values of UHexPlanetWaterConfig that RUNUP_CODE takes
@@ -865,15 +873,190 @@ float4 canopy = CellCanopy.Load(int3(biomeCell, 0));
 }
 '''
 
+# Rivers (UHexPlanetRivers), drawn on the bottom of the valley the surface lowers along them. They follow one line of the rivers for every cell
+# (HexPlanetRivers::BuildCurve), so the water, its banks and its valley join across the sides of the cells, and each pixel finds the exact
+# distance to it: CellRivers has a pixel per sector of each cell (six at six times the column of CellMarks), the first of its segments in RGB
+# and their number in alpha, and RiverSegments two texels per segment, its ends as directions from the center with the narrowing near a
+# spring, whether it is frozen and which way it flows, so no triangle blends distances that do not fit and a river joins another cleanly.
+# The water lets the bed show through as the shallows of the sea do: the sand of RiverBedLayer, tinted darker by RiverBedTint, under the color of
+# the water, RiverWaterEdge of it at the edge to RiverWaterMiddle in the middle, from RiverShallowColor to RiverDeepColor, shaded under the banks.
+# Lines drift downstream on it in lanes along the river (RiverStreak*), it has faint ripples and foam where the ground is steep, and it is rough
+# enough that the sun makes no glints on it (RiverRoughness). Its banks are wet earth with a volume alike on both sides (RiverBankShade at their
+# foot, RiverBankHighlight on their crest) and a normal bent a little across them (RiverBankRelief over RiverLeveeWidth). A frozen river
+# (RiverFrozenBiomes) is ice with cracks and no flow. Below the sea it fades out, so at its mouth the water of the sea meets the bed alone, and it
+# grows as light as RiverShallowColor and its rapids calm down near the coast (RiverMouthCalm, by the distance of the sea field). It needs
+# biomeCell, biomeSides and biomeTurn of BIOME_CODE and runs after CANOPY_CODE, so the canopy of a forest never covers it
+RIVER_PARAMETERS = ['RiverWidth', 'RiverRunupGap', 'RiverDeepColor', 'RiverShallowColor', 'RiverBedLayer', 'RiverBedTint', 'RiverWaterEdge',
+    'RiverWaterMiddle', 'RiverBankColor', 'RiverBankWidth', 'RiverBankDarkening', 'RiverBankRelief', 'RiverBankShade', 'RiverBankHighlight',
+    'RiverLeveeWidth', 'RiverEdgeShade', 'RiverEdgeNoise', 'RiverEdgeNoiseScale', 'RiverFlowSpeed', 'RiverRippleScale', 'RiverRippleStrength',
+    'RiverStreakLength', 'RiverStreakSpacing', 'RiverStreakThin', 'RiverStreakStrength', 'RiverRapidsFlatStart', 'RiverRapidsFlatEnd', 'RiverFoamColor',
+    'RiverRoughness', 'RiverMouthDepth', 'RiverMouthCalm', 'RiverIceColor', 'RiverIceCrack', 'RiverIceCrackScale', 'RiverIceRoughness', 'Roughness']
+RIVER_CODE = r'''
+OutRoughness = Roughness;
+float riverShown = 0.0;
+// how much a river and its banks keep the run-up of the sea off, out to RiverRunupGap past the banks
+float riverKeep = 0.0;
+// the segments of the line of the rivers near the sector of the cell under the pixel (UHexPlanetRivers::UpdateTexture): CellRivers holds the
+// first and the number of them for each sector, the triangle from the center to corners K - 1 and K, which the angle of the fourth UV gives
+float riverAngle = atan2(LocalUV.y, LocalUV.x);
+int riverSector = ((int)round(riverAngle / biomeTurn) + biomeSides) % biomeSides;
+uint4 riverList = (uint4)round(CellRivers.Load(int3(biomeCell.x * 6.0 + riverSector, biomeCell.y, 0)) * 255.0);
+[branch] if (riverList.a > 0u && PreviewTile < 0.5)
+{
+    // the nearest of them, exactly for the pixel: RiverSegments has two texels a segment, its ends as directions from the center with the
+    // narrowing near a spring at each, and in the first whether it is frozen (16) and flows from its first end to its second (32)
+    float3 riverPoint = normalize(WorldPos);
+    uint riverFirst = riverList.r | (riverList.g << 8) | (riverList.b << 16);
+    float riverLine = 1e9;
+    float3 riverNear = riverPoint;
+    float3 riverRun = 0.0;
+    float riverFlags = 0.0;
+    for (uint riverEntry = 0u; riverEntry < riverList.a; ++riverEntry)
+    {
+        uint riverTexel = (riverFirst + riverEntry) * 2u;
+        float4 segA = RiverSegments.Load(int3(riverTexel % 4096u, riverTexel / 4096u, 0));
+        float4 segB = RiverSegments.Load(int3((riverTexel + 1u) % 4096u, (riverTexel + 1u) / 4096u, 0));
+        float3 segRun = segB.xyz - segA.xyz;
+        float segT = saturate(dot(riverPoint - segA.xyz, segRun) / max(dot(segRun, segRun), 1e-20));
+        float3 segNear = segA.xyz + segRun * segT;
+        float segFlags = segA.w;
+        float segForward = segFlags >= 32.0 ? 1.0 : 0.0;
+        segFlags -= segForward * 32.0;
+        float segIce = segFlags >= 16.0 ? 1.0 : 0.0;
+        float segDistance = distance(riverPoint, segNear) * PlanetRadius + lerp(segFlags - segIce * 16.0, segB.w, segT);
+        if (segDistance < riverLine)
+        {
+            riverLine = segDistance;
+            riverNear = segNear;
+            riverRun = segRun * (segForward * 2.0 - 1.0);
+            riverFlags = segIce;
+        }
+    }
+    float riverIce = riverFlags;
+    // downstream along the ground; away from the river, along the ground, for the banks; and across it, left of the flow positive, for its lanes
+    float3 flowDir = riverRun - surfaceUp * dot(riverRun, surfaceUp);
+    flowDir = dot(flowDir, flowDir) > 1e-20 ? normalize(flowDir) : 0.0;
+    float3 riverOff = riverPoint - riverNear;
+    riverOff -= surfaceUp * dot(riverOff, surfaceUp);
+    float3 bankAway = dot(riverOff, riverOff) > 1e-24 ? normalize(riverOff) : 0.0;
+    float riverAcross = riverLine * (dot(riverOff, cross(surfaceUp, flowDir)) >= 0.0 ? 1.0 : -1.0);
+
+    float riverAa = max((length(PosDdx) + length(PosDdy)) * 0.5, 0.01);
+    float riverEdge = (cloudNoise.Value(WorldPos / max(RiverEdgeNoiseScale, 1.0) + 8.1) - 0.5) * 2.0 * RiverEdgeNoise;
+    // world units inside the water from its edge, which stays at least about a pixel wide from far away; the line is further near a source,
+    // where the river narrows to a spring
+    float riverHalf = max(RiverWidth * 0.5, riverAa * 0.8);
+    float fromEdge = riverHalf + riverEdge - riverLine;
+    // below the sea the sea draws the water, so the river fades out down to RiverMouthDepth and its bed meets the bed of the sea
+    float riverAbove = smoothstep(-max(RiverMouthDepth, 0.01), 0.5, height);
+    float riverWater = saturate(fromEdge / riverAa + 0.5) * riverAbove;
+    float riverBank = saturate((fromEdge + RiverBankWidth) / riverAa + 0.5) * (1.0 - riverIce);
+    float riverDamp = saturate((fromEdge + RiverBankWidth * 4.0) / max(RiverBankWidth * 3.0, 0.01));
+    riverKeep = 1.0 - smoothstep(RiverBankWidth, RiverBankWidth + max(RiverRunupGap, 0.01), -fromEdge);
+
+    // the banks: wet earth at the water, the ground beyond a little darker, both banks with the same volume, dark at the foot and light on
+    // the crest, and a normal bent a little across them, up from the edge of the water to the crest RiverBankWidth out and down over
+    // RiverLeveeWidth
+    float outside = -fromEdge;
+    float crest = max(RiverBankWidth, 0.5);
+    float levee = max(RiverLeveeWidth, crest + 0.5);
+    albedo *= 1.0 - RiverBankDarkening * riverDamp * riverAbove;
+    albedo = lerp(albedo, RiverBankColor.rgb, riverBank * riverAbove);
+    float bankFoot = 1.0 - smoothstep(0.0, crest, outside);
+    float bankCrest = smoothstep(crest * 0.6, crest * 1.3, outside) * (1.0 - smoothstep(crest * 1.3, levee, outside));
+    albedo *= (1.0 - RiverBankShade * bankFoot * (1.0 - riverWater) * riverAbove) * (1.0 + RiverBankHighlight * bankCrest * riverAbove);
+    float bankSlope = smoothstep(-1.0, crest, outside) * (1.0 - smoothstep(crest, levee, outside));
+    float bankRise = (outside < crest ? 1.0 / (crest + 1.0) : -1.0 / (levee - crest)) * bankSlope;
+    float bankTilt = bankRise * RiverBankRelief * riverAbove * (1.0 - riverWater);
+    OutNormal = normalize(OutNormal - bankAway * bankTilt);
+
+    [branch] if (riverWater > 0.001)
+    {
+        // the distance to the coast of the sea field, which goes 50 units under the land: towards its mouth a river grows as light as the
+        // shallow water it meets, and its rapids calm down
+        float riverCoast = 50.0 - SeaField.SampleLevel(SeaFieldSampler, surfaceUp, 0).a * 450.0;
+        float riverInland = smoothstep(0.0, max(RiverMouthCalm, 0.01), riverCoast);
+        float riverDeep = saturate(fromEdge / max(riverHalf, 0.01));
+        float3 waterColor = lerp(RiverShallowColor.rgb, RiverDeepColor.rgb, sqrt(riverDeep) * riverInland);
+        // the sandy bed through the water, as in the shallows of the sea, darker
+        float3 bedBend;
+        float3 bed = layers.Sample(Colors, ColorsSampler, Normals, NormalsSampler, LayerParams, (float)RiverBedLayer, bedBend).rgb * RiverBedTint.rgb;
+        float3 riverColor = lerp(bed, waterColor, lerp(RiverWaterEdge, RiverWaterMiddle, smoothstep(0.0, 1.0, riverDeep)));
+        // shaded under the banks
+        riverColor *= lerp(RiverEdgeShade, 1.0, smoothstep(0.0, max(riverHalf * 0.35, 0.5), fromEdge));
+        float3 riverNormal = surfaceUp;
+        float rapids = 0.0;
+
+        [branch] if (riverIce < 0.5)
+        {
+            // faint ripples carried downstream, in two phases a half cycle apart that fade into each other
+            float riverCycle = 2.0;
+            float2 riverPhases = frac(Time / riverCycle + float2(0.0, 0.5));
+            float3 riverGrad = 0.0;
+            [unroll] for (int ph = 0; ph < 2; ++ph)
+            {
+                float3 p = (WorldPos - flowDir * (riverPhases[ph] - 0.5) * RiverFlowSpeed * riverCycle) / max(RiverRippleScale, 0.1) + ph * 17.3;
+                float e = 0.35;
+                float n0 = cloudNoise.Value(p);
+                float3 g = float3(cloudNoise.Value(p + float3(e, 0, 0)), cloudNoise.Value(p + float3(0, e, 0)), cloudNoise.Value(p + float3(0, 0, e))) - n0;
+                riverGrad += g / e * (1.0 - abs(riverPhases[ph] * 2.0 - 1.0));
+            }
+            riverGrad -= surfaceUp * dot(riverGrad, surfaceUp);
+            riverNormal = normalize(surfaceUp - riverGrad * RiverRippleStrength);
+
+            // lines that drift downstream in lanes along the river, broken into dashes of a noise carried with the water in the same two
+            // phases, faded where they grow thinner than a pixel
+            float lane = riverAcross / max(RiverStreakSpacing, 0.1);
+            float laneLine = 1.0 - smoothstep(RiverStreakThin * 0.5, RiverStreakThin, abs(frac(lane) - 0.5) * 2.0);
+            float dash = 0.0;
+            float foamDash = 0.0;
+            [unroll] for (int dp = 0; dp < 2; ++dp)
+            {
+                float3 carried = WorldPos - flowDir * (riverPhases[dp] - 0.5) * RiverFlowSpeed * riverCycle;
+                float weight = 1.0 - abs(riverPhases[dp] * 2.0 - 1.0);
+                dash += cloudNoise.Value(carried / max(RiverStreakLength, 0.1) + floor(lane) * 3.7 + dp * 11.1) * weight;
+                foamDash += cloudNoise.Value(carried / max(RiverRippleScale * 0.6, 0.1) + 31.0 + dp * 7.7) * weight;
+            }
+            float streak = laneLine * smoothstep(0.5, 0.75, dash) * smoothstep(0.1, 0.5, riverDeep)
+                * (1.0 - smoothstep(0.3, 1.0, riverAa / max(RiverStreakSpacing * RiverStreakThin, 0.01)));
+            riverColor = lerp(riverColor, riverColor * 1.5 + 0.04, saturate(streak * RiverStreakStrength * 3.0) * riverInland);
+
+            // foam on the rapids, where the ground under the water is steep, as more and brighter lines along the flow
+            rapids = smoothstep(RiverRapidsFlatStart, RiverRapidsFlatEnd, flatness) * riverInland;
+            float foamLane = riverAcross / max(RiverStreakSpacing * 0.5, 0.1);
+            float foamLine = 1.0 - smoothstep(RiverStreakThin, RiverStreakThin * 2.5, abs(frac(foamLane) - 0.5) * 2.0);
+            float foamStreak = foamLine * smoothstep(0.4, 0.7, foamDash);
+            riverColor = lerp(riverColor, RiverFoamColor.rgb, saturate(rapids * (0.15 + foamStreak * 0.8)) * riverDeep);
+        }
+        else
+        {
+            // ice: still, whitish, broken by cracks
+            float crackValue = cloudNoise.Value(WorldPos / max(RiverIceCrackScale, 0.1) + 13.7);
+            float crack = 1.0 - smoothstep(0.0, 0.035, abs(crackValue - 0.5));
+            riverColor = lerp(riverColor, RiverIceColor.rgb, smoothstep(0.0, max(riverHalf * 0.3, 0.5), fromEdge) * 0.85 + 0.15) * (1.0 - crack * RiverIceCrack);
+            float3 iceBend = float3(cloudNoise.Value(WorldPos / 6.0 + 2.0), cloudNoise.Value(WorldPos / 6.0 + 5.0), cloudNoise.Value(WorldPos / 6.0 + 9.0)) - 0.5;
+            riverNormal = normalize(surfaceUp + (iceBend - surfaceUp * dot(iceBend, surfaceUp)) * 0.15);
+        }
+
+        albedo = lerp(albedo, riverColor, riverWater);
+        riverShown = riverWater;
+        OutNormal = normalize(lerp(OutNormal, riverNormal, riverWater));
+        OutRoughness = lerp(Roughness, riverIce > 0.5 ? RiverIceRoughness : RiverRoughness, riverWater * (1.0 - rapids * 0.6));
+    }
+}
+'''
+
 # below the sea the line of the seabed fades out over GridSeaFade, as M_HexPlanetWaterGrid draws it on the water, and so do the outlines,
 # but where the debug view hides the water, which hides that strip too, the seabed draws both
-PLANET_CODE = CLOUD_SHADOW_CODE + GRID_LINE_CODE + MARK_CODE.replace('MARK_HOLE_BITS', '0u') + BIOME_CODE + RUNUP_CODE + CANOPY_CODE + r'''
+PLANET_CODE = CLOUD_SHADOW_CODE + GRID_LINE_CODE + MARK_CODE.replace('MARK_HOLE_BITS', '0u') + BIOME_CODE + RUNUP_CODE + CANOPY_CODE + RIVER_CODE + RUNUP_APPLY_CODE + r'''
 float seaFade = lerp(saturate(1.0 + PeakShare / GridSeaFade), 1.0, waterHidden);
-float opacity = GridOpacity * (1.0 - smoothstep(GridFadeStart, max(GridFadeEnd, GridFadeStart + 1e-3), PeakShare)) * seaFade;
+// the grid line along a side with a river is the river itself, so the water hides it
+float opacity = GridOpacity * (1.0 - smoothstep(GridFadeStart, max(GridFadeEnd, GridFadeStart + 1e-3), PeakShare)) * seaFade * (1.0 - riverShown);
 float3 color = lerp(albedo, albedo * GridDarkness, gridLine * opacity);
 // under the sea the outline is hidden at once, as clear water would show it on the seabed, apart from the one M_HexPlanetWaterGrid draws
 float markOpacity = markLine * lerp(smoothstep(-0.01, 0.0, PeakShare), 1.0, waterHidden);
-OutEmissive = lerp(color * (Ambient + Glow * Alpha), markColor * MarkGlow, markOpacity);
+// the alpha of the vertex colors lights only the tiles of painting, as on the surface it holds which way a river flows (RIVER_CODE)
+OutEmissive = lerp(color * (Ambient + Glow * Alpha * PreviewTile), markColor * MarkGlow, markOpacity);
 color = lerp(color, markColor, markOpacity);
 return color * lerp(cloudShadow, 1.0, markOpacity);
 '''
@@ -963,6 +1146,7 @@ float3 ripple = (rippleA + rippleB) * lerp(1.0, ShallowCalm.y, shallowCalm) * ic
 ripple -= planetUp * dot(ripple, planetUp);
 float3 waterNormal = normalize(planetUp + slope * lerp(NormalStrength.x, NormalStrength.y, closeUp) * lerp(1.0, FarCalm.x, farCalm)
     + ripple * lerp(NormalStrength.z, NormalStrength.w, closeUp) * lerp(1.0, FarCalm.y, farCalm));
+PLUME_CODE
 
 // from the shore: clear lagoon, then turquoise, then the blue of the open sea, whose tone drifts in wide patches.
 // The water grows opaque with the depth of the seabed under it, a little unevenly by place
@@ -981,6 +1165,8 @@ float3 color = lerp(shallow, deepColor, depthAmount);
 // the water of the frozen sea is dark and cold, and deep enough to hide the seabed
 color = lerp(color, IceWaterColor.rgb, iceWater * IceWaterShare);
 opacity = lerp(opacity, 1.0, iceWater * IceWaterShare);
+// the silty water of a river where it pours into the sea
+color = lerp(color, RiverPlumeColor.rgb, plumeCover * RiverPlumeTint);
 
 // the sky shows on what faces away from the camera, and the side of a wave towards the sun is lighter
 float3 toCamera = normalize(CameraDir);
@@ -1041,7 +1227,7 @@ float surfZone = (1.0 - smoothstep(SurfReach + SurfCurl, SurfReach + SurfCurl + 
 // how fast the distance grows across the screen, in units of it per world unit, so the widths of the breakers are in world units and a line does
 // not swell where the soft minimum grows slowly, close to the shore
 float surfGrad = clamp(length(float2(ddx(surfDistance) / max(length(PosDdx), 1e-4), ddy(surfDistance) / max(length(PosDdy), 1e-4))), 0.1, 1.5);
-float stretchFoam = stretchPresent * stretchEnds * lerp(Surf, RollerFoam, stretchRoller) * (1.0 - shoreFar);
+float stretchFoam = stretchPresent * stretchEnds * lerp(Surf, RollerFoam, stretchRoller) * (1.0 - shoreFar) * (1.0 - plumeCover * RiverPlumeCalm);
 if (waterDepth < max(BackwashDepth, filmDepth) * 1.5 || surfZone * stretchFoam > 0.001)
 {
     float laceNoise = TRI_NOISE(swayP, ShoreLaceScale, Time * float2(0.006, -0.004), 1.0);
@@ -1072,9 +1258,15 @@ if (waterDepth < max(BackwashDepth, filmDepth) * 1.5 || surfZone * stretchFoam >
     float backwash = (1.0 - smoothstep(0.0, BackwashDepth * lerp(0.4, 1.0, backShare) + 0.01, waterDepth)) * smoothstep(0.35, 0.75, backShare)
         * (1.0 - smoothstep(0.8, 1.0, backShare)) * smoothstep(0.25 + backShare * 0.35, 0.4 + backShare * 0.35, laceNoise);
     shore = max(shore, backwash * (backAge > 0.0 ? stretchFoam : 0.0) * (1.0 - smoothstep(0.95, 1.0, stretchProgress)));
+    // where a river pours in, its water pushes the foam of the shore away
+    shore *= 1.0 - plumeCover * RiverPlumeCalm;
     color = lerp(color, ShoreFoamColor.rgb, shore);
     opacity = max(opacity, shore);
 }
+
+// the lines of the river running out into the sea
+color = lerp(color, ShoreFoamColor.rgb, saturate(plumeLines * RiverPlumeFoam));
+opacity = max(opacity, saturate(plumeLines * RiverPlumeFoam));
 
 // unlit water keeps its colors, so it darkens by itself where the sun is low or gone, and under clouds, which also dim its glints
 color *= lerp(NightBrightness, 1.0, smoothstep(NightStart, NightEnd, sunUp)) * cloudShadow;
@@ -1091,6 +1283,63 @@ return color;
 #undef TRI_NOISE_LEVEL
 #undef SHORE_CREST_TIME
 '''
+
+# the mouths of rivers the water takes, MaxRiverMouths of AHexPlanet
+RIVER_MOUTHS = 8
+PLUME_MOUTH = r'''
+if (RiverMouth%(i)d.w > 0.5)
+{
+    float3 mouthRel = WorldPos - RiverMouth%(i)d.xyz;
+    float3 mouthDir = RiverMouthDir%(i)d.xyz;
+    float mouthAlong = dot(mouthRel, mouthDir);
+    float mouthAcross = dot(mouthRel, cross(planetUp, mouthDir));
+    float mouthHalf = RiverPlumeWidth + max(mouthAlong, 0.0) * RiverPlumeSpread;
+    [branch] if (mouthAlong > -RiverPlumeBack && mouthAlong < RiverPlumeLength && abs(mouthAcross) < mouthHalf)
+    {
+        float cover = smoothstep(-RiverPlumeBack, -RiverPlumeBack * 0.4, mouthAlong) * (1.0 - smoothstep(RiverPlumeLength * 0.3, RiverPlumeLength, mouthAlong))
+            * (1.0 - smoothstep(mouthHalf * 0.5, mouthHalf, abs(mouthAcross)));
+        // the lines fan out from a point behind the mouth, so each keeps its share of the width, and wander more the further out they run
+        float3 mouthOut = WorldPos - (RiverMouth%(i)d.xyz - mouthDir * (RiverPlumeWidth / max(RiverPlumeSpread, 0.01)));
+        mouthOut = normalize(mouthOut - planetUp * dot(mouthOut, planetUp) + mouthDir * 1e-3);
+        float wander = (cloudNoise.Value(WorldPos / max(RiverPlumeDashLength * 1.5, 1.0) + %(i)d.0 * 7.3) - 0.5) * RiverPlumeWobble * saturate(mouthAlong / RiverPlumeLength + 0.2);
+        float lane = (mouthAcross / mouthHalf + wander) * RiverPlumeLanes * 0.5;
+        float laneLine = 1.0 - smoothstep(RiverPlumeLineWidth * 0.5, RiverPlumeLineWidth, abs(frac(lane) - 0.5) * 2.0);
+        float dash = 0.0;
+        float3 chop = 0.0;
+        [unroll] for (int ph = 0; ph < 2; ++ph)
+        {
+            float3 carried = WorldPos - mouthOut * (plumePhases[ph] - 0.5) * RiverPlumeSpeed * 2.0;
+            float weight = 1.0 - abs(plumePhases[ph] * 2.0 - 1.0);
+            dash += cloudNoise.Value(carried / max(RiverPlumeDashLength, 0.1) + floor(lane) * 3.7 + ph * 11.1) * weight;
+            float3 q = carried / max(RiverPlumeDashLength * 0.4, 0.1) + ph * 5.7;
+            chop += (float3(cloudNoise.Value(q), cloudNoise.Value(q + 3.1), cloudNoise.Value(q + 6.2)) - 0.5) * weight;
+        }
+        // thinner than a pixel from far away they would only flicker
+        float laneWidth = mouthHalf * 2.0 / max(RiverPlumeLanes, 1.0);
+        float lines = laneLine * smoothstep(0.45, 0.7, dash) * cover * (1.0 - smoothstep(0.5, 1.5, aa / max(laneWidth * RiverPlumeLineWidth, 0.01)));
+        // and where the river meets the sea it churns into froth
+        float froth = smoothstep(0.42, 0.68, dash * 0.6 + cloudNoise.Value(WorldPos / max(RiverPlumeDashLength * 0.35, 0.1) - plumePhases.x * 0.3) * 0.4)
+            * (1.0 - smoothstep(RiverPlumeLength * 0.05, RiverPlumeLength * 0.3, mouthAlong)) * smoothstep(-RiverPlumeBack * 0.6, 0.0, mouthAlong) * cover * RiverPlumeFroth;
+        plumeCover = max(plumeCover, cover);
+        plumeLines = max(plumeLines, max(lines, froth));
+        plumeChop += (chop - planetUp * dot(chop, planetUp)) * cover;
+    }
+}
+'''
+
+PLUME_CODE = r'''
+// the water a river pours into the sea, from the mouths of open rivers nearest the camera (RiverMouth0.., RiverMouthDir0.., which
+// AHexPlanet::UpdateRiverMouths gives): a fan RiverPlumeWidth wide at the mouth that spreads by RiverPlumeSpread out to RiverPlumeLength,
+// beginning RiverPlumeBack inland, so it covers the edge of the water there. In it the foam of the shore and the breakers give way
+// (RiverPlumeCalm), the water is rougher and silty, and lines in RiverPlumeLanes lanes run out with the river at RiverPlumeSpeed
+float plumeCover = 0.0;
+float plumeLines = 0.0;
+float3 plumeChop = 0.0;
+float2 plumePhases = frac(Time / 2.0 + float2(0.0, 0.5));
+''' + ''.join(PLUME_MOUTH % {'i': i} for i in range(RIVER_MOUTHS)) + r'''
+waterNormal = normalize(waterNormal + plumeChop * RiverPlumeChop);
+'''
+WATER_CODE = WATER_CODE.replace('PLUME_CODE', PLUME_CODE)
 
 # the debug view hex.Water hides the water of the cell under the mouse, and maybe its neighbors: AHexPlanet gives the centers of that cell,
 # its neighbors and theirs, and the first HideCount of them are hidden. A pixel lies in the cell whose center is nearest
@@ -1209,7 +1458,9 @@ WATER_PARAMETERS = ['TileSize', 'WaveScale', 'WideNoiseScale', 'MiddleNoiseScale
     'IceWaveShare', 'IceSlushColor', 'IceSlush', 'IceSlushScale', 'IceFoam', 'IceFoamWidth', 'IceUnderClearness', 'IceClearDepth', 'IceFarColor', 'IceFarCover', 'IceFarStart', 'IceFarEnd',
     'IceEdgeSoftness', 'IceEdgeNoise', 'IceWaterFade', 'IceShade', 'ShoreFoamColor', 'ShoreFoam', 'ShoreFoamDepth', 'ShoreFoamPixels', 'ShoreLaceScale', 'ShoreLace',
     'ShoreFarStart', 'ShoreFarEnd', 'ShoreFarFilm', 'Surf', 'SurfChance', 'SurfReach', 'SurfPeriod', 'SurfRunShare', 'SurfWidthStart', 'SurfWidthEnd',
-    'SurfBorderStart', 'SurfBorderEnd', 'SurfLength', 'SurfShoreDistance', 'SurfShoreSpeed', 'SurfCurl', 'SurfWobble', 'SurfCapeStart', 'SurfCapeEnd', 'RollerChance', 'RollerFoam', 'BackwashDepth', 'RunupRiseTime', 'RunupFallTime']
+    'SurfBorderStart', 'SurfBorderEnd', 'SurfLength', 'SurfShoreDistance', 'SurfShoreSpeed', 'SurfCurl', 'SurfWobble', 'SurfCapeStart', 'SurfCapeEnd', 'RollerChance', 'RollerFoam', 'BackwashDepth', 'RunupRiseTime', 'RunupFallTime',
+    'RiverPlumeLength', 'RiverPlumeWidth', 'RiverPlumeSpread', 'RiverPlumeBack', 'RiverPlumeCalm', 'RiverPlumeLanes', 'RiverPlumeLineWidth',
+    'RiverPlumeDashLength', 'RiverPlumeSpeed', 'RiverPlumeFoam', 'RiverPlumeColor', 'RiverPlumeTint', 'RiverPlumeChop', 'RiverPlumeWobble', 'RiverPlumeFroth']
 WATER_OFFSET_PARAMETERS = ['TileSize', 'WaveScale', 'WaveHeight', 'WideNoiseScale', 'MiddleNoiseScale', 'SwellBend', 'SwellBendMip', 'SwellWaveA', 'SwellWaveB',
     'SwellWaveC', 'ChopWaveA', 'ChopWaveB', 'ChopLiftStart', 'ChopLiftEnd', 'VertexWaveFadeStart', 'VertexWaveFadeEnd', 'CalmDepthStart', 'CalmDepthEnd', 'ShallowCalm', 'NearLandHeight',
     'LagoonDistanceStart', 'LagoonDistanceEnd', 'IceEdgeSoftness', 'IceWaveShare']
@@ -1316,10 +1567,11 @@ def build_material():
     custom.set_editor_property('code', PLANET_CODE)
     custom.set_editor_property('output_type', unreal.CustomMaterialOutputType.CMOT_FLOAT3)
     outputs = []
-    for output_name in ('OutEmissive', 'OutNormal'):
+    for output_name, output_type in (('OutEmissive', unreal.CustomMaterialOutputType.CMOT_FLOAT3), ('OutNormal', unreal.CustomMaterialOutputType.CMOT_FLOAT3),
+                                     ('OutRoughness', unreal.CustomMaterialOutputType.CMOT_FLOAT1)):
         output = unreal.CustomOutput()
         output.set_editor_property('output_name', output_name)
-        output.set_editor_property('output_type', unreal.CustomMaterialOutputType.CMOT_FLOAT3)
+        output.set_editor_property('output_type', output_type)
         outputs.append(output)
     custom.set_editor_property('additional_outputs', outputs)
     # the normal comes in world space, as the planet has no tangents that fit the projection of the layers
@@ -1377,12 +1629,15 @@ def build_material():
         ('CreviceShare', add_uv_channel(library, material, 1, 'g', 3540), ''),
         # the tint of the covers of the cells from far away (CANOPY_CODE), read with Load
         ('CellCanopy', add_texture(library, material, DEFAULT_MARKS, 'CellCanopy', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 3542), ''),
-        ('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1000, 3543), '')
+        ('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1000, 3543), ''),
+        # the rivers of the sectors of the cells and their segments (RIVER_CODE), read with Load
+        ('CellRivers', add_texture(library, material, DEFAULT_MARKS, 'CellRivers', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 3544), ''),
+        ('RiverSegments', add_texture(library, material, DEFAULT_MARKS, 'RiverSegments', unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_COLOR, 3546), '')
         # the beach and the rock of each layer of the biome textures, which AHexPlanet::SetBiomeLayers gives from the biomes; these defaults are
         # those of create_biome_assets.py
         ] + [('%sLayers%d' % (kind, group), add_vector4(library, material, '%sLayers%d' % (kind, group), unreal.LinearColor(*table[group * 4:group * 4 + 4]),
             3545 + group * 5), '') for kind, table in (('Beach', BEACH_LAYERS), ('Rock', ROCK_LAYERS), ('Seabed', SEABED_LAYERS)) for group in range(3)
-        ] + add_config_parameters(library, material, unreal.HexPlanetConfig, BIOME_PARAMETERS + CANOPY_PARAMETERS, 3550) + add_config_parameters(library, material, unreal.HexPlanetWaterConfig, RUNUP_PARAMETERS, 5500)
+        ] + add_config_parameters(library, material, unreal.HexPlanetConfig, BIOME_PARAMETERS + CANOPY_PARAMETERS + RIVER_PARAMETERS, 3550) + add_config_parameters(library, material, unreal.HexPlanetWaterConfig, RUNUP_PARAMETERS, 5500)
 
     inputs = []
     for name, _, _ in connections:
@@ -1394,11 +1649,11 @@ def build_material():
     for name, node, pin in connections:
         library.connect_material_expressions(node, pin, custom, name)
 
-    roughness = add_config_parameters(library, material, unreal.HexPlanetConfig, ['Roughness'], 300)[0][1]
+    # Roughness of DA_HexPlanet, and RiverRoughness on the water of rivers (RIVER_CODE)
     library.connect_material_property(custom, '', unreal.MaterialProperty.MP_BASE_COLOR)
     library.connect_material_property(custom, 'OutEmissive', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
     library.connect_material_property(custom, 'OutNormal', unreal.MaterialProperty.MP_NORMAL)
-    library.connect_material_property(roughness, '', unreal.MaterialProperty.MP_ROUGHNESS)
+    library.connect_material_property(custom, 'OutRoughness', unreal.MaterialProperty.MP_ROUGHNESS)
 
     cut_connections = [('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1000, 700), ''),
         ('HideCount', add_scalar(library, material, 'HideCount', 0.0, 750), ''),
@@ -1750,6 +2005,10 @@ def build_water():
         ('HideCount', add_scalar(library, material, 'HideCount', 0.0, 900), '')] + add_cloud_parameters(library, material, -700, SHADOW_PARAMETERS + HAZE_PARAMETERS)
     for index in range(HIDE_CELLS):
         connections.append(('HideCell%d' % index, add_vector(library, material, 'HideCell%d' % index, unreal.LinearColor(0.0, 0.0, 0.0, 0.0), 950 + index * 50), ''))
+    # the mouths of rivers near the camera (PLUME_CODE), whose alpha says whether they are given
+    for index in range(RIVER_MOUTHS):
+        connections.append(('RiverMouth%d' % index, add_vector4(library, material, 'RiverMouth%d' % index, unreal.LinearColor(0.0, 0.0, 0.0, 0.0), 2950 + index * 60), ''))
+        connections.append(('RiverMouthDir%d' % index, add_vector(library, material, 'RiverMouthDir%d' % index, unreal.LinearColor(1.0, 0.0, 0.0, 0.0), 2980 + index * 60), ''))
     custom = add_custom(library, material, WATER_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, connections, 0,
         ('OutOpacity', unreal.CustomMaterialOutputType.CMOT_FLOAT1))
     library.connect_material_property(custom, '', unreal.MaterialProperty.MP_EMISSIVE_COLOR)

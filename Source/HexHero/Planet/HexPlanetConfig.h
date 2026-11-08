@@ -6,6 +6,8 @@
 #include "Engine/DataAsset.h"
 #include "HexPlanetConfig.generated.h"
 
+class UStaticMesh;
+
 /**
  *  The planets: the size of their cells, how levels are generated for a planet without levels.txt, the colors of its surface, the outlines of the cell under the mouse and the values of
  *  M_HexPlanet and M_HexPlanetWireframe. AHexPlanet gives every float and color of it to those materials as parameters of the same names,
@@ -204,12 +206,12 @@ public:
 	float CoastBlendShift = 0.35f;
 
 	/** Height below which the beach of a layer turns into its seabed (PlanetSeabedLayer of the biomes), fully SeabedFade lower, so snow does
-	 *  not go on under the sea */
+	 *  not go on under the sea; at the water, so a snowy shore stays snow above it and the sand only shows a little below it */
 	UPROPERTY(EditAnywhere, Category="Textures")
-	float SeabedHeight = 6.0f;
+	float SeabedHeight = 0.0f;
 
 	UPROPERTY(EditAnywhere, Category="Textures", meta=(ClampMin=0.01))
-	float SeabedFade = 9.0f;
+	float SeabedFade = 6.0f;
 
 	/** How much the heights of the beach and the seabed decide which lies where in that band, so snow stays in the hollows of the sand */
 	UPROPERTY(EditAnywhere, Category="Textures", meta=(ClampMin=0))
@@ -221,7 +223,7 @@ public:
 
 	/** How much the beach (snow) dusts the seabed in the upper part of that band, so the shore reads as snowy sand */
 	UPROPERTY(EditAnywhere, Category="Textures", meta=(ClampMin=0, ClampMax=1))
-	float SeabedDusting = 0.55f;
+	float SeabedDusting = 0.7f;
 
 	/** Cells of sea from snow land that freeze into shore ice when biomes are generated (HexPlanetGenerator::AddShoreIce), 0 for none */
 	UPROPERTY(EditAnywhere, Category="Biomes", meta=(ClampMin=0, ClampMax=4))
@@ -694,11 +696,12 @@ public:
 
 	/** How much of the rock on the slopes of snow ground (the snow layer) is snowed over, so a steep hill of snow stays snowy */
 	UPROPERTY(EditAnywhere, Category="Colors|Rock", meta=(ClampMin=0, ClampMax=1))
-	float SnowRockCover = 0.85f;
+	float SnowRockCover = 0.95f;
 
-	/** How much the high edges of that rock, by its height, peek out of the snow */
+	/** How much the high edges of that rock, by its height, peek out of the snow; little, as on the slope of a hill to the sea more read as
+	 *  patches of sand */
 	UPROPERTY(EditAnywhere, Category="Colors|Rock", meta=(ClampMin=0, ClampMax=1))
-	float SnowRockPeek = 0.5f;
+	float SnowRockPeek = 0.25f;
 
 	/** Colors of the debug wireframe in the cell under the mouse and in its neighbors, as on the flat map */
 	UPROPERTY(EditAnywhere, Category="Wireframe")
@@ -810,4 +813,255 @@ public:
 	/** Roughness of the surface */
 	UPROPERTY(EditAnywhere, Category="Surface", meta=(ClampMin=0, ClampMax=1))
 	float Roughness = 0.85f;
+
+	/** Rivers of a generated planet per thousand cells of land (UHexPlanetRivers, HexPlanetRivers::Generate); each runs along the sides of cells
+	 *  from the foot of mountains or hills down to the sea or into another river */
+	UPROPERTY(EditAnywhere, Category="Rivers|Generation", meta=(ClampMin=0))
+	float RiverDensity = 1.2f;
+
+	/** Fewest and most sides of cells a generated river runs along; a shorter one is left out */
+	UPROPERTY(EditAnywhere, Category="Rivers|Generation", meta=(ClampMin=1))
+	int32 RiverMinLength = 6;
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Generation", meta=(ClampMin=1))
+	int32 RiverMaxLength = 120;
+
+	/** How many sides in a row a generated river may run without coming nearer the sea, so it winds over flat land */
+	UPROPERTY(EditAnywhere, Category="Rivers|Generation", meta=(ClampMin=0))
+	int32 RiverFlatSteps = 3;
+
+	/** How much a generated river shuns turning the same way at two corners in a row, which takes it off to the side, against how much nearer
+	 *  the sea a side takes it (1 for a side straight towards it), so it runs straight */
+	UPROPERTY(EditAnywhere, Category="Rivers|Generation", meta=(ClampMin=0))
+	float RiverStraightness = 0.5f;
+
+	/** Randomness in the side a generated river takes at a corner, on the same scale */
+	UPROPERTY(EditAnywhere, Category="Rivers|Generation", meta=(ClampMin=0))
+	float RiverWander = 0.2f;
+
+	/** Fewest rings of cells from the sea at which a generated river may start */
+	UPROPERTY(EditAnywhere, Category="Rivers|Generation", meta=(ClampMin=1))
+	int32 RiverSourceSeaDistance = 4;
+
+	/** Sides of a river between the bridges a generated planet puts on it, about; 0 puts none */
+	UPROPERTY(EditAnywhere, Category="Rivers|Generation", meta=(ClampMin=0))
+	int32 BridgeSpacing = 9;
+
+	/** Factor on the cost of a move across a side with a river and no bridge; a bridge takes it away (UHexPlanetRivers::GetCrossingFactor) */
+	UPROPERTY(EditAnywhere, Category="Rivers|Movement", meta=(ClampMin=1))
+	float RiverCrossCost = 2.0f;
+
+	/** Width of the water of a river, in world units; every river has the same width, so a bridge fits any of them */
+	UPROPERTY(EditAnywhere, Category="Rivers", meta=(ClampMin=1))
+	float RiverWidth = 28.0f;
+
+	/** How many times the line of a river through the middles of its sides is rounded off (HexPlanetRivers::BuildCurve), so it cuts the
+	 *  corners of the zigzag of the sides and runs straight where they do */
+	UPROPERTY(EditAnywhere, Category="Rivers", meta=(ClampMin=0, ClampMax=6))
+	int32 RiverSmoothing = 3;
+
+	/** How straight a river runs, and so how far it leaves the sides of the cells it belongs to: how far each corner between two of its sides is
+	 *  pulled onto the chord between their middles, 0 along the sides and 1 straight through their middles, where a zigzag of sides becomes a
+	 *  straight line about a quarter of a cell from the corners; then how many passes straighten it further over several sides, and how far it
+	 *  may leave its sides at most, in world units, 0 for no limit. hex.PlanetRiverShape tries them while the game runs */
+	UPROPERTY(EditAnywhere, Category="Rivers", meta=(ClampMin=0, ClampMax=1))
+	float RiverCornerCut = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers", meta=(ClampMin=0, ClampMax=50))
+	int32 RiverRelax = 0;
+
+	UPROPERTY(EditAnywhere, Category="Rivers", meta=(ClampMin=0))
+	float RiverMaxOffset = 0.0f;
+
+	/** How far the line of a river winds off that, in world units, and the size of the noise of its bends; it fades in over RiverMeanderFade
+	 *  of a cell from the ends of a line, so lines meet where rivers join */
+	UPROPERTY(EditAnywhere, Category="Rivers", meta=(ClampMin=0))
+	float RiverMeander = 8.0f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers", meta=(ClampMin=1))
+	float RiverMeanderScale = 150.0f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers", meta=(ClampMin=0))
+	float RiverMeanderFade = 0.35f;
+
+	/** How far from its source a river widens from a spring to its full width, as a share of the radius of a cell */
+	UPROPERTY(EditAnywhere, Category="Rivers", meta=(ClampMin=0.01))
+	float RiverSourceTaper = 0.9f;
+
+	/** How far a river goes on into the sea past the corner on the coast where it ends, in world units, so its water and its valley reach the
+	 *  water of the sea */
+	UPROPERTY(EditAnywhere, Category="Rivers", meta=(ClampMin=0))
+	float RiverMouthLength = 40.0f;
+
+
+	/** The valley the surface lowers along a river (HexPlanetSurface): its depth, the half width of its flat bottom from the line of the river,
+	 *  and the width of its slopes beyond, in world units, so the river lies a little below the cells and the ground falls to its banks */
+	UPROPERTY(EditAnywhere, Category="Rivers", meta=(ClampMin=0))
+	float RiverValleyDepth = 4.5f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers", meta=(ClampMin=0))
+	float RiverValleyBottom = 19.0f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers", meta=(ClampMin=1))
+	float RiverValleySlope = 26.0f;
+
+	/** Colors of the water of a river: in the middle and at its edges, where it is shallow */
+	UPROPERTY(EditAnywhere, Category="Rivers|Look")
+	FLinearColor RiverDeepColor = FLinearColor(0.025f, 0.1f, 0.12f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look")
+	FLinearColor RiverShallowColor = FLinearColor(0.07f, 0.24f, 0.23f, 1.0f);
+
+	/** The bed seen through the water, as the sand of the shallows of the sea: its texture layer (of DA_HexTerrainLayers), its tint under the
+	 *  water, and how much of the color of the water lies over it at the edge and in the middle */
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0))
+	int32 RiverBedLayer = 1;
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look")
+	FLinearColor RiverBedTint = FLinearColor(0.5f, 0.6f, 0.54f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0, ClampMax=1))
+	float RiverWaterEdge = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0, ClampMax=1))
+	float RiverWaterMiddle = 0.72f;
+
+	/** Color of the wet earth of the banks, how far it reaches past the water in world units, and how much it darkens the ground beyond */
+	UPROPERTY(EditAnywhere, Category="Rivers|Look")
+	FLinearColor RiverBankColor = FLinearColor(0.2f, 0.16f, 0.1f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0))
+	float RiverBankWidth = 4.0f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0, ClampMax=1))
+	float RiverBankDarkening = 0.25f;
+
+	/** How much the banks seem to rise out of the water, as a bend of the normal across them: up from the edge of the water to a crest
+	 *  RiverBankWidth out, and down to the ground over RiverLeveeWidth from the edge, in world units */
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0))
+	float RiverBankRelief = 2.0f;
+
+	/** The volume of the banks, alike on both sides whatever the light: how much darker their foot at the water is and how much lighter their
+	 *  crest */
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0, ClampMax=1))
+	float RiverBankShade = 0.45f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0, ClampMax=1))
+	float RiverBankHighlight = 0.18f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=1))
+	float RiverLeveeWidth = 14.0f;
+
+	/** How far past its banks a river keeps the run-up of the sea off (RUNUP_CODE), fading over that, in world units, so at a mouth the foam
+	 *  of the sea does not roll up the river */
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0))
+	float RiverRunupGap = 20.0f;
+
+	/** How dark the water is right under its banks, as a share of its color */
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0, ClampMax=1))
+	float RiverEdgeShade = 0.65f;
+
+	/** How much a noise moves the edge of the water and of the banks, in world units, and its size */
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0))
+	float RiverEdgeNoise = 1.2f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=1))
+	float RiverEdgeNoiseScale = 14.0f;
+
+	/** Speed of the water downstream in world units a second, the size of its ripples and how much they bend the normal */
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0))
+	float RiverFlowSpeed = 9.0f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0.1))
+	float RiverRippleScale = 7.0f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0, ClampMax=1))
+	float RiverRippleStrength = 0.08f;
+
+	/** How much ripples stretch along the flow */
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=1))
+	float RiverRippleStretch = 2.5f;
+
+	/** Lines that drift downstream on the water, so it shows that it flows: their length along the flow and their spacing across it in world
+	 *  units, how thin they are (the share of a line that is lit) and how light */
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0.1))
+	float RiverStreakLength = 22.0f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0.1))
+	float RiverStreakSpacing = 3.5f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0.01, ClampMax=1))
+	float RiverStreakThin = 0.18f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0, ClampMax=1))
+	float RiverStreakStrength = 0.22f;
+
+	/** Foam of the rapids where the ground under a river is steep: from which flatness it starts and is full, and its color */
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0, ClampMax=1))
+	float RiverRapidsFlatStart = 0.99f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0, ClampMax=1))
+	float RiverRapidsFlatEnd = 0.95f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look")
+	FLinearColor RiverFoamColor = FLinearColor(0.75f, 0.8f, 0.8f, 1.0f);
+
+	/** How far below the sea a river fades out at its mouth, so the water of the sea meets its bed, and how far from the coast its rapids
+	 *  calm down, in world units; the sea field reaches 50 under the land, so no further */
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0))
+	float RiverMouthDepth = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0))
+	float RiverMouthCalm = 45.0f;
+
+	/** The PlanetLetters of the biomes where rivers freeze: a side is frozen when either of its cells has one, and so ice, still and cracked */
+	UPROPERTY(EditAnywhere, Category="Rivers|Look")
+	FString RiverFrozenBiomes = TEXT("N");
+
+	/** Color of the ice of a frozen river, how dark its cracks are, the size of their noise in world units, and its roughness */
+	UPROPERTY(EditAnywhere, Category="Rivers|Look")
+	FLinearColor RiverIceColor = FLinearColor(0.42f, 0.52f, 0.58f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0, ClampMax=1))
+	float RiverIceCrack = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0.1))
+	float RiverIceCrackScale = 9.0f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0, ClampMax=1))
+	float RiverIceRoughness = 0.35f;
+
+	/** Roughness of the water of a river, rough enough that the sun makes no glints on it */
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0, ClampMax=1))
+	float RiverRoughness = 0.65f;
+
+	/** Where a frozen river reaches the sea, its ice goes on as broken floes (AHexPlanet::UpdateFloes): how many, how far out, in world units,
+	 *  and the radius of the largest */
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0))
+	int32 RiverMouthFloes = 8;
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0))
+	float RiverMouthFloeReach = 80.0f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Look", meta=(ClampMin=0.1))
+	float RiverMouthFloeSize = 17.0f;
+
+	/** The bridge over a river (UHexPlanetRivers), a mesh whose X runs across the river and Z up, with its middle over the water; it is scaled
+	 *  so its X fills BridgeLength, and drawn with M_HexPlanetBoulder in the rock layer BridgeRockLayer */
+	UPROPERTY(EditAnywhere, Category="Rivers|Bridges")
+	TSoftObjectPtr<UStaticMesh> BridgeMesh;
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Bridges", meta=(ClampMin=1))
+	float BridgeLength = 64.0f;
+
+	/** How far the bridge sinks into the ground, in world units, so its ends sit in the banks */
+	UPROPERTY(EditAnywhere, Category="Rivers|Bridges")
+	float BridgeSink = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Rivers|Bridges", meta=(ClampMin=0))
+	int32 BridgeRockLayer = 2;
+
+	/** Distance from the camera past which bridges are not drawn */
+	UPROPERTY(EditAnywhere, Category="Rivers|Bridges", meta=(ClampMin=0))
+	float BridgeCullDistance = 4500.0f;
 };

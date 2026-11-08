@@ -475,4 +475,57 @@ public:
 	 *  out and fades */
 	UPROPERTY(EditAnywhere, Category="Shore", meta=(ClampMin=0.01))
 	float BackwashDepth = 1.5f;
+
+	/** Where a river pours into the sea (PLUME_CODE, from the mouths of AHexPlanet::UpdateRiverMouths): a fan RiverPlumeWidth wide each way at
+	 *  the mouth that spreads by RiverPlumeSpread for each unit out to RiverPlumeLength, beginning RiverPlumeBack inland of the corner on the
+	 *  coast, in world units */
+	UPROPERTY(EditAnywhere, Category="River Mouths", meta=(ClampMin=1))
+	float RiverPlumeLength = 150.0f;
+
+	UPROPERTY(EditAnywhere, Category="River Mouths", meta=(ClampMin=1))
+	float RiverPlumeWidth = 18.0f;
+
+	UPROPERTY(EditAnywhere, Category="River Mouths", meta=(ClampMin=0))
+	float RiverPlumeSpread = 0.4f;
+
+	UPROPERTY(EditAnywhere, Category="River Mouths", meta=(ClampMin=0))
+	float RiverPlumeBack = 30.0f;
+
+	/** How much the foam of the shore and the breakers give way in it, so a river does not run into a line of foam */
+	UPROPERTY(EditAnywhere, Category="River Mouths", meta=(ClampMin=0, ClampMax=1))
+	float RiverPlumeCalm = 1.0f;
+
+	/** The lines that run out with the river: how many lanes across the fan, the share of a lane a line takes, the length of their dashes, their
+	 *  speed in world units a second, how white they are, and how much they wander as they spread */
+	UPROPERTY(EditAnywhere, Category="River Mouths", meta=(ClampMin=1))
+	float RiverPlumeLanes = 5.0f;
+
+	UPROPERTY(EditAnywhere, Category="River Mouths", meta=(ClampMin=0.01, ClampMax=1))
+	float RiverPlumeLineWidth = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category="River Mouths", meta=(ClampMin=0.1))
+	float RiverPlumeDashLength = 18.0f;
+
+	UPROPERTY(EditAnywhere, Category="River Mouths", meta=(ClampMin=0))
+	float RiverPlumeSpeed = 14.0f;
+
+	UPROPERTY(EditAnywhere, Category="River Mouths", meta=(ClampMin=0, ClampMax=1))
+	float RiverPlumeFoam = 0.55f;
+
+	UPROPERTY(EditAnywhere, Category="River Mouths", meta=(ClampMin=0))
+	float RiverPlumeWobble = 0.5f;
+
+	/** How much froth churns where the river meets the sea, in the first part of the fan */
+	UPROPERTY(EditAnywhere, Category="River Mouths", meta=(ClampMin=0, ClampMax=1))
+	float RiverPlumeFroth = 0.6f;
+
+	/** The silty color of its water and how much of it, and how much rougher the water is there */
+	UPROPERTY(EditAnywhere, Category="River Mouths")
+	FLinearColor RiverPlumeColor = FLinearColor(0.22f, 0.36f, 0.3f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="River Mouths", meta=(ClampMin=0, ClampMax=1))
+	float RiverPlumeTint = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category="River Mouths", meta=(ClampMin=0))
+	float RiverPlumeChop = 0.6f;
 };

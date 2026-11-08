@@ -9,6 +9,7 @@
 #include "HexPlanetGenerator.h"
 #include "HexPlanetKit.h"
 #include "HexPlanetKitConfig.h"
+#include "HexPlanetRivers.h"
 #include "HexPlanetSeaField.h"
 #include "HexPlanetSurface.h"
 #include "HexSphereGrid.h"
@@ -856,6 +857,276 @@ bool FHexPlanetSurfaceRebuildTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Every point on a side between mountains is built by both cells, before the change"), Old.UnmatchedRidgePoints, 0);
 	AddInfo(FString::Printf(TEXT("%d points on sides between mountains, %d mirrored cells"), Full.RidgePoints,
 		Full.CellMirrored.FilterByPredicate([](bool bMirrored) { return bMirrored; }).Num()));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHexPlanetRiversTest, "HexHero.Planet.Rivers",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FHexPlanetRiversTest::RunTest(const FString& Parameters)
+{
+	const FHexSphereGrid Grid = FHexSphereGrid::Build(16, 4);
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+	const UHexPlanetConfig& Config = *GetDefault<UHexPlanetConfig>();
+	FHexPlanetManifest Manifest;
+	Manifest.Frequency = Grid.GetFrequency();
+	TArray<int8> Levels;
+	HexPlanetGenerator::GenerateLevels(Grid, Manifest, Config, Levels);
+
+	// many rivers, so the small planet has some
+	HexPlanetRivers::FGenerateParams GenerateParams;
+	GenerateParams.Seed = 7;
+	GenerateParams.Density = 40.0f;
+	GenerateParams.MinLength = 3;
+	GenerateParams.SourceSeaDistance = 2;
+	TSet<uint64> Edges;
+	TSet<uint64> Bridges;
+	HexPlanetRivers::Generate(Grid, Levels, GenerateParams, Edges, Bridges);
+	AddInfo(FString::Printf(TEXT("%d sides of rivers, %d bridges"), Edges.Num(), Bridges.Num()));
+	TestTrue(TEXT("The generator lays rivers"), Edges.Num() > 0);
+	TestTrue(TEXT("Bridges stand on rivers"), Edges.Includes(Bridges));
+
+	TSet<uint64> Again;
+	TSet<uint64> AgainBridges;
+	HexPlanetRivers::Generate(Grid, Levels, GenerateParams, Again, AgainBridges);
+	TestTrue(TEXT("Same seed, same rivers"), Again.Num() == Edges.Num() && Again.Includes(Edges));
+
+	for (const uint64 Key : Edges)
+	{
+		int32 A, B;
+		HexPlanetRivers::GetEdgeCells(Key, A, B);
+		if (!Cells[A].Neighbors.Contains(B) || Levels[A] != Levels[B] || !HexPlanetRivers::IsLevelAllowed(Levels[A]))
+		{
+			AddError(FString::Printf(TEXT("A river between cells %d and %d of levels %d and %d"), A, B, Levels[A], Levels[B]));
+			break;
+		}
+	}
+
+	// a river runs straight: at each corner it turns left or right, and a side whose two corners both turn it the same way takes it off to the
+	// side, which the generator shuns (TurnPenalty), so fewer than half of the sides do, as a random walk would
+	{
+		TMap<int32, TArray<int32, TInlineAllocator<3>>> Ends;
+		for (const uint64 Key : Edges)
+		{
+			int32 A, B;
+			HexPlanetRivers::GetEdgeCells(Key, A, B);
+			const int32 NumSides = Cells[A].Corners.Num();
+			const int32 Side = Cells[A].Neighbors.IndexOfByKey(B);
+			const int32 From = Cells[A].Corners[(Side + NumSides - 1) % NumSides];
+			const int32 To = Cells[A].Corners[Side];
+			Ends.FindOrAdd(From).Add(To);
+			Ends.FindOrAdd(To).Add(From);
+		}
+		const TArray<FVector3d>& Points = Grid.GetCorners();
+		const auto TurnAt = [&](int32 Before, int32 At, int32 After)
+		{
+			return FVector3d::DotProduct(FVector3d::CrossProduct(Points[At] - Points[Before], Points[After] - Points[At]), Points[At]) > 0.0;
+		};
+		int32 Same = 0;
+		int32 Turning = 0;
+		for (const TPair<int32, TArray<int32, TInlineAllocator<3>>>& Pair : Ends)
+		{
+			for (const int32 Other : Pair.Value)
+			{
+				const TArray<int32, TInlineAllocator<3>>& OtherEnds = Ends[Other];
+				if (Pair.Key > Other || Pair.Value.Num() != 2 || OtherEnds.Num() != 2)
+				{
+					continue;
+				}
+				const int32 Before = Pair.Value[0] == Other ? Pair.Value[1] : Pair.Value[0];
+				const int32 After = OtherEnds[0] == Pair.Key ? OtherEnds[1] : OtherEnds[0];
+				Same += TurnAt(Before, Pair.Key, Other) == TurnAt(Pair.Key, Other, After) ? 1 : 0;
+				++Turning;
+			}
+		}
+		AddInfo(FString::Printf(TEXT("%d of %d sides turn the river the same way at both corners"), Same, Turning));
+		TestTrue(TEXT("Rivers run straight rather than off to the side"), Turning > 0 && Same * 10 < Turning * 4);
+	}
+
+	// both cells of a side hold its river, the one flowing from its corner K - 1 to K and the other the other way
+	const TArray<uint16> Net = HexPlanetRivers::BuildNet(Grid, Levels, Edges);
+	for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+	{
+		for (int32 Side = 0; Side < Cells[Cell].Neighbors.Num(); ++Side)
+		{
+			const int32 Neighbor = Cells[Cell].Neighbors[Side];
+			const int32 Back = Cells[Neighbor].Neighbors.IndexOfByKey(Cell);
+			const bool bRiver = (Net[Cell] >> Side & 1) != 0;
+			const bool bFlow = (Net[Cell] >> (Side + HexPlanetRivers::FlowShift) & 1) != 0;
+			if (bRiver != ((Net[Neighbor] >> Back & 1) != 0) || bRiver != Edges.Contains(HexPlanetRivers::GetEdgeKey(Cell, Neighbor))
+				|| (bRiver && bFlow == ((Net[Neighbor] >> (Back + HexPlanetRivers::FlowShift) & 1) != 0)))
+			{
+				AddError(FString::Printf(TEXT("Cells %d and %d disagree on their side"), Cell, Neighbor));
+				return true;
+			}
+		}
+	}
+
+	// the line of the rivers: a point on a side lies as far from it for either cell, so both lower it alike and the surface has no seam, and the
+	// line keeps near the sides it belongs to, cutting their corners
+	const double Radius = FMath::Sqrt(Cells.Num() * 1.5 * FMath::Sqrt(3.0) * Config.HexRadius * Config.HexRadius / (4.0 * UE_DOUBLE_PI));
+	HexPlanetRivers::FCurveParams CurveParams;
+	CurveParams.Radius = Radius;
+	CurveParams.HexRadius = Config.HexRadius;
+	CurveParams.RiverWidth = Config.RiverWidth;
+	CurveParams.Meander = Config.RiverMeander;
+	CurveParams.MeanderScale = Config.RiverMeanderScale;
+	CurveParams.MeanderFade = Config.RiverMeanderFade;
+	CurveParams.SourceTaper = Config.RiverSourceTaper;
+	CurveParams.MouthLength = Config.RiverMouthLength;
+	CurveParams.Smoothing = Config.RiverSmoothing;
+	CurveParams.Reach = HexPlanetRivers::GetReach(Config);
+	CurveParams.CornerCut = Config.RiverCornerCut;
+	CurveParams.Relax = Config.RiverRelax;
+	CurveParams.MaxOffset = Config.RiverMaxOffset;
+	const TSharedRef<const HexPlanetRivers::FCurve> Curve = HexPlanetRivers::BuildCurve(Grid, Levels, Net, CurveParams);
+	AddInfo(FString::Printf(TEXT("%d points on the line of the rivers, %d mouths"), Curve->Points.Num(), Curve->Mouths.Num()));
+	TestTrue(TEXT("The rivers have a line"), Curve->Points.Num() > Edges.Num());
+
+	int32 Checked = 0;
+	for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+	{
+		const int32 NumSides = Cells[Cell].Corners.Num();
+		for (int32 Side = 0; Side < NumSides; ++Side)
+		{
+			const int32 Neighbor = Cells[Cell].Neighbors[Side];
+			const FVector3d From = Grid.GetCorners()[Cells[Cell].Corners[(Side + NumSides - 1) % NumSides]];
+			const FVector3d To = Grid.GetCorners()[Cells[Cell].Corners[Side]];
+			for (int32 Step = 0; Step <= 8; ++Step)
+			{
+				const FVector3d Point = FMath::Lerp(From, To, Step / 8.0).GetSafeNormal();
+				HexPlanetRivers::FCurveHit Own;
+				HexPlanetRivers::FCurveHit Other;
+				HexPlanetRivers::FindNearest(*Curve, Cell, Point, Own);
+				HexPlanetRivers::FindNearest(*Curve, Neighbor, Point, Other);
+				const double Near = FMath::Min(Own.Distance, CurveParams.Reach);
+				const double Far = FMath::Min(Other.Distance, CurveParams.Reach);
+				if (FMath::Min(Near, Far) < CurveParams.Reach)
+				{
+					++Checked;
+					if (!FMath::IsNearlyEqual(Near, Far, 1.0e-6))
+					{
+						AddError(FString::Printf(TEXT("Cells %d and %d see a river at %g and %g on their side"), Cell, Neighbor, Near, Far));
+						return true;
+					}
+				}
+			}
+		}
+	}
+	TestTrue(TEXT("Points near rivers were checked"), Checked > 0);
+
+	// the middle of every side with a river lies near its line, which leaves the sides by less than a quarter of a cell
+	double Farthest = 0.0;
+	for (const uint64 Key : Edges)
+	{
+		int32 A, B;
+		HexPlanetRivers::GetEdgeCells(Key, A, B);
+		if (!HexPlanetRivers::IsLevelAllowed(Levels[A]) || Levels[A] != Levels[B])
+		{
+			continue;
+		}
+		const int32 NumSides = Cells[A].Corners.Num();
+		const int32 Side = Cells[A].Neighbors.IndexOfByKey(B);
+		const FVector3d Middle = (Grid.GetCorners()[Cells[A].Corners[(Side + NumSides - 1) % NumSides]] + Grid.GetCorners()[Cells[A].Corners[Side]]).GetSafeNormal();
+		HexPlanetRivers::FCurveHit Hit;
+		HexPlanetRivers::FindNearest(*Curve, A, Middle, Hit);
+		Farthest = FMath::Max(Farthest, Hit.Distance);
+	}
+	AddInfo(FString::Printf(TEXT("the middles of the sides lie up to %.1f from the line of their river"), Farthest));
+	TestTrue(TEXT("The line of a river keeps near its sides"), Farthest < Config.HexRadius * 0.25 + Config.RiverWidth * 0.5);
+
+	// how straight a line runs: how far its points lie from the sides of its river, with no corners cut, with a limit, and straightened more
+	const auto GetOffset = [&](double CornerCut, int32 Relax, double MaxOffset)
+	{
+		HexPlanetRivers::FCurveParams Shape = CurveParams;
+		Shape.CornerCut = CornerCut;
+		Shape.Relax = Relax;
+		Shape.MaxOffset = MaxOffset;
+		Shape.Meander = 0.0;
+		const TSharedRef<const HexPlanetRivers::FCurve> Shaped = HexPlanetRivers::BuildCurve(Grid, Levels, Net, Shape);
+		double Most = 0.0;
+		for (int32 Point = 0; Point < Shaped->Points.Num(); ++Point)
+		{
+			// past a mouth the line goes on into the sea, off its sides, so the cells by the sea are left out
+			const int32 Home = Grid.FindCell(Shaped->Points[Point]);
+			if (Home == INDEX_NONE || Levels[Home] < 0 || Cells[Home].Neighbors.ContainsByPredicate([&](int32 Neighbor) { return Levels[Neighbor] < 0; }))
+			{
+				continue;
+			}
+			double Nearest = TNumericLimits<double>::Max();
+			for (const uint64 Key : Edges)
+			{
+				int32 A, B;
+				HexPlanetRivers::GetEdgeCells(Key, A, B);
+				const int32 NumSides = Cells[A].Corners.Num();
+				const int32 Side = Cells[A].Neighbors.IndexOfByKey(B);
+				if (Side == INDEX_NONE || !(Net[A] >> Side & 1))
+				{
+					continue;
+				}
+				const FVector3d From = Grid.GetCorners()[Cells[A].Corners[(Side + NumSides - 1) % NumSides]];
+				const FVector3d To = Grid.GetCorners()[Cells[A].Corners[Side]];
+				const double T = FMath::Clamp(FVector3d::DotProduct(Shaped->Points[Point] - From, To - From) / FMath::Max((To - From).SizeSquared(), 1e-20), 0.0, 1.0);
+				Nearest = FMath::Min(Nearest, FVector3d::Distance(Shaped->Points[Point], From + (To - From) * T) * Radius);
+			}
+			// the end of a river that joins another lies on the line of that one
+			const bool bEnd = Point == 0 || !Shaped->Links[Point] || !Shaped->Links[Point - 1];
+			Most = bEnd ? Most : FMath::Max(Most, Nearest);
+		}
+		return Most;
+	};
+	const double AlongSides = GetOffset(0.0, 0, 0.0);
+	const double Straight = GetOffset(1.0, 0, 0.0);
+	const double Limited = GetOffset(1.0, 0, 8.0);
+	const double Relaxed = GetOffset(1.0, 6, 0.0);
+	AddInfo(FString::Printf(TEXT("lines leave their sides by up to %.1f along the sides, %.1f through their middles, %.1f with a limit of 8, %.1f relaxed"),
+		AlongSides, Straight, Limited, Relaxed));
+	TestTrue(TEXT("RiverCornerCut 0 keeps the line on its sides"), AlongSides < Straight * 0.5);
+	TestTrue(TEXT("RiverMaxOffset limits how far the line leaves its sides"), Limited < 8.0 + 1.0);
+	TestTrue(TEXT("RiverRelax straightens the line further"), Relaxed >= Straight - 0.5);
+
+	// a build with the rivers lowers the ground, and a rebuild of the chunks they reach gives what a full build does
+	const UHexPlanetKitConfig* KitConfig = LoadObject<UHexPlanetKitConfig>(nullptr, TEXT("/Game/HexPlanet/Kit/DA_HexPlanetKit.DA_HexPlanetKit"));
+	const TSharedRef<const HexPlanetSurface::FKit> Kit = HexPlanetSurface::LoadKit(KitConfig, Config.HexRadius);
+	const HexPlanetSurface::FParams Params = HexPlanetSurface::FParams::Make(Config, *Kit, Radius);
+	const TArray<int32> Massif = HexPlanetSurface::FindMassifSteps(Grid, *Kit, Levels);
+	const TArray<int32> AllChunks = HexPlanetSurface::GetAllChunks(Grid);
+	TArray<uint16> NoRivers;
+	NoRivers.Init(0, Cells.Num());
+	const HexPlanetSurface::FBuild Old = HexPlanetSurface::Build(Grid, *Kit, Params, Levels, Massif, AllChunks, 0.0, nullptr, nullptr);
+	const HexPlanetSurface::FBuild Full = HexPlanetSurface::Build(Grid, *Kit, Params, Levels, Massif, AllChunks, Old.MeanPeak, nullptr, &Curve.Get());
+	const TArray<int32> Chunks = HexPlanetSurface::FindAffectedChunks(Grid, Levels, Levels, Massif, Massif, HexPlanetRivers::FindChangedCells(NoRivers, Net));
+	const HexPlanetSurface::FBuild Partial = HexPlanetSurface::Build(Grid, *Kit, Params, Levels, Massif, Chunks, Old.MeanPeak, nullptr, &Curve.Get());
+
+	int32 Lowered = 0;
+	for (int32 Index = 0; Index < Full.Sections.Num(); ++Index)
+	{
+		for (int32 Vertex = 0; Vertex < Full.Sections[Index].Positions.Num() && Vertex < Old.Sections[Index].Positions.Num(); ++Vertex)
+		{
+			Lowered += Full.Sections[Index].Positions[Vertex].Length() < Old.Sections[Index].Positions[Vertex].Length() - 0.1 ? 1 : 0;
+		}
+	}
+	AddInfo(FString::Printf(TEXT("%d vertices lowered into valleys, %d of %d chunks rebuilt"), Lowered, Chunks.Num(), Grid.GetNumChunks()));
+	TestTrue(TEXT("The rivers lower the ground"), Lowered > 0);
+
+	for (int32 Slot = 0; Slot < Chunks.Num(); ++Slot)
+	{
+		for (int32 Part = 0; Part < 2; ++Part)
+		{
+			const HexPlanetSurface::FSection& A = Partial.Sections[Slot * 2 + Part];
+			const HexPlanetSurface::FSection& B = Full.Sections[Chunks[Slot] * 2 + Part];
+			bool bSame = A.Positions.Num() == B.Positions.Num();
+			for (int32 Vertex = 0; bSame && Vertex < A.Positions.Num(); ++Vertex)
+			{
+				bSame = A.Positions[Vertex].Equals(B.Positions[Vertex], 1.0e-6) && A.Normals[Vertex].Equals(B.Normals[Vertex], 1.0e-4)
+					&& A.Colors[Vertex].Equals(B.Colors[Vertex], 1.0e-4f);
+			}
+			if (!bSame)
+			{
+				AddError(FString::Printf(TEXT("Rebuilt section %d differs from the full build"), Chunks[Slot] * 2 + Part));
+			}
+		}
+	}
 	return true;
 }
 

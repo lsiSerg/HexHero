@@ -138,6 +138,37 @@ struct FHexObjectsFile
 	TArray<FHexObjectCell> Cells;
 };
 
+/** A side of two cells with a river, a line of rivers.json, and whether a bridge crosses it there */
+USTRUCT()
+struct FHexRiverEdge
+{
+	GENERATED_BODY()
+
+	/** The lower of the two cells, and its neighbor across the side */
+	UPROPERTY()
+	int32 Cell = 0;
+
+	UPROPERTY()
+	int32 Neighbor = 0;
+
+	/** Named without the b of a bool, so the key in the file is "bridge" */
+	UPROPERTY()
+	bool Bridge = false;
+};
+
+/** rivers.json of a planet: the sides of cells that hold rivers (UHexPlanetRivers), a list only of them, which Git can merge */
+USTRUCT()
+struct FHexRiversFile
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	int32 Version = 1;
+
+	UPROPERTY()
+	TArray<FHexRiverEdge> Edges;
+};
+
 /**
  *  Description of a planet, stored as planet.json in its folder in Content/Data/Planets. The planet takes its levels from levels.txt next to it,
  *  or generates them from Seed when that file is missing.
@@ -310,6 +341,18 @@ namespace HexPlanetFile
 
 	/** Writes objects.json of a folder, sorted by cell */
 	bool SaveObjects(const FString& Folder, const TArray<FHexObjectCell>& Cells, FString& OutError);
+
+	/** rivers.json holds the sides of cells with rivers and bridges; a planet without it generates them and writes it, even empty */
+	constexpr const TCHAR* RiversFile = TEXT("rivers.json");
+
+	/** Returns true if the folder has rivers.json */
+	bool HasRivers(const FString& Folder);
+
+	/** Reads rivers.json of a folder */
+	bool LoadRivers(const FString& Folder, TArray<FHexRiverEdge>& OutEdges, FString& OutError);
+
+	/** Writes rivers.json of a folder, a line per side, sorted */
+	bool SaveRivers(const FString& Folder, const TArray<FHexRiverEdge>& Edges, FString& OutError);
 
 	/** Writes relief.json of a folder, or deletes it when there are no cells */
 	bool SaveRelief(const FString& Folder, const TArray<FHexReliefCell>& Cells, FString& OutError);

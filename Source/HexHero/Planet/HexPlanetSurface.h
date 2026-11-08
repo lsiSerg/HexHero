@@ -9,6 +9,11 @@ class FHexSphereGrid;
 class UHexPlanetConfig;
 class UHexPlanetKitConfig;
 
+namespace HexPlanetRivers
+{
+	struct FCurve;
+}
+
 /**
  *  Builds the surface of the planet: two mesh sections per chunk of the grid (FHexSphereCell::Chunk), the second with the mountains, from the kit
  *  of each level, and a coarse section per chunk for far away, 12 triangles a cell. It can build only some chunks, so a change of levels rebuilds only the chunks it reaches. Everything but LoadKit reads only its
@@ -23,6 +28,7 @@ class UHexPlanetKitConfig;
 namespace HexPlanetSurface
 {
 	constexpr int32 MountainLevel = 2;
+
 
 	/** Returns the section of a cell: two per chunk, the second with the mountains */
 	inline int32 GetSection(int32 Chunk, int32 Level) { return Chunk * 2 + (Level == MountainLevel ? 1 : 0); }
@@ -173,6 +179,10 @@ namespace HexPlanetSurface
 		/** By level from -2: the radii where the faces of high ground begin and are full */
 		double FacetLow[5] = {};
 		double FacetHigh[5] = {};
+		/** The valley along a river (RiverValleyDepth, RiverValleyBottom, RiverValleySlope of DA_HexPlanet) */
+		double RiverValleyDepth = 0.0;
+		double RiverValleyBottom = 20.0;
+		double RiverValleySlope = 20.0;
 
 		static FParams Make(const UHexPlanetConfig& Config, const FKit& Kit, double Radius);
 
@@ -206,6 +216,7 @@ namespace HexPlanetSurface
 		/** The cell of each vertex and where it lies in it, see GetCellUV and GetLocalUV */
 		TArray<FVector2D> CellUVs;
 		TArray<FVector2D> LocalUVs;
+		/** Black, as only the tiles of painting draw colors of their own */
 		TArray<FLinearColor> Colors;
 	};
 
@@ -274,7 +285,11 @@ namespace HexPlanetSurface
 	/** Returns every chunk of the grid */
 	TArray<int32> GetAllChunks(const FHexSphereGrid& Grid);
 
-	/** Builds the sections of some chunks in parallel. A MeanPeak of 0 or less measures it from the mountains, which needs every chunk */
+	/**
+	 *  Builds the sections of some chunks in parallel. A MeanPeak of 0 or less measures it from the mountains, which needs every chunk. Rivers is
+	 *  the line of the rivers (HexPlanetRivers::BuildCurve), by which the ground lowers into a valley along each river and the vertices know
+	 *  where its water lies, a function of the place and that line alone, so the cells that share a point lower it alike; null for none
+	 */
 	FBuild Build(const FHexSphereGrid& Grid, const FKit& Kit, const FParams& Params, TConstArrayView<int8> Levels, TConstArrayView<int32> MassifSteps,
-		TConstArrayView<int32> Chunks, double MeanPeak, const FReliefOverrides* Overrides = nullptr);
+		TConstArrayView<int32> Chunks, double MeanPeak, const FReliefOverrides* Overrides = nullptr, const HexPlanetRivers::FCurve* Rivers = nullptr);
 }

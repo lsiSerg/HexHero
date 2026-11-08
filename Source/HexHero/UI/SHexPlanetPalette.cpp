@@ -335,6 +335,46 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 		];
 	}
 
+	// rivers run along the sides of the cells from corner to corner, and bridges stand on their sides
+	{
+		const TSharedRef<SButton> River = MakeButton(
+			SNew(STextBlock).Text(LOCTEXT("River", "River")).Font(Small).Justification(ETextJustify::Center),
+			[](UHexPlanetPainter& Each) { Each.SetRiverTool(); },
+			[](const UHexPlanetPainter& Each) { return Each.IsPaintingRivers(); });
+		River->SetToolTipText(LOCTEXT("RiverTip", "Drag along the sides of cells to lay a river from corner to corner; Ctrl+drag takes it away. Only between plains and hills"));
+		const TSharedRef<SButton> Bridge = MakeButton(
+			SNew(STextBlock).Text(LOCTEXT("Bridge", "Bridge")).Font(Small).Justification(ETextJustify::Center),
+			[](UHexPlanetPainter& Each) { Each.SetBridgeTool(); },
+			[](const UHexPlanetPainter& Each) { return Each.IsPlacingBridges(); });
+		Bridge->SetToolTipText(LOCTEXT("BridgeTip", "Click the side of a cell with a river to put a bridge on it, which takes away the cost of crossing; Ctrl+click takes it away"));
+
+		Content->AddSlot()
+		.AutoHeight()
+		.Padding(0.0f, 8.0f, 0.0f, 3.0f)
+		[
+			SNew(STextBlock)
+			.Text(LOCTEXT("Rivers", "Rivers"))
+			.Font(Font)
+		];
+
+		Content->AddSlot()
+		.AutoHeight()
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.FillWidth(1.0f)
+			[
+				River
+			]
+			+ SHorizontalBox::Slot()
+			.FillWidth(1.0f)
+			.Padding(3.0f, 0.0f, 0.0f, 0.0f)
+			[
+				Bridge
+			]
+		];
+	}
+
 	// the size of the brush
 	TSharedRef<SHorizontalBox> Sizes = SNew(SHorizontalBox);
 	for (int32 Size = 1; Size <= UHexPlanetPainter::MaxBrushSize; ++Size)

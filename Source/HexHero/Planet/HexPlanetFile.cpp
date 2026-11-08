@@ -416,6 +416,50 @@ bool HexPlanetFile::SaveObjects(const FString& Folder, const TArray<FHexObjectCe
 	return true;
 }
 
+bool HexPlanetFile::HasRivers(const FString& Folder)
+{
+	return IFileManager::Get().FileExists(*GetFilePath(Folder, RiversFile));
+}
+
+bool HexPlanetFile::LoadRivers(const FString& Folder, TArray<FHexRiverEdge>& OutEdges, FString& OutError)
+{
+	OutEdges.Reset();
+	const FString FilePath = GetFilePath(Folder, RiversFile);
+	FString Text;
+	FHexRiversFile File;
+	if (!FFileHelper::LoadFileToString(Text, *FilePath) || !FJsonObjectConverter::JsonObjectStringToUStruct(Text, &File))
+	{
+		OutError = FString::Printf(TEXT("could not read %s"), *FilePath);
+		return false;
+	}
+	OutEdges = MoveTemp(File.Edges);
+	return true;
+}
+
+bool HexPlanetFile::SaveRivers(const FString& Folder, const TArray<FHexRiverEdge>& Edges, FString& OutError)
+{
+	const FString FilePath = GetFilePath(Folder, RiversFile);
+	TArray<FHexRiverEdge> Sorted = Edges;
+	Sorted.Sort([](const FHexRiverEdge& A, const FHexRiverEdge& B) { return A.Cell != B.Cell ? A.Cell < B.Cell : A.Neighbor < B.Neighbor; });
+
+	// a line per side, so an edit changes only the lines of its sides and Git merges them
+	FString Text = TEXT("{\n\t\"version\": 1,\n\t\"edges\": [");
+	for (int32 Index = 0; Index < Sorted.Num(); ++Index)
+	{
+		const FHexRiverEdge& Edge = Sorted[Index];
+		Text += FString::Printf(TEXT("%s\n\t\t{\"cell\": %d, \"neighbor\": %d%s}"), Index == 0 ? TEXT("") : TEXT(","), Edge.Cell, Edge.Neighbor,
+			Edge.Bridge ? TEXT(", \"bridge\": true") : TEXT(""));
+	}
+	Text += Sorted.IsEmpty() ? TEXT("]\n}\n") : TEXT("\n\t]\n}\n");
+
+	if (!FFileHelper::SaveStringToFile(Text, *FilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+	{
+		OutError = FString::Printf(TEXT("could not write %s"), *FilePath);
+		return false;
+	}
+	return true;
+}
+
 bool HexPlanetFile::SaveLevels(const FString& Folder, TConstArrayView<int8> Levels, FString& OutError)
 {
 	const FString FilePath = GetFilePath(Folder, LevelsFile);

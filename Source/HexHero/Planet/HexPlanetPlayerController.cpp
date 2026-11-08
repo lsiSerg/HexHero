@@ -298,8 +298,15 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 
 	FVector Origin;
 	FVector Direction;
-	const int32 Cell = DeprojectMousePositionToWorld(Origin, Direction) ? Planet->FindCellAlongRay(Origin, Direction) : INDEX_NONE;
+	FVector MousePoint = FVector::ZeroVector;
+	const int32 Cell = DeprojectMousePositionToWorld(Origin, Direction) ? Planet->FindCellAlongRay(Origin, Direction, &MousePoint) : INDEX_NONE;
 	MouseCell = Cell;
+
+	// the river brush follows the corner nearest the point under the mouse
+	if (Painter && Cell != INDEX_NONE)
+	{
+		Painter->SetCursorPoint(MousePoint);
+	}
 
 	if (Painter && Painter->IsPainting())
 	{

@@ -26,6 +26,7 @@
 #include "HexPlanetConfig.h"
 #include "HexPlanetKitConfig.h"
 #include "HexPlanetObjects.h"
+#include "HexPlanetRivers.h"
 #include "HexPlanetSeaField.h"
 #include "HexPlanetWaterConfig.h"
 #include "HexTerrainLayersConfig.h"
@@ -37,6 +38,7 @@
 #include "NiagaraSystem.h"
 #include "HAL/IConsoleManager.h"
 #include "ProceduralMeshComponent.h"
+#include "Misc/ScopeExit.h"
 
 namespace
 {
@@ -53,6 +55,9 @@ namespace
 
 	/** Cells whose centers the water material compares a pixel with, to find whether it lies in a hidden cell: the cell, its neighbors and theirs */
 	const int32 MaxWaterHideCells = 19;
+
+	/** How many mouths of rivers the water takes, as RIVER_MOUTHS of create_planet_assets.py */
+	constexpr int32 MaxRiverMouths = 8;
 
 	/** Mesh of one section */
 	struct FSectionMesh
@@ -428,6 +433,33 @@ namespace
 		}
 	}
 
+	/** Sets how straight the rivers run while the game runs, or back to DA_HexPlanet without arguments */
+	void RiverShapeCommand(const TArray<FString>& Args, UWorld* World)
+	{
+		AHexPlanet* Planet = nullptr;
+		for (TActorIterator<AHexPlanet> It(World); It; ++It)
+		{
+			Planet = *It;
+			break;
+		}
+		double CornerCut = 1.0;
+		int32 Relax = 0;
+		double MaxOffset = 0.0;
+		const bool bParsed = Args.IsEmpty() || (LexTryParseString(CornerCut, *Args[0]) && (Args.Num() < 2 || LexTryParseString(Relax, *Args[1]))
+			&& (Args.Num() < 3 || LexTryParseString(MaxOffset, *Args[2])));
+		if (!Planet || !bParsed)
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("Usage: hex.PlanetRiverShape [CornerCut 0..1] [Relax passes] [MaxOffset], on a planet; without arguments the values of DA_HexPlanet"));
+			return;
+		}
+		Planet->SetRiverShape(Args.IsEmpty() ? TOptional<FVector3d>() : TOptional<FVector3d>(FVector3d(FMath::Clamp(CornerCut, 0.0, 1.0), FMath::Clamp(Relax, 0, 50),
+			FMath::Max(MaxOffset, 0.0))));
+	}
+
+	FAutoConsoleCommandWithWorldAndArgs RiverShapeConsoleCommand(TEXT("hex.PlanetRiverShape"),
+		TEXT("hex.PlanetRiverShape [CornerCut] [Relax] [MaxOffset]: how straight the rivers run, as RiverCornerCut (0 along the sides of the cells, 1 through their middles), RiverRelax and RiverMaxOffset of DA_HexPlanet; without arguments back to the asset"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&RiverShapeCommand));
+
 	FAutoConsoleCommandWithWorldAndArgs ShoreIceConsoleCommand(TEXT("hex.PlanetShoreIce"),
 		TEXT("hex.PlanetShoreIce [Rings] [save]: freezes the open sea up to Rings cells (1) from snow land into shore ice, as the generation does, and with save writes biomes.txt"),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&ShoreIceCommand));
@@ -453,8 +485,14 @@ struct AHexPlanet::FLevelRebuild
 	TArray<int8> Levels;
 	HexPlanetSurface::FReliefOverrides OldOverrides;
 	HexPlanetSurface::FReliefOverrides Overrides;
+	/** The nets of the rivers shown and to build, HexPlanetRivers::BuildNet, and the line of the new one */
+	TArray<uint16> OldRivers;
+	TArray<uint16> Rivers;
+	TSharedPtr<const HexPlanetRivers::FCurve> RiverCurve;
 	TArray<uint8> OldFrozen;
 	TArray<uint8> Frozen;
+	/** True to build every chunk, as the shape of the rivers changed */
+	bool bAll = false;
 	/** The real coast by chunk as it was, which the task brings up to date with the chunks it builds, for the sea field */
 	TArray<TArray<FVector3f>> Coasts;
 
@@ -483,6 +521,7 @@ AHexPlanet::AHexPlanet()
 	RootComponent = Surface;
 
 	Objects = CreateDefaultSubobject<UHexPlanetObjects>(TEXT("Objects"));
+	Rivers = CreateDefaultSubobject<UHexPlanetRivers>(TEXT("Rivers"));
 	Objects->SetupAttachment(Surface);
 
 	Water = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("Water"));
@@ -703,9 +742,10 @@ void AHexPlanet::BuildPlanet()
 	LoadBiomeConfigs();
 	LoadBiomes();
 	LoadRelief();
-	// the objects are placed on the surface as it is built, so they are read first
+	// the objects are placed on the surface as it is built, so they are read first, and they keep out of the rivers
+	Rivers->Init(this, Settings);
 	Objects->Init(this, Settings);
-	WriteGeneratedFiles(!bHadLevels, !bHadBiomes && !BiomeConfigs.IsEmpty(), Objects->WasGenerated() && !Objects->GetSets().IsEmpty());
+	WriteGeneratedFiles(!bHadLevels, !bHadBiomes && !BiomeConfigs.IsEmpty(), Objects->WasGenerated() && !Objects->GetSets().IsEmpty(), Rivers->WasGenerated());
 	CreateCellMarks();
 	CreateBiomeTexture();
 	// before the materials of the surface are made, which take the texture
@@ -850,6 +890,8 @@ void AHexPlanet::SetCells(const TMap<int32, int32>& NewLevels, const TMap<int32,
 	if (!BiomeCells.IsEmpty())
 	{
 		UpdateBiomePixels(BiomeCells);
+		// a river freezes or thaws with the biomes beside it
+		Rivers->RefreshTexture();
 		// objects take the variant of their biome, and stand on the surface shown until a rebuild of the levels places them again
 		Objects->RebuildCells(BiomeCells);
 	}
@@ -952,22 +994,31 @@ void AHexPlanet::StartRebuild()
 	Rebuild->Levels = Levels;
 	Rebuild->OldOverrides = ShownReliefOverrides;
 	Rebuild->Overrides = ReliefOverrides;
+	Rebuild->OldRivers = TArray<uint16>(Rivers->GetShownNet());
+	Rebuild->Rivers = Rivers->BuildNet(Levels);
 	Rebuild->OldFrozen = ShownFrozen;
 	Rebuild->Frozen = GetFrozenCells();
 	Rebuild->Coasts = ChunkCoasts;
+	Rebuild->bAll = bRebuildAllPending;
+	bRebuildAllPending = false;
 	Rebuild->StartTime = FPlatformTime::Seconds();
 
 	RebuildTask = UE::Tasks::Launch(UE_SOURCE_LOCATION,
-		[Work = Rebuild, GridPtr = &Grid, Kit = SurfaceKit.ToSharedRef(), Params = SurfaceParams, SeaParams = FSeaParams::Make(*Settings, Radius), FixedPeak = MeanPeak]()
+		[Work = Rebuild, GridPtr = &Grid, Kit = SurfaceKit.ToSharedRef(), Params = SurfaceParams, SeaParams = FSeaParams::Make(*Settings, Radius), FixedPeak = MeanPeak,
+			CurveParams = Rivers->GetCurveParams()]()
 		{
 			const double SurfaceStart = FPlatformTime::Seconds();
+			Work->RiverCurve = HexPlanetRivers::BuildCurve(*GridPtr, Work->Levels, Work->Rivers, CurveParams);
 			Work->MassifSteps = HexPlanetSurface::FindMassifSteps(*GridPtr, *Kit, Work->Levels);
-			Work->Chunks = HexPlanetSurface::FindAffectedChunks(*GridPtr, Work->OldLevels, Work->Levels, Work->OldMassifSteps, Work->MassifSteps,
-				HexPlanetSurface::FindChangedOverrides(Work->OldOverrides, Work->Overrides));
+			// a relief set by hand and a river change the cells they lie on as a level does
+			TArray<int32> ChangedCells = HexPlanetSurface::FindChangedOverrides(Work->OldOverrides, Work->Overrides);
+			ChangedCells.Append(HexPlanetRivers::FindChangedCells(Work->OldRivers, Work->Rivers));
+			Work->Chunks = Work->bAll ? HexPlanetSurface::GetAllChunks(*GridPtr)
+				: HexPlanetSurface::FindAffectedChunks(*GridPtr, Work->OldLevels, Work->Levels, Work->OldMassifSteps, Work->MassifSteps, ChangedCells);
 
 			if (!Work->Chunks.IsEmpty())
 			{
-				Work->Surface = HexPlanetSurface::Build(*GridPtr, *Kit, Params, Work->Levels, Work->MassifSteps, Work->Chunks, FixedPeak, &Work->Overrides);
+				Work->Surface = HexPlanetSurface::Build(*GridPtr, *Kit, Params, Work->Levels, Work->MassifSteps, Work->Chunks, FixedPeak, &Work->Overrides, Work->RiverCurve.Get());
 				for (int32 Slot = 0; Slot < Work->Surface.Chunks.Num(); ++Slot)
 				{
 					Work->Coasts[Work->Surface.Chunks[Slot]] = Work->Surface.Coasts[Slot];
@@ -1012,10 +1063,14 @@ void AHexPlanet::FinishRebuild()
 		NumChanged += Rebuild->Levels[Cell] != Rebuild->OldLevels[Cell] ? 1 : 0;
 	}
 
+	// the objects placed again with the surface keep out of the rivers it shows; the line also changes with the coast at a mouth
+	Rivers->SetShownNet(Rebuild->Rivers, Rebuild->RiverCurve);
 	if (!Rebuild->Chunks.IsEmpty())
 	{
 		ApplySurface(Rebuild->Surface);
 	}
+	// the bridges stand on the ground of the valleys just shown
+	Rivers->UpdateBridges();
 	if (!Rebuild->SeaPixels.IsEmpty())
 	{
 		ApplySeaField(Rebuild->SeaPixels);
@@ -1027,7 +1082,7 @@ void AHexPlanet::FinishRebuild()
 	}
 
 	// the floes move with the ice, and with the coast, as a cell of frozen sea that became land keeps its frozen mark for the sea field
-	const bool bFloesChanged = !Rebuild->SeaPixels.IsEmpty();
+	const bool bFloesChanged = !Rebuild->SeaPixels.IsEmpty() || Rebuild->Rivers != Rebuild->OldRivers;
 	ShownLevels = MoveTemp(Rebuild->Levels);
 	ShownMassifSteps = MoveTemp(Rebuild->MassifSteps);
 	ShownFrozen = MoveTemp(Rebuild->Frozen);
@@ -1086,6 +1141,7 @@ void AHexPlanet::Tick(float DeltaTime)
 		if (!Below.IsNearlyZero())
 		{
 			Water->SetWorldRotation(FQuat::FindBetweenNormals(FVector::UpVector, Below));
+			UpdateRiverMouths(FVector3d(Below));
 		}
 	}
 
@@ -1564,6 +1620,11 @@ void AHexPlanet::SetBiomeLayers(UMaterialInstanceDynamic* Target) const
 	{
 		Target->SetTextureParameterValue(TEXT("CellCanopy"), CellCanopyTexture);
 	}
+	if (Rivers && Rivers->GetTexture() && Rivers->GetSegmentTexture())
+	{
+		Target->SetTextureParameterValue(TEXT("CellRivers"), Rivers->GetTexture());
+		Target->SetTextureParameterValue(TEXT("RiverSegments"), Rivers->GetSegmentTexture());
+	}
 	if (LayerParamsTexture)
 	{
 		Target->SetTextureParameterValue(TEXT("LayerParams"), LayerParamsTexture);
@@ -1906,7 +1967,7 @@ bool AHexPlanet::SaveAs(const FString& Name, FString& OutError)
 
 	// the levels and biomes are always written, painted or generated, so the planet does not change when the generation does
 	if (!HexPlanetFile::SaveLevels(Folder, Levels, OutError) || !HexPlanetFile::SaveBiomes(Folder, CellBiomes, BiomeLetters, OutError)
-		|| !SaveRelief(Folder, OutError) || !Objects->Save(Folder, OutError))
+		|| !SaveRelief(Folder, OutError) || !Objects->Save(Folder, OutError) || !Rivers->Save(Folder, OutError))
 	{
 		return false;
 	}
@@ -1917,7 +1978,7 @@ bool AHexPlanet::SaveAs(const FString& Name, FString& OutError)
 	return true;
 }
 
-void AHexPlanet::WriteGeneratedFiles(bool bLevels, bool bBiomes, bool bObjects)
+void AHexPlanet::WriteGeneratedFiles(bool bLevels, bool bBiomes, bool bObjects, bool bRivers)
 {
 	if (!IsSaved())
 	{
@@ -1954,6 +2015,18 @@ void AHexPlanet::WriteGeneratedFiles(bool bLevels, bool bBiomes, bool bObjects)
 		if (Objects->Save(PlanetFolder, Error))
 		{
 			UE_LOG(LogHexHero, Log, TEXT("Planet: wrote the generated objects to %s"), *HexPlanetFile::GetFilePath(PlanetFolder, HexPlanetFile::ObjectsFile));
+		}
+		else
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("Planet: %s"), *Error);
+		}
+	}
+
+	if (bRivers)
+	{
+		if (Rivers->Save(PlanetFolder, Error))
+		{
+			UE_LOG(LogHexHero, Log, TEXT("Planet: wrote the generated rivers to %s"), *HexPlanetFile::GetFilePath(PlanetFolder, HexPlanetFile::RiversFile));
 		}
 		else
 		{
@@ -2064,6 +2137,13 @@ void AHexPlanet::SetReliefOverrides(const HexPlanetSurface::FReliefOverrides& Ch
 	}
 }
 
+void AHexPlanet::OnRiversChanged()
+{
+	MarkLevelsEdited();
+	bLevelsPending = true;
+	StartRebuild();
+}
+
 HexPlanetSurface::FReliefOverride AHexPlanet::GetReliefOverride(int32 Cell) const
 {
 	const HexPlanetSurface::FReliefOverride* Found = ReliefOverrides.Find(Cell);
@@ -2079,7 +2159,7 @@ bool AHexPlanet::SaveLevels(FString& OutError)
 	}
 
 	if (!HexPlanetFile::SaveLevels(PlanetFolder, Levels, OutError) || !HexPlanetFile::SaveBiomes(PlanetFolder, CellBiomes, BiomeLetters, OutError)
-		|| !SaveRelief(PlanetFolder, OutError) || !Objects->Save(PlanetFolder, OutError))
+		|| !SaveRelief(PlanetFolder, OutError) || !Objects->Save(PlanetFolder, OutError) || !Rivers->Save(PlanetFolder, OutError))
 	{
 		return false;
 	}
@@ -2445,10 +2525,14 @@ void AHexPlanet::BuildSurface()
 
 	ShownLevels = Levels;
 	ShownMassifSteps = HexPlanetSurface::FindMassifSteps(Grid, *SurfaceKit, Levels);
+	TArray<uint16> RiverNet = Rivers->BuildNet(Levels);
+	const TSharedRef<const HexPlanetRivers::FCurve> RiverCurve = HexPlanetRivers::BuildCurve(Grid, Levels, RiverNet, Rivers->GetCurveParams());
 
 	// the mean peak of this build stays while levels are edited, so the fade of the grid lines does not jump
 	ShownReliefOverrides = ReliefOverrides;
-	HexPlanetSurface::FBuild Build = HexPlanetSurface::Build(Grid, *SurfaceKit, SurfaceParams, Levels, ShownMassifSteps, HexPlanetSurface::GetAllChunks(Grid), 0.0, &ReliefOverrides);
+	HexPlanetSurface::FBuild Build = HexPlanetSurface::Build(Grid, *SurfaceKit, SurfaceParams, Levels, ShownMassifSteps, HexPlanetSurface::GetAllChunks(Grid), 0.0,
+		&ReliefOverrides, &RiverCurve.Get());
+	Rivers->SetShownNet(MoveTemp(RiverNet), RiverCurve);
 	MeanPeak = Build.MeanPeak;
 	const double ApplyStart = FPlatformTime::Seconds();
 
@@ -2513,6 +2597,7 @@ void AHexPlanet::BuildSurface()
 	CellTurnChoices.Init(FIntPoint::ZeroValue, Grid.GetCells().Num());
 	BouldersByChunk.SetNum(Grid.GetNumChunks());
 	ApplySurface(Build);
+	Rivers->UpdateBridges();
 
 	int32 LevelCounts[5] = {};
 	for (int32 Cell = 0; Cell < Grid.GetCells().Num(); ++Cell)
@@ -2600,7 +2685,7 @@ void AHexPlanet::ApplySurface(HexPlanetSurface::FBuild& Build)
 	bSurfaceChanged = true;
 }
 
-int32 AHexPlanet::FindCellAlongRay(const FVector& Origin, const FVector& Direction) const
+int32 AHexPlanet::FindCellAlongRay(const FVector& Origin, const FVector& Direction, FVector* OutPoint) const
 {
 	if (Radius <= 0.0 || !Settings)
 	{
@@ -2661,6 +2746,10 @@ int32 AHexPlanet::FindCellAlongRay(const FVector& Origin, const FVector& Directi
 				{
 					Low = Middle;
 				}
+			}
+			if (OutPoint)
+			{
+				*OutPoint = Origin + RayDirection * High;
 			}
 			return Hit;
 		}
@@ -2874,6 +2963,72 @@ void AHexPlanet::UpdateFloes()
 	const double SizeMax = FMath::Max(Config.FloeSizeMax, Config.FloeSizeMin);
 	int32 Total = 0;
 
+	const auto AddFloe = [&](int32 Cell, const FVector3d& Position, double Size, FRandomStream& Random)
+	{
+		const bool bShard = Size < Config.FloeShardSize && NumShards > 0;
+		const bool bShallow = ShownLevels[Cell] == -1;
+		NumShadowed += bShallow ? 1 : 0;
+		const int32 Mesh = (bShard || NumFloeSlabs == 0 ? NumFloeSlabs + Random.RandRange(0, FMath::Max(NumShards, 1) - 1) : Random.RandRange(0, NumFloeSlabs - 1))
+			+ (bShallow ? 0 : NumFloeMeshes);
+		const FVector3d FloeUp = Position.GetSafeNormal();
+		const FQuat4d Lean(FVector3d::CrossProduct(FVector3d::UnitZ(), FloeUp).GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector3d::UnitX()),
+			FMath::Acos(FMath::Clamp(FloeUp.Z, -1.0, 1.0)));
+		const FQuat4d Tilt(FVector3d(Random.FRandRange(-1.0, 1.0), Random.FRandRange(-1.0, 1.0), 0.0).GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector3d::UnitX()),
+			FMath::DegreesToRadians(Random.FRand() * Config.FloeTilt));
+		const FQuat4d Spin(FVector3d::UnitZ(), Random.FRand() * UE_DOUBLE_TWO_PI);
+		FloesByCell[Cell].Add({Position, Size});
+		if (Transforms.IsValidIndex(Mesh))
+		{
+			Transforms[Mesh].Add(FTransform(FQuat(Lean * Tilt * Spin), FVector(Position), FVector(Size)));
+			++Total;
+		}
+	};
+
+	// where a frozen river reaches the sea its ice goes on as broken floes, smaller and further apart out to RiverMouthFloeReach, before the
+	// floes of the pack, which keep away from them
+	const TSharedPtr<const HexPlanetRivers::FCurve> RiverCurve = Rivers ? Rivers->GetShownCurve() : nullptr;
+	const auto IsFrozenLand = [this](int32 Cell) { return IsRiverFrozenAt(Cell); };
+	if (RiverCurve && Config.RiverMouthFloes > 0)
+	{
+		for (const HexPlanetRivers::FCurve::FMouth& Mouth : RiverCurve->Mouths)
+		{
+			if (!Cells.IsValidIndex(Mouth.CellA) || !Cells.IsValidIndex(Mouth.CellB) || (!IsFrozenLand(Mouth.CellA) && !IsFrozenLand(Mouth.CellB)))
+			{
+				continue;
+			}
+			FRandomStream Random(int32(uint32(Mouth.CellA) * 2654435761u ^ uint32(Mouth.CellB) * 40503u));
+			const FVector3d Across = FVector3d::CrossProduct(Mouth.Position, Mouth.Direction);
+			const int32 Before = Total;
+			ON_SCOPE_EXIT
+			{
+				UE_LOG(LogHexHero, Verbose, TEXT("Planet: %d floes at the frozen mouth between cells %d and %d"), Total - Before, Mouth.CellA, Mouth.CellB);
+			};
+			for (int32 Index = 0; Index < Config.RiverMouthFloes; ++Index)
+			{
+				const double Share = (Index + Random.FRandRange(0.2, 0.8)) / Config.RiverMouthFloes;
+				const double Size = Config.RiverMouthFloeSize * FMath::Lerp(1.0, 0.3, Share) * Random.FRandRange(0.75, 1.1);
+				const double Out = Share * Config.RiverMouthFloeReach + Size * 0.5;
+				const double Side = Random.FRandRange(-1.0, 1.0) * Config.RiverWidth * (0.25 + Share * 0.6);
+				const FVector3d Position = (Mouth.Position + (Mouth.Direction * Out + Across * Side) / Radius).GetSafeNormal() * Radius;
+				// the first ones lie on the edge of the water, where the ground falls into it, the others out on the sea
+				const int32 Cell = Grid.FindCell(Position.GetSafeNormal(), Mouth.CellA);
+				if (Cell == INDEX_NONE || (ShownLevels[Cell] >= 0 && Out > Config.RiverWidth))
+				{
+					continue;
+				}
+				bool bFree = true;
+				for (const FFloe& Floe : FloesByCell[Cell])
+				{
+					bFree &= FVector3d::DistSquared(Floe.Position, Position) >= FMath::Square((Floe.Size + Size) * 0.9);
+				}
+				if (bFree)
+				{
+					AddFloe(Cell, Position, Size, Random);
+				}
+			}
+		}
+	}
+
 	for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
 	{
 		if (!IsIce(Cell))
@@ -2962,25 +3117,8 @@ void AHexPlanet::UpdateFloes()
 					continue;
 				}
 
-				FloesByCell[Cell].Add({Position, Size});
 				Covered += UE_DOUBLE_PI * Size * Size * FillShare;
-
-				const bool bShard = Size < Config.FloeShardSize && NumShards > 0;
-				const bool bShallow = ShownLevels[Cell] == -1;
-				NumShadowed += bShallow ? 1 : 0;
-				const int32 Mesh = (bShard || NumFloeSlabs == 0 ? NumFloeSlabs + Random.RandRange(0, FMath::Max(NumShards, 1) - 1) : Random.RandRange(0, NumFloeSlabs - 1))
-					+ (bShallow ? 0 : NumFloeMeshes);
-				const FVector3d FloeUp = Position.GetSafeNormal();
-				const FQuat4d Lean(FVector3d::CrossProduct(FVector3d::UnitZ(), FloeUp).GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector3d::UnitX()),
-					FMath::Acos(FMath::Clamp(FloeUp.Z, -1.0, 1.0)));
-				const FQuat4d Tilt(FVector3d(Random.FRandRange(-1.0, 1.0), Random.FRandRange(-1.0, 1.0), 0.0).GetSafeNormal(UE_DOUBLE_SMALL_NUMBER, FVector3d::UnitX()),
-					FMath::DegreesToRadians(Random.FRand() * Config.FloeTilt));
-				const FQuat4d Spin(FVector3d::UnitZ(), Random.FRand() * UE_DOUBLE_TWO_PI);
-				if (Transforms.IsValidIndex(Mesh))
-				{
-					Transforms[Mesh].Add(FTransform(FQuat(Lean * Tilt * Spin), FVector(Position), FVector(Size)));
-					++Total;
-				}
+				AddFloe(Cell, Position, Size, Random);
 				break;
 			}
 		}
@@ -2994,6 +3132,110 @@ void AHexPlanet::UpdateFloes()
 		Component->MarkRenderStateDirty();
 	}
 	UE_LOG(LogHexHero, Log, TEXT("Planet: %d floes, %d of them over the shallows with shadows, placed in %.1f ms"), Total, NumShadowed, (FPlatformTime::Seconds() - StartTime) * 1000.0);
+}
+
+bool AHexPlanet::IsRiverFrozenAt(int32 Cell) const
+{
+	const TCHAR Letter = GetCellBiomeLetter(Cell);
+	return Letter != 0 && Settings->RiverFrozenBiomes.Contains(FString::Chr(Letter), ESearchCase::IgnoreCase);
+}
+
+void AHexPlanet::UpdateRiverMouths(const FVector3d& Below)
+{
+	static const TArray<FName> PositionNames = []()
+	{
+		TArray<FName> Names;
+		for (int32 Index = 0; Index < MaxRiverMouths; ++Index)
+		{
+			Names.Add(FName(*FString::Printf(TEXT("RiverMouth%d"), Index)));
+		}
+		return Names;
+	}();
+	static const TArray<FName> DirectionNames = []()
+	{
+		TArray<FName> Names;
+		for (int32 Index = 0; Index < MaxRiverMouths; ++Index)
+		{
+			Names.Add(FName(*FString::Printf(TEXT("RiverMouthDir%d"), Index)));
+		}
+		return Names;
+	}();
+	if (!WaterMaterial || !Rivers)
+	{
+		return;
+	}
+
+	// the open mouths nearest the point under the camera, as the water is seen closest there; a frozen river ends in floes instead
+	const TSharedPtr<const HexPlanetRivers::FCurve> Curve = Rivers->GetShownCurve();
+	TArray<TPair<double, int32>, TInlineAllocator<64>> Nearest;
+	if (Curve)
+	{
+		for (int32 Index = 0; Index < Curve->Mouths.Num(); ++Index)
+		{
+			const HexPlanetRivers::FCurve::FMouth& Mouth = Curve->Mouths[Index];
+			if (!IsRiverFrozenAt(Mouth.CellA) && !IsRiverFrozenAt(Mouth.CellB))
+			{
+				Nearest.Add({-FVector3d::DotProduct(Mouth.Position, Below), Index});
+			}
+		}
+	}
+	Nearest.Sort([](const TPair<double, int32>& A, const TPair<double, int32>& B) { return A.Key < B.Key; });
+	TArray<int32> Chosen;
+	for (int32 Index = 0; Index < Nearest.Num() && Index < MaxRiverMouths; ++Index)
+	{
+		Chosen.Add(Nearest[Index].Value);
+	}
+	Chosen.Sort();
+	if (Chosen == AppliedRiverMouths && Curve.Get() == AppliedRiverCurve)
+	{
+		return;
+	}
+	AppliedRiverMouths = Chosen;
+	AppliedRiverCurve = Curve.Get();
+
+	for (int32 Slot = 0; Slot < MaxRiverMouths; ++Slot)
+	{
+		if (Chosen.IsValidIndex(Slot))
+		{
+			const HexPlanetRivers::FCurve::FMouth& Mouth = Curve->Mouths[Chosen[Slot]];
+			const FVector3d Position = Mouth.Position * Radius;
+			WaterMaterial->SetVectorParameterValue(PositionNames[Slot], FLinearColor(float(Position.X), float(Position.Y), float(Position.Z), 1.0f));
+			WaterMaterial->SetVectorParameterValue(DirectionNames[Slot], FLinearColor(float(Mouth.Direction.X), float(Mouth.Direction.Y), float(Mouth.Direction.Z), 0.0f));
+		}
+		else
+		{
+			WaterMaterial->SetVectorParameterValue(PositionNames[Slot], FLinearColor(0.0f, 0.0f, 0.0f, 0.0f));
+		}
+	}
+}
+
+void AHexPlanet::ApplyRiverTextures()
+{
+	for (UMaterialInstanceDynamic* Target : { SurfaceMaterial.Get(), SurfaceCutMaterial.Get(), LodNearMaterial.Get(), LodFarMaterial.Get() })
+	{
+		if (Target && Rivers && Rivers->GetTexture() && Rivers->GetSegmentTexture())
+		{
+			Target->SetTextureParameterValue(TEXT("CellRivers"), Rivers->GetTexture());
+			Target->SetTextureParameterValue(TEXT("RiverSegments"), Rivers->GetSegmentTexture());
+		}
+	}
+}
+
+void AHexPlanet::SetRiverShape(TOptional<FVector3d> Shape)
+{
+	// before the build, as from -ExecCmds, the build takes it
+	Rivers->SetShapeOverride(Shape);
+	if (!bBuilt)
+	{
+		UE_LOG(LogHexHero, Log, TEXT("Planet: the rivers will be built with the shape %s"), Shape.IsSet() ? *Shape->ToString() : TEXT("of DA_HexPlanet"));
+		return;
+	}
+	const HexPlanetRivers::FCurveParams Params = Rivers->GetCurveParams();
+	UE_LOG(LogHexHero, Log, TEXT("Planet: rivers cut corners by %.2f, relax %d times and leave their sides by at most %.0f%s; building the surface again"),
+		Params.CornerCut, Params.Relax, Params.MaxOffset, Params.MaxOffset > 0.0 ? TEXT("") : TEXT(" (no limit)"));
+	bRebuildAllPending = true;
+	bLevelsPending = true;
+	StartRebuild();
 }
 
 void AHexPlanet::CreateCellMarks()
@@ -3251,7 +3493,8 @@ FString AHexPlanet::GetCellDebugText(int32 Cell) const
 		ReliefText = FString::Printf(TEXT(", set by hand: %s"), *FString::Join(Parts, TEXT(", ")));
 	}
 
-	return FString::Printf(TEXT("Cell %d (%s)\nLevel: %s\nBiome: %s\nObjects: %s\nPiece: %s\nFace: %d, chunk %d\nLatitude %.1f, longitude %.1f\nArea: %.1f%% of the mean\nSides: longest x%.3f of shortest"),
-		Cell, Each.IsPentagon() ? TEXT("pentagon") : TEXT("hexagon"), LevelNames[GetCellLevel(Cell) + 2], *BiomeName, *Objects->GetCellText(Cell), *(PieceText + ReliefText), Each.Face, Each.Chunk,
+	return FString::Printf(TEXT("Cell %d (%s)\nLevel: %s\nBiome: %s\nObjects: %s\n%s%sPiece: %s\nFace: %d, chunk %d\nLatitude %.1f, longitude %.1f\nArea: %.1f%% of the mean\nSides: longest x%.3f of shortest"),
+		Cell, Each.IsPentagon() ? TEXT("pentagon") : TEXT("hexagon"), LevelNames[GetCellLevel(Cell) + 2], *BiomeName, *Objects->GetCellText(Cell), *Rivers->GetCellText(Cell),
+		Rivers->GetCellText(Cell).IsEmpty() ? TEXT("") : TEXT("\n"), *(PieceText + ReliefText), Each.Face, Each.Chunk,
 		Latitude, Longitude, Grid.GetCellArea(Cell) / MeanCellArea * 100.0, Grid.GetCellSideRatio(Cell));
 }

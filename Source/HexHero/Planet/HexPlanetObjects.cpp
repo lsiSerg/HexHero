@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "HexPlanetObjects.h"
+#include "HexPlanetRivers.h"
 #include "Async/ParallelFor.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
@@ -569,6 +570,8 @@ void UHexPlanetObjects::PlaceInCell(int32 Cell, int32 SetIndex, int32 Density, b
 	FRandomStream Random(int32(HashCombine(GetTypeHash(Cell), FCrc::StrCrc32(*Set.Id.ToString())) + (bDecor ? 7 : 0)));
 	const float Rock = float(Planet->GetCellRockLayer(Cell));
 	const float MinUp = FMath::Clamp(Set.MinUp, 0.0f, 1.0f);
+	const double RiverClearance = Planet->GetRivers() && !Planet->GetRivers()->GetShownNet().IsEmpty()
+		? Settings->RiverWidth * 0.5 + Settings->RiverMeander + Settings->RiverBankWidth : 0.0;
 	TArray<FVector3f, TInlineAllocator<64>> Taken;
 	TArray<float, TInlineAllocator<64>> TakenSizes;
 	const int32 Tries = Count * 6 + 4;
@@ -599,6 +602,11 @@ void UHexPlanetObjects::PlaceInCell(int32 Cell, int32 SetIndex, int32 Density, b
 		}
 		const FVector3f Up = Position.GetSafeNormal();
 		if (FVector3f::DotProduct(Normal, Up) < MinUp || Position.Length() - Radius < Set.MinHeight)
+		{
+			continue;
+		}
+		// not in a river, nor on its banks
+		if (RiverClearance > 0.0 && Planet->GetRivers()->GetRiverDistance(Cell, FVector3d(Position)) < RiverClearance + Set.Spacing * Scale * 0.5)
 		{
 			continue;
 		}

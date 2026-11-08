@@ -341,6 +341,81 @@ class Floe:
         return result
 
 
+# the bridge over a river (BridgeMesh of DA_HexPlanet, UHexPlanetRivers): a stone arch whose X runs across the river, BRIDGE_LENGTH long in world
+# units, so it fills BridgeLength at a scale of 1, and Z up from the bottom of the valley of the river at 0. Its deck humps over the middle, an
+# arch spans the water, the abutments at its ends go down under the ground of the banks, and a low parapet runs along each side. A normal per face
+BRIDGE_LENGTH = 64.0
+BRIDGE_WIDTH = 14.0
+BRIDGE_STEPS = 24
+
+
+class Bridge:
+    def __init__(self):
+        half = BRIDGE_LENGTH * 0.5
+        width = BRIDGE_WIDTH * 0.5
+        arch = 15.0
+        rise = 4.6
+        end_height = 3.2
+        hump = 4.5
+        parapet = 2.0
+        wall = 1.2
+        foot = -2.5
+        xs = [-half + BRIDGE_LENGTH * index / BRIDGE_STEPS for index in range(BRIDGE_STEPS + 1)]
+        # the arch springs from the ground, and its crown leaves a band of stone under the deck
+        for edge in (-arch, arch):
+            if edge not in xs:
+                xs.append(edge)
+        xs.sort()
+
+        def top(x):
+            return end_height + hump * (1.0 - (x / half) ** 2)
+
+        def bottom(x):
+            return rise * math.sqrt(max(0.0, 1.0 - (x / arch) ** 2)) if abs(x) < arch else foot
+
+        self.faces = []
+
+        def quad(a, b, c, d, outward):
+            self.add(a, b, c, outward)
+            self.add(a, c, d, outward)
+
+        for left, right in zip(xs, xs[1:]):
+            # the deck between the parapets, their tops, and their inner faces
+            quad((left, -width + wall, top(left)), (right, -width + wall, top(right)), (right, width - wall, top(right)), (left, width - wall, top(left)), (0.0, 0.0, 1.0))
+            for side in (-1.0, 1.0):
+                outer = side * width
+                inner = side * (width - wall)
+                quad((left, inner, top(left) + parapet), (right, inner, top(right) + parapet), (right, outer, top(right) + parapet), (left, outer, top(left) + parapet), (0.0, 0.0, 1.0))
+                quad((left, inner, top(left)), (right, inner, top(right)), (right, inner, top(right) + parapet), (left, inner, top(left) + parapet), (0.0, -side, 0.0))
+                # the outer walls, from the underside up to the top of the parapet
+                quad((left, outer, bottom(left)), (right, outer, bottom(right)), (right, outer, top(right) + parapet), (left, outer, top(left) + parapet), (0.0, side, 0.0))
+            # the underside: the arch, and under the abutments their feet in the ground
+            quad((left, -width, bottom(left)), (right, -width, bottom(right)), (right, width, bottom(right)), (left, width, bottom(left)), (0.0, 0.0, -1.0))
+        # the ends
+        for end in (-half, half):
+            sign = 1.0 if end > 0.0 else -1.0
+            quad((end, -width, foot), (end, width, foot), (end, width, top(end) + parapet), (end, -width, top(end) + parapet), (sign, 0.0, 0.0))
+
+    def add(self, a, b, c, outward):
+        self.faces.append((a, b, c, outward))
+
+    def get_triangles(self):
+        """Triangles wound and with a normal facing the outward direction each face was given"""
+        result = []
+        for a, b, c, outward in self.faces:
+            u = [c[axis] - a[axis] for axis in range(3)]
+            v = [b[axis] - a[axis] for axis in range(3)]
+            cross = (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0])
+            length = math.sqrt(sum(value * value for value in cross))
+            if length < 1e-9:
+                continue
+            if sum(cross[axis] * outward[axis] for axis in range(3)) < 0.0:
+                b, c = c, b
+                cross = tuple(-value for value in cross)
+            result.append(((a, b, c), tuple(value / length for value in cross)))
+        return result
+
+
 def write_boulder(boulder, path, name):
     """Writes a boulder or a floe as a binary glTF with a vertex per corner of each triangle, in meters, a radius of 1 world unit"""
     positions = []
@@ -439,6 +514,11 @@ def main():
         name = ('SM_PlanetIceShard_%d' % (index - FLOES)) if shard else ('SM_PlanetFloe_%d' % index)
         write_boulder(Floe(index * 31 + 11, shard), os.path.join(OUTPUT_FOLDER, name + '.glb'), name)
         manifest['shards' if shard else 'floes'].append(name)
+
+    # in a folder of its own, as import_planet_kit.py imports every file of the kit, and import_planet_bridge.py imports it apart
+    bridge_folder = os.path.join(os.path.dirname(os.path.abspath(OUTPUT_FOLDER)), 'HexPlanetBridge')
+    os.makedirs(bridge_folder, exist_ok=True)
+    write_boulder(Bridge(), os.path.join(bridge_folder, 'SM_PlanetBridge.glb'), 'SM_PlanetBridge')
 
     with open(os.path.join(OUTPUT_FOLDER, 'kit.json'), 'w', encoding='utf-8') as file:
         json.dump(manifest, file, indent=2)

@@ -34,6 +34,10 @@ enum class EHexPaintTool : uint8
 	Object,
 	/** Takes the cover and decor off the cells */
 	Eraser,
+	/** Lays rivers along the sides of cells, from the corner nearest the cursor to the next (UHexPlanetRivers) */
+	River,
+	/** Puts bridges on the sides with a river nearest the cursor */
+	Bridge,
 };
 
 /** What a click of the brush in relief mode does to the mountains and hills under it, once per cell and stroke */
@@ -119,6 +123,15 @@ public:
 	bool IsErasing() const { return Tool == EHexPaintTool::Eraser; }
 	void SetEraser() { Tool = EHexPaintTool::Eraser; }
 
+	/** Returns true while the brush lays rivers, or puts bridges; Ctrl takes them away */
+	bool IsPaintingRivers() const { return Tool == EHexPaintTool::River; }
+	void SetRiverTool() { Tool = EHexPaintTool::River; }
+	bool IsPlacingBridges() const { return Tool == EHexPaintTool::Bridge; }
+	void SetBridgeTool() { Tool = EHexPaintTool::Bridge; }
+
+	/** Sets the point on the planet under the cursor, by which the river brush finds the nearest corner and side */
+	void SetCursorPoint(const FVector& Point) { CursorPoint = Point; }
+
 	/** Returns the tool of relief */
 	EHexReliefTool GetReliefTool() const { return ReliefTool; }
 
@@ -184,6 +197,9 @@ private:
 		HexPlanetSurface::FReliefOverrides NewRelief;
 		TMap<int32, FHexCellObjects> OldObjects;
 		TMap<int32, FHexCellObjects> NewObjects;
+		/** What stood on the sides of rivers before and after, by HexPlanetRivers::GetEdgeKey (UHexPlanetRivers::GetEdge) */
+		TMap<uint64, uint8> OldRivers;
+		TMap<uint64, uint8> NewRivers;
 	};
 
 	/** Planet painted */
@@ -215,6 +231,13 @@ private:
 	/** Last cell under the cursor in the stroke */
 	int32 LastCell = INDEX_NONE;
 
+	/** Point on the planet under the cursor, and the corner the river brush stood at last in the stroke */
+	FVector CursorPoint = FVector::ZeroVector;
+	int32 LastCorner = INDEX_NONE;
+
+	/** The cells that meet at each corner of the grid, made the first time the river brush needs them */
+	TArray<TArray<int32, TInlineAllocator<3>>> CornerCells;
+
 	/** Stroke painted now */
 	FStep Stroke;
 
@@ -227,9 +250,15 @@ private:
 	/** Paints the brush around a cell */
 	void PaintAround(int32 Cell);
 
+	/** Lays or takes away a river from the last corner to the corner of the cell nearest the cursor, or puts or takes away a bridge */
+	void PaintRiver(int32 Cell);
+
+	/** Returns the sides of the shortest way along sides of cells between two corners, by HexPlanetRivers::GetEdgeKey */
+	TArray<uint64> FindCornerPath(int32 From, int32 To);
+
 	/** Gives the planet the levels and biomes of a step and shows the levels as tiles until it is rebuilt */
 	void Apply(const TMap<int32, int32>& Levels, const TMap<int32, int32>& Biomes, const HexPlanetSurface::FReliefOverrides& Relief = {},
-		const TMap<int32, FHexCellObjects>& Objects = {});
+		const TMap<int32, FHexCellObjects>& Objects = {}, const TMap<uint64, uint8>& Rivers = {});
 
 	/** Returns the relief a click of the tool gives a cell, or false if it cannot change it, as it has no piece or its neighbors fix it */
 	bool GetToolRelief(int32 Cell, HexPlanetSurface::FReliefOverride& OutRelief) const;

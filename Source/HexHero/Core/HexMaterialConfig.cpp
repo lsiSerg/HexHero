@@ -19,6 +19,11 @@ void HexMaterialConfig::Apply(UMaterialInstanceDynamic* Target, const UObject* C
 		{
 			Target->SetScalarParameterValue(Name, Float->GetPropertyValue_InContainer(Config));
 		}
+		else if (const FIntProperty* Int = CastField<FIntProperty>(*It))
+		{
+			// as a float, such as the index of a texture layer
+			Target->SetScalarParameterValue(Name, float(Int->GetPropertyValue_InContainer(Config)));
+		}
 		else if (const FStructProperty* Struct = CastField<FStructProperty>(*It))
 		{
 			const void* Value = Struct->ContainerPtrToValuePtr<void>(Config);

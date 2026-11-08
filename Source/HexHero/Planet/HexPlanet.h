@@ -28,6 +28,7 @@ class UHexBiomeConfig;
 class UHexPlanetCloudConfig;
 class UHexPlanetConfig;
 class UHexPlanetObjects;
+class UHexPlanetRivers;
 class UHexPlanetWaterConfig;
 struct FProcMeshSection;
 
@@ -67,6 +68,10 @@ class AHexPlanet : public AActor
 	/** Forests, bushes, flowers, stones and decor on the cells, drawn as instances on the ground of their cells (objects.json) */
 	UPROPERTY(VisibleAnywhere, Category="Components")
 	TObjectPtr<UHexPlanetObjects> Objects;
+
+	/** The rivers along the sides of the cells and the bridges over them */
+	UPROPERTY(VisibleAnywhere, Category="Planet")
+	TObjectPtr<UHexPlanetRivers> Rivers;
 
 	/** Floes of sea ice on the frozen sea, one component per mesh of FHexPlanetFloes (UpdateFloes), which M_HexPlanetFloe moves */
 	UPROPERTY(Transient)
@@ -322,6 +327,22 @@ public:
 	/** Returns the forests, bushes, stones and decor of the cells */
 	UHexPlanetObjects* GetObjects() const { return Objects; }
 
+	/** Returns the rivers and bridges */
+	UHexPlanetRivers* GetRivers() const { return Rivers; }
+
+	/** Rebuilds the valleys of the rivers, which UHexPlanetRivers changed, and marks the planet as edited */
+	void OnRiversChanged();
+
+	/** Sets how straight the rivers run for trying it (UHexPlanetRivers::SetShapeOverride), or back to DA_HexPlanet with none, and builds the
+	 *  whole surface again in the background (hex.PlanetRiverShape) */
+	void SetRiverShape(TOptional<FVector3d> Shape);
+
+	/** Returns true if a river freezes beside a cell, by the letter of its biome (RiverFrozenBiomes of DA_HexPlanet) */
+	bool IsRiverFrozenAt(int32 Cell) const;
+
+	/** Gives the materials of the surface the textures of the rivers again, as UHexPlanetRivers made them anew */
+	void ApplyRiverTextures();
+
 	/** Returns true if a biome, an index into GetBiomes, may lie on a level */
 	bool IsBiomeAllowed(int32 Biome, int32 Level) const;
 
@@ -338,7 +359,7 @@ public:
 	FSimpleMulticastDelegate OnLevelsRebuilt;
 
 	/** Finds the cell that a ray from the world hits, or INDEX_NONE if it misses the planet */
-	int32 FindCellAlongRay(const FVector& Origin, const FVector& Direction) const;
+	int32 FindCellAlongRay(const FVector& Origin, const FVector& Direction, FVector* OutPoint = nullptr) const;
 
 	/** Outlines a cell, or nothing for INDEX_NONE, and its neighbors while the wireframe draws them too. With a brush of 1 to 3 rings of
 	 *  cells around it, outlines the edge of the brush instead */
@@ -453,7 +474,7 @@ private:
 	void LoadBiomes();
 
 	/** Writes the generated levels, biomes and objects of a saved planet that had no such files, so it keeps them when the generation changes */
-	void WriteGeneratedFiles(bool bLevels, bool bBiomes, bool bObjects);
+	void WriteGeneratedFiles(bool bLevels, bool bBiomes, bool bObjects, bool bRivers);
 
 	/** Returns the biome a cell takes on its level when its own is not allowed there: the one most of its neighbors have that it allows,
 	 *  else the default of the level, else the first allowed */
@@ -575,6 +596,13 @@ private:
 	/** True while levels changed that no rebuild has started for yet */
 	bool bLevelsPending = false;
 
+	/** True when the next rebuild builds every chunk, as the shape of the rivers changed (SetRiverShape) */
+	bool bRebuildAllPending = false;
+
+	/** The mouths of rivers given to the water (UpdateRiverMouths), by their index in the line of the rivers, and that line */
+	TArray<int32> AppliedRiverMouths;
+	const void* AppliedRiverCurve = nullptr;
+
 	/** True after the surface changed, so the debug view copies its sections again */
 	bool bSurfaceChanged = false;
 
@@ -663,6 +691,10 @@ private:
 
 	/** Places the floes on the frozen sea of ShownLevels and gives them to their components, at the start and whenever the ice changed */
 	void UpdateFloes();
+
+	/** Gives the water the mouths of open rivers nearest the point under the camera, up to MaxRiverMouths (RiverMouth0.., RiverMouthDir0..),
+	 *  from which M_HexPlanetWater draws the water of the river streaming out into the sea instead of the foam of the shore */
+	void UpdateRiverMouths(const FVector3d& Below);
 
 	/** How many meshes the floes have, the slabs first and then the shards: FloeComponents holds them all over the shallows, which cast
 	 *  shadows, and then all again over the deep sea, which do not */
