@@ -44,6 +44,26 @@ HexPlanetKit::FCellFrame HexPlanetKit::BuildFrame(const FHexSphereGrid& Grid, in
 	const auto GetRelief = [&Relief](int32 Other) { return Relief.IsEmpty() ? 1.0 : double(Relief[Other]); };
 	Frame.ReliefCenter = GetRelief(Cell);
 
+	// the plateau: two cells share it when they are on the same level and neither is a pentagon, and a cell has the share of its sides towards
+	// such neighbors
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+	const auto ArePlateau = [&](int32 One, int32 Other) { return GetLevel(One) == GetLevel(Other) && !Cells[One].IsPentagon() && !Cells[Other].IsPentagon(); };
+	const auto GetPlateauShare = [&](int32 Of)
+	{
+		int32 Count = 0;
+		for (const int32 Next : Cells[Of].Neighbors)
+		{
+			Count += ArePlateau(Of, Next) ? 1 : 0;
+		}
+		return double(Count) / Cells[Of].Neighbors.Num();
+	};
+	Frame.PlateauCenter = GetPlateauShare(Cell);
+	TArray<double, TInlineAllocator<6>> NeighborPlateau;
+	for (const int32 Neighbor : Each.Neighbors)
+	{
+		NeighborPlateau.Add(ArePlateau(Cell, Neighbor) ? GetPlateauShare(Neighbor) : -1.0);
+	}
+
 	for (int32 Side = 0; Side < NumSides; ++Side)
 	{
 		const int32 Neighbor = Each.Neighbors[Side];
@@ -53,6 +73,11 @@ HexPlanetKit::FCellFrame HexPlanetKit::BuildFrame(const FHexSphereGrid& Grid, in
 
 		Frame.SideMiddles.Add((Frame.Top + GetTop(Neighbor)) * 0.5);
 		Frame.SameSides.Add(GetLevel(Neighbor) == Level);
+		// corner K lies between neighbors K and K + 1, and its three cells are all on the plateau when both of them share it with this one
+		const double SidePlateau = NeighborPlateau[Side];
+		const double NextPlateau = NeighborPlateau[(Side + 1) % NumSides];
+		Frame.PlateauSides.Add(SidePlateau >= 0.0 ? (Frame.PlateauCenter + SidePlateau) * 0.5 : 0.0);
+		Frame.PlateauCorners.Add(SidePlateau >= 0.0 && NextPlateau >= 0.0 ? (Frame.PlateauCenter + SidePlateau + NextPlateau) / 3.0 : 0.0);
 		Frame.CornerHeights.Add(CornerHeights[Each.Corners[Side]]);
 		Frame.MassifSides.Add((MassifSteps[Cell] + NeighborSteps) * 0.5);
 		// corner K lies between neighbors K and K + 1
@@ -185,6 +210,21 @@ FVector3d HexPlanetKit::PlaceVertex(const FHexSphereGrid& Grid, int32 Cell, cons
 		// whatever it models there, so it fades the stretch out where its top follows them
 		const double Relief = Blend(Frame.ReliefCenter, Frame.ReliefSides, Frame.ReliefCorners);
 		Height += FMath::Max(Z - Placement.ScaleBase, 0.0) * (Relief - 1.0) * (1.0 - Follow);
+	}
+
+	// a cell with neighbors on its level rises into a plateau with them, the more the more of them it has: on the sides towards them, at the
+	// corners between two of them and in its middle, blended across the cell as the massif, so it ramps down to the line of a side towards
+	// another level. Its bumps take only a part of the lift, so the ground between them comes up towards their tops rather than each cell
+	// standing as a mound of its own. A point of a shared side lies on the top whatever the piece models there, so both cells lift it alike
+	if (Placement.PlateauLift > 0.0 && Frame.PlateauCenter > 0.0 && !Frame.PlateauSides.IsEmpty())
+	{
+		// it sets in gently at a side towards another level, where the slope of the piece is steepest, so the edge of a plateau gets little rock
+		const double Share = FMath::SmoothStep(0.0, 1.0, Blend(Frame.PlateauCenter, Frame.PlateauSides, Frame.PlateauCorners));
+
+		// a bump keeps its top when it is twice as high as the lift, and the fill never folds the ground, as the height still grows with the bump
+		const double Lift = Placement.PlateauLift * FMath::Max(CellRelief, 0.0);
+		const double Bump = Height - Top;
+		Height += Lift * Share * (1.0 - Placement.PlateauFill * FMath::SmoothStep(0.0, 2.0 * Lift, Bump));
 	}
 
 	// a lone cell never lies below a dome over the whole cell from the line of its sides, so its flat outer ground rises too and the mountain

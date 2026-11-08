@@ -271,6 +271,20 @@ struct FHexPlanetKit
 	UPROPERTY(EditAnywhere, Category="Kit|Bulk", meta=(ClampMin=-1, ClampMax=1))
 	float SplitThreshold = 0.0f;
 
+	/**
+	 *  Cells with neighbors on their level rise together into a plateau rather than each standing as a mound of its own: the ground rises by
+	 *  this, in mesh units, on the sides towards those neighbors, at the corners between two of them and in the middle, blended across the cell
+	 *  as the massif, so it ramps down to the line of a side towards another level, times the factor of the height, so the plateau is higher
+	 *  where the cells are. A cell with no such neighbor, and a pentagon, keeps its shape. 0 for none
+	 */
+	UPROPERTY(EditAnywhere, Category="Kit|Plateau", meta=(ClampMin=0))
+	float PlateauLift = 0.0f;
+
+	/** How much of the bumps above the top the plateau swallows: at 0 they rise with it, at 1 the ground between them rises by all of it and a
+	 *  bump twice as high as the lift keeps its top, so the ground comes up towards their tops and they read as hills of one upland */
+	UPROPERTY(EditAnywhere, Category="Kit|Plateau", meta=(ClampMin=0, ClampMax=1))
+	float PlateauFill = 0.7f;
+
 	/** Height above the sea, in world units, where the faces begin */
 	UPROPERTY(EditAnywhere, Category="Kit|Facets", meta=(ClampMin=0))
 	float FacetHeightStart = 0.0f;

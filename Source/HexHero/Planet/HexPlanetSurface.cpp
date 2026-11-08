@@ -518,6 +518,8 @@ TSharedRef<const HexPlanetSurface::FKit> HexPlanetSurface::LoadKit(const UHexPla
 		Loaded.Placement.SplitDepth = Kit.SplitDepth;
 		Loaded.Placement.SplitBlade = Kit.SplitBlade;
 		Loaded.Placement.SplitWidth = Kit.SplitWidth;
+		Loaded.Placement.PlateauLift = Kit.PlateauLift * Loaded.Placement.Scale;
+		Loaded.Placement.PlateauFill = FMath::Clamp(Kit.PlateauFill, 0.0f, 1.0f);
 		Loaded.SummitBase = Kit.SummitBase;
 		Loaded.SummitHeight = Kit.SummitHeight;
 		Loaded.SummitWidth = Kit.SummitWidth;
@@ -957,6 +959,12 @@ HexPlanetSurface::FBuild HexPlanetSurface::Build(const FHexSphereGrid& Grid, con
 					Ground.FootDepth = Params.LevelHeight;
 					Ground.FadeHeight = Params.LevelHeight;
 					Params.SetWobble(Ground);
+					// the ground of a plateau of hills rises, though only a little this near a side towards the mountain
+					if (const FKitLevel* NeighborKit = Cells[Neighbor].IsPentagon() ? nullptr : Kit.Levels.Find(Levels[Neighbor]))
+					{
+						Ground.PlateauLift = NeighborKit->Placement.PlateauLift;
+						Ground.PlateauFill = NeighborKit->Placement.PlateauFill;
+					}
 
 					FRandomStream Random(int32(HashCell(Cell * 7 + Side, 10)));
 					const int32 Count = Random.RandRange(0, Kit.BoulderMaxPerSide);

@@ -444,6 +444,9 @@ bool FHexPlanetKitSeamsTest::RunTest(const FString& Parameters)
 	// both stretch by the factor of their cells, and the slopes below the plains wobble
 	Land.bRelief = true;
 	Land.ScaleBase = -20.0;
+	// and land with neighbors on its level rises into a plateau, which swallows part of its bumps
+	Land.PlateauLift = 15.0;
+	Land.PlateauFill = 0.7;
 	Mountain.bRelief = true;
 	Mountain.ScaleBase = -45.0;
 	// and mountains have the shape of their inside, crags and faces of split stone

@@ -35,6 +35,14 @@ namespace HexPlanetKit
 		/** By side: true if that neighbor has the same level */
 		TArray<bool, TInlineAllocator<6>> SameSides;
 
+		/** Share of the plateau (FPlacement::PlateauLift) in the center, by the middle of each side and by corner, blended as the massif. A cell
+		 *  has the share of its sides that face neighbors on its level, where a pentagon, a flat tile, has none and counts for none of its
+		 *  neighbors; a side or a corner whose cells are all on the plateau has their mean, any other 0, so the plateau rises where many such
+		 *  cells meet, ramps down to the sides towards other levels and leaves a lone cell as it is */
+		double PlateauCenter = 0.0;
+		TArray<double, TInlineAllocator<6>> PlateauSides;
+		TArray<double, TInlineAllocator<6>> PlateauCorners;
+
 		/** By corner of the cell: the mean top of the three cells there */
 		TArray<double, TInlineAllocator<6>> CornerHeights;
 
@@ -124,6 +132,10 @@ namespace HexPlanetKit
 		double SplitDepth = 0.0;
 		double SplitBlade = 0.0;
 		double SplitWidth = 0.25;
+		/** The plateau of cells with neighbors on their level (FHexPlanetKit, Plateau): its lift in world units, 0 for none, and how much of the
+		 *  bumps above the top it swallows, 0 to 1 */
+		double PlateauLift = 0.0;
+		double PlateauFill = 0.0;
 	};
 
 	/** Share of the faces of high ground at a radius, 0 without them */

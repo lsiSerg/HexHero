@@ -33,7 +33,9 @@ MOUNTAIN_MASSIF_MAX_STEPS = 3
 # of about noise_cells cells, a jitter and now and then a peak, so a chain rises and falls and neighbors differ
 VARIETY = {
     1: {'mirror': True, 'height_scale_min': 0.55, 'height_scale_max': 1.3, 'height_noise_cells': 3.0, 'height_jitter': 0.2,
-        'peak_chance': 0.0, 'peak_scale': 0.0, 'scale_base': -15.0, 'center_shift': 0.3},
+        'peak_chance': 0.0, 'peak_scale': 0.0, 'scale_base': -15.0, 'center_shift': 0.3,
+        # hills next to hills rise together into an upland that swallows part of their knolls, rather than each standing as a mound
+        'plateau_lift': 16.0, 'plateau_fill': 0.45},
     # a mountain never goes below height_scale_floor, so it reads as one, and a lone one is a broad tall dome in the middle of its cell
     MOUNTAIN_LEVEL: {'mirror': True, 'height_scale_min': 0.65, 'height_scale_max': 1.35, 'height_noise_cells': 3.5, 'height_jitter': 0.2,
                      # a spur, the end of a chain with one neighbor, steps down instead of standing as a tower
