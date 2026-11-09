@@ -75,6 +75,11 @@ namespace HexPlanetWalls
 		double ColumnShare = 0.12;
 		double FluteDepth = 7.0;
 		double FluteWidth = 0.3;
+		/** Along a void of lava or a lake the wall sinks to PoolHeight of its height and PoolThickness of its thickness, without an overhang, so
+		 *  they show over it, easing in over PoolBlend world units each way along the line */
+		double PoolHeight = 0.3;
+		double PoolThickness = 0.5;
+		double PoolBlend = 60.0;
 		/** The styles, each holding in regions of a noise of the place StyleScale across, blending where they meet over less the higher
 		 *  StyleSharpness; none keeps the values as they are */
 		TArray<FStyle> Styles;
@@ -106,6 +111,10 @@ namespace HexPlanetWalls
 		 *  across a corner of a void, which the foot of the wall covers with floor */
 		double Gap = 0.0;
 
+		/** How much of the void beyond is lava and how much a lake (0 to 1, smoothed along the line), where the wall sinks to a parapet */
+		double Lava = 0.0;
+		double Lake = 0.0;
+
 		/** How far the wall may reach from each line onto the passage and towards the chasm here, about the radius of the turn of that line on
 		 *  that side, so a wall does not fold over itself inside a tight turn */
 		double InnerReach = TNumericLimits<double>::Max();
@@ -129,8 +138,10 @@ namespace HexPlanetWalls
 		int32 Next(const FIntPoint& At) const { return (At.Y + 1) % Lines[At.X].Num(); }
 	};
 
-	/** Builds the lines of the walls along every side of a cell that CanHold towards a neighbor at least MinDrop levels lower */
-	void Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Levels, TFunctionRef<bool(int32)> CanHold, const FParams& Params, FWalls& Out);
+	/** Builds the lines of the walls along every side of a cell that CanHold towards a neighbor at least MinDrop levels lower; VoidStyles, a value
+	 *  per cell, says which voids are lava (1) or a lake (2), along which the wall sinks to a parapet */
+	void Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Levels, TFunctionRef<bool(int32)> CanHold, const FParams& Params, FWalls& Out,
+		TConstArrayView<uint8> VoidStyles = {});
 
 	/** Returns the height of a wall at a sample, without the rise and fall of its crest by the stalactites */
 	double GetHeight(const FSample& Sample, const FParams& Params);
@@ -147,8 +158,10 @@ namespace HexPlanetWalls
 
 	/** The mesh of the walls of a chunk, in world space: positions, normals, in the first UV how deep in a hollow a point lies (0 to 1, flutes,
 	 *  under the overhang and between the stalactites) and its height above the floor as a share of the wall, in the second how much it is floor
-	 *  (the foot and the floor before it, 0 to 1) and how much of a stalactite stands out there (0 to 1), in the third how much its stone is
-	 *  flowstone and how much it shows its joints (FStyle), and three triangles each */
+	 *  (the foot and the floor before it, 0 to 1) or, below 0, how much it is the outer face (to -1, over the crest towards the chasm, from the
+	 *  smoothed line), as no row is both, and how much of a stalactite stands out there (0 to 1), in the third how much its stone is
+	 *  flowstone and how much it shows its joints (FStyle), in the fourth how much lava and how much lake lies beyond it (FSample::Lava, Lake),
+	 *  and three triangles each */
 	struct FMesh
 	{
 		TArray<FVector3f> Positions;
@@ -156,9 +169,12 @@ namespace HexPlanetWalls
 		TArray<FVector2f> UVs;
 		TArray<FVector2f> UV1s;
 		TArray<FVector2f> UV2s;
+		TArray<FVector2f> UV3s;
 		TArray<int32> Triangles;
 	};
-	void BuildChunk(const FWalls& Walls, int32 Chunk, const FParams& Params, FMesh& Out);
+	/** Builds it whole, or coarse: every third sample and 14 of the rows of the profile, about a fifth of the triangles, which the planet draws
+	 *  further than WallLodDistance */
+	void BuildChunk(const FWalls& Walls, int32 Chunk, const FParams& Params, FMesh& Out, bool bCoarse = false);
 
 	/** The mesh of the walls along a cell, as BuildChunk builds it: the stretches from the samples listed for it (CellSamples) within Reach of its
 	 *  middle on the floor, so a void cell has the walls along its sides too, for the cells under the cursor in the wireframe view */

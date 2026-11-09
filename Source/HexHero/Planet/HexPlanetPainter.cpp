@@ -232,6 +232,20 @@ FText UHexPlanetPainter::GetBiomeName(EHexPlanetLayer Layer, int32 InBiome) cons
 	return InBiome >= 0 && InBiome < GetNumBiomes(Layer) ? FText::FromString(Layers[int32(Layer)].Planet->GetBiomes()[InBiome]->DisplayName) : FText::GetEmpty();
 }
 
+FText UHexPlanetPainter::GetBiomeTip(EHexPlanetLayer Layer, int32 InBiome) const
+{
+	if (InBiome < 0 || InBiome >= GetNumBiomes(Layer))
+	{
+		return FText::GetEmpty();
+	}
+	const UHexBiomeConfig* Biome = Layers[int32(Layer)].Planet->GetBiomes()[InBiome];
+	if (Layer == EHexPlanetLayer::Underground && Biome && !Biome->AllowedLevels.Contains(HexPlanetUnderground::PassageLevel))
+	{
+		return LOCTEXT("VoidBiomeTip", "Paints the look of a void: mist, lava or a lake. It takes only voids, so make a passage a void first (key 1); along lava and lakes the walls sink to a low parapet, so they show");
+	}
+	return LOCTEXT("BiomeTip", "Paints the cells whose level allows this biome");
+}
+
 FLinearColor UHexPlanetPainter::GetBiomeColor(EHexPlanetLayer Layer, int32 InBiome) const
 {
 	return InBiome >= 0 && InBiome < GetNumBiomes(Layer) ? FLinearColor(Layers[int32(Layer)].Planet->GetBiomes()[InBiome]->FileColor) : FLinearColor::Gray;

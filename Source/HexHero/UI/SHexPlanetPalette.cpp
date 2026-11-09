@@ -171,13 +171,12 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 		TSharedRef<SUniformGridPanel> BiomeGrid = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
 		for (int32 Biome = 0; Biome < NumBiomes; ++Biome)
 		{
-			BiomeGrid->AddSlot(Biome % 2, Biome / 2)
-			[
-				MakeButton(
-					MakeSwatch(Painter->GetBiomeColor(Layer, Biome), SwatchSize * 0.75f, SwatchSize * 0.75f, 6.0f, Painter->GetBiomeName(Layer, Biome), Small, FText::GetEmpty()),
-					[Biome](UHexPlanetPainter& Each) { Each.SetBiome(Biome); },
-					[Biome, Layer](const UHexPlanetPainter& Each) { return Each.GetTarget() == Layer && Each.IsPaintingBiomes() && Each.GetBiome() == Biome; })
-			];
+			const TSharedRef<SWidget> Button = MakeButton(
+				MakeSwatch(Painter->GetBiomeColor(Layer, Biome), SwatchSize * 0.75f, SwatchSize * 0.75f, 6.0f, Painter->GetBiomeName(Layer, Biome), Small, FText::GetEmpty()),
+				[Biome](UHexPlanetPainter& Each) { Each.SetBiome(Biome); },
+				[Biome, Layer](const UHexPlanetPainter& Each) { return Each.GetTarget() == Layer && Each.IsPaintingBiomes() && Each.GetBiome() == Biome; });
+			Button->SetToolTipText(Painter->GetBiomeTip(Layer, Biome));
+			BiomeGrid->AddSlot(Biome % 2, Biome / 2)[Button];
 		}
 		Body->AddSlot().AutoHeight()[MakeHeading(Heading)];
 		Body->AddSlot().AutoHeight()[BiomeGrid];

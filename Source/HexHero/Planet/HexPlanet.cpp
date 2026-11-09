@@ -1627,6 +1627,7 @@ void AHexPlanet::SetPresented(bool bInPresented)
 		// what only the camera above it needs goes: the pieces of its chunks, which their coarse meshes stand in for, and the build of the start;
 		// a prefetch for a jump on it that a trip cut short goes too, so it streams nothing more while hidden
 		PrefetchCamera.Reset();
+		DropWallWholes();
 		int32 Dropped = 0;
 		for (int32 Chunk = 0; Chunk < ChunkPieces.Num(); ++Chunk)
 		{
@@ -1987,11 +1988,13 @@ void AHexPlanet::SetCells(const TMap<int32, int32>& NewLevels, const TMap<int32,
 	}
 
 	bool bFreezeChanged = false;
+	bool bVoidStyleChanged = false;
 	const auto SetBiome = [&](int32 Cell, int32 Biome)
 	{
 		if (CellBiomes[Cell] != Biome && BiomeConfigs.IsValidIndex(Biome) && BiomeConfigs.IsValidIndex(CellBiomes[Cell]))
 		{
 			bFreezeChanged |= Levels[Cell] < 0 && BiomeConfigs[CellBiomes[Cell]]->bFrozen != BiomeConfigs[Biome]->bFrozen;
+			bVoidStyleChanged |= Levels[Cell] < 0 && BiomeConfigs[CellBiomes[Cell]]->VoidStyle != BiomeConfigs[Biome]->VoidStyle;
 			CellBiomes[Cell] = uint8(Biome);
 			BiomeCells.Add(Cell);
 		}
@@ -2026,6 +2029,15 @@ void AHexPlanet::SetCells(const TMap<int32, int32>& NewLevels, const TMap<int32,
 		Rivers->RefreshTexture();
 		// objects take the variant of their biome, and stand on the surface shown until a rebuild of the levels places them again
 		Objects->RebuildCells(BiomeCells);
+	}
+
+	// the walls sink to a parapet along lava and lakes, so they follow the style of a void painted beside them at once; a change of the levels
+	// builds them again with its rebuild
+	if (bVoidStyleChanged && NumChanged == 0 && Settings->bWalls && !Walls->Lines.IsEmpty())
+	{
+		TArray<int32> WallChunksChanged;
+		UpdateWalls(WallChunksChanged);
+		Objects->RebuildChunks(WallChunksChanged);
 	}
 
 	if (NumChanged > 0 || bFreezeChanged)
@@ -2294,6 +2306,12 @@ void AHexPlanet::Tick(float DeltaTime)
 		StreamTask = UE::Tasks::FTask();
 		FinishStream();
 	}
+	// and the whole walls of chunks near the camera
+	if (WallStreamTask.IsValid() && WallStreamTask.IsCompleted())
+	{
+		WallStreamTask = UE::Tasks::FTask();
+		FinishWallStream();
+	}
 
 	// a hidden layer streams only the pieces a trip to it asks for, without building any at once on the game thread, and does nothing else
 	// of a frame, so a camera below the surface does not build its pieces
@@ -2307,14 +2325,6 @@ void AHexPlanet::Tick(float DeltaTime)
 	}
 
 	Objects->SetShown(CVarHexPlanetObjects.GetValueOnGameThread(), CVarHexPlanetRims.GetValueOnGameThread());
-	const bool bWallsShown = CVarHexPlanetWalls.GetValueOnGameThread() && !bWallsHiddenByWire;
-	for (UHexPlanetMeshComponent* Wall : WallChunks)
-	{
-		if (Wall && Wall->IsVisible() != bWallsShown)
-		{
-			Wall->SetVisibility(bWallsShown);
-		}
-	}
 
 	const APlayerController* PlayerController = GetWorld()->GetFirstPlayerController();
 
@@ -2350,6 +2360,7 @@ void AHexPlanet::Tick(float DeltaTime)
 		// would draw a frame of the new place with the chunks of the old one
 		const AActor* ViewTarget = PlayerController->GetViewTarget();
 		UpdateChunkLod(ViewTarget ? ViewTarget->GetActorLocation() : CameraManager->GetCameraLocation());
+		UpdateWallLod(ViewTarget ? ViewTarget->GetActorLocation() : CameraManager->GetCameraLocation());
 	}
 
 	if (Sun)
@@ -2930,7 +2941,7 @@ void AHexPlanet::UpdateDebugView()
 
 	// the walls are no terrain: their copies while the triangles of every cell are drawn, and the walls themselves hidden while they are drawn
 	// alone; built again with every change of the surface, as the walls follow it
-	const bool bWallWires = WireTarget.IsSet() && IsWireTarget(1, WireTarget.GetValue()) && !WallChunks.IsEmpty();
+	const bool bWallWires = WireTarget.IsSet() && IsWireTarget(1, WireTarget.GetValue()) && !WallCoarseChunks.IsEmpty();
 	bWallsHiddenByWire = bWallWires && View.Mode == EHexWireframeMode::Only;
 	if (bWallWires != bAppliedWallWires || (bWallWires && bSurfaceChangedNow))
 	{
@@ -2990,12 +3001,12 @@ void AHexPlanet::BuildHoverWireframe(const FHexDebugViewSettings& View)
 	}
 
 	// the walls of these cells, which are no terrain, in the color of their cell
-	if (!WallChunks.IsEmpty() && IsWireTarget(1, View.Target))
+	if (!WallCoarseChunks.IsEmpty() && IsWireTarget(1, View.Target))
 	{
 		for (const TPair<int32, FLinearColor>& Each : Chosen)
 		{
 			HexPlanetWalls::FMesh Mesh;
-			HexPlanetWalls::BuildNear(Walls, Each.Key, Grid.GetCells()[Each.Key].Center * WallParams.FloorRadius, Settings->HexRadius * 1.1, WallParams, Mesh);
+			HexPlanetWalls::BuildNear(*Walls, Each.Key, Grid.GetCells()[Each.Key].Center * WallParams.FloorRadius, Settings->HexRadius * 1.1, WallParams, Mesh);
 			const int32 First = Positions.Num();
 			for (const FVector3f& Position : Mesh.Positions)
 			{
@@ -3032,10 +3043,10 @@ void AHexPlanet::BuildWallWires(bool bShown)
 
 	// the walls keep their meshes on the GPU alone, so the debug view builds them again from their lines
 	const double Start = FPlatformTime::Seconds();
-	const int32 NumChunks = Walls.ChunkSamples.Num();
+	const int32 NumChunks = Walls->ChunkSamples.Num();
 	TArray<HexPlanetWalls::FMesh> Meshes;
 	Meshes.SetNum(NumChunks);
-	ParallelFor(NumChunks, [&](int32 Chunk) { HexPlanetWalls::BuildChunk(Walls, Chunk, WallParams, Meshes[Chunk]); });
+	ParallelFor(NumChunks, [&](int32 Chunk) { HexPlanetWalls::BuildChunk(*Walls, Chunk, WallParams, Meshes[Chunk]); });
 	WallWireChunks.SetNum(NumChunks);
 	int64 Total = 0;
 	for (int32 Chunk = 0; Chunk < NumChunks; ++Chunk)
@@ -3064,9 +3075,9 @@ void AHexPlanet::BuildWallWires(bool bShown)
 		}
 		Wire->CreateMeshSection_LinearColor(0, Positions, Mesh.Triangles, {}, {}, {}, {}, false);
 		Wire->SetMaterial(0, WireframeMaterial);
-		if (WallChunks.IsValidIndex(Chunk) && WallChunks[Chunk])
+		if (WallCoarseChunks.IsValidIndex(Chunk) && WallCoarseChunks[Chunk])
 		{
-			Wire->SetCullDistance(WallChunks[Chunk]->LDMaxDrawDistance);
+			Wire->SetCullDistance(WallCoarseChunks[Chunk]->LDMaxDrawDistance);
 		}
 		Total += Mesh.Triangles.Num() / 3;
 	}
@@ -3219,6 +3230,8 @@ void AHexPlanet::SetBiomeLayers(UMaterialInstanceDynamic* Target) const
 	{
 		Target->SetTextureParameterValue(TEXT("LayerParams"), LayerParamsTexture);
 	}
+	// where walls stand on the lips, the moss of the rims grows on their foot (M_HexUndergroundWall) and not on the floor beside them
+	Target->SetScalarParameterValue(TEXT("WallsShown"), Settings && Settings->bWalls ? 1.0f : 0.0f);
 
 	// the beach is a property of the layer of the terrain, so it blends between cells as their layers do: the beach of the first biome with
 	// that layer, else the layer itself, as for the rock of mountains, so a layer without a beach goes down to the water as it is
@@ -4757,6 +4770,23 @@ void AHexPlanet::LogMemory(const FString& FrameTimes, bool bProcess)
 	UE_LOG(LogHexHero, Log, TEXT("Planet memory: pieces 0.0 MB on the CPU in the components, 0.0 MB on the CPU in their scene proxies, %.1f MB of vertices and indices on the GPU; coarse meshes 0.0, 0.0 and %.1f MB; copies of the wireframe %.1f MB on the CPU"),
 		Pieces.GpuBytes / MB, Coarse.GpuBytes / MB, WireBytes / MB);
 
+	// the walls: coarse in every chunk, whole near the camera, about 24 bytes a triangle on the GPU (a vertex of 36 bytes to two triangles, and
+	// indices of 16 bits)
+	int64 WallWholeChunks = 0;
+	int64 WallWholeTotal = 0;
+	int64 WallCoarseTotal = 0;
+	for (int32 Chunk = 0; Chunk < WallWhole.Num(); ++Chunk)
+	{
+		WallWholeChunks += WallWhole[Chunk];
+		WallWholeTotal += WallWholeTriangles[Chunk];
+		WallCoarseTotal += WallCoarseTriangles[Chunk];
+	}
+	if (WallCoarseTotal > 0)
+	{
+		UE_LOG(LogHexHero, Log, TEXT("Planet memory: walls whole in %lld chunks near the camera, %lld triangles, about %.1f MB on the GPU; coarse in every chunk, %lld triangles, about %.1f MB"),
+			WallWholeChunks, WallWholeTotal, WallWholeTotal * 24.0 / MB, WallCoarseTotal, WallCoarseTotal * 24.0 / MB);
+	}
+
 	if (!bProcess)
 	{
 		return;
@@ -5698,10 +5728,43 @@ void AHexPlanet::UploadCellMarks()
 
 void AHexPlanet::SetFadeFocus(bool bOnPlanet, const FVector& Point)
 {
-	if (WallMaterial)
+	const FLinearColor Center = bOnPlanet ? FLinearColor(float(Point.X), float(Point.Y), float(Point.Z), 1.0f) : FLinearColor::Transparent;
+	for (UMaterialInstanceDynamic* Instance : {WallMaterial.Get(), WallNearMaterial.Get(), WallFarMaterial.Get()})
 	{
-		WallMaterial->SetVectorParameterValue(TEXT("WallFadeCenter"), bOnPlanet ? FLinearColor(float(Point.X), float(Point.Y), float(Point.Z), 1.0f) : FLinearColor::Transparent);
+		if (Instance)
+		{
+			Instance->SetVectorParameterValue(TEXT("WallFadeCenter"), Center);
+		}
 	}
+}
+
+namespace
+{
+	/** Packs a mesh of walls for the GPU, on any thread */
+	FHexPlanetMeshSectionRef PrepareWallSection(const HexPlanetWalls::FMesh& Mesh, const TCHAR* Name, int32 Chunk)
+	{
+		FHexPlanetMeshSource Source;
+		Source.Positions = Mesh.Positions;
+		Source.Normals = Mesh.Normals;
+		Source.UVs[0] = Mesh.UVs;
+		Source.UVs[1] = Mesh.UV1s;
+		Source.UVs[2] = Mesh.UV2s;
+		Source.UVs[3] = Mesh.UV3s;
+		Source.Triangles = Mesh.Triangles;
+		return UHexPlanetMeshComponent::PrepareSection(Source, FName(*FString::Printf(TEXT("%s%d"), Name, Chunk)));
+	}
+}
+
+UHexPlanetMeshComponent* AHexPlanet::MakeWallComponent(const TCHAR* Name, int32 Chunk)
+{
+	UHexPlanetMeshComponent* Mesh = NewObject<UHexPlanetMeshComponent>(this, *FString::Printf(TEXT("%s%d"), Name, Chunk));
+	Mesh->SetupAttachment(Surface);
+	Mesh->SetCastShadow(true);
+	// light added by ray tracing would need its geometry too, a third of the triangles of the underground again
+	Mesh->SetVisibleInRayTracing(false);
+	Mesh->bAffectDistanceFieldLighting = false;
+	Mesh->RegisterComponent();
+	return Mesh;
 }
 
 void AHexPlanet::UpdateWalls(TArray<int32>& Chunks)
@@ -5715,13 +5778,22 @@ void AHexPlanet::UpdateWalls(TArray<int32>& Chunks)
 	{
 		if (UMaterialInterface* Base = WallMaterialAsset.LoadSynchronous())
 		{
-			WallMaterial = UMaterialInstanceDynamic::Create(Base, this);
-			HexMaterialConfig::Apply(WallMaterial, Settings);
-			if (LayerParamsTexture)
+			// the walls whole or coarse, and the two sides of the band where one dissolves into the other (WallLodSide)
+			const auto Make = [&](float Side)
 			{
-				WallMaterial->SetTextureParameterValue(TEXT("LayerParams"), LayerParamsTexture);
-			}
-			WallMaterial->SetScalarParameterValue(TEXT("FloorRadius"), float(Radius + Settings->LevelHeight));
+				UMaterialInstanceDynamic* Instance = UMaterialInstanceDynamic::Create(Base, this);
+				HexMaterialConfig::Apply(Instance, Settings);
+				if (LayerParamsTexture)
+				{
+					Instance->SetTextureParameterValue(TEXT("LayerParams"), LayerParamsTexture);
+				}
+				Instance->SetScalarParameterValue(TEXT("FloorRadius"), float(Radius + Settings->LevelHeight));
+				Instance->SetScalarParameterValue(TEXT("WallLodSide"), Side);
+				return Instance;
+			};
+			WallMaterial = Make(0.0f);
+			WallNearMaterial = Make(1.0f);
+			WallFarMaterial = Make(2.0f);
 		}
 		else
 		{
@@ -5730,7 +5802,7 @@ void AHexPlanet::UpdateWalls(TArray<int32>& Chunks)
 	}
 
 	// the walls stand on the lips of the passages, the rock of the cliff below them, which is the rock of the void, and their foot is the floor of
-	// the passages, the terrain layer of their biome
+	// the passages, the terrain layer of their biome; in regions they are of another rock, -1 without it
 	int32 RockCell = INDEX_NONE;
 	int32 FloorCell = INDEX_NONE;
 	for (int32 Cell = 0; Cell < ShownLevels.Num() && (RockCell == INDEX_NONE || FloorCell == INDEX_NONE); ++Cell)
@@ -5738,102 +5810,275 @@ void AHexPlanet::UpdateWalls(TArray<int32>& Chunks)
 		RockCell = RockCell == INDEX_NONE && ShownLevels[Cell] < 0 ? Cell : RockCell;
 		FloorCell = FloorCell == INDEX_NONE && ShownLevels[Cell] >= 0 ? Cell : FloorCell;
 	}
-	if (WallMaterial && RockCell != INDEX_NONE)
-	{
-		WallMaterial->SetScalarParameterValue(TEXT("RockLayer"), float(GetCellRockLayer(RockCell)));
-	}
 	const int32 FloorBiome = FloorCell == INDEX_NONE ? INDEX_NONE : GetCellBiome(FloorCell);
-	if (WallMaterial && BiomeConfigs.IsValidIndex(FloorBiome) && BiomeConfigs[FloorBiome])
+	const UHexTerrainLayersConfig* TerrainLayers = GetDefault<UHexMapSettings>()->LoadTerrainLayers();
+	for (UMaterialInstanceDynamic* Instance : {WallMaterial.Get(), WallNearMaterial.Get(), WallFarMaterial.Get()})
 	{
-		WallMaterial->SetScalarParameterValue(TEXT("FloorLayer"), float(FMath::Max(BiomeConfigs[FloorBiome]->TerrainLayer, 0)));
-	}
-	// in regions the walls are of another rock, -1 without it
-	if (WallMaterial)
-	{
-		const UHexTerrainLayersConfig* TerrainLayers = GetDefault<UHexMapSettings>()->LoadTerrainLayers();
-		WallMaterial->SetScalarParameterValue(TEXT("CaveWallAltLayer"), float(TerrainLayers ? TerrainLayers->FindLayer(Settings->CaveWallAltLayerName) : INDEX_NONE));
+		if (!Instance)
+		{
+			continue;
+		}
+		if (RockCell != INDEX_NONE)
+		{
+			Instance->SetScalarParameterValue(TEXT("RockLayer"), float(GetCellRockLayer(RockCell)));
+		}
+		if (BiomeConfigs.IsValidIndex(FloorBiome) && BiomeConfigs[FloorBiome])
+		{
+			Instance->SetScalarParameterValue(TEXT("FloorLayer"), float(FMath::Max(BiomeConfigs[FloorBiome]->TerrainLayer, 0)));
+		}
+		Instance->SetScalarParameterValue(TEXT("CaveWallAltLayer"), float(TerrainLayers ? TerrainLayers->FindLayer(Settings->CaveWallAltLayerName) : INDEX_NONE));
 	}
 
+	// the voids of lava and lakes, along which the walls sink to a parapet
+	TArray<uint8> VoidStyles;
+	VoidStyles.SetNumZeroed(ShownLevels.Num());
+	for (int32 Cell = 0; Cell < ShownLevels.Num() && Cell < CellBiomes.Num(); ++Cell)
+	{
+		const UHexBiomeConfig* Biome = ShownLevels[Cell] < 0 && BiomeConfigs.IsValidIndex(CellBiomes[Cell]) ? BiomeConfigs[CellBiomes[Cell]].Get() : nullptr;
+		VoidStyles[Cell] = !Biome ? 0 : Biome->VoidStyle == EHexVoidStyle::Lava ? 1 : Biome->VoidStyle == EHexVoidStyle::Lake ? 2 : 0;
+	}
+
+	// new walls, so a stream still building whole walls from the old ones keeps them and its result is dropped
 	WallParams = HexPlanetWalls::FParams::FromConfig(*Settings, Radius + Settings->LevelHeight, HexPlanetUnderground::GetSeed(GetManifest()));
-	HexPlanetWalls::Build(Grid, ShownLevels, [this](int32 Cell) { return ShownLevels[Cell] >= 0; }, WallParams, Walls);
+	const TSharedRef<HexPlanetWalls::FWalls> NewWalls = MakeShared<HexPlanetWalls::FWalls>();
+	HexPlanetWalls::Build(Grid, ShownLevels, [this](int32 Cell) { return ShownLevels[Cell] >= 0; }, WallParams, *NewWalls, VoidStyles);
+	Walls = NewWalls;
+	++WallGeneration;
 	const double LineTime = FPlatformTime::Seconds();
 
-	// the chunks whose samples changed, built in parallel and packed for the GPU
+	// the chunks whose samples changed get their coarse walls again, and those near the camera their whole ones too, at once, as an edit there
+	// would show the coarse ones for a moment; the others get their whole walls from the stream when the camera comes near
 	const int32 NumChunks = Grid.GetNumChunks();
 	WallHashes.SetNum(NumChunks);
 	WallChunks.SetNum(NumChunks);
+	WallCoarseChunks.SetNum(NumChunks);
+	WallWhole.SetNumZeroed(NumChunks);
+	WallWholeTriangles.SetNumZeroed(NumChunks);
+	WallCoarseTriangles.SetNumZeroed(NumChunks);
+	WallLodStates.SetNum(NumChunks);
+	const double Ahead = Settings->WallLodDistance + Settings->WallLodBand + Settings->WallStreamAhead;
 	TArray<int32> Changed;
+	TArray<uint8> bNear;
 	for (int32 Chunk = 0; Chunk < NumChunks; ++Chunk)
 	{
-		const uint32 Hash = HexPlanetWalls::HashChunk(Walls, Chunk);
-		if (Hash != WallHashes[Chunk] || (!WallChunks[Chunk] && !Walls.ChunkSamples[Chunk].IsEmpty()))
+		const uint32 Hash = HexPlanetWalls::HashChunk(*Walls, Chunk);
+		if (Hash != WallHashes[Chunk] || (!WallCoarseChunks[Chunk] && !Walls->ChunkSamples[Chunk].IsEmpty()))
 		{
 			WallHashes[Chunk] = Hash;
 			Changed.Add(Chunk);
+			bNear.Add(bHasLodCamera && ChunkBounds.IsValidIndex(Chunk)
+				&& FVector::Distance(LodCamera, ChunkBounds[Chunk].Origin) - ChunkBounds[Chunk].SphereRadius < Ahead ? 1 : 0);
 		}
 	}
-	TArray<FHexPlanetMeshSectionRef> Prepared;
-	Prepared.SetNum(Changed.Num());
-	TArray<int32> Triangles;
-	Triangles.Init(0, Changed.Num());
+	TArray<FHexPlanetMeshSectionRef> Coarse;
+	TArray<FHexPlanetMeshSectionRef> Whole;
+	Coarse.SetNum(Changed.Num());
+	Whole.SetNum(Changed.Num());
+	TArray<FIntPoint> Triangles;
+	Triangles.SetNumZeroed(Changed.Num());
 	ParallelFor(Changed.Num(), [&](int32 Index)
 	{
+		const int32 Chunk = Changed[Index];
 		HexPlanetWalls::FMesh Mesh;
-		HexPlanetWalls::BuildChunk(Walls, Changed[Index], WallParams, Mesh);
-		Triangles[Index] = Mesh.Triangles.Num() / 3;
-		if (Mesh.Triangles.IsEmpty())
+		HexPlanetWalls::BuildChunk(*Walls, Chunk, WallParams, Mesh, true);
+		Triangles[Index].Y = Mesh.Triangles.Num() / 3;
+		Coarse[Index] = Mesh.Triangles.IsEmpty() ? nullptr : PrepareWallSection(Mesh, TEXT("WallCoarseChunk"), Chunk);
+		if (bNear[Index])
 		{
-			return;
+			HexPlanetWalls::BuildChunk(*Walls, Chunk, WallParams, Mesh);
+			Triangles[Index].X = Mesh.Triangles.Num() / 3;
+			Whole[Index] = Mesh.Triangles.IsEmpty() ? nullptr : PrepareWallSection(Mesh, TEXT("WallChunk"), Chunk);
 		}
-		TArray<FVector2f> Zeros;
-		Zeros.SetNumZeroed(Mesh.Positions.Num());
-		FHexPlanetMeshSource Source;
-		Source.Positions = Mesh.Positions;
-		Source.Normals = Mesh.Normals;
-		Source.UVs[0] = Mesh.UVs;
-		Source.UVs[1] = Mesh.UV1s;
-		Source.UVs[2] = Mesh.UV2s;
-		Source.UVs[3] = Zeros;
-		Source.Triangles = Mesh.Triangles;
-		Prepared[Index] = UHexPlanetMeshComponent::PrepareSection(Source, FName(*FString::Printf(TEXT("WallChunk%d"), Changed[Index])));
 	});
 
-	int64 Total = 0;
+	const auto Show = [this](UHexPlanetMeshComponent* Mesh, FHexPlanetMeshSectionRef Section)
+	{
+		Mesh->SetSection(0, MoveTemp(Section));
+		Mesh->SetMaterial(0, WallMaterial);
+		Mesh->UpdateBounds();
+		if (Settings->WallCullDistance > 0.0f)
+		{
+			Mesh->SetCullDistance(Settings->WallCullDistance + Mesh->Bounds.SphereRadius);
+		}
+	};
+	int64 CoarseTotal = 0;
+	int64 WholeTotal = 0;
 	for (int32 Index = 0; Index < Changed.Num(); ++Index)
 	{
 		const int32 Chunk = Changed[Index];
-		Total += Triangles[Index];
-		UHexPlanetMeshComponent* Mesh = WallChunks[Chunk];
-		if (!Mesh && Prepared[Index])
+		if (Coarse[Index])
 		{
-			Mesh = NewObject<UHexPlanetMeshComponent>(this, *FString::Printf(TEXT("WallChunk%d"), Chunk));
-			Mesh->SetupAttachment(Surface);
-			Mesh->SetCastShadow(true);
-			// light added by ray tracing would need its geometry too, a third of the triangles of the underground again
-			Mesh->SetVisibleInRayTracing(false);
-			Mesh->bAffectDistanceFieldLighting = false;
-			Mesh->RegisterComponent();
+			UHexPlanetMeshComponent* Mesh = WallCoarseChunks[Chunk] ? WallCoarseChunks[Chunk].Get() : MakeWallComponent(TEXT("WallCoarseChunk"), Chunk);
+			WallCoarseChunks[Chunk] = Mesh;
+			Show(Mesh, MoveTemp(Coarse[Index]));
+		}
+		else if (WallCoarseChunks[Chunk])
+		{
+			WallCoarseChunks[Chunk]->ClearSection(0);
+		}
+		WallCoarseTriangles[Chunk] = Triangles[Index].Y;
+		CoarseTotal += Triangles[Index].Y;
+
+		if (Whole[Index])
+		{
+			UHexPlanetMeshComponent* Mesh = WallChunks[Chunk] ? WallChunks[Chunk].Get() : MakeWallComponent(TEXT("WallChunk"), Chunk);
 			WallChunks[Chunk] = Mesh;
+			Show(Mesh, MoveTemp(Whole[Index]));
+			WallWhole[Chunk] = 1;
 		}
-		if (Mesh)
+		else
 		{
-			Mesh->SetSection(0, MoveTemp(Prepared[Index]));
-			Mesh->SetMaterial(0, WallMaterial);
-			Mesh->UpdateBounds();
-			if (Settings->WallCullDistance > 0.0f)
+			if (WallChunks[Chunk])
 			{
-				Mesh->SetCullDistance(Settings->WallCullDistance + Mesh->Bounds.SphereRadius);
+				WallChunks[Chunk]->ClearSection(0);
 			}
+			WallWhole[Chunk] = 0;
 		}
+		WallWholeTriangles[Chunk] = Triangles[Index].X;
+		WholeTotal += Triangles[Index].X;
+		WallLodStates[Chunk] = 255;
 		Chunks.AddUnique(Chunk);
 	}
+	if (bHasLodCamera)
+	{
+		UpdateWallLod(LodCamera);
+	}
+
 	int32 Samples = 0;
-	for (const TArray<HexPlanetWalls::FSample>& Line : Walls.Lines)
+	for (const TArray<HexPlanetWalls::FSample>& Line : Walls->Lines)
 	{
 		Samples += Line.Num();
 	}
-	UE_LOG(LogHexHero, Log, TEXT("Planet: walls of the %s: %d lines, %d samples, %d chunks built again with %lld triangles, lines in %.1f ms, meshes in %.1f ms"),
-		GetPlanetLayerName(PlanetLayer), Walls.Lines.Num(), Samples, Changed.Num(), Total, (LineTime - StartTime) * 1000.0, (FPlatformTime::Seconds() - LineTime) * 1000.0);
+	UE_LOG(LogHexHero, Log, TEXT("Planet: walls of the %s: %d lines, %d samples, %d chunks built again, %lld coarse triangles and %lld whole ones near the camera, lines in %.1f ms, meshes in %.1f ms"),
+		GetPlanetLayerName(PlanetLayer), Walls->Lines.Num(), Samples, Changed.Num(), CoarseTotal, WholeTotal, (LineTime - StartTime) * 1000.0,
+		(FPlatformTime::Seconds() - LineTime) * 1000.0);
+}
+
+void AHexPlanet::UpdateWallLod(const FVector& CameraLocation)
+{
+	if (WallCoarseChunks.IsEmpty() || !WallMaterial || !Settings)
+	{
+		return;
+	}
+	const bool bShown = CVarHexPlanetWalls.GetValueOnGameThread() && !bWallsHiddenByWire;
+	const double Near = Settings->WallLodDistance - Settings->WallLodBand;
+	const double Far = Settings->WallLodDistance + Settings->WallLodBand;
+	const double Ahead = Far + Settings->WallStreamAhead;
+	const double Keep = Ahead + Settings->WallStreamKeep;
+	TArray<TPair<double, int32>> Wanted;
+
+	for (int32 Chunk = 0; Chunk < WallCoarseChunks.Num(); ++Chunk)
+	{
+		UHexPlanetMeshComponent* Coarse = WallCoarseChunks[Chunk];
+		if (!Coarse || WallCoarseTriangles[Chunk] == 0)
+		{
+			continue;
+		}
+		const FBoxSphereBounds& Bounds = Coarse->Bounds;
+		const double Distance = FVector::Distance(CameraLocation, Bounds.Origin);
+		const double NearEdge = Distance - Bounds.SphereRadius;
+		const double FarEdge = Distance + Bounds.SphereRadius;
+
+		// the whole walls of a chunk are freed past Keep and built in the background as it comes within Ahead
+		if (WallWhole[Chunk] && NearEdge > Keep)
+		{
+			WallChunks[Chunk]->ClearSection(0);
+			WallWhole[Chunk] = 0;
+			WallWholeTriangles[Chunk] = 0;
+		}
+		else if (!WallWhole[Chunk] && NearEdge < Ahead && !(WallStream && WallStream->Chunks.Contains(Chunk)))
+		{
+			Wanted.Emplace(NearEdge, Chunk);
+		}
+
+		// a chunk whose whole walls are not built yet draws its coarse ones whole
+		const uint8 Band = FarEdge < Near ? 0 : NearEdge > Far ? 2 : 1;
+		const uint8 State = !bShown ? 4 : !WallWhole[Chunk] ? 3 : Band;
+		if (State == WallLodStates[Chunk])
+		{
+			continue;
+		}
+		WallLodStates[Chunk] = State;
+		if (UHexPlanetMeshComponent* Whole = WallChunks[Chunk])
+		{
+			Whole->SetVisibility(State <= 1);
+			Whole->SetMaterial(0, State == 1 ? WallNearMaterial.Get() : WallMaterial.Get());
+		}
+		Coarse->SetVisibility(State >= 1 && State <= 3);
+		Coarse->SetMaterial(0, State == 1 ? WallFarMaterial.Get() : WallMaterial.Get());
+	}
+
+	// the nearest of those that want their whole walls, a few at a time, from the walls of now
+	if (!Wanted.IsEmpty() && !WallStreamTask.IsValid())
+	{
+		Wanted.Sort([](const TPair<double, int32>& A, const TPair<double, int32>& B) { return A.Key < B.Key; });
+		const TSharedRef<FWallStream> Batch = MakeShared<FWallStream>();
+		Batch->Generation = WallGeneration;
+		for (int32 Index = 0; Index < Wanted.Num() && Index < 8; ++Index)
+		{
+			Batch->Chunks.Add(Wanted[Index].Value);
+		}
+		Batch->Sections.SetNum(Batch->Chunks.Num());
+		Batch->Triangles.SetNumZeroed(Batch->Chunks.Num());
+		WallStream = Batch;
+		const TSharedRef<const HexPlanetWalls::FWalls> Data = Walls;
+		const HexPlanetWalls::FParams Params = WallParams;
+		WallStreamTask = UE::Tasks::Launch(UE_SOURCE_LOCATION, [Batch, Data, Params]()
+		{
+			ParallelFor(Batch->Chunks.Num(), [&](int32 Index)
+			{
+				HexPlanetWalls::FMesh Mesh;
+				HexPlanetWalls::BuildChunk(*Data, Batch->Chunks[Index], Params, Mesh);
+				Batch->Triangles[Index] = Mesh.Triangles.Num() / 3;
+				Batch->Sections[Index] = Mesh.Triangles.IsEmpty() ? nullptr : PrepareWallSection(Mesh, TEXT("WallChunk"), Batch->Chunks[Index]);
+			});
+		});
+	}
+}
+
+void AHexPlanet::FinishWallStream()
+{
+	const TSharedPtr<FWallStream> Batch = MoveTemp(WallStream);
+	// walls built again meanwhile make their own whole walls near the camera
+	if (!Batch || Batch->Generation != WallGeneration)
+	{
+		return;
+	}
+	for (int32 Index = 0; Index < Batch->Chunks.Num(); ++Index)
+	{
+		const int32 Chunk = Batch->Chunks[Index];
+		if (!Batch->Sections[Index] || !WallChunks.IsValidIndex(Chunk))
+		{
+			continue;
+		}
+		UHexPlanetMeshComponent* Mesh = WallChunks[Chunk] ? WallChunks[Chunk].Get() : MakeWallComponent(TEXT("WallChunk"), Chunk);
+		WallChunks[Chunk] = Mesh;
+		Mesh->SetSection(0, MoveTemp(Batch->Sections[Index]));
+		Mesh->SetMaterial(0, WallMaterial);
+		Mesh->UpdateBounds();
+		if (Settings->WallCullDistance > 0.0f)
+		{
+			Mesh->SetCullDistance(Settings->WallCullDistance + Mesh->Bounds.SphereRadius);
+		}
+		WallWhole[Chunk] = 1;
+		WallWholeTriangles[Chunk] = Batch->Triangles[Index];
+		WallLodStates[Chunk] = 255;
+	}
+}
+
+void AHexPlanet::DropWallWholes()
+{
+	WallStream.Reset();
+	for (int32 Chunk = 0; Chunk < WallChunks.Num(); ++Chunk)
+	{
+		if (WallWhole.IsValidIndex(Chunk) && WallWhole[Chunk] && WallChunks[Chunk])
+		{
+			WallChunks[Chunk]->ClearSection(0);
+			WallWhole[Chunk] = 0;
+			WallWholeTriangles[Chunk] = 0;
+			WallLodStates[Chunk] = 255;
+		}
+	}
 }
 
 void AHexPlanet::SetHoveredCell(int32 Cell, int32 BrushSize)

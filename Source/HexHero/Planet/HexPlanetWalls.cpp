@@ -214,11 +214,15 @@ namespace
 			+ Params.CrestJag * Style.CrestJag * Rise * Rib - Params.CrestNotch * Style.CrestNotch * (1.0 - Rib), MinCrest);
 		uint32 OuterHash = 0;
 		GetCells(Sample.Position, Params.RibSize * Style.RibSize * 1.3, Offsets.OuterRibs, Frame.OuterEdge, OuterHash);
-		Frame.Thickness = Params.Thickness * Style.Thickness;
+		// along lava and lakes a low and thinner parapet, without an overhang, so they show over it
+		const double Pool = FMath::Max(Sample.Lava, Sample.Lake);
+		Frame.Base *= FMath::Lerp(1.0, Params.PoolHeight, Pool);
+		Frame.Crest *= FMath::Lerp(1.0, Params.PoolHeight, Pool);
+		Frame.Thickness = Params.Thickness * Style.Thickness * FMath::Lerp(1.0, Params.PoolThickness, Pool);
 		Frame.Lean = Params.Lean * Style.Lean;
-		Frame.Overhang = Params.Overhang * Style.Overhang;
+		Frame.Overhang = Params.Overhang * Style.Overhang * (1.0 - Pool);
 		Frame.Bulge = Style.Bulge;
-		Frame.RibDepth = Params.RibDepth * Style.RibDepth;
+		Frame.RibDepth = Params.RibDepth * Style.RibDepth * FMath::Lerp(1.0, 0.5, Pool);
 		Frame.FluteDepth = Params.FluteDepth * Style.FluteDepth;
 		Frame.Flowstone = FMath::Clamp(Style.Flowstone, 0.0, 1.0);
 		Frame.Fracture = FMath::Clamp(Style.Fracture, 0.0, 1.0);
@@ -563,6 +567,9 @@ HexPlanetWalls::FParams HexPlanetWalls::FParams::FromConfig(const UHexPlanetConf
 	Params.ColumnShare = Config.WallColumnShare;
 	Params.FluteDepth = Config.WallFluteDepth;
 	Params.FluteWidth = Config.WallFluteWidth;
+	Params.PoolHeight = FMath::Clamp(Config.WallPoolHeight, 0.1f, 1.0f);
+	Params.PoolThickness = FMath::Clamp(Config.WallPoolThickness, 0.1f, 1.0f);
+	Params.PoolBlend = FMath::Max(Config.WallPoolBlend, 0.0f);
 	Params.StyleScale = FMath::Max(Config.WallStyleScale, 10.0f);
 	Params.StyleSharpness = FMath::Max(Config.WallStyleSharpness, 0.0f);
 	for (const FHexWallStyle& Style : Config.WallStyles)
@@ -590,7 +597,8 @@ HexPlanetWalls::FParams HexPlanetWalls::FParams::FromConfig(const UHexPlanetConf
 double HexPlanetWalls::GetHeight(const FSample& Sample, const FParams& Params)
 {
 	const FOffsets Offsets(Params.Seed);
-	return Params.Height * GetStyle(Sample.Position, Params).Height * FMath::Max(1.0 + Params.HeightNoise * Noise(Sample.Position, Params.HeightNoiseScale, Offsets.Height), 0.2);
+	return Params.Height * GetStyle(Sample.Position, Params).Height * FMath::Max(1.0 + Params.HeightNoise * Noise(Sample.Position, Params.HeightNoiseScale, Offsets.Height), 0.2)
+		* FMath::Lerp(1.0, Params.PoolHeight, FMath::Max(Sample.Lava, Sample.Lake));
 }
 
 double HexPlanetWalls::GetFootReach(const FParams& Params)
@@ -598,7 +606,8 @@ double HexPlanetWalls::GetFootReach(const FParams& Params)
 	return Params.FootReach;
 }
 
-void HexPlanetWalls::Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Levels, TFunctionRef<bool(int32)> CanHold, const FParams& Params, FWalls& Out)
+void HexPlanetWalls::Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Levels, TFunctionRef<bool(int32)> CanHold, const FParams& Params, FWalls& Out,
+	TConstArrayView<uint8> VoidStyles)
 {
 	Out = FWalls();
 	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
@@ -616,6 +625,8 @@ void HexPlanetWalls::Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Lev
 	struct FEdge
 	{
 		int32 Cell;
+		/** The void across the side */
+		int32 Void;
 		int32 From;
 		int32 To;
 	};
@@ -633,7 +644,7 @@ void HexPlanetWalls::Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Lev
 		{
 			if (int32(Levels[Each.Neighbors[Side]]) <= int32(Levels[Cell]) - Params.MinDrop)
 			{
-				const int32 Index = Edges.Add({Cell, Each.Corners[(Side + Count - 1) % Count], Each.Corners[Side]});
+				const int32 Index = Edges.Add({Cell, Each.Neighbors[Side], Each.Corners[(Side + Count - 1) % Count], Each.Corners[Side]});
 				EdgeFrom.FindOrAdd(Edges[Index].From, Index);
 			}
 		}
@@ -662,6 +673,7 @@ void HexPlanetWalls::Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Lev
 		const auto Wrap = [NumEdges](int32 Index) { return (Index % NumEdges + NumEdges) % NumEdges; };
 		const auto CornerAt = [&](int32 Index) { return Corners[Edges[Loop[Wrap(Index)]].From] * Radius; };
 		const auto CellAt = [&](int32 Index) { return Edges[Loop[Wrap(Index)]].Cell; };
+		const auto VoidAt = [&](int32 Index) { return Edges[Loop[Wrap(Index)]].Void; };
 		// where the sides of two passages meet, the corner of the void between them pokes into the floor; where two sides of one passage meet, it
 		// is the tip of that hex
 		const auto IsVoidCorner = [&](int32 Index) { return CellAt(Index - 1) != CellAt(Index); };
@@ -670,6 +682,7 @@ void HexPlanetWalls::Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Lev
 		// ends at another such corner, as if the floor went on into the void, so the walls still show the hexes they stand on
 		TArray<FVector3d> Points;
 		TArray<int32> PointCells;
+		TArray<int32> PointVoids;
 		for (int32 Index = 0; Index < NumEdges; ++Index)
 		{
 			const FVector3d Here = CornerAt(Index);
@@ -677,14 +690,17 @@ void HexPlanetWalls::Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Lev
 			{
 				Points.Add(Here);
 				PointCells.Add(CellAt(Index));
+				PointVoids.Add(VoidAt(Index));
 				continue;
 			}
 			const double Back = Params.CornerCut * (IsVoidCorner(Index - 1) ? 0.5 : 1.0);
 			const double Ahead = Params.CornerCut * (IsVoidCorner(Index + 1) ? 0.5 : 1.0);
 			Points.Add(FMath::Lerp(Here, CornerAt(Index - 1), Back));
 			PointCells.Add(CellAt(Index - 1));
+			PointVoids.Add(VoidAt(Index - 1));
 			Points.Add(FMath::Lerp(Here, CornerAt(Index + 1), Ahead));
 			PointCells.Add(CellAt(Index));
+			PointVoids.Add(VoidAt(Index));
 		}
 		// points that fall together, as where a full cut reaches the tip of a hex, are one
 		for (int32 Index = Points.Num() - 1; Index >= 0 && Points.Num() > 3; --Index)
@@ -693,12 +709,14 @@ void HexPlanetWalls::Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Lev
 			{
 				Points.RemoveAt(Index);
 				PointCells.RemoveAt(Index);
+				PointVoids.RemoveAt(Index);
 			}
 		}
 
 		// every corner rounded by a quadratic curve within CornerRound of it
 		TArray<FVector3d> Rounded;
 		TArray<int32> RoundedCells;
+		TArray<int32> RoundedVoids;
 		const int32 NumPoints = Points.Num();
 		for (int32 Index = 0; Index < NumPoints; ++Index)
 		{
@@ -715,6 +733,7 @@ void HexPlanetWalls::Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Lev
 			{
 				Rounded.Add(Here);
 				RoundedCells.Add(PointCells[Index]);
+				RoundedVoids.Add(PointVoids[Index]);
 				continue;
 			}
 			const FVector3d Start = Here - InWay * Tangent;
@@ -725,6 +744,7 @@ void HexPlanetWalls::Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Lev
 				const double U = double(Step) / Steps;
 				Rounded.Add(Start * FMath::Square(1.0 - U) + Here * (2.0 * U * (1.0 - U)) + End * FMath::Square(U));
 				RoundedCells.Add(PointCells[Index]);
+				RoundedVoids.Add(PointVoids[Index]);
 			}
 		}
 
@@ -756,6 +776,11 @@ void HexPlanetWalls::Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Lev
 			Sample.Position = Sample.Up * Radius;
 			Sample.S = S;
 			Sample.Cell = RoundedCells[Share < 0.5 ? Segment : (Segment + 1) % NumRounded];
+			// how much of the void beyond is lava or a lake, before it is smoothed along the line
+			const int32 Void = RoundedVoids[Share < 0.5 ? Segment : (Segment + 1) % NumRounded];
+			const uint8 Style = VoidStyles.IsValidIndex(Void) ? VoidStyles[Void] : 0;
+			Sample.Lava = Style == 1 ? 1.0 : 0.0;
+			Sample.Lake = Style == 2 ? 1.0 : 0.0;
 		}
 
 		// the line smoothed over OuterSmooth each way, twice, from which the outer face and the crest stand
@@ -821,6 +846,31 @@ void HexPlanetWalls::Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Lev
 		// inside a turn the wall reaches at most about its radius from the line it stands from, so its faces do not cross over themselves
 		SetReaches(Line, false);
 		SetReaches(Line, true);
+
+		// along lava and lakes the wall sinks to a low parapet, so they show over it, easing in over PoolBlend each way
+		const int32 PoolHalf = FMath::Clamp(FMath::RoundToInt32(Params.PoolBlend / Spacing), 0, (Count - 1) / 2);
+		if (PoolHalf > 0)
+		{
+			TArray<FVector2d> Raw;
+			Raw.SetNum(Count);
+			for (int32 Index = 0; Index < Count; ++Index)
+			{
+				Raw[Index] = FVector2d(Line[Index].Lava, Line[Index].Lake);
+			}
+			for (int32 Index = 0; Index < Count; ++Index)
+			{
+				FVector2d Sum = FVector2d::ZeroVector;
+				double Weights = 0.0;
+				for (int32 Offset = -PoolHalf; Offset <= PoolHalf; ++Offset)
+				{
+					const double Weight = 1.0 - FMath::Abs(double(Offset)) / (PoolHalf + 1);
+					Sum += Raw[(Index + Offset + Count * 2) % Count] * Weight;
+					Weights += Weight;
+				}
+				Line[Index].Lava = FMath::SmoothStep(0.0, 1.0, Sum.X / Weights);
+				Line[Index].Lake = FMath::SmoothStep(0.0, 1.0, Sum.Y / Weights);
+			}
+		}
 
 		// where the line cuts across the corner of a void, the floor begins further onto the passage
 		ParallelFor(Count, [&](int32 Index) { Line[Index].Gap = FindGap(Grid, CanHold, Line[Index], Radius); }, Count < 512 ? EParallelForFlags::ForceSingleThread : EParallelForFlags::None);
@@ -899,10 +949,26 @@ double HexPlanetWalls::GetDistanceToLine(const FWalls& Walls, int32 Cell, const 
 
 namespace
 {
-	/** The mesh of the stretches from each of some samples to the next */
-	void BuildSamples(const FWalls& Walls, TConstArrayView<FIntPoint> Samples, const FParams& Params, FMesh& Out)
+	/** The rows a coarse mesh of the walls keeps, from deep down the outer face over the crest to under the floor, every CoarseStride sample:
+	 *  about a fifth of the triangles, for the walls further than WallLodDistance */
+	constexpr int32 CoarseRows[] = {OuterDeep, OuterFloor, OuterLow, OuterHigh, CrestOuter, CrestTop, CrestInner, InnerLip, InnerFirst + 2, InnerFirst + 5,
+		FootFirst + 2, FootLast, FloorEnd, Buried};
+	constexpr int32 CoarseStride = 3;
+
+	/** The mesh of the stretches from each of some samples to the sample Stride further, of the rows of RowSet in its order (every row when it
+	 *  is empty); a sample whose index is no multiple of Stride starts none */
+	void BuildSamples(const FWalls& Walls, TConstArrayView<FIntPoint> Samples, const FParams& Params, FMesh& Out, int32 Stride = 1, TConstArrayView<int32> RowSet = {})
 	{
 		const FOffsets Offsets(Params.Seed);
+		TArray<int32, TInlineAllocator<Rows>> Kept(RowSet.GetData(), RowSet.Num());
+		if (Kept.IsEmpty())
+		{
+			for (int32 Row = 0; Row < Rows; ++Row)
+			{
+				Kept.Add(Row);
+			}
+		}
+		const int32 NumKept = Kept.Num();
 
 		// the rings of the samples, of the next sample of each and, for the normals, of the samples around them
 		struct FRing
@@ -911,6 +977,7 @@ namespace
 			FLocal Locals[Rows];
 			double Height = 0.0;
 			FVector2f Stone = FVector2f::ZeroVector;
+			FVector2f Pools = FVector2f::ZeroVector;
 		};
 		TMap<FIntPoint, FRing> Rings;
 		const auto FindRing = [&](const FIntPoint& At) -> const FRing&
@@ -924,13 +991,20 @@ namespace
 			const FWallFrame Frame = GetFrame(Sample, Params, Offsets);
 			Ring.Height = Frame.Base;
 			Ring.Stone = FVector2f(float(Frame.Flowstone), float(Frame.Fracture));
+			Ring.Pools = FVector2f(float(Sample.Lava), float(Sample.Lake));
 			GetRing(Sample, Frame, Params, Offsets, Ring.Locals, Ring.Points);
 			return Rings.Add(At, Ring);
 		};
-		const auto Offset = [&Walls](const FIntPoint& At, int32 By)
+		// the sample Stride along, the last stretch of a loop ending at its first sample
+		const auto Step = [&Walls, Stride](const FIntPoint& At, int32 Way)
 		{
 			const int32 Count = Walls.Lines[At.X].Num();
-			return FIntPoint(At.X, ((At.Y + By) % Count + Count) % Count);
+			if (Way > 0)
+			{
+				return FIntPoint(At.X, At.Y + Stride >= Count ? 0 : At.Y + Stride);
+			}
+			const int32 Last = ((Count - 1) / Stride) * Stride;
+			return FIntPoint(At.X, At.Y == 0 ? Last : At.Y - Stride);
 		};
 
 		TMap<FIntPoint, int32> RingVertices;
@@ -943,13 +1017,14 @@ namespace
 			const FSample& Sample = Walls.Get(At);
 			// copies, as the map may grow and move the rings while the neighbors are built
 			const FRing Ring = FindRing(At);
-			const FRing Before = FindRing(Offset(At, -1));
-			const FRing After = FindRing(Offset(At, 1));
+			const FRing Before = FindRing(Step(At, -1));
+			const FRing After = FindRing(Step(At, 1));
 			const int32 First = Out.Positions.Num();
-			for (int32 Row = 0; Row < Rows; ++Row)
+			for (int32 Index = 0; Index < NumKept; ++Index)
 			{
+				const int32 Row = Kept[Index];
 				const FVector3d AcrossLine = After.Points[Row] - Before.Points[Row];
-				const FVector3d DownProfile = Ring.Points[FMath::Min(Row + 1, Rows - 1)] - Ring.Points[FMath::Max(Row - 1, 0)];
+				const FVector3d DownProfile = Ring.Points[Kept[FMath::Min(Index + 1, NumKept - 1)]] - Ring.Points[Kept[FMath::Max(Index - 1, 0)]];
 				FVector3d Normal = FVector3d::CrossProduct(DownProfile, AcrossLine).GetSafeNormal();
 				if (FVector3d::DotProduct(Normal, GetRowOutside(Sample, Row)) < 0.0)
 				{
@@ -959,8 +1034,10 @@ namespace
 				Out.Positions.Add(FVector3f(Ring.Points[Row]));
 				Out.Normals.Add(FVector3f(Normal));
 				Out.UVs.Add(FVector2f(float(Local.Cavity), float(Local.Up / FMath::Max(Ring.Height, 1.0))));
-				Out.UV1s.Add(FVector2f(float(Local.Floor), float(Local.Rib)));
+				// the floor of the foot and the outer face, which stands from the smoothed line, never share a row, so one channel holds both
+				Out.UV1s.Add(FVector2f(float(Local.Floor - Local.Smooth), float(Local.Rib)));
 				Out.UV2s.Add(Ring.Stone);
+				Out.UV3s.Add(Ring.Pools);
 			}
 			RingVertices.Add(At, First);
 			return First;
@@ -968,11 +1045,15 @@ namespace
 
 		for (const FIntPoint& At : Samples)
 		{
-			const int32 A = AddRing(At);
-			const int32 B = AddRing(Offset(At, 1));
-			for (int32 Row = 0; Row < Rows - 1; ++Row)
+			if (At.Y % Stride != 0)
 			{
-				const int32 Quad[4] = {A + Row, B + Row, B + Row + 1, A + Row + 1};
+				continue;
+			}
+			const int32 A = AddRing(At);
+			const int32 B = AddRing(Step(At, 1));
+			for (int32 Index = 0; Index < NumKept - 1; ++Index)
+			{
+				const int32 Quad[4] = {A + Index, B + Index, B + Index + 1, A + Index + 1};
 				// a triangle shows on the side where (C - A) x (B - A) points, which must be out of the wall
 				const FVector3f Outside = Out.Normals[Quad[0]] + Out.Normals[Quad[1]] + Out.Normals[Quad[2]] + Out.Normals[Quad[3]];
 				const FVector3f Face = FVector3f::CrossProduct(Out.Positions[Quad[2]] - Out.Positions[Quad[0]], Out.Positions[Quad[1]] - Out.Positions[Quad[0]]);
@@ -989,12 +1070,19 @@ namespace
 	}
 }
 
-void HexPlanetWalls::BuildChunk(const FWalls& Walls, int32 Chunk, const FParams& Params, FMesh& Out)
+void HexPlanetWalls::BuildChunk(const FWalls& Walls, int32 Chunk, const FParams& Params, FMesh& Out, bool bCoarse)
 {
 	Out = FMesh();
 	if (Walls.ChunkSamples.IsValidIndex(Chunk) && !Walls.ChunkSamples[Chunk].IsEmpty())
 	{
-		BuildSamples(Walls, Walls.ChunkSamples[Chunk], Params, Out);
+		if (bCoarse)
+		{
+			BuildSamples(Walls, Walls.ChunkSamples[Chunk], Params, Out, CoarseStride, CoarseRows);
+		}
+		else
+		{
+			BuildSamples(Walls, Walls.ChunkSamples[Chunk], Params, Out);
+		}
 	}
 }
 
@@ -1034,13 +1122,14 @@ uint32 HexPlanetWalls::HashChunk(const FWalls& Walls, int32 Chunk)
 	for (const FIntPoint& At : Walls.ChunkSamples[Chunk])
 	{
 		const TArray<FSample>& Line = Walls.Lines[At.X];
-		// the normals of a ring take the samples on both sides of it
-		for (const int32 Index : {(At.Y + Line.Num() - 1) % Line.Num(), At.Y, (At.Y + 1) % Line.Num(), (At.Y + 2) % Line.Num()})
+		// the normals of a ring take the samples on both sides of it, a coarse ring those three samples away
+		for (int32 Step = -3; Step <= 4; ++Step)
 		{
-			const FSample& Sample = Line[Index];
+			const FSample& Sample = Line[((At.Y + Step) % Line.Num() + Line.Num()) % Line.Num()];
 			Hash = HashCombine(Hash, GetTypeHash(Round(Sample.Position)));
 			Hash = HashCombine(Hash, GetTypeHash(Round(Sample.OuterPosition)));
 			Hash = HashCombine(Hash, GetTypeHash(FMath::RoundToInt32(Sample.Gap * 16.0)));
+			Hash = HashCombine(Hash, GetTypeHash(FIntPoint(FMath::RoundToInt32(Sample.Lava * 256.0), FMath::RoundToInt32(Sample.Lake * 256.0))));
 			for (const double Reach : {Sample.InnerReach, Sample.OuterReach, Sample.SmoothInnerReach, Sample.SmoothOuterReach})
 			{
 				Hash = HashCombine(Hash, GetTypeHash(FMath::RoundToInt32(FMath::Min(Reach, 1e6) * 4.0)));

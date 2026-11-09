@@ -1619,20 +1619,48 @@ public:
 	UPROPERTY(EditAnywhere, Category="Underground|Walls")
 	TArray<FHexWallStyle> WallStyles = MakeDefaultWallStyles();
 
+	/** Along a void of lava or a lake (EHexVoidStyle) the wall sinks to WallPoolHeight of its height and WallPoolThickness of its thickness,
+	 *  without an overhang, so the pool shows over it from above, easing in over WallPoolBlend world units each way along the wall */
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0.1, ClampMax=1))
+	float WallPoolHeight = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0.1, ClampMax=1))
+	float WallPoolThickness = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float WallPoolBlend = 60.0f;
+
 	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=10))
 	float WallStyleScale = 450.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=20))
 	float WallStyleSharpness = 5.0f;
 
+	/** Beyond WallCullDistance (0 for never) no wall is drawn; further than WallLodDistance a chunk draws its coarse walls (every third sample
+	 *  and 14 of the rows, about a fifth of the triangles), dissolving into the whole ones over WallLodBand each way; the whole walls of a chunk are
+	 *  built in the background once it comes within WallStreamAhead past that band and freed past WallStreamKeep further, so only those near the
+	 *  camera take their memory */
 	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
-	float WallCullDistance = 9000.0f;
+	float WallCullDistance = 20000.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float WallLodDistance = 2200.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=1))
+	float WallLodBand = 300.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float WallStreamAhead = 800.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float WallStreamKeep = 1500.0f;
 
 	/** The look of the walls (M_HexUndergroundWall): the rock layer of the cliff below them (the rock of the abyss) with the values of that layer
 	 *  (LayerParams), times CaveWallColor, and lighter and warmer on the stalactites by CaveWallRibTint, as dripstone; streaked down the faces by
 	 *  CaveWallStreaks in streaks about CaveWallStreakScale wide, lighter or darker by CaveWallTone in patches of CaveWallToneScale, darker by
 	 *  CaveWallCavityShade in the flutes, under the overhang and between the stalactites, and from CaveWallTopStart of the height up to the crest by
-	 *  CaveWallTopShade, as the light of a cave comes from its floor, and down the outer face below the floor as the cliffs are (AbyssDepthHalf);
+	 *  CaveWallTopShade, as the light of a cave comes from its floor, and down the outer face below the floor as the cliffs below it are
+	 *  (AbyssFadeStart, AbyssFadeEnd, AbyssDarkness), so its lower edge meets them without a seam where a lake or lava lets one see it;
 	 *  its normal bent by CaveWallNormalStrength of the layer, CaveWallRoughness rough and CaveWallRibRoughness on the stalactites. The rounded foot
 	 *  and the floor before it take the floor of the passages (the layer of their biome, CaveFloorTint, CaveFloorBrightness and CaveFloorPools), the
 	 *  edge between them moved by CaveWallFloorNoise, so the wall rises out of the floor. Lighter and warmer than 1, as a wall is steep, so it draws
@@ -1742,6 +1770,19 @@ public:
 
 	UPROPERTY(EditAnywhere, Category="Underground|Walls")
 	FLinearColor CaveWallStainColor = FLinearColor(0.8f, 0.42f, 0.2f, 1.0f);
+
+	/** The glowing moss of the rims grows on the foot of the walls instead of the floor beside them (which it would poke out from under), up to
+	 *  CaveWallMossTop of their height on the inner face alone, in the patches, speckles and colors of CaveMoss*, by CaveWallMoss; and lava beyond
+	 *  a wall lights its rock in LavaLightColor: the low parapet by CaveWallLavaGlow, fading up it and less on its inner face, the outer face as
+	 *  the cliffs of the void (LavaCliff*), and the floor at its foot as the passage there (GlowPoolEdge of LavaPool) */
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
+	float CaveWallMoss = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0.01, ClampMax=1))
+	float CaveWallMossTop = 0.22f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float CaveWallLavaGlow = 0.8f;
 
 	/** The walls dissolve around the line from the camera to the point under the cursor, as in a game seen from above, where they stand in front
 	 *  of that point: within CaveWallFadeRadius world units of the line, softer over CaveWallFadeSoftness of it at its edge, fully from

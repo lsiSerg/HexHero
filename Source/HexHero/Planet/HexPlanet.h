@@ -526,9 +526,9 @@ public:
 	UHexPlanetObjects* GetObjects() const { return Objects; }
 
 	/** Returns the walls on the lips of the passages, empty without UHexPlanetConfig::bWalls, and the values they are built with */
-	const HexPlanetWalls::FWalls& GetWalls() const { return Walls; }
+	const HexPlanetWalls::FWalls& GetWalls() const { return *Walls; }
 	const HexPlanetWalls::FParams& GetWallParams() const { return WallParams; }
-	bool HasWalls() const { return !Walls.Lines.IsEmpty(); }
+	bool HasWalls() const { return !Walls->Lines.IsEmpty(); }
 
 	/** Gives the walls the point under the cursor, around which they dissolve where they stand in front of it (WallFadeCenter of
 	 *  M_HexUndergroundWall), or none while the cursor is off the planet */
@@ -770,17 +770,63 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UTexture2D> LayerParamsTexture;
 
-	/** The walls on the lips of the passages (UHexPlanetConfig::bWalls, HexPlanetWalls), built from the levels shown, their mesh per chunk
-	 *  (WallChunks, under the empty root Surface), the hash of the samples each was built from, and their material */
-	HexPlanetWalls::FWalls Walls;
+	/** The walls on the lips of the passages (UHexPlanetConfig::bWalls, HexPlanetWalls), built from the levels shown, shared with the build of
+	 *  their whole meshes in the background (WallGeneration counts them), and the hash of the samples each chunk was built from. Every chunk keeps
+	 *  its coarse walls (WallCoarseChunks); its whole walls (WallChunks) are on the GPU only near the camera (WallWhole, UpdateWallLod); both
+	 *  under the empty root Surface */
+	TSharedRef<HexPlanetWalls::FWalls> Walls = MakeShared<HexPlanetWalls::FWalls>();
 	HexPlanetWalls::FParams WallParams;
 	TArray<uint32> WallHashes;
+	uint32 WallGeneration = 0;
+	TArray<uint8> WallWhole;
+	TArray<int32> WallWholeTriangles;
+	TArray<int32> WallCoarseTriangles;
+
+	/** What each chunk draws: 0 its whole walls, 1 both in the band between them, 2 its coarse walls, 3 its coarse walls while its whole ones are
+	 *  not built yet, 4 none (hex.PlanetWalls 0); 255 for none applied yet */
+	TArray<uint8> WallLodStates;
 
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UHexPlanetMeshComponent>> WallChunks;
 
 	UPROPERTY(Transient)
+	TArray<TObjectPtr<UHexPlanetMeshComponent>> WallCoarseChunks;
+
+	/** The material of the walls whole or coarse, and of the whole (WallLodSide 1) and coarse (2) walls in the band where one dissolves into the
+	 *  other */
+	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> WallMaterial;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> WallNearMaterial;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> WallFarMaterial;
+
+	/** The whole walls of chunks near the camera, built in the background from the walls of a generation, which UpdateWallLod starts and
+	 *  FinishWallStream shows, dropping them if the walls changed meanwhile */
+	struct FWallStream
+	{
+		uint32 Generation = 0;
+		TArray<int32> Chunks;
+		TArray<FHexPlanetMeshSectionRef> Sections;
+		TArray<int32> Triangles;
+	};
+	TSharedPtr<FWallStream> WallStream;
+	UE::Tasks::FTask WallStreamTask;
+
+	/** Shows each chunk of walls whole, coarse or both by its distance from the camera, frees the whole walls of those far from it and starts
+	 *  building those of the nearest ones that lack them */
+	void UpdateWallLod(const FVector& CameraLocation);
+
+	/** Gives the chunks the whole walls the stream built */
+	void FinishWallStream();
+
+	/** Frees the whole walls of every chunk, which their coarse walls stand in for, as a hidden layer does */
+	void DropWallWholes();
+
+	/** Makes a mesh component of walls for a chunk */
+	UHexPlanetMeshComponent* MakeWallComponent(const TCHAR* Name, int32 Chunk);
 
 	/** Triangles of the walls, drawn by hex.Wireframe when it draws every cell and its target is not the terrain alone (walls are not terrain):
 	 *  a copy of each chunk of walls, made the first time, under the empty Wireframe; and whether the view hides the walls themselves, as

@@ -2602,7 +2602,8 @@ float puddle = 0.0;
 {
     float mossFloor = (1.0 - smoothstep((1.0 - CaveMossFade) * CaveMossReach, max(CaveMossReach, 1e-3), lipDistance)) * topShare * (1.0 - ownVoid);
     float mossWall = ownVoid * (1.0 - smoothstep((1.0 - CaveMossFade) * CaveMossWallDepth, max(CaveMossWallDepth, 1.0), depthBelow));
-    float mossWhere = max(mossFloor, mossWall);
+    // where walls stand on the lips the moss grows on their foot (M_HexUndergroundWall), as on the floor it poked out from under it
+    float mossWhere = max(mossFloor, mossWall) * (1.0 - WallsShown);
     [branch] if (mossWhere > 0.001)
     {
         float mossPatch = smoothstep(CaveMossCover, lerp(CaveMossCover, 1.0, CaveMossSoftness), cloudNoise.Value(WorldPos / max(CaveMossPatchScale, 1.0) + 13.1));
@@ -2905,6 +2906,7 @@ def build_underground_material():
         # the pool of light of each cell (GLOW_POOL_CODE), read with Load, and the layer of the flagstones, found by name (AHexPlanet::SetBiomeLayers)
         ('CellCanopy', add_texture(library, material, DEFAULT_MARKS, 'CellCanopy', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 3470), ''),
         ('CaveFlagLayer', add_scalar(library, material, 'CaveFlagLayer', -1.0, 3480), ''),
+        ('WallsShown', add_scalar(library, material, 'WallsShown', 0.0, 3490), ''),
         ('PreviewTile', add_scalar(library, material, 'PreviewTile', 0.0, 3500), ''),
         ('FacetShare', add_uv_channel(library, material, 1, 'r', 3525), ''),
         ('CreviceShare', add_uv_channel(library, material, 1, 'g', 3540), ''),
@@ -3177,15 +3179,20 @@ def build_cave_object_material():
 # the center, which a vertical line of a wall keeps), lighter or darker in broad patches (CaveWallTone) and in layers (CaveWallStrata), split into
 # facets that lean their own ways with cracks between them (CaveWallFacet*, CaveWallCrack*, a cellular pattern of the place), in regions another rock
 # (CaveWallAltLayer, from CaveWallAltLayerName), and by the style of the wall in the third UV (FHexWallStyle) lighter and smoother as flowstone
-# (CaveWallFlow*) or showing its joints, layers and pale veins as broken rock (CaveWallVein*), with rusty stains down it (CaveWallStain*); darker in its hollows (CaveWallCavityShade,
+# (CaveWallFlow*) or showing its joints, layers and pale veins as broken rock (CaveWallVein*), with rusty stains down it (CaveWallStain*), the glowing
+# moss of the rims on its foot and the lowest part of its inner face (CaveWallMoss*, CaveMoss*; U of the second UV below 0 is the outer face, which
+# takes none) and, over lava (the fourth UV), its rock lit by it: the low parapet by CaveWallLavaGlow, the outer face as the cliffs of the void
+# (LavaCliff*) and the floor at its foot as the pool of light of the passage at that side (GlowPoolEdge of LavaPool); darker in its hollows (CaveWallCavityShade,
 # by U of the first UV) and towards its crest (CaveWallTopShade from CaveWallTopStart, by the height share in V of the first UV), as the light of a
-# cave comes from its floor, and down its outer face below the floor (FloorRadius) as the cliffs darken into the abyss (AbyssDepthHalf), with Ambient
+# cave comes from its floor, and down its outer face below the floor (FloorRadius) as the cliffs darken into the abyss (AbyssFade*, AbyssDarkness), with Ambient
 # as the ground has. Its rounded foot and the floor before it (U of the second UV) are the floor of the passages, the terrain layer of their biome
 # (FloorLayer) taken as M_HexUnderground takes it, with CaveFloorTint, CaveFloorBrightness and its pools of tone, the edge moved by a noise
 # (CaveWallFloorNoise), so the wall rises out of the floor without a seam. Masked: around the line from the camera to the point under the cursor
 # (WallFadeCenter, its alpha 1 while the cursor is on the planet, AHexPlanet::SetFadeFocus) a wall dissolves where it stands in front of that point,
 # keeping CaveWallFadeKeep of its pixels by a noise of the pixel that changes every frame, which the temporal filter blends into a ghost, as a game
-# seen from above shows what lies behind a wall. The shadow pass and ray tracing take it whole, so its shadow does not flicker
+# seen from above shows what lies behind a wall. In the band of WallLodDistance and WallLodBand the whole walls of a chunk (WallLodSide 1) and its
+# coarse mesh (2) keep complementary pixels, so one dissolves into the other. The shadow pass and ray tracing take it whole, so its shadow does
+# not flicker
 WALL_MATERIAL = FOLDER + '/M_HexUndergroundWall'
 # the value noise hashed in integers of the cracks of lava
 CAVE_NOISE_CODE = CAVE_RUNES_CODE[CAVE_RUNES_CODE.index('// a value noise whose lattice is hashed in integers'):]
@@ -3251,10 +3258,14 @@ layers.DefaultTile = max(BiomeTileSize, 1.0);
 float cavity = saturate(WallUV.x);
 float rise = WallUV.y;
 float floorShare = saturate(WallUV1.x);
+// below 0 the same channel says how much a point is the outer face, over the crest and down into the chasm
+float outer = saturate(-WallUV1.x);
 float ribShare = saturate(WallUV1.y);
 // how much the style of the wall here is flowstone and how much it shows its joints (FHexWallStyle)
 float flowstone = saturate(WallUV2.x);
 float fracture = saturate(WallUV2.y);
+// how much lava and how much lake lies beyond the wall here, where it sinks to a parapet
+float lavaBeyond = saturate(WallUV3.x);
 
 // the rock of the cliff below, as dripstone: lighter and warmer on the stalactites, streaked down the faces, in broad patches of tone
 float3 rockBend;
@@ -3344,8 +3355,12 @@ float3 facetNormal = n;
 // hollows lie in the shade, and the light of a cave comes from its floor, so the crest falls into the dark
 albedo *= 1.0 - CaveWallCavityShade * cavity;
 albedo *= 1.0 - CaveWallTopShade * smoothstep(CaveWallTopStart, 1.0, rise);
-// down the outer face below the floor it darkens into the abyss as the cliffs do
-albedo *= exp2(-max(FloorRadius - length(WorldPos), 0.0) / max(AbyssDepthHalf, 1.0));
+// down the outer face below the floor it darkens into the abyss by the curve of the cliffs below it (AbyssFadeStart, AbyssFadeEnd, AbyssDarkness),
+// so its lower edge, which a lake or lava lets one see, meets them without a seam, while lava lights the rock as it was
+float3 rockAlbedo = albedo;
+float depthBelowFloor = max(FloorRadius - length(WorldPos), 0.0);
+float abyssKeep = lerp(1.0, AbyssDarkness, smoothstep(AbyssFadeStart, max(AbyssFadeEnd, AbyssFadeStart + 1.0), depthBelowFloor));
+albedo *= abyssKeep;
 
 // the foot and the floor before it are the floor of the passages, so the wall rises out of it
 float3 floorBend = 0.0;
@@ -3361,8 +3376,44 @@ albedo = lerp(albedo, floorColor, floorMix);
 float3 rockNormal = normalize(facetNormal + rockBend * CaveWallNormalStrength);
 float3 floorNormal = normalize(n + (floorBend - n * dot(floorBend, n)) * BiomeNormalStrength);
 OutNormal = normalize(lerp(rockNormal, floorNormal, floorMix));
+
+// the glowing moss of the rims on the foot of the wall and up the lowest part of its inner face, in the patches and speckles of the moss of the
+// floor, never on the outer face, whose height above the floor says nothing of a rim
+float3 wallGlow = 0.0;
+[branch] if (CaveWallMoss > 0.0)
+{
+    float mossWhere = (1.0 - smoothstep(CaveWallMossTop * 0.6, max(CaveWallMossTop, 1e-3), rise)) * (1.0 - floorMix * 0.8) * (1.0 - outer) * CaveWallMoss;
+    [branch] if (mossWhere > 0.001)
+    {
+        float mossPatch = smoothstep(CaveMossCover, lerp(CaveMossCover, 1.0, CaveMossSoftness), cloudNoise.Value(WorldPos / max(CaveMossPatchScale, 1.0) + 13.1));
+        float moss = mossWhere * mossPatch;
+        float speckleDetail = 1.0 - smoothstep(CaveMossDetailFadeStart, max(CaveMossDetailFadeEnd, CaveMossDetailFadeStart + 1e-3), pixelWorld / max(CaveMossSpeckleScale, 0.5));
+        float speckle = CaveMossFarGlow;
+        [branch] if (speckleDetail > 0.001)
+        {
+            float speck = smoothstep(CaveMossSpeckle, lerp(CaveMossSpeckle, 1.0, CaveMossSoftness), cloudNoise.Value(WorldPos / max(CaveMossSpeckleScale, 0.5) + 21.7));
+            speckle = lerp(CaveMossFarGlow, speck, speckleDetail);
+        }
+        albedo = lerp(albedo, CaveMossAlbedo.rgb, moss * CaveMossAlbedoShare);
+        wallGlow += CaveMossColor.rgb * CaveMossGlow * moss * speckle;
+    }
+}
+// lava beyond lights the wall by its rock and not as a plate of light: the floor at its foot takes the pool of light the passage has at that side
+// (GlowPoolEdge of LavaPool in the color of the light of lava, as M_HexUnderground draws it), the low parapet is lit by CaveWallLavaGlow of its
+// rock, fading up it and darkening down the outer face, less on its inner face, which the lava does not see, and the outer face glows as the
+// cliffs of the void do, up to LavaCliffReach above the floor of the void (LevelHeight + DeepDepth below the passages)
+[branch] if (lavaBeyond > 0.001)
+{
+    float3 lavaColor = LavaLightColor.rgb / max(max(LavaLightColor.r, LavaLightColor.g), max(LavaLightColor.b, 1e-3));
+    float3 floorPool = lavaColor * LavaPool * GlowPoolEdge * lavaBeyond;
+    wallGlow += (floorColor * GlowPoolStrength + GlowPoolLight) * floorPool * floorMix;
+    float parapet = pow(saturate(1.0 - rise), 1.5) * lerp(0.4, 1.0, outer) * abyssKeep;
+    float lavaBand = (1.0 - smoothstep(0.0, max(LavaCliffReach, 1.0), LevelHeight + DeepDepth - depthBelowFloor)) * lavaBeyond;
+    wallGlow += LavaLightColor.rgb * (rockAlbedo * (CaveWallLavaGlow * lavaBeyond * parapet + LavaCliffLight * lavaBand) + LavaCliffGlow * lavaBand) * (1.0 - floorMix);
+    albedo *= lerp((float3)1.0, LavaLightColor.rgb, lavaBand * LavaCliffTint * (1.0 - floorMix));
+}
 OutRoughness = lerp(lerp(lerp(CaveWallRoughness, CaveWallFlowRoughness, flowstone), CaveWallRibRoughness, ribShare), Roughness, floorMix);
-OutEmissive = albedo * Ambient;
+OutEmissive = albedo * Ambient + wallGlow;
 return albedo;
 '''
 WALL_FADE_CODE = r'''
@@ -3377,16 +3428,29 @@ float fade = WallFadeCenter.w * (1.0 - smoothstep(radius * (1.0 - CaveWallFadeSo
     * saturate((focusDistance - along) / max(CaveWallFadeDepth, 0.1));
 float2 pixel = Parameters.SvPosition.xy + 5.588238 * (float)View.StateFrameIndexMod8;
 float noise = frac(52.9829189 * frac(dot(pixel, float2(0.06711056, 0.00583715))));
-return noise < 1.0 - fade * (1.0 - CaveWallFadeKeep) ? 1.0 : 0.0;
+float visible = noise < 1.0 - fade * (1.0 - CaveWallFadeKeep) ? 1.0 : 0.0;
+// in the band between the whole walls near the camera and their coarse mesh further away, each keeps the pixels the other leaves, by a noise of
+// its own, so one dissolves into the other (WallLodSide 1 near, 2 far, 0 whole)
+if (WallLodSide > 0.5)
+{
+    float lodShare = saturate((distance(WorldPos, CameraPos) - (WallLodDistance - WallLodBand)) / max(2.0 * WallLodBand, 1.0));
+    float2 lodPixel = Parameters.SvPosition.xy * 1.37 + 3.17 + 5.588238 * (float)View.StateFrameIndexMod8;
+    float lodNoise = frac(52.9829189 * frac(dot(lodPixel, float2(0.06711056, 0.00583715))));
+    visible *= ((WallLodSide < 1.5) == (lodShare < lodNoise)) ? 1.0 : 0.0;
+}
+return visible;
 '''
 WALL_PARAMETERS = ['BiomeTileSize', 'TriplanarSharpness', 'BiomeNormalStrength', 'Roughness', 'CaveWallColor', 'CaveWallRibTint', 'CaveWallStreaks',
                    'CaveWallStreakScale', 'CaveWallTone', 'CaveWallToneScale', 'CaveWallCavityShade', 'CaveWallTopShade', 'CaveWallTopStart',
                    'CaveWallNormalStrength', 'CaveWallRoughness', 'CaveWallRibRoughness', 'CaveWallFloorNoise', 'CaveWallFacetCell', 'CaveWallFacetStretch',
                    'CaveWallFacetTilt', 'CaveWallCrackShade', 'CaveWallCrackWidth', 'CaveWallStrata', 'CaveWallStrataSpacing', 'CaveWallAltShare', 'CaveWallAltScale',
                    'CaveWallAltColor', 'CaveWallFlowTint', 'CaveWallFlowRoughness', 'CaveWallVeins', 'CaveWallVeinWidth', 'CaveWallVeinScale',
-                   'CaveWallVeinColor', 'CaveWallStains', 'CaveWallStainColor', 'CaveFloorTint', 'CaveFloorBrightness', 'CaveFloorPools',
-                   'CaveFloorPoolScale', 'AbyssDepthHalf', 'Ambient']
-WALL_FADE_PARAMETERS = ['CaveWallFadeRadius', 'CaveWallFadeSoftness', 'CaveWallFadeDepth', 'CaveWallFadeKeep']
+                   'CaveWallVeinColor', 'CaveWallStains', 'CaveWallStainColor', 'CaveWallMoss', 'CaveWallMossTop', 'CaveWallLavaGlow', 'CaveMossCover',
+                   'CaveMossSoftness', 'CaveMossPatchScale', 'CaveMossDetailFadeStart', 'CaveMossDetailFadeEnd', 'CaveMossSpeckleScale', 'CaveMossFarGlow',
+                   'CaveMossSpeckle', 'CaveMossAlbedo', 'CaveMossAlbedoShare', 'CaveMossColor', 'CaveMossGlow', 'LavaLightColor', 'CaveFloorTint',
+                   'CaveFloorBrightness', 'CaveFloorPools', 'CaveFloorPoolScale', 'AbyssFadeStart', 'AbyssFadeEnd', 'AbyssDarkness', 'Ambient', 'LevelHeight', 'DeepDepth', 'LavaCliffReach',
+                   'LavaCliffLight', 'LavaCliffGlow', 'LavaCliffTint', 'LavaPool', 'GlowPoolEdge', 'GlowPoolStrength', 'GlowPoolLight']
+WALL_FADE_PARAMETERS = ['CaveWallFadeRadius', 'CaveWallFadeSoftness', 'CaveWallFadeDepth', 'CaveWallFadeKeep', 'WallLodDistance', 'WallLodBand']
 for _name in WALL_PARAMETERS:
     assert _name in WALL_CODE, _name
 for _name in WALL_FADE_PARAMETERS:
@@ -3411,11 +3475,14 @@ def build_wall_material():
     wall_uv1.set_editor_property('coordinate_index', 1)
     wall_uv2 = library.create_material_expression(material, unreal.MaterialExpressionTextureCoordinate, -1000, 170)
     wall_uv2.set_editor_property('coordinate_index', 2)
+    wall_uv3 = library.create_material_expression(material, unreal.MaterialExpressionTextureCoordinate, -1000, 180)
+    wall_uv3.set_editor_property('coordinate_index', 3)
     connections = [('WorldPos', position, ''), ('PosDdx', position_ddx, ''), ('PosDdy', position_ddy, ''),
         ('VertexNormal', library.create_material_expression(material, unreal.MaterialExpressionVertexNormalWS, -1000, 100), ''),
         ('WallUV', library.create_material_expression(material, unreal.MaterialExpressionTextureCoordinate, -1000, 150), ''),
         ('WallUV1', wall_uv1, ''),
         ('WallUV2', wall_uv2, ''),
+        ('WallUV3', wall_uv3, ''),
         ('RockLayer', add_scalar(library, material, 'RockLayer', 7.0, 175), ''),
         ('FloorLayer', add_scalar(library, material, 'FloorLayer', 15.0, 185), ''),
         ('CaveWallAltLayer', add_scalar(library, material, 'CaveWallAltLayer', -1.0, 195), ''),
@@ -3441,7 +3508,8 @@ def build_wall_material():
 
     fade_connections = [('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1100, 1000), ''),
         ('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1100, 1050), ''),
-        ('WallFadeCenter', add_vector4(library, material, 'WallFadeCenter', unreal.LinearColor(0.0, 0.0, 0.0, 0.0), 1100), '')
+        ('WallFadeCenter', add_vector4(library, material, 'WallFadeCenter', unreal.LinearColor(0.0, 0.0, 0.0, 0.0), 1100), ''),
+        ('WallLodSide', add_scalar(library, material, 'WallLodSide', 0.0, 1120), '')
         ] + add_config_parameters(library, material, unreal.HexPlanetConfig, WALL_FADE_PARAMETERS, 1150)
     fade = add_custom(library, material, WALL_FADE_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT1, fade_connections, 1000)
     whole = library.create_material_expression(material, unreal.MaterialExpressionConstant, -200, 1400)

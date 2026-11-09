@@ -316,6 +316,9 @@ public:
 	/** Returns the number of biomes that can be painted on a layer, their names and their colors, the FileColor of their asset */
 	int32 GetNumBiomes(EHexPlanetLayer Layer) const;
 	FText GetBiomeName(EHexPlanetLayer Layer, int32 InBiome) const;
+
+	/** Returns the tooltip of the button of a biome: which cells it paints, as underground the styles of the voids paint only voids */
+	FText GetBiomeTip(EHexPlanetLayer Layer, int32 InBiome) const;
 	FLinearColor GetBiomeColor(EHexPlanetLayer Layer, int32 InBiome) const;
 
 	/** Returns the size of the brush, 1 to MaxBrushSize */
