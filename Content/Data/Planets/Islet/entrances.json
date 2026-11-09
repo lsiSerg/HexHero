@@ -1,0 +1,10 @@
+{
+	"version": 1,
+	"entrances": [
+		{"cell": 1333, "network": "A"},
+		{"cell": 4112, "network": "A"},
+		{"cell": 6121, "network": "B"},
+		{"cell": 7144, "network": "B"},
+		{"cell": 8149, "network": "B"}
+	]
+}

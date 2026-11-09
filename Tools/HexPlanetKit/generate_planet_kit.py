@@ -416,6 +416,176 @@ class Bridge:
         return result
 
 
+# the markers of the entrances of the underground (AHexPlanet::UpdateMarkers), of radius 1 around their foot at the origin, which the planet scales
+# to MarkerSize: the alpha of the color of a vertex is how much it glows in the color of its network (M_HexPlanetMarker), the red how far up the
+# shaft it lies (M_HexPlanetShaft). A normal per face, as on the boulders, so the rock reads as broken stone
+MARKER_SEGMENTS = 20
+
+
+def ring_noise(index, ring, seed, amount):
+    return (hash_unit(index, ring, seed) - 0.5) * 2.0 * amount
+
+
+class CaveMouth:
+    """A mound of broken rock around a dark funnel that glows from deep inside, so the mouth of a cave reads from above and from the side"""
+
+    def __init__(self, seed):
+        # rings from the bottom of the funnel out to the foot of the mound: (radius, height, how much it glows)
+        # the funnel stays above the ground, which would hide what lies below it, and glows from its bottom up its walls
+        rings = [(0.0, 0.05, 1.0), (0.14, 0.07, 1.0), (0.24, 0.2, 0.75), (0.31, 0.44, 0.0), (0.4, 0.52, 0.0), (0.58, 0.38, 0.0),
+                 (0.78, 0.18, 0.0), (1.0, -0.04, 0.0)]
+        self.points = []
+        self.rings = []
+        for ring, (radius, height, glow) in enumerate(rings):
+            row = []
+            count = 1 if radius == 0.0 else MARKER_SEGMENTS
+            for index in range(count):
+                angle = (index + 0.5 * (ring % 2)) / count * 2.0 * math.pi
+                # the rim and the mound are broken, the funnel stays round enough to read as a hole
+                jag = 0.0 if ring < 2 else 0.08 + 0.04 * ring
+                r = radius * (1.0 + ring_noise(index, ring, seed, 0.12 if ring >= 3 else 0.04))
+                h = height + ring_noise(index, ring + 20, seed, jag * 0.6) if radius > 0.0 else height
+                # one side of the mound lower, so the mouth opens towards a side like a cave in a slope
+                h -= 0.12 * max(0.0, math.cos(angle - 0.6)) * (ring >= 3) * (0.5 + radius * 0.5)
+                row.append(len(self.points))
+                self.points.append(((r * math.cos(angle), r * math.sin(angle), h), glow))
+            self.rings.append(row)
+        self.faces = []
+        for ring in range(len(self.rings) - 1):
+            inner, outer = self.rings[ring], self.rings[ring + 1]
+            if len(inner) == 1:
+                for index in range(len(outer)):
+                    self.faces.append((inner[0], outer[index], outer[(index + 1) % len(outer)]))
+                continue
+            for index in range(len(outer)):
+                a, b = inner[index], inner[(index + 1) % len(inner)]
+                c, d = outer[index], outer[(index + 1) % len(outer)]
+                self.faces.append((a, c, d))
+                self.faces.append((a, d, b))
+
+    def get_triangles(self):
+        """Triangles with their corners, a glow each, and a normal facing up and out of the mound, a triangle showing where (C - A) x (B - A) points"""
+        result = []
+        for face in self.faces:
+            corners = [self.points[index][0] for index in face]
+            glows = [self.points[index][1] for index in face]
+            a, b, c = corners
+            u = [c[axis] - a[axis] for axis in range(3)]
+            v = [b[axis] - a[axis] for axis in range(3)]
+            cross = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]
+            length = math.sqrt(sum(value * value for value in cross))
+            if length < 1e-9:
+                continue
+            # every face of the mound and the funnel is seen from above, so it faces up
+            if cross[2] < 0.0:
+                corners = [a, c, b]
+                glows = [glows[0], glows[2], glows[1]]
+                cross = [-value for value in cross]
+            result.append((corners, [value / length for value in cross], glows))
+        return result
+
+
+class ExitRing:
+    """A ring of standing stones around a glowing glyph on the floor, where a hero comes out of an entrance underground"""
+
+    def __init__(self, seed):
+        self.triangles = []
+        stones = 7
+        for stone in range(stones):
+            angle = (stone + (hash_unit(stone, 1, seed) - 0.5) * 0.4) / stones * 2.0 * math.pi
+            distance = 0.78 + 0.1 * hash_unit(stone, 2, seed)
+            size = 0.13 + 0.06 * hash_unit(stone, 3, seed)
+            tall = 1.8 + 1.4 * hash_unit(stone, 4, seed)
+            lean = (hash_unit(stone, 5, seed) - 0.5) * 0.25
+            for corners, normal in Boulder(seed * 13 + stone * 7 + 1).get_triangles():
+                placed = []
+                for x, y, z in corners:
+                    x, y, z = x * size, y * size, (z + 0.45) * size * tall
+                    x += lean * z
+                    cos, sin = math.cos(angle), math.sin(angle)
+                    placed.append((x * cos - y * sin + distance * cos, x * sin + y * cos + distance * sin, z - 0.03))
+                nx, ny, nz = normal
+                nx, ny, nz = nx / size, ny / size, nz / (size * tall)
+                nx, ny = nx * math.cos(angle) - ny * math.sin(angle), nx * math.sin(angle) + ny * math.cos(angle)
+                length = math.sqrt(nx * nx + ny * ny + nz * nz)
+                self.triangles.append((placed, (nx / length, ny / length, nz / length), (0.0, 0.0, 0.0)))
+        # the glyph: a flat ring and a disc a little above the floor, which glow
+        glyph = MARKER_SEGMENTS * 2
+        for index in range(glyph):
+            a0, a1 = index / glyph * 2.0 * math.pi, (index + 1) / glyph * 2.0 * math.pi
+            for inner, outer, glow in ((0.46, 0.56, 1.0), (0.0, 0.3, 0.7)):
+                p = [(inner * math.cos(a0), inner * math.sin(a0), 0.02), (outer * math.cos(a0), outer * math.sin(a0), 0.02),
+                     (outer * math.cos(a1), outer * math.sin(a1), 0.02), (inner * math.cos(a1), inner * math.sin(a1), 0.02)]
+                for corners in ((p[0], p[2], p[1]), (p[0], p[3], p[2])):
+                    self.triangles.append((list(corners), (0.0, 0.0, 1.0), (glow, glow, glow)))
+
+    def get_triangles(self):
+        result = []
+        for corners, normal, glows in self.triangles:
+            a, b, c = corners
+            u = [c[axis] - a[axis] for axis in range(3)]
+            v = [b[axis] - a[axis] for axis in range(3)]
+            cross = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]
+            if sum(cross[axis] * normal[axis] for axis in range(3)) < 0.0:
+                corners = [a, c, b]
+                glows = (glows[0], glows[2], glows[1])
+            result.append((list(corners), list(normal), list(glows)))
+        return result
+
+
+class Shaft:
+    """A shaft of light over an exit: an open cone, wider at the top, of height 1 and radius 0.55 at its foot, whose red is how far up it is"""
+
+    def __init__(self):
+        self.triangles = []
+        rows = 6
+        for row in range(rows):
+            z0, z1 = row / rows, (row + 1) / rows
+            r0, r1 = 0.55 + 0.35 * z0, 0.55 + 0.35 * z1
+            for index in range(MARKER_SEGMENTS * 2):
+                a0, a1 = index / (MARKER_SEGMENTS * 2) * 2.0 * math.pi, (index + 1) / (MARKER_SEGMENTS * 2) * 2.0 * math.pi
+                p = [(r0 * math.cos(a0), r0 * math.sin(a0), z0), (r0 * math.cos(a1), r0 * math.sin(a1), z0),
+                     (r1 * math.cos(a1), r1 * math.sin(a1), z1), (r1 * math.cos(a0), r1 * math.sin(a0), z1)]
+                for corners in ((p[0], p[1], p[2]), (p[0], p[2], p[3])):
+                    self.triangles.append(corners)
+
+    def get_vertices(self):
+        """By corner of each triangle: position, a smooth normal out from the axis, and the color with its height in red"""
+        result = []
+        for corners in self.triangles:
+            a, b, c = corners
+            u = [c[axis] - a[axis] for axis in range(3)]
+            v = [b[axis] - a[axis] for axis in range(3)]
+            cross = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]
+            middle = [(a[axis] + b[axis] + c[axis]) / 3.0 for axis in range(3)]
+            if cross[0] * middle[0] + cross[1] * middle[1] < 0.0:
+                corners = [a, c, b]
+            for x, y, z in corners:
+                length = math.hypot(x, y) or 1.0
+                result.append(((x, y, z), (x / length, y / length, 0.0), (z, 0.0, 0.0, 1.0)))
+        return result
+
+
+def write_marker(triangles, path, name):
+    """Writes triangles of (corners, normal, glows) as a binary glTF in meters, a radius of 1 world unit, with the glow in the alpha of the colors"""
+    positions, normals, colors = [], [], []
+    for corners, normal, glows in triangles:
+        for corner, glow in zip(corners, glows):
+            positions.append(to_file_axes(*(value * 0.01 for value in corner)))
+            normals.append(to_file_axes(*normal))
+            colors.append((0.0, 0.0, 0.0, glow))
+    write_glb_arrays(path, name, positions, normals, list(range(len(positions))), colors)
+
+
+def write_shaft(shaft, path, name):
+    positions, normals, colors = [], [], []
+    for position, normal, color in shaft.get_vertices():
+        positions.append(to_file_axes(*(value * 0.01 for value in position)))
+        normals.append(to_file_axes(*normal))
+        colors.append(color)
+    write_glb_arrays(path, name, positions, normals, list(range(len(positions))), colors)
+
+
 def write_boulder(boulder, path, name):
     """Writes a boulder or a floe as a binary glTF with a vertex per corner of each triangle, in meters, a radius of 1 world unit"""
     positions = []
@@ -440,32 +610,40 @@ def write_glb(piece, path, name):
     write_glb_arrays(path, name, positions, normals, indices)
 
 
-def write_glb_arrays(path, name, positions, normals, indices):
+def write_glb_arrays(path, name, positions, normals, indices, colors=None):
+    """Writes a binary glTF of positions, normals and indices, and with colors their linear RGBA as COLOR_0"""
     count = len(positions)
 
     position_data = b''.join(struct.pack('<3f', *value) for value in positions)
     normal_data = b''.join(struct.pack('<3f', *value) for value in normals)
+    color_data = b''.join(struct.pack('<4f', *value) for value in colors) if colors else b''
     index_data = struct.pack('<%dI' % len(indices), *indices)
-    binary = position_data + normal_data + index_data
+    binary = position_data + normal_data + color_data + index_data
 
     views = []
     offset = 0
-    for data, target in ((position_data, 34962), (normal_data, 34962), (index_data, 34963)):
+    parts = [(position_data, 34962), (normal_data, 34962)] + ([(color_data, 34962)] if colors else []) + [(index_data, 34963)]
+    for data, target in parts:
         views.append({'buffer': 0, 'byteOffset': offset, 'byteLength': len(data), 'target': target})
         offset += len(data)
 
     stored = [struct.unpack('<3f', struct.pack('<3f', *value)) for value in positions]
+    accessors = [
+        {'bufferView': 0, 'componentType': 5126, 'count': count, 'type': 'VEC3', 'min': [min(value[axis] for value in stored) for axis in range(3)], 'max': [max(value[axis] for value in stored) for axis in range(3)]},
+        {'bufferView': 1, 'componentType': 5126, 'count': count, 'type': 'VEC3'},
+    ]
+    attributes = {'POSITION': 0, 'NORMAL': 1}
+    if colors:
+        attributes['COLOR_0'] = len(accessors)
+        accessors.append({'bufferView': len(accessors), 'componentType': 5126, 'count': count, 'type': 'VEC4'})
+    accessors.append({'bufferView': len(accessors), 'componentType': 5125, 'count': len(indices), 'type': 'SCALAR'})
     document = {
         'asset': {'version': '2.0', 'generator': 'generate_planet_kit.py'},
         'scene': 0,
         'scenes': [{'nodes': [0]}],
         'nodes': [{'mesh': 0, 'name': name}],
-        'meshes': [{'name': name, 'primitives': [{'attributes': {'POSITION': 0, 'NORMAL': 1}, 'indices': 2}]}],
-        'accessors': [
-            {'bufferView': 0, 'componentType': 5126, 'count': count, 'type': 'VEC3', 'min': [min(value[axis] for value in stored) for axis in range(3)], 'max': [max(value[axis] for value in stored) for axis in range(3)]},
-            {'bufferView': 1, 'componentType': 5126, 'count': count, 'type': 'VEC3'},
-            {'bufferView': 2, 'componentType': 5125, 'count': len(indices), 'type': 'SCALAR'},
-        ],
+        'meshes': [{'name': name, 'primitives': [{'attributes': attributes, 'indices': len(accessors) - 1}]}],
+        'accessors': accessors,
         'bufferViews': views,
         'buffers': [{'byteLength': len(binary)}],
     }
@@ -519,6 +697,13 @@ def main():
     bridge_folder = os.path.join(os.path.dirname(os.path.abspath(OUTPUT_FOLDER)), 'HexPlanetBridge')
     os.makedirs(bridge_folder, exist_ok=True)
     write_boulder(Bridge(), os.path.join(bridge_folder, 'SM_PlanetBridge.glb'), 'SM_PlanetBridge')
+
+    # the markers of the entrances of the underground, in a folder of their own too, imported by import_planet_markers.py
+    marker_folder = os.path.join(os.path.dirname(os.path.abspath(OUTPUT_FOLDER)), 'HexPlanetMarkers')
+    os.makedirs(marker_folder, exist_ok=True)
+    write_marker(CaveMouth(7).get_triangles(), os.path.join(marker_folder, 'SM_PlanetCaveMouth.glb'), 'SM_PlanetCaveMouth')
+    write_marker(ExitRing(19).get_triangles(), os.path.join(marker_folder, 'SM_PlanetExitRing.glb'), 'SM_PlanetExitRing')
+    write_shaft(Shaft(), os.path.join(marker_folder, 'SM_PlanetExitShaft.glb'), 'SM_PlanetExitShaft')
 
     with open(os.path.join(OUTPUT_FOLDER, 'kit.json'), 'w', encoding='utf-8') as file:
         json.dump(manifest, file, indent=2)

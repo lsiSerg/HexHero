@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
+#include "HexPlanetLayers.h"
 #include "HexPlanetObjectSet.generated.h"
 
 class UMaterialInterface;
@@ -83,6 +84,13 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Set")
 	EHexObjectLayer Layer = EHexObjectLayer::Cover;
+
+	/** Layers of the planet this kind stands on, a mask of the bits of EHexPlanetLayer: the surface, the underground or both */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Set", meta=(Bitmask, BitmaskEnum="/Script/HexHero.EHexPlanetLayer"))
+	int32 PlanetLayers = GetPlanetLayerBit(EHexPlanetLayer::Surface);
+
+	/** Returns true if this kind stands on a layer of the planet */
+	bool IsOnLayer(EHexPlanetLayer PlanetLayer) const { return (PlanetLayers & GetPlanetLayerBit(PlanetLayer)) != 0; }
 
 	/** A hero cannot cross a cell with it, as trees; bushes and flowers can be crossed. Nothing moves yet, so only the info at the cursor shows it */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Set")

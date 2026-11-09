@@ -20,8 +20,12 @@
 #include "SHexHoverInfo.h"
 #include "SHexPlanetPalette.h"
 #include "HexPlanetPainter.h"
+#include "HexPlanetUnderground.h"
+#include "HexHero.h"
 #include "TimerManager.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Styling/CoreStyle.h"
+#include "Widgets/Layout/SBorder.h"
 
 AHexPlanetPlayerController::AHexPlanetPlayerController()
 {
@@ -85,8 +89,14 @@ void AHexPlanetPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReaso
 		{
 			ViewportClient->RemoveViewportWidgetContent(Palette.ToSharedRef());
 		}
+
+		if (TravelScreen.IsValid())
+		{
+			ViewportClient->RemoveViewportWidgetContent(TravelScreen.ToSharedRef());
+		}
 	}
 
+	TravelScreen.Reset();
 	Dialog.Reset();
 	HoverInfo.Reset();
 	Palette.Reset();
@@ -287,7 +297,7 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 		const AHexPlanet* ShownPlanet = CameraPawn ? CameraPawn->GetPlanet() : nullptr;
 		const bool bSaved = !CameraPawn || CameraPawn->IsLastViewSaved();
 		DebugOverlay->SetWarning(ShownPlanet && !ShownPlanet->IsSaved() ? FString::Printf(TEXT("Planet not saved (%s)"), *SaveKeys)
-			: ShownPlanet && ShownPlanet->HasUnsavedLevels() ? FString::Printf(TEXT("Levels not saved (%s)"), *SaveKeys)
+			: ShownPlanet && ShownPlanet->HasUnsavedLevels() ? FString::Printf(TEXT("%s not saved (%s)"), ShownPlanet->HasUnsavedCells() ? TEXT("Levels") : TEXT("Entrances"), *SaveKeys)
 			: bSaved ? FString() : FString::Printf(TEXT("View not saved (%s)"), *SaveKeys));
 	}
 
@@ -302,18 +312,20 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 	const int32 Cell = DeprojectMousePositionToWorld(Origin, Direction) ? Planet->FindCellAlongRay(Origin, Direction, &MousePoint) : INDEX_NONE;
 	MouseCell = Cell;
 
-	// the river brush follows the corner nearest the point under the mouse
-	if (Painter && Cell != INDEX_NONE)
+	// the brush paints the layer shown, which it follows (UHexPlanetPainter::SetTarget); the river brush follows the corner nearest the point
+	// under the mouse
+	const bool bPainterOnPlanet = Painter && Painter->GetTarget() == Planet->GetLayer();
+	if (bPainterOnPlanet && Cell != INDEX_NONE)
 	{
 		Painter->SetCursorPoint(MousePoint);
 	}
 
-	if (Painter && Painter->IsPainting())
+	if (bPainterOnPlanet && Painter->IsPainting())
 	{
 		Painter->ContinueStroke(Cell);
 	}
 
-	Planet->SetHoveredCell(Cell, IsBrushArmed() ? Painter->GetBrushSize() : 0);
+	Planet->SetHoveredCell(Cell, IsBrushArmed() ? Painter->GetOutlineSize() : 0);
 
 	// the panel follows hex.HoverInfo of the flat map
 	static const IConsoleVariable* HoverInfoVariable = IConsoleManager::Get().FindConsoleVariable(TEXT("hex.HoverInfo"));
@@ -511,12 +523,19 @@ AHexPlanet* AHexPlanetPlayerController::GetPlanet() const
 
 UHexPlanetPainter* AHexPlanetPlayerController::GetPainter()
 {
-	AHexPlanet* Planet = GetPlanet();
+	// both layers, as the palette takes the biomes of each from its planet, so the underground's data is waited for if it is still read
+	const UHexPlanetLayers* LayerSet = UHexPlanetLayers::Get(GetWorld());
+	AHexPlanet* SurfacePlanet = LayerSet ? LayerSet->GetSurface() : GetPlanet();
+	AHexPlanet* Underground = LayerSet ? LayerSet->GetUnderground() : nullptr;
 
-	if (!Painter && Planet)
+	if (!Painter && SurfacePlanet && SurfacePlanet->IsBuilt())
 	{
+		if (Underground)
+		{
+			Underground->EnsureDataLoaded();
+		}
 		Painter = NewObject<UHexPlanetPainter>(this);
-		Painter->Init(Planet);
+		Painter->Init(SurfacePlanet, Underground && Underground->IsDataLoaded() ? Underground : nullptr);
 	}
 	return Painter;
 }
@@ -528,7 +547,39 @@ bool AHexPlanetPlayerController::IsPaintModeOn() const
 
 bool AHexPlanetPlayerController::IsBrushArmed() const
 {
-	return IsPaintModeOn() && Painter->HasTool();
+	const AHexPlanet* Planet = GetPlanet();
+	return IsPaintModeOn() && Painter->HasTool() && Planet && Painter->GetTarget() == Planet->GetLayer();
+}
+
+void AHexPlanetPlayerController::TravelToLayer(EHexPlanetLayer Layer)
+{
+	if (AHexPlanetCameraPawn* CameraPawn = GetCameraPawn(); CameraPawn && CameraPawn->GetShownLayer() != Layer && !CameraPawn->IsTravelling())
+	{
+		CameraPawn->TravelTo(Layer);
+	}
+}
+
+void AHexPlanetPlayerController::SetTravelScreen(bool bShown)
+{
+	UGameViewportClient* ViewportClient = GetWorld()->GetGameViewport();
+	if (!ViewportClient || bShown == TravelScreen.IsValid())
+	{
+		return;
+	}
+
+	if (bShown)
+	{
+		// over the palette, the panels and the menu, as the loading screen of the planet
+		TravelScreen = SNew(SBorder)
+			.BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush"))
+			.BorderBackgroundColor(FLinearColor::Black);
+		ViewportClient->AddViewportWidgetContent(TravelScreen.ToSharedRef(), 1000);
+	}
+	else
+	{
+		ViewportClient->RemoveViewportWidgetContent(TravelScreen.ToSharedRef());
+		TravelScreen.Reset();
+	}
 }
 
 void AHexPlanetPlayerController::SetPaintMode(bool bOn)
@@ -546,14 +597,23 @@ void AHexPlanetPlayerController::SetPaintMode(bool bOn)
 	if (bOn && !Palette.IsValid())
 	{
 		const UHexInputConfig* InputConfig = GetDefault<UHexMapSettings>()->LoadInputConfig();
+		TWeakObjectPtr<AHexPlanetPlayerController> WeakThis(this);
 
 		SAssignNew(Palette, SHexPlanetPalette)
 			.Painter(Brush)
+			.OnLayerClicked([WeakThis](EHexPlanetLayer Layer)
+			{
+				if (WeakThis.IsValid())
+				{
+					WeakThis->TravelToLayer(Layer);
+				}
+			})
 			.PaintModeKeys(InputConfig->GetKeysText(InputConfig->PaintModeAction))
 			.BrushSizeKeys(InputConfig->GetKeysText(InputConfig->BrushSizeAction))
 			.UndoKeys(InputConfig->GetKeysText(InputConfig->UndoAction))
 			.RedoKeys(InputConfig->GetKeysText(InputConfig->RedoAction))
-			.SaveKeys(InputConfig->GetKeysText(InputConfig->SaveViewAction));
+			.SaveKeys(InputConfig->GetKeysText(InputConfig->SaveViewAction))
+			.LayerKeys(InputConfig->LayerAction ? InputConfig->GetKeysText(InputConfig->LayerAction) : FString(TEXT("U")));
 
 		ViewportClient->AddViewportWidgetContent(Palette.ToSharedRef());
 	}
@@ -564,13 +624,28 @@ void AHexPlanetPlayerController::SetPaintMode(bool bOn)
 	}
 }
 
-void AHexPlanetPlayerController::SetPaintLevel(int32 Level)
+void AHexPlanetPlayerController::SetPaintLevelKey(int32 Number)
 {
-	if (UHexPlanetPainter* Brush = GetPainter())
+	UHexPlanetPainter* Brush = GetPainter();
+	if (!Brush)
 	{
-		Brush->SetLevel(Level);
-		SetPaintMode(true);
+		return;
 	}
+
+	// 1 to 5 choose deep sea to mountains on the surface, and underground 1 the void and 2 a passage
+	if (Brush->GetTarget() == EHexPlanetLayer::Underground)
+	{
+		if (Number != 1 && Number != 2)
+		{
+			return;
+		}
+		Brush->SetLevel(Number == 1 ? HexPlanetUnderground::VoidLevel : HexPlanetUnderground::PassageLevel);
+	}
+	else
+	{
+		Brush->SetLevel(Number - 1 + UHexPlanetPainter::MinLevel);
+	}
+	SetPaintMode(true);
 }
 
 void AHexPlanetPlayerController::CycleBrushSize()
@@ -599,6 +674,7 @@ void AHexPlanetPlayerController::EndPaintStroke()
 
 void AHexPlanetPlayerController::UndoPaint()
 {
+	// the steps of the layer shown, each layer keeping its own
 	if (Painter)
 	{
 		Painter->Undo();
@@ -611,4 +687,190 @@ void AHexPlanetPlayerController::RedoPaint()
 	{
 		Painter->Redo();
 	}
+}
+
+void AHexPlanetPlayerController::RunPaintCommand(const TArray<FString>& Args)
+{
+	UHexPlanetPainter* Brush = GetPainter();
+	const AHexPlanet* Planet = GetPlanet();
+	if (!Brush || !Planet || Args.IsEmpty())
+	{
+		UE_LOG(LogHexHero, Warning, TEXT("hex.PlanetPaint: %s"), !Brush || !Planet ? TEXT("the planet is not built yet") : TEXT("needs an action, see its help"));
+		return;
+	}
+
+	const FString& Action = Args[0];
+	const auto GetInt = [&Args](int32 Index, int32 Default)
+	{
+		int32 Value = Default;
+		return Args.IsValidIndex(Index) && LexTryParseString(Value, *Args[Index]) ? Value : Default;
+	};
+	const bool bCtrl = Args.ContainsByPredicate([](const FString& Each) { return Each.Equals(TEXT("ctrl"), ESearchCase::IgnoreCase); });
+
+	if (Action == TEXT("on") || Action == TEXT("off"))
+	{
+		SetPaintMode(Action == TEXT("on"));
+	}
+	else if (Action == TEXT("tab") && Args.IsValidIndex(1))
+	{
+		for (int32 Tab = 0; Tab < NumPaintTabs; ++Tab)
+		{
+			if (UHexPlanetPainter::GetTabName(EHexPaintTab(Tab)).ToString().Equals(Args[1], ESearchCase::IgnoreCase))
+			{
+				SetPaintMode(true);
+				Brush->SetTab(EHexPaintTab(Tab));
+			}
+		}
+	}
+	else if (Action == TEXT("key"))
+	{
+		SetPaintLevelKey(GetInt(1, 0));
+	}
+	else if (Action == TEXT("biome"))
+	{
+		Brush->SetBiome(GetInt(1, 0));
+	}
+	else if (Action == TEXT("size"))
+	{
+		Brush->SetBrushSize(GetInt(1, 1));
+	}
+	else if (Action == TEXT("network") && Args.IsValidIndex(1))
+	{
+		Brush->SetNetwork(HexPlanetFile::GetNetworkIndex(Args[1].IsEmpty() ? TEXT('A') : Args[1][0]));
+	}
+	else if (Action == TEXT("entrance"))
+	{
+		Brush->SetEntranceTool();
+	}
+	else if (Action == TEXT("carve"))
+	{
+		Brush->SetCarveTool();
+	}
+	else if (Action == TEXT("object"))
+	{
+		Brush->SetObjectSet(GetInt(1, 0));
+	}
+	else if (Action == TEXT("eraser"))
+	{
+		Brush->SetEraser();
+	}
+	else if (Action == TEXT("river"))
+	{
+		Brush->SetRiverTool();
+	}
+	else if (Action == TEXT("bridge"))
+	{
+		Brush->SetBridgeTool();
+	}
+	else if (Action == TEXT("relief") && Args.IsValidIndex(1))
+	{
+		const TCHAR* Names[] = {TEXT("Version"), TEXT("Turn"), TEXT("Mirror"), TEXT("Higher"), TEXT("Lower"), TEXT("Auto")};
+		for (int32 Index = 0; Index < UE_ARRAY_COUNT(Names); ++Index)
+		{
+			if (Args[1].Equals(Names[Index], ESearchCase::IgnoreCase))
+			{
+				Brush->SetReliefTool(EHexReliefTool(Index));
+			}
+		}
+	}
+	else if (Action == TEXT("none"))
+	{
+		Brush->ClearTool();
+	}
+	else if (Action == TEXT("stroke"))
+	{
+		// the cells of a stroke as the mouse would pass them, the first pressed and the last released
+		TArray<int32> Cells;
+		for (int32 Index = 1; Index < Args.Num(); ++Index)
+		{
+			// a cell, or @Latitude:Longitude in degrees for the cell there
+			int32 Cell = 0;
+			FString Latitude;
+			FString Longitude;
+			double LatitudeValue = 0.0;
+			double LongitudeValue = 0.0;
+			if (LexTryParseString(Cell, *Args[Index]))
+			{
+				Cells.Add(Cell);
+			}
+			else if (Args[Index].StartsWith(TEXT("@")) && Args[Index].Mid(1).Split(TEXT(":"), &Latitude, &Longitude) && LexTryParseString(LatitudeValue, *Latitude)
+				&& LexTryParseString(LongitudeValue, *Longitude))
+			{
+				const double Phi = FMath::DegreesToRadians(LatitudeValue);
+				const double Lambda = FMath::DegreesToRadians(LongitudeValue);
+				Cells.Add(Planet->GetGrid().FindCell(FVector3d(FMath::Cos(Phi) * FMath::Cos(Lambda), FMath::Cos(Phi) * FMath::Sin(Lambda), FMath::Sin(Phi)), 0));
+			}
+		}
+		UE_LOG(LogHexHero, Log, TEXT("hex.PlanetPaint stroke over cells %s"), *FString::JoinBy(Cells, TEXT(" "), [](int32 Each) { return FString::FromInt(Each); }));
+		if (Cells.IsEmpty() || !Brush->IsActive() || !Brush->HasTool() || Brush->GetTarget() != Planet->GetLayer())
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("hex.PlanetPaint stroke: needs cells, painting on with a tool, and the layer it paints shown"));
+			return;
+		}
+		Brush->SetBackwards(bCtrl);
+		for (int32 Index = 0; Index < Cells.Num(); ++Index)
+		{
+			if (Cells.IsValidIndex(Index) && Planet->GetGrid().GetCells().IsValidIndex(Cells[Index]))
+			{
+				Brush->SetCursorPoint(FVector(Planet->GetGrid().GetCells()[Cells[Index]].Center * Planet->GetRadius()));
+			}
+			if (Index == 0)
+			{
+				Brush->BeginStroke(Cells[Index]);
+			}
+			else
+			{
+				Brush->ContinueStroke(Cells[Index]);
+			}
+		}
+		Brush->EndStroke();
+		Brush->SetBackwards(false);
+	}
+	else if (Action == TEXT("regenerate"))
+	{
+		Brush->Regenerate(Args.IsValidIndex(1) && Args[1].Equals(TEXT("all"), ESearchCase::IgnoreCase) ? INDEX_NONE : Brush->GetNetwork());
+	}
+	else if (Action == TEXT("undo"))
+	{
+		Brush->Undo();
+	}
+	else if (Action == TEXT("redo"))
+	{
+		Brush->Redo();
+	}
+	else if (Action == TEXT("save"))
+	{
+		if (AHexPlanetCameraPawn* CameraPawn = GetCameraPawn())
+		{
+			CameraPawn->SavePlanet(nullptr);
+		}
+	}
+	else
+	{
+		UE_LOG(LogHexHero, Warning, TEXT("hex.PlanetPaint: no action %s"), *Action);
+		return;
+	}
+
+	const HexPlanetUnderground::FReport* Report = Planet->GetUndergroundReport();
+	UE_LOG(LogHexHero, Log, TEXT("hex.PlanetPaint %s: painting %s on the %s, tab %s, tool %d, level %d, network %c, undo %s, unsaved %s, underground %s"), *FString::Join(Args, TEXT(" ")),
+		Brush->IsActive() ? TEXT("on") : TEXT("off"), GetPlanetLayerName(Brush->GetTarget()), *UHexPlanetPainter::GetTabName(Brush->GetTab()).ToString(), int32(Brush->GetTool()),
+		Brush->GetLevel(), HexPlanetFile::GetNetworkLetter(Brush->GetNetwork()), Brush->CanUndo() ? TEXT("yes") : TEXT("no"), Planet->HasUnsavedChanges() ? TEXT("yes") : TEXT("no"),
+		Report ? *Report->ToString() : TEXT("none"));
+}
+
+namespace
+{
+	void PlanetPaintCommand(const TArray<FString>& Args, UWorld* World)
+	{
+		if (AHexPlanetPlayerController* PlayerController = World ? Cast<AHexPlanetPlayerController>(World->GetFirstPlayerController()) : nullptr)
+		{
+			PlayerController->RunPaintCommand(Args);
+		}
+	}
+
+	FAutoConsoleCommandWithWorldAndArgs PlanetPaintConsoleCommand(TEXT("hex.PlanetPaint"),
+		TEXT("Drives the brush of the planet as the palette and the mouse would, for tests: on | off | tab <Ground|Relief|Objects|Rivers|Entrances|Maze|Links> | ")
+		TEXT("key <1-5> | biome <Index> | size <1-3> | network <A-H> | entrance | carve | object <Index> | eraser | river | bridge | relief <Version|Turn|Mirror|Higher|Lower|Auto> | none | ")
+		TEXT("stroke <Cell or @Latitude:Longitude> [...] [ctrl] | regenerate [all] | undo | redo | save. A stroke presses on the first cell, passes the others and releases on the last; ctrl makes it take away"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&PlanetPaintCommand));
 }

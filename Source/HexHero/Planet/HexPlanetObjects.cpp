@@ -184,6 +184,11 @@ void UHexPlanetObjects::Init(AHexPlanet* InPlanet, const UHexPlanetConfig* InSet
 
 	for (const UHexPlanetObjectSet* Set : GetDefault<UHexMapSettings>()->LoadPlanetObjectSets())
 	{
+		// the sets of the layer of this planet alone, so the underground loads no meshes of forests
+		if (!Set->IsOnLayer(Planet->GetLayer()))
+		{
+			continue;
+		}
 		if (Set->Id.IsNone() || Sets.ContainsByPredicate([Set](const UHexPlanetObjectSet* Each) { return Each->Id == Set->Id; }))
 		{
 			UE_LOG(LogHexHero, Error, TEXT("Planet: the object set %s has no Id or one another set has, so it is left out"), *Set->GetName());
@@ -240,13 +245,18 @@ void UHexPlanetObjects::Load()
 
 	TArray<FHexObjectCell> Lines;
 	FString Error;
-	if (!Planet->IsSaved() || !HexPlanetFile::HasObjects(Planet->GetPlanetFolder()))
+	// from the data folder of the layer of the planet; a layer that does not generate them, the underground, has none without the file
+	const FString Folder = Planet->GetDataFolder();
+	if (!Planet->IsSaved() || !HexPlanetFile::HasObjects(Folder))
 	{
-		Generate();
-		bGenerated = true;
+		if (Settings->bGenerateObjects)
+		{
+			Generate();
+			bGenerated = true;
+		}
 		return;
 	}
-	if (!HexPlanetFile::LoadObjects(Planet->GetPlanetFolder(), Lines, Error))
+	if (!HexPlanetFile::LoadObjects(Folder, Lines, Error))
 	{
 		UE_LOG(LogHexHero, Warning, TEXT("Planet: %s"), *Error);
 		return;
@@ -382,7 +392,7 @@ bool UHexPlanetObjects::GetCellCanopy(int32 Cell, FLinearColor& OutColor, float&
 {
 	const FHexCellObjects Objects = GetCell(Cell);
 	const int32 Set = int32(Objects.Cover) - 1;
-	if (Set < 0 || !IsAllowed(Set, Planet->GetCellLevel(Cell)) || Sets[Set]->FarCover <= 0.0f)
+	if (Set < 0 || IsClear(Cell) || !IsAllowed(Set, Planet->GetCellLevel(Cell)) || Sets[Set]->FarCover <= 0.0f)
 	{
 		return false;
 	}
@@ -407,7 +417,7 @@ bool UHexPlanetObjects::BlocksMovement(int32 Cell) const
 	const FHexCellObjects Objects = GetCell(Cell);
 	const int32 Level = Planet->GetCellLevel(Cell);
 	const auto Blocks = [&](int32 Set) { return Set > 0 && IsAllowed(Set - 1, Level) && Sets[Set - 1]->bBlocksMovement; };
-	return Blocks(Objects.Cover) || Blocks(Objects.Decor);
+	return !IsClear(Cell) && (Blocks(Objects.Cover) || Blocks(Objects.Decor));
 }
 
 FString UHexPlanetObjects::GetCellText(int32 Cell) const
@@ -428,7 +438,37 @@ FString UHexPlanetObjects::GetCellText(int32 Cell) const
 	{
 		return TEXT("none");
 	}
-	return FString::Join(Parts, TEXT(", ")) + (BlocksMovement(Cell) ? TEXT(", blocks movement") : TEXT(", passable"));
+	return FString::Join(Parts, TEXT(", ")) + (IsClear(Cell) ? TEXT(", not drawn on the entrance") : BlocksMovement(Cell) ? TEXT(", blocks movement") : TEXT(", passable"));
+}
+
+void UHexPlanetObjects::SetClearCells(TConstArrayView<int32> Cells)
+{
+	TSet<int32> NewCells;
+	NewCells.Append(Cells);
+
+	// the cells that hold something and were cleared or given back
+	TArray<int32> Changed;
+	for (const int32 Cell : NewCells)
+	{
+		if (!ClearCells.Contains(Cell) && !GetCell(Cell).IsEmpty())
+		{
+			Changed.Add(Cell);
+		}
+	}
+	for (const int32 Cell : ClearCells)
+	{
+		if (!NewCells.Contains(Cell) && !GetCell(Cell).IsEmpty())
+		{
+			Changed.Add(Cell);
+		}
+	}
+	ClearCells = MoveTemp(NewCells);
+
+	// before the planet is built its objects are placed with the surface, which reads them then
+	if (Planet && Planet->IsBuilt() && !Changed.IsEmpty())
+	{
+		RebuildCells(Changed);
+	}
 }
 
 void UHexPlanetObjects::SetCells(const TMap<int32, FHexCellObjects>& Changes)
@@ -503,7 +543,8 @@ TArray<UHexPlanetObjects::FInstance> UHexPlanetObjects::PlaceChunk(int32 Chunk) 
 	{
 		const FHexCellObjects& Objects = CellObjects[Cell];
 		const int32 Level = Planet->GetCellLevel(Cell);
-		if (!Objects.IsEmpty() && ((Objects.Cover != 0 && IsAllowed(Objects.Cover - 1, Level)) || (Objects.Decor != 0 && IsAllowed(Objects.Decor - 1, Level))))
+		// an entrance keeps its cell free, so trees do not cover its cave mouth
+		if (!Objects.IsEmpty() && !IsClear(Cell) && ((Objects.Cover != 0 && IsAllowed(Objects.Cover - 1, Level)) || (Objects.Decor != 0 && IsAllowed(Objects.Decor - 1, Level))))
 		{
 			Placed.Add(Cell);
 		}

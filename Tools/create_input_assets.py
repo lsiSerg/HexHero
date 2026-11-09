@@ -46,6 +46,8 @@ ACTIONS = [
     ("water_view_action", "IA_HexWaterView", "Water", BOOLEAN, [("V", False, False)]),
     # the sun of the planet follows the camera or stays where it is (hex.PlanetSun)
     ("sun_follow_action", "IA_HexSunFollow", "Sun follows camera", BOOLEAN, [("L", False, False)]),
+    # the planet goes between its surface and its underground, through the entrance under the mouse (AHexPlanetCameraPawn::TravelTo)
+    ("layer_action", "IA_HexLayer", "Underground and back", BOOLEAN, [("U", False, False)]),
     ("key_legend_action", "IA_HexKeyLegend", "This legend", BOOLEAN, [("H", False, False)]),
     # painting the levels of the planet; a number key gives its level through a scalar, 1 deep sea to 5 mountains
     ("paint_mode_action", "IA_HexPaintMode", "Paint levels", BOOLEAN, [("B", False, False)]),
@@ -69,6 +71,7 @@ LEGEND_CATEGORIES = {
     "IA_HexToggleGrid": "View",
     "IA_HexWaterView": "View",
     "IA_HexSunFollow": "View",
+    "IA_HexLayer": "View",
     "IA_HexWireframeMode": "Wireframe",
     "IA_HexWireframeScope": "Wireframe",
     "IA_HexWireframeTarget": "Wireframe",
@@ -83,7 +86,7 @@ LEGEND_CATEGORIES = {
 
 
 # actions added after the legend was made, whose lines an existing legend gets if it lacks them
-ADDED_LEGEND_ACTIONS = {"IA_HexPaintMode", "IA_HexPaintLevel", "IA_HexBrushSize", "IA_HexUndo", "IA_HexRedo", "IA_HexSunFollow"}
+ADDED_LEGEND_ACTIONS = {"IA_HexPaintMode", "IA_HexPaintLevel", "IA_HexBrushSize", "IA_HexUndo", "IA_HexRedo", "IA_HexSunFollow", "IA_HexLayer"}
 
 
 def load_or_create(name, asset_class, factory):

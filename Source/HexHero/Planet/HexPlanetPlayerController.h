@@ -39,10 +39,13 @@ class AHexPlanetPlayerController : public APlayerController
 	/** Palette of the brush, shown while painting is on */
 	TSharedPtr<SHexPlanetPalette> Palette;
 
+	/** Black screen of a trip between the layers */
+	TSharedPtr<SWidget> TravelScreen;
+
 	/** Cell under the cursor in the last tick */
 	int32 MouseCell = INDEX_NONE;
 
-	/** Brush that paints the levels of the planet, made when painting first turns on */
+	/** Brush that paints both layers of the planet, the one shown, made when painting first turns on once both have their data */
 	UPROPERTY(Transient)
 	TObjectPtr<UHexPlanetPainter> Painter;
 
@@ -75,8 +78,15 @@ public:
 	/** Turns painting on or off, with its palette */
 	void SetPaintMode(bool bOn);
 
-	/** Sets the level of the brush, -2 deep sea to 2 mountains, and turns painting on */
-	void SetPaintLevel(int32 Level);
+	/** Sets the level of the brush by a number key, 1 deep sea to 5 mountains on the surface and 1 void, 2 passage underground, and turns
+	 *  painting on */
+	void SetPaintLevelKey(int32 Number);
+
+	/** Travels to a layer at the same place, as its tab of the palette asks */
+	void TravelToLayer(EHexPlanetLayer Layer);
+
+	/** Runs hex.PlanetPaint, which drives the brush as the palette and the mouse would */
+	void RunPaintCommand(const TArray<FString>& Args);
 
 	/** Makes the brush one ring larger, from the largest back to one cell */
 	void CycleBrushSize();
@@ -88,6 +98,12 @@ public:
 	/** Undoes or redoes a stroke */
 	void UndoPaint();
 	void RedoPaint();
+
+	/** Returns the cell under the cursor in the last tick, on the layer shown */
+	int32 GetMouseCell() const { return MouseCell; }
+
+	/** Shows or hides the black screen of a trip between the layers, over every widget, as the fade of the camera does not cover them */
+	void SetTravelScreen(bool bShown);
 
 protected:
 
@@ -133,7 +149,7 @@ private:
 	/** Returns the planet of the pawn, or null */
 	AHexPlanet* GetPlanet() const;
 
-	/** Returns the brush, made on the planet when first needed, or null without a planet */
+	/** Returns the brush, made on the surface of the planet when first needed, or null without one */
 	UHexPlanetPainter* GetPainter();
 
 	/** Puts the input mode of play back */

@@ -12,9 +12,21 @@
 
 namespace
 {
-	/** Letters of the levels from -2 up */
-	const TCHAR LevelLetters[] = {TEXT('D'), TEXT('S'), TEXT('P'), TEXT('H'), TEXT('M')};
-	const int32 LowestLevel = -2;
+	/** Letters of the levels of each layer */
+	const FHexLevelLetter SurfaceLetters[] = {{TEXT('D'), -2}, {TEXT('S'), -1}, {TEXT('P'), 0}, {TEXT('H'), 1}, {TEXT('M'), 2}};
+	const FHexLevelLetter UndergroundLetters[] = {{TEXT('V'), -2}, {TEXT('P'), 0}};
+
+	/** Returns the letters of a table as "D, S, P, H or M" */
+	FString GetLettersText(TConstArrayView<FHexLevelLetter> Letters)
+	{
+		FString Text;
+		for (int32 Index = 0; Index < Letters.Num(); ++Index)
+		{
+			Text += Index == 0 ? TEXT("") : Index + 1 == Letters.Num() ? TEXT(" or ") : TEXT(", ");
+			Text.AppendChar(Letters[Index].Letter);
+		}
+		return Text;
+	}
 }
 
 TArray<FString> HexPlanetFile::GetRoots()
@@ -29,17 +41,28 @@ FString HexPlanetFile::GetWritableRoot()
 
 FString HexPlanetFile::GetFilePath(const FString& Folder, const TCHAR* File)
 {
+	// the root is the one of the planet, as a data folder in it may not be there yet
+	FString Planet = Folder;
+	int32 Slash = INDEX_NONE;
+	if (Planet.FindChar(TEXT('/'), Slash) || Planet.FindChar(TEXT('\\'), Slash))
+	{
+		Planet.LeftInline(Slash);
+	}
+
 	for (const FString& Root : GetRoots())
 	{
-		const FString Directory = FPaths::Combine(Root, Folder);
-
-		if (IFileManager::Get().DirectoryExists(*Directory))
+		if (IFileManager::Get().DirectoryExists(*FPaths::Combine(Root, Planet)))
 		{
-			return FPaths::Combine(Directory, File);
+			return FPaths::Combine(Root, Folder, File);
 		}
 	}
 
 	return FPaths::Combine(GetWritableRoot(), Folder, File);
+}
+
+FString HexPlanetFile::GetDataFolder(const FString& PlanetFolder, EHexPlanetLayer Layer)
+{
+	return PlanetFolder.IsEmpty() || Layer == EHexPlanetLayer::Surface ? PlanetFolder : FString::Printf(TEXT("%s/%s"), *PlanetFolder, UndergroundFolder);
 }
 
 FString HexPlanetFile::SanitizeFolderName(const FString& Name)
@@ -224,21 +247,41 @@ bool HexPlanetFile::ReadManifest(const FString& Folder, FHexPlanetManifest& OutM
 	return true;
 }
 
-TCHAR HexPlanetFile::GetLevelLetter(int32 Level)
+TConstArrayView<FHexLevelLetter> HexPlanetFile::GetLevelLetters(EHexPlanetLayer Layer)
 {
-	const int32 Index = Level - LowestLevel;
-	return Index >= 0 && Index < UE_ARRAY_COUNT(LevelLetters) ? LevelLetters[Index] : TCHAR(0);
+	return Layer == EHexPlanetLayer::Underground ? TConstArrayView<FHexLevelLetter>(UndergroundLetters) : TConstArrayView<FHexLevelLetter>(SurfaceLetters);
 }
 
-FString HexPlanetFile::EncodeLevels(TConstArrayView<int8> Levels)
+TCHAR HexPlanetFile::GetLevelLetter(int32 Level, TConstArrayView<FHexLevelLetter> Letters)
+{
+	const FHexLevelLetter* Found = Letters.FindByPredicate([Level](const FHexLevelLetter& Each) { return Each.Level == Level; });
+	return Found ? Found->Letter : TCHAR(0);
+}
+
+FString HexPlanetFile::EncodeLevels(TConstArrayView<int8> Levels, TConstArrayView<FHexLevelLetter> Letters)
 {
 	FString Text;
 	Text.Reserve(Levels.Num() + Levels.Num() / LevelsLineLength + 2);
 
+	// the letter of each level from the lowest up, a level without one taking the nearest, the lower of two as near
+	TCHAR ByLevel[256] = {};
+	for (int32 Level = -128; Level < 128 && !Letters.IsEmpty(); ++Level)
+	{
+		const FHexLevelLetter* Best = nullptr;
+		for (const FHexLevelLetter& Each : Letters)
+		{
+			const int32 Distance = FMath::Abs(Each.Level - Level);
+			if (!Best || Distance < FMath::Abs(Best->Level - Level) || (Distance == FMath::Abs(Best->Level - Level) && Each.Level < Best->Level))
+			{
+				Best = &Each;
+			}
+		}
+		ByLevel[Level + 128] = Best->Letter;
+	}
+
 	for (int32 Cell = 0; Cell < Levels.Num(); ++Cell)
 	{
-		const TCHAR Letter = GetLevelLetter(Levels[Cell]);
-		Text.AppendChar(Letter ? Letter : GetLevelLetter(0));
+		Text.AppendChar(Letters.IsEmpty() ? TEXT('?') : ByLevel[Levels[Cell] + 128]);
 
 		if ((Cell + 1) % LevelsLineLength == 0 || Cell + 1 == Levels.Num())
 		{
@@ -249,7 +292,7 @@ FString HexPlanetFile::EncodeLevels(TConstArrayView<int8> Levels)
 	return Text;
 }
 
-bool HexPlanetFile::DecodeLevels(const FString& Text, int32 CellCount, TArray<int8>& OutLevels, FString& OutError)
+bool HexPlanetFile::DecodeLevels(const FString& Text, int32 CellCount, TArray<int8>& OutLevels, FString& OutError, TConstArrayView<FHexLevelLetter> Letters)
 {
 	TArray<int8> Levels;
 	Levels.Reserve(CellCount);
@@ -268,19 +311,15 @@ bool HexPlanetFile::DecodeLevels(const FString& Text, int32 CellCount, TArray<in
 			continue;
 		}
 
-		int32 Index = 0;
-		while (Index < UE_ARRAY_COUNT(LevelLetters) && FChar::ToUpper(Char) != LevelLetters[Index])
-		{
-			++Index;
-		}
+		const FHexLevelLetter* Found = Letters.FindByPredicate([Char](const FHexLevelLetter& Each) { return FChar::ToUpper(Char) == FChar::ToUpper(Each.Letter); });
 
-		if (Index == UE_ARRAY_COUNT(LevelLetters))
+		if (!Found)
 		{
-			OutError = FString::Printf(TEXT("line %d has '%s', which is not a level (D, S, P, H or M)"), Line, *FString::Chr(Char));
+			OutError = FString::Printf(TEXT("line %d has '%s', which is not a level (%s)"), Line, *FString::Chr(Char), *GetLettersText(Letters));
 			return false;
 		}
 
-		Levels.Add(int8(LowestLevel + Index));
+		Levels.Add(Found->Level);
 	}
 
 	if (Levels.Num() != CellCount)
@@ -298,7 +337,7 @@ bool HexPlanetFile::HasLevels(const FString& Folder)
 	return IFileManager::Get().FileExists(*GetFilePath(Folder, LevelsFile));
 }
 
-bool HexPlanetFile::LoadLevels(const FString& Folder, int32 CellCount, TArray<int8>& OutLevels, FString& OutError)
+bool HexPlanetFile::LoadLevels(const FString& Folder, int32 CellCount, TArray<int8>& OutLevels, FString& OutError, TConstArrayView<FHexLevelLetter> Letters)
 {
 	const FString FilePath = GetFilePath(Folder, LevelsFile);
 	FString Text;
@@ -309,7 +348,7 @@ bool HexPlanetFile::LoadLevels(const FString& Folder, int32 CellCount, TArray<in
 		return false;
 	}
 
-	if (!DecodeLevels(Text, CellCount, OutLevels, OutError))
+	if (!DecodeLevels(Text, CellCount, OutLevels, OutError, Letters))
 	{
 		OutError = FString::Printf(TEXT("%s: %s"), *FilePath, *OutError);
 		return false;
@@ -460,11 +499,11 @@ bool HexPlanetFile::SaveRivers(const FString& Folder, const TArray<FHexRiverEdge
 	return true;
 }
 
-bool HexPlanetFile::SaveLevels(const FString& Folder, TConstArrayView<int8> Levels, FString& OutError)
+bool HexPlanetFile::SaveLevels(const FString& Folder, TConstArrayView<int8> Levels, FString& OutError, TConstArrayView<FHexLevelLetter> Letters)
 {
 	const FString FilePath = GetFilePath(Folder, LevelsFile);
 
-	if (!FFileHelper::SaveStringToFile(EncodeLevels(Levels), *FilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+	if (!FFileHelper::SaveStringToFile(EncodeLevels(Levels, Letters), *FilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
 	{
 		OutError = FString::Printf(TEXT("could not write %s"), *FilePath);
 		return false;
@@ -574,6 +613,91 @@ bool HexPlanetFile::DeleteBiomes(const FString& Folder)
 {
 	const FString FilePath = GetFilePath(Folder, BiomesFile);
 	return !IFileManager::Get().FileExists(*FilePath) || IFileManager::Get().Delete(*FilePath);
+}
+
+TCHAR HexPlanetFile::GetNetworkLetter(int32 Network)
+{
+	return Network >= 0 && Network < MaxNetworks ? TCHAR(TEXT('A') + Network) : TEXT('?');
+}
+
+int32 HexPlanetFile::GetNetworkIndex(TCHAR Letter)
+{
+	const int32 Network = int32(FChar::ToUpper(Letter)) - int32(TEXT('A'));
+	return Network >= 0 && Network < MaxNetworks ? Network : INDEX_NONE;
+}
+
+FString HexPlanetFile::EncodeEntrances(TConstArrayView<FHexEntrance> Entrances)
+{
+	TArray<FHexEntrance> Sorted;
+	for (const FHexEntrance& Entrance : Entrances)
+	{
+		if (Entrance.Network >= 0 && Entrance.Network < MaxNetworks)
+		{
+			Sorted.Add(Entrance);
+		}
+	}
+	Sorted.Sort([](const FHexEntrance& A, const FHexEntrance& B) { return A.Cell != B.Cell ? A.Cell < B.Cell : A.Network < B.Network; });
+
+	// a line per entrance, so an edit changes only the lines of its entrances and Git merges them
+	FString Text = TEXT("{\n\t\"version\": 1,\n\t\"entrances\": [");
+	for (int32 Index = 0; Index < Sorted.Num(); ++Index)
+	{
+		Text += FString::Printf(TEXT("%s\n\t\t{\"cell\": %d, \"network\": \"%c\"}"), Index == 0 ? TEXT("") : TEXT(","), Sorted[Index].Cell, GetNetworkLetter(Sorted[Index].Network));
+	}
+	Text += Sorted.IsEmpty() ? TEXT("]\n}\n") : TEXT("\n\t]\n}\n");
+	return Text;
+}
+
+bool HexPlanetFile::DecodeEntrances(const FString& Text, TArray<FHexEntrance>& OutEntrances, FString& OutError)
+{
+	FHexEntrancesFile File;
+	if (!FJsonObjectConverter::JsonObjectStringToUStruct(Text, &File))
+	{
+		OutError = TEXT("not valid JSON");
+		return false;
+	}
+
+	OutEntrances.Reset();
+	for (const FHexEntranceLine& Line : File.Entrances)
+	{
+		FHexEntrance& Entrance = OutEntrances.AddDefaulted_GetRef();
+		Entrance.Cell = Line.Cell;
+		Entrance.Network = Line.Network.Len() == 1 ? GetNetworkIndex(Line.Network[0]) : INDEX_NONE;
+	}
+	return true;
+}
+
+bool HexPlanetFile::HasEntrances(const FString& PlanetFolder)
+{
+	return !PlanetFolder.IsEmpty() && IFileManager::Get().FileExists(*GetFilePath(PlanetFolder, EntrancesFile));
+}
+
+bool HexPlanetFile::LoadEntrances(const FString& PlanetFolder, TArray<FHexEntrance>& OutEntrances, FString& OutError)
+{
+	const FString FilePath = GetFilePath(PlanetFolder, EntrancesFile);
+	FString Text;
+	if (!FFileHelper::LoadFileToString(Text, *FilePath))
+	{
+		OutError = FString::Printf(TEXT("could not read %s"), *FilePath);
+		return false;
+	}
+	if (!DecodeEntrances(Text, OutEntrances, OutError))
+	{
+		OutError = FString::Printf(TEXT("%s: %s"), *FilePath, *OutError);
+		return false;
+	}
+	return true;
+}
+
+bool HexPlanetFile::SaveEntrances(const FString& PlanetFolder, TConstArrayView<FHexEntrance> Entrances, FString& OutError)
+{
+	const FString FilePath = GetFilePath(PlanetFolder, EntrancesFile);
+	if (PlanetFolder.IsEmpty() || !FFileHelper::SaveStringToFile(EncodeEntrances(Entrances), *FilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+	{
+		OutError = FString::Printf(TEXT("could not write %s"), *FilePath);
+		return false;
+	}
+	return true;
 }
 
 FString HexPlanetFile::FindPlanetToOpen(const UWorld* World)

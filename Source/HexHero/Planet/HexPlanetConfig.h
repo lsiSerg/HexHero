@@ -8,6 +8,18 @@
 
 class UStaticMesh;
 
+/** Where the corners and the sides of the cells lie between two levels (HexPlanetKit::FindCornerHeights, HexPlanetKit::BuildFrame) */
+UENUM()
+enum class EHexEdgeRule : uint8
+{
+	/** A corner at the mean top of its three cells and the middle of a side at the mean of its two, so two levels share the slope between
+	 *  them and the side of a cell lies halfway down it, as on the surface */
+	Shared,
+	/** A corner at the highest top of its three cells and a side at the higher of its two, so a higher cell stays flat up to its sides and a
+	 *  lower one carries the whole slope inside itself, as the underground does, whose passages are ledges over the voids */
+	HigherHolds,
+};
+
 /**
  *  The planets: the size of their cells, how levels are generated for a planet without levels.txt, the colors of its surface, the outlines of the cell under the mouse and the values of
  *  M_HexPlanet and M_HexPlanetWireframe. AHexPlanet gives every float and color of it to those materials as parameters of the same names,
@@ -57,6 +69,11 @@ public:
 	UPROPERTY(EditAnywhere, Category="Grid", meta=(ClampMin=0))
 	float LevelHeight = 25.0f;
 
+	/** Where the corners and sides of the cells lie between two levels: Shared on the surface, HigherHolds in the underground (DA_HexUnderground),
+	 *  so a passage stays flat up to its sides and a void carries its whole cliff inside its own cell */
+	UPROPERTY(EditAnywhere, Category="Grid")
+	EHexEdgeRule EdgeRule = EHexEdgeRule::Shared;
+
 	/** Frequency of the planet that the values of scale and speed in DA_HexPlanet and DA_HexPlanetClouds are tuned on, that of Terra.
 	 *  On another planet the ranges of mountains and the clouds scale by its frequency over this one, so they keep their size and speed in
 	 *  cells, and a smaller planet has fewer of them rather than the same ones, larger. GetSizeRatio gives that ratio */
@@ -65,6 +82,36 @@ public:
 
 	/** Returns the frequency of a planet over ReferenceFrequency, by which sizes of noise on the unit sphere scale */
 	double GetSizeRatio(int32 Frequency) const { return double(Frequency) / FMath::Max(ReferenceFrequency, 1); }
+
+	/** What a layer of the planet has, so the underground (DA_HexUnderground) turns off what only the surface needs: the sea, which is the cap
+	 *  of water, its grid lines, the sea and shore fields, the floes, the shore ice and the mouths of rivers; materials of the surface that read
+	 *  their textures get empty ones */
+	UPROPERTY(EditAnywhere, Category="Features")
+	bool bSea = true;
+
+	/** The shells of clouds and their shadows */
+	UPROPERTY(EditAnywhere, Category="Features")
+	bool bClouds = true;
+
+	/** The haze of the air, a post process */
+	UPROPERTY(EditAnywhere, Category="Features")
+	bool bHaze = true;
+
+	/** The auroras over the pentagons */
+	UPROPERTY(EditAnywhere, Category="Features")
+	bool bAuroras = true;
+
+	/** Rivers and bridges, read from rivers.json of the data folder of the layer or generated */
+	UPROPERTY(EditAnywhere, Category="Features")
+	bool bRivers = true;
+
+	/** Generates forests and decor from the shares of the variants of the object sets when the layer has no objects.json */
+	UPROPERTY(EditAnywhere, Category="Features")
+	bool bGenerateObjects = true;
+
+	/** The fog of the underground, a post process (M_HexUndergroundFog) in place of the haze, with the Fog values of the category Underground */
+	UPROPERTY(EditAnywhere, Category="Features")
+	bool bFog = false;
 
 	/** Scale of the largest octave of the noise of levels, on the unit sphere, divided by ContinentSize of a planet; the shares of levels are in planet.json */
 	UPROPERTY(EditAnywhere, Category="Levels", meta=(ClampMin=0.01))
@@ -1077,4 +1124,221 @@ public:
 	/** Distance from the camera past which bridges are not drawn */
 	UPROPERTY(EditAnywhere, Category="Rivers|Bridges", meta=(ClampMin=0))
 	float BridgeCullDistance = 4500.0f;
+
+	/** The voids of the underground in M_HexUnderground, all measured in world units below the top of the passages: the rock of a cliff darkens
+	 *  from AbyssFadeStart to AbyssFadeEnd, where it keeps AbyssDarkness of its color, so a cliff falls into the dark */
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0))
+	float AbyssFadeStart = 25.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0))
+	float AbyssFadeEnd = 140.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0, ClampMax=1))
+	float AbyssDarkness = 0.05f;
+
+	/** The mist the floor of a void draws as its light, teal grey, from AbyssMistStart below the passages to all of it at AbyssMistEnd: a noise
+	 *  of AbyssScale world units, AbyssDetail of a finer octave, sharpened by AbyssContrast, taken in AbyssSlices layers AbyssSliceDepth apart under
+	 *  the floor along the view, so it moves against the floor as the camera moves and reads as bottomless; it drifts AbyssSpeed units a second */
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss")
+	FLinearColor AbyssColor = FLinearColor(0.05f, 0.09f, 0.095f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0))
+	float AbyssBrightness = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0))
+	float AbyssMistStart = 60.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0))
+	float AbyssMistEnd = 190.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=1))
+	float AbyssScale = 150.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0, ClampMax=1))
+	float AbyssDetail = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0))
+	float AbyssContrast = 2.2f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=1, ClampMax=6))
+	int32 AbyssSlices = 4;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=1))
+	float AbyssSliceDepth = 110.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0))
+	float AbyssSpeed = 6.0f;
+
+	/** The slices lie AbyssSliceDepth apart down the normal, so a slanted view goes 1 / cosine of that through them, but at most 1 / AbyssViewFloor,
+	 *  so at grazing angles they do not smear far along the view */
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0.05, ClampMax=1))
+	float AbyssViewFloor = 0.3f;
+
+	/** The finer octave of the mist is AbyssDetailScale times as fine as AbyssScale, and fades out as a pixel grows from AbyssDetailFadeStart to
+	 *  AbyssDetailFadeEnd of its cells, as from far away it only speckles */
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=1))
+	float AbyssDetailScale = 2.7f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0))
+	float AbyssDetailFadeStart = 0.15f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0))
+	float AbyssDetailFadeEnd = 0.45f;
+
+	/** Each deeper slice drifts AbyssSliceDrift faster than the one above, so they slide against each other, and weighs 2 to the power of
+	 *  -AbyssSliceFalloff of it, so the upper ones lead */
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0))
+	float AbyssSliceDrift = 0.4f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0))
+	float AbyssSliceFalloff = 0.6f;
+
+	/** Share of its light the mist keeps where its noise is thinnest, growing with the square of the noise to all of it where it is thickest */
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0, ClampMax=1))
+	float AbyssMistFloor = 0.2f;
+
+	/** How much of the color of the floor of a void gives way to the mist where it lies, so the floor does not show through it */
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0, ClampMax=1))
+	float AbyssFloorHide = 0.9f;
+
+	/** The lip of a passage, a faint light along its sides towards a void, AbyssLipWidth of the radius of a cell wide and gone AbyssLipDepth down
+	 *  the cliff, so a passage reads as a ledge */
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss")
+	FLinearColor AbyssLipColor = FLinearColor(0.06f, 0.075f, 0.075f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0.001))
+	float AbyssLipWidth = 0.06f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0.1))
+	float AbyssLipDepth = 10.0f;
+
+	/** How far below the passages the grid lines fade out, so they show on passages and not down the cliffs; outlines show on the voids too */
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0.1))
+	float AbyssGridFade = 6.0f;
+
+	/** The fog of the underground (M_HexUndergroundFog, bFog): the scene fades to FogColor with the length of the view past FogStart, by
+	 *  FogDensity a unit and at most FogMax, and the space past the globe is FogSpaceColor */
+	UPROPERTY(EditAnywhere, Category="Underground|Fog")
+	FLinearColor FogColor = FLinearColor(0.004f, 0.006f, 0.007f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Fog", meta=(ClampMin=0))
+	float FogStart = 1500.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Fog", meta=(ClampMin=0))
+	float FogDensity = 0.00012f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Fog", meta=(ClampMin=0, ClampMax=1))
+	float FogMax = 0.7f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Fog")
+	FLinearColor FogSpaceColor = FLinearColor(0.0f, 0.0f, 0.0f, 1.0f);
+
+	/** And the mist in the voids: below FogMistTop under the passages the air thickens over FogMistDepth to FogMistDensity a unit, at most FogMistMax,
+	 *  in FogMistColor, so a view into a chasm meets more mist the deeper it goes */
+	UPROPERTY(EditAnywhere, Category="Underground|Fog")
+	FLinearColor FogMistColor = FLinearColor(0.03f, 0.05f, 0.055f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Fog")
+	float FogMistTop = 50.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Fog", meta=(ClampMin=1))
+	float FogMistDepth = 170.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Fog", meta=(ClampMin=0))
+	float FogMistDensity = 0.005f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Fog", meta=(ClampMin=0, ClampMax=1))
+	float FogMistMax = 0.75f;
+
+	/** The colors of the networks of entrances A to H, of the chips of the editor and the markers of entrances and exits; the surface's are used
+	 *  for both layers */
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances")
+	TArray<FLinearColor> NetworkColors = {FLinearColor(1.0f, 0.55f, 0.1f), FLinearColor(0.1f, 0.7f, 1.0f), FLinearColor(0.95f, 0.25f, 0.8f), FLinearColor(0.45f, 0.95f, 0.15f),
+		FLinearColor(0.6f, 0.4f, 1.0f), FLinearColor(1.0f, 0.22f, 0.18f), FLinearColor(0.15f, 0.95f, 0.75f), FLinearColor(1.0f, 0.9f, 0.25f)};
+
+	/** The marker of an entrance on the surface, a cave mouth, and of its exit underground, a ring of rocks with a shaft of light, each drawn with
+	 *  the network color as their glow (M_HexPlanetMarker, M_HexPlanetShaft; Tools/HexPlanetKit/import_planet_markers.py), scaled so their radius
+	 *  is MarkerSize and the shaft ShaftHeight high; their glow is MarkerGlow and that of the shaft ShaftBrightness */
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances")
+	TSoftObjectPtr<UStaticMesh> EntranceMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetCaveMouth.SM_PlanetCaveMouth")));
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances")
+	TSoftObjectPtr<UStaticMesh> ExitMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetExitRing.SM_PlanetExitRing")));
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances")
+	TSoftObjectPtr<UStaticMesh> ShaftMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetExitShaft.SM_PlanetExitShaft")));
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=1))
+	float MarkerSize = 55.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=1))
+	float ShaftHeight = 150.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0))
+	float MarkerGlow = 4.0f;
+
+	/** The glow breathes by MarkerPulse of it, MarkerPulseSpeed radians a second, each marker at its own phase */
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0, ClampMax=1))
+	float MarkerPulse = 0.2f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0))
+	float MarkerPulseSpeed = 1.7f;
+
+	/** How much of the color of the rock a marker loses where it glows, so the glow is not washed out by the rock under it */
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0, ClampMax=1))
+	float MarkerRockDarkening = 0.85f;
+
+	/** Light the rock of a marker gives by itself besides Ambient, times the color of its network, as if lit by its glow, so the stones of an
+	 *  exit ring do not stand black in the dim light of the underground */
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0))
+	float MarkerRockLight = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0))
+	float ShaftBrightness = 0.5f;
+
+	/** The shaft flickers by ShaftFlicker of its light, ShaftFlickerSpeed radians a second, the phase moving ShaftFlickerRise radians up its height,
+	 *  so the flicker runs up it */
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0, ClampMax=1))
+	float ShaftFlicker = 0.15f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0))
+	float ShaftFlickerSpeed = 2.3f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances")
+	float ShaftFlickerRise = 5.0f;
+
+	/** How sharply the shaft fades towards its edges, where its surface turns away from the view: the facing to this power */
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0.1))
+	float ShaftFacingPower = 1.5f;
+
+	/** Distances from the camera over which the shaft fades out towards it, gone within ShaftNearFadeStart, so it does not fill the screen when the
+	 *  camera is close */
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0))
+	float ShaftNearFadeStart = 200.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0))
+	float ShaftNearFade = 400.0f;
+
+	/** The color of what is wrong in the editor of the underground: the markers of entrances that cannot be used, of the surface's config on both
+	 *  layers, and in the Links tab of the palette an exit in the void, the pieces of a network split in two but its largest, passages where
+	 *  networks join and passages one cell wide (M_HexUnderground, by the blue of CellMarks, AHexPlanet::UpdateLinkMarks) */
+	UPROPERTY(EditAnywhere, Category="Underground|Editor")
+	FLinearColor ProblemColor = FLinearColor(1.0f, 0.06f, 0.04f, 1.0f);
+
+	/** The Links tab tints each passage by the color of its network (NetworkColors of the surface): LinksTint of its color, and it glows by
+	 *  LinksGlow of it, so it shows in the dim light; a passage no exit reaches takes LinksOrphanColor */
+	UPROPERTY(EditAnywhere, Category="Underground|Editor")
+	FLinearColor LinksOrphanColor = FLinearColor(0.5f, 0.5f, 0.5f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Editor", meta=(ClampMin=0, ClampMax=1))
+	float LinksTint = 0.45f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Editor", meta=(ClampMin=0))
+	float LinksGlow = 0.2f;
+
+	/** Returns the color of a network, white for none */
+	FLinearColor GetNetworkColor(int32 Network) const
+	{
+		return NetworkColors.IsValidIndex(Network) ? NetworkColors[Network] : FLinearColor::White;
+	}
 };

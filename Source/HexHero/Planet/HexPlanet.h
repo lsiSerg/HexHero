@@ -5,8 +5,10 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "HexPlanetFile.h"
+#include "HexPlanetLayers.h"
 #include "HexPlanetMeshComponent.h"
 #include "HexPlanetSurface.h"
+#include "HexPlanetUnderground.h"
 #include "HexSphereGrid.h"
 #include "HexWorldMap.h"
 #include "Tasks/Task.h"
@@ -40,6 +42,11 @@ class UHexPlanetWaterConfig;
  *  what lies behind the planet or off the screen is culled and a change of levels rebuilds only the chunks it reaches (SetCellLevels), in the background. The planet stays at the world origin.
  *  The water is a cap around the point under the camera, drawn by M_HexPlanetWater from a cubemap of the sea, see HexPlanetSeaField.
  *  The debug views of the flat map work here too: hex.Wireframe, hex.WireframeScope, hex.WireframeTarget, where mountains are not terrain, and hex.Water.
+ *
+ *  A planet has two layers, each an AHexPlanet (UHexPlanetLayers): the surface, placed in the level, spawns the underground with
+ *  DA_HexUnderground, whose features (sea, clouds, haze, auroras, rivers, generated objects) are off. The underground reads or generates its
+ *  data in the background once the surface is built and builds its meshes only when it is first shown. Only the layer shown is drawn and does
+ *  the work of a frame (SetPresented).
  */
 UCLASS()
 class AHexPlanet : public AActor
@@ -219,6 +226,25 @@ private:
 	 *  GetCellTriangles builds the triangles of a cell again */
 	TArray<double> ShownCornerLow;
 
+	/** The triangles of the cells that picking with EHexEdgeRule::HigherHolds tested lately (FindHeldCellAlongRay), so a cursor that stays over a
+	 *  place does not build them again every frame; emptied whenever a build is shown */
+	mutable TMap<int32, TArray<FVector3f>> PickTriangles;
+
+	/** FindCellAlongRay with EHexEdgeRule::HigherHolds, where a cell lower than a neighbor carries its slope inside itself: the ray is tested
+	 *  against the triangles of every cell it passes below the highest top around it, from Start to End, and the nearest hit wins */
+	int32 FindHeldCellAlongRay(const FVector& Origin, const FVector& RayDirection, double Start, double End, FVector* OutPoint) const;
+
+	/** The markers of the entrances: a cave mouth on each usable entrance of the surface, a ring of rocks with a shaft of light on each exit
+	 *  underground, tinted by the color of its network (UHexPlanetConfig::NetworkColors of the surface) */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> MarkerComponents;
+
+	/** Material of the fog of the underground (UHexPlanetConfig::bFog), in HazeVolume in place of the haze */
+	UPROPERTY(EditAnywhere, Category="Planet|Underground")
+	TSoftObjectPtr<UMaterialInterface> FogMaterialAsset = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/HexPlanet/M_HexUndergroundFog.M_HexUndergroundFog")));
+
+	void CreateFog();
+
 	/** Material of the wireframe of the whole surface */
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> WireframeMaterial;
@@ -299,11 +325,44 @@ public:
 	UPROPERTY(EditAnywhere, Category="Planet|Kit")
 	TSoftObjectPtr<UHexPlanetKitConfig> KitConfig = TSoftObjectPtr<UHexPlanetKitConfig>(FSoftObjectPath(TEXT("/Game/HexPlanet/Kit/DA_HexPlanetKit.DA_HexPlanetKit")));
 
+	/** Config of the underground, which the surface gives the underground it spawns, its features off, from Tools/create_planet_assets.py */
+	UPROPERTY(EditAnywhere, Category="Planet|Underground")
+	TSoftObjectPtr<UHexPlanetConfig> UndergroundConfig = TSoftObjectPtr<UHexPlanetConfig>(FSoftObjectPath(TEXT("/Game/HexPlanet/DA_HexUnderground.DA_HexUnderground")));
+
+	/** Material of the cells of the underground; until Tools/create_planet_assets.py makes it, the underground draws Material */
+	UPROPERTY(EditAnywhere, Category="Planet|Underground")
+	TSoftObjectPtr<UMaterialInterface> UndergroundMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/HexPlanet/M_HexUnderground.M_HexUnderground")));
+
 	/** Constructor */
 	AHexPlanet();
 
-	/** Returns the folder in Content/Data/Planets of the open planet, empty if there was none and it was generated from the defaults */
+	/** Returns the layer of this planet, the surface or the underground */
+	EHexPlanetLayer GetLayer() const { return PlanetLayer; }
+
+	/** Returns the planet of a layer of this planet: this one for its own layer, else through UHexPlanetLayers, or null */
+	AHexPlanet* GetLayerPlanet(EHexPlanetLayer InLayer) const;
+
+	/** Returns true while this layer is the one shown */
+	bool IsPresented() const { return bPresented; }
+
+	/**
+	 *  Shows or hides this layer (UHexPlanetLayers::Present calls it): a hidden layer is hidden in the game, so its primitives and its sky light
+	 *  leave the scene, frees the pieces of its chunks, keeping their coarse meshes, and skips the work of a frame (the water cap, the switch of
+	 *  the clouds, the LOD and streaming of its chunks, the sun of its materials and MPC_HexPlanet, the debug view), but streams the pieces
+	 *  SetPiecePrefetch asks for. Shown the first time, the underground builds its meshes. Showing a layer again recreates its scene proxies
+	 */
+	void SetPresented(bool bInPresented);
+
+	/** Returns true once the levels and biomes of the cells are there: on the surface once it is built, underground once its data is read or
+	 *  generated in the background, before its meshes are built */
+	bool IsDataLoaded() const { return bBuilt || bDataLoaded; }
+
+	/** Returns the folder in Content/Data/Planets of the open planet, empty if there was none and it was generated from the defaults; the
+	 *  same for both layers, as it is the name of the planet */
 	const FString& GetPlanetFolder() const { return PlanetFolder; }
+
+	/** Returns the folder of the files of this layer (HexPlanetFile::GetDataFolder), empty for a planet that is not saved */
+	FString GetDataFolder() const { return HexPlanetFile::GetDataFolder(PlanetFolder, PlanetLayer); }
 
 	/** Returns planet.json of the open planet */
 	const FHexPlanetManifest& GetManifest() const { return Manifest; }
@@ -311,15 +370,40 @@ public:
 	/** Returns true if the planet has a folder; a new planet of the menu has none until it is saved */
 	bool IsSaved() const { return !PlanetFolder.IsEmpty(); }
 
-	/** Writes the planet into the folder of a name, over a planet that is there, and makes it the folder of this one, with levels.txt and
-	 *  biomes.txt, painted or generated. Returns false with an error if it could not */
+	/** Writes the planet into the folder of a name, over a planet that is there, and makes it the folder of both layers, with the levels and
+	 *  biomes of both, painted or generated, and entrances.json. Returns false with an error if it could not */
 	bool SaveAs(const FString& Name, FString& OutError);
 
-	/** Returns true if leaving the planet now would lose something: it is new and not saved, or its cells were painted since the last save */
-	bool HasUnsavedChanges() const { return !IsSaved() || bLevelsEdited; }
+	/** Returns true if leaving the planet now would lose something: it is new and not saved, or the cells of either layer or the entrances
+	 *  were edited since the last save */
+	bool HasUnsavedChanges() const { return !IsSaved() || HasUnsavedLevels(); }
 
-	/** Writes levels.txt and biomes.txt of a saved planet. Returns false with an error if it could not */
+	/** Writes the files of the levels and biomes of both layers of a saved planet, and entrances.json. Returns false with an error if it could not */
 	bool SaveLevels(FString& OutError);
+
+	/** Returns the entrances of the underground, all of entrances.json, those that cannot be used too; empty until the underground has its data */
+	const TArray<FHexEntrance>& GetEntrances() const;
+
+	/** Returns the index in GetEntrances of the entrance on a cell, or INDEX_NONE */
+	int32 FindEntrance(int32 Cell) const;
+
+	/** Returns what keeps an entrance of GetEntrances from being used, against the levels of both layers */
+	HexPlanetUnderground::EEntranceProblem GetEntranceProblem(int32 Index) const;
+
+	/** Returns how the passages and entrances of the underground fit together, or null until it has its data */
+	const HexPlanetUnderground::FReport* GetUndergroundReport() const;
+
+	/** Sets the entrances of the underground, on whichever layer it is called, as the editor changes them: marks them as edited, checks the
+	 *  report again and places the markers of both layers again. Nothing is carved, so the exit of a new entrance may be in the void */
+	void SetEntrances(const TArray<FHexEntrance>& NewEntrances);
+
+	/** On the underground, reads or generates its data now if it is not there yet, waiting for the background, as the editor needs it */
+	void EnsureDataLoaded();
+
+	/** Shows or hides the links of the underground for the Links tab of the editor: each passage tinted by the color of its network and what is
+	 *  wrong in ProblemColor, through the blue of CellMarks, which M_HexUnderground reads; kept up to date while shown (UpdateLinkMarks) */
+	void SetLinksShown(bool bShown);
+	bool AreLinksShown() const { return bLinksShown; }
 
 	/** Records that the levels or biomes were painted, so they differ from the files or the generation */
 	void MarkLevelsEdited() { bLevelsEdited = true; }
@@ -337,8 +421,12 @@ public:
 	/** Returns whether the piece of a cell is mirrored as shown */
 	bool IsCellMirrored(int32 Cell) const { return CellMirrored.IsValidIndex(Cell) && CellMirrored[Cell]; }
 
-	/** Returns true if the levels or biomes were painted since they were last saved */
-	bool HasUnsavedLevels() const { return bLevelsEdited; }
+	/** Returns true if the levels or biomes of either layer or the entrances were edited since they were last saved */
+	bool HasUnsavedLevels() const;
+
+	/** Returns true if the levels, biomes, relief, objects or rivers of either layer were edited since they were last saved, the entrances
+	 *  left aside, so the warning can say which */
+	bool HasUnsavedCells() const;
 
 	/** Returns the grid, empty until the planet is built */
 	const FHexSphereGrid& GetGrid() const { return Grid; }
@@ -367,14 +455,21 @@ public:
 	/** Returns the biomes a planet can have, those with a PlanetLetter, by their letter; a cell holds an index into it */
 	const TArray<TObjectPtr<UHexBiomeConfig>>& GetBiomes() const { return BiomeConfigs; }
 
+	/** Finds the biomes of a layer, those with a PlanetLetter on the surface and with an UndergroundLetter underground, sorted by that letter,
+	 *  which a cell of that layer holds the index of, so the index of a biome is the same in every run */
+	static void FindBiomes(EHexPlanetLayer Layer, TArray<TObjectPtr<UHexBiomeConfig>>& OutConfigs, TArray<TCHAR>& OutLetters);
+
 	/** Returns the biome of a cell, an index into GetBiomes */
 	int32 GetCellBiome(int32 Cell) const { return CellBiomes.IsValidIndex(Cell) ? CellBiomes[Cell] : 0; }
 
 	/** Returns the biome of every cell, in the order of the grid */
 	const TArray<uint8>& GetCellBiomes() const { return CellBiomes; }
 
-	/** Returns the PlanetLetter of the biome of a cell, or 0 */
+	/** Returns the letter of the biome of a cell in the files of its layer, its PlanetLetter on the surface and its UndergroundLetter underground, or 0 */
 	TCHAR GetCellBiomeLetter(int32 Cell) const { return CellBiomes.IsValidIndex(Cell) && BiomeLetters.IsValidIndex(CellBiomes[Cell]) ? BiomeLetters[CellBiomes[Cell]] : TEXT('\0'); }
+
+	/** Returns the letters of GetBiomes in the files of this layer, by index */
+	const TArray<TCHAR>& GetBiomeLetters() const { return BiomeLetters; }
 
 	/** Returns the rock layer of the biome of a cell, as the surface draws it on slopes and mountains */
 	int32 GetCellRockLayer(int32 Cell) const;
@@ -383,6 +478,14 @@ public:
 	 *  when it holds the cell, else built again from what the surface shown was built from, as its meshes are on the GPU alone. Reads only,
 	 *  so any thread may call it while the surface does not change */
 	void GetCellTriangles(int32 Cell, TArray<FVector3f>& OutCorners) const;
+
+	/** Returns the radius of the ground of a cell in a direction from the center of the planet, from its triangles, or its top when no
+	 *  triangle of it lies in that direction */
+	double FindGroundRadius(int32 Cell, const FVector3d& Direction) const;
+
+	/** Places the markers of this layer again (MarkerComponents), from the entrances and the levels of both layers; a change of the entrances
+	 *  calls it on both layers */
+	void UpdateMarkers();
 
 	/** Returns the forests, bushes, stones and decor of the cells */
 	UHexPlanetObjects* GetObjects() const { return Objects; }
@@ -470,9 +573,9 @@ public:
 	/**
 	 *  Logs what the surface holds in memory, after the times of frames the caller measured: its triangles by level, the copies of the meshes
 	 *  of its chunks on the CPU and the GPU, the memory of the process, and the ray tracing geometry of the chunks and the memory of the RHI
-	 *  (D3D12.DumpRayTracingGeometries, rhi.DumpMemory). hex.PlanetMemory calls it
+	 *  (D3D12.DumpRayTracingGeometries, rhi.DumpMemory), the last two only with bProcess. hex.PlanetMemory calls it for each layer that is built
 	 */
-	void LogMemory(const FString& FrameTimes);
+	void LogMemory(const FString& FrameTimes, bool bProcess = true);
 
 protected:
 
@@ -484,8 +587,72 @@ protected:
 
 private:
 
-	/** Builds the grid, the surface, the objects, the sea and the sky, which takes a second or two on a large planet */
+	/** Builds the grid, the surface, the objects, the sea and the sky, which takes a second or two on a large planet; underground from the data
+	 *  read in the background, with the kit of the surface, and without the features its config turns off */
 	void BuildPlanet();
+
+	/** Layer of this planet, which the surface sets on the underground it spawns before it begins to play */
+	UPROPERTY(VisibleAnywhere, Category="Planet")
+	EHexPlanetLayer PlanetLayer = EHexPlanetLayer::Surface;
+
+	/** True while this layer is shown */
+	bool bPresented = true;
+
+	/** Spawns the underground of this surface, hidden, with UndergroundConfig and UndergroundMaterial, which shares its folder and manifest */
+	void SpawnUnderground();
+
+	/** What the underground reads or generates in the background: its grid and HexPlanetUnderground::Load */
+	struct FUndergroundData;
+	UE::Tasks::FTask DataTask;
+	TSharedPtr<FUndergroundData> UndergroundData;
+
+	/** True once the underground has its levels, biomes and entrances */
+	bool bDataLoaded = false;
+
+	/** Starts reading or generating the data of the underground in the background, from the levels of the surface */
+	void StartUndergroundData();
+
+	/** Takes the data the background made, waiting for it if it runs */
+	void FinishUndergroundData();
+
+	/** The entrances of the underground, on the underground planet, and how they and the passages fit together, checked again when it is
+	 *  read after a rebuild of either layer changed the levels */
+	TArray<FHexEntrance> Entrances;
+	mutable HexPlanetUnderground::FReport UndergroundReport;
+	mutable bool bUndergroundReportDirty = false;
+
+	/** Marks the report of the underground to be checked again, after the levels of a layer changed */
+	void MarkUndergroundReportDirty();
+
+	/** True if the entrances changed since they were last saved */
+	bool bEntrancesEdited = false;
+
+	/** True while the Links tab shows the networks of the passages (SetLinksShown) */
+	bool bLinksShown = false;
+
+	/** Writes the blue of CellMarks of the underground from its report while the links are shown, else clears it: 1 + the network of a passage,
+	 *  LinkProblem where something is wrong and LinkOrphan for a passage no exit reaches */
+	void UpdateLinkMarks();
+
+	/** Values of the blue of CellMarks for the links besides the networks */
+	static constexpr uint8 LinkProblem = 9;
+	static constexpr uint8 LinkOrphan = 10;
+
+	/** Returns the planets of both layers that have their data, this one first */
+	TArray<AHexPlanet*, TInlineAllocator<2>> GetLoadedLayers() const;
+
+	/** Writes the files of this layer into its data folder of the folder of a planet, and the underground also entrances.json */
+	bool SaveLayerFiles(const FString& Folder, FString& OutError) const;
+
+	/** After a save, tells on the screen and in the log how many entrances were left out of entrances.json as they cannot be used, so they are
+	 *  gone when the planet opens again although they still show now */
+	void ReportLeftOutEntrances() const;
+
+	/** Keeps the objects of both layers off the cells of the entrances (UHexPlanetObjects::SetClearCells) */
+	void UpdateClearCells();
+
+	/** Gives the materials of the surface empty cubemaps of the sea and the shore, on a layer without the sea */
+	void CreateEmptySeaField();
 
 	/** Gives the sky light its plain cubemap and the color and intensity of DA_HexPlanet */
 	void CreateSkyLight();

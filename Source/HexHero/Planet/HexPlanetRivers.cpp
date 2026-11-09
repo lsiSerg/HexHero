@@ -1078,11 +1078,12 @@ void UHexPlanetRivers::Init(AHexPlanet* InPlanet, const UHexPlanetConfig* InSett
 	bGenerated = false;
 
 	const FHexSphereGrid& Grid = Planet->GetGrid();
-	const FString& Folder = Planet->GetPlanetFolder();
+	// from the data folder of the layer of the planet; a layer without rivers, the underground, reads and generates none
+	const FString Folder = Planet->GetDataFolder();
 	FString Error;
 	TArray<FHexRiverEdge> Lines;
 
-	if (!Folder.IsEmpty() && HexPlanetFile::HasRivers(Folder))
+	if (Settings->bRivers && !Folder.IsEmpty() && HexPlanetFile::HasRivers(Folder))
 	{
 		if (HexPlanetFile::LoadRivers(Folder, Lines, Error))
 		{
@@ -1099,7 +1100,7 @@ void UHexPlanetRivers::Init(AHexPlanet* InPlanet, const UHexPlanetConfig* InSett
 			UE_LOG(LogHexHero, Warning, TEXT("Planet: %s, the planet has no rivers"), *Error);
 		}
 	}
-	else
+	else if (Settings->bRivers)
 	{
 		HexPlanetRivers::FGenerateParams Params;
 		Params.Seed = Planet->GetManifest().Seed;

@@ -14,25 +14,26 @@ namespace
 	const double KitSqrt3 = FMath::Sqrt(3.0);
 }
 
-TArray<double> HexPlanetKit::FindCornerHeights(const FHexSphereGrid& Grid, TFunctionRef<double(int32)> GetTop)
+TArray<double> HexPlanetKit::FindCornerHeights(const FHexSphereGrid& Grid, TFunctionRef<double(int32)> GetTop, EHexEdgeRule Rule)
 {
 	// three cells meet at every corner
+	const bool bHighest = Rule == EHexEdgeRule::HigherHolds;
 	TArray<double> Heights;
-	Heights.Init(0.0, Grid.GetCorners().Num());
+	Heights.Init(bHighest ? -TNumericLimits<double>::Max() : 0.0, Grid.GetCorners().Num());
 
 	for (int32 Cell = 0; Cell < Grid.GetCells().Num(); ++Cell)
 	{
 		const double Top = GetTop(Cell);
 		for (const int32 Corner : Grid.GetCells()[Cell].Corners)
 		{
-			Heights[Corner] += Top / 3.0;
+			Heights[Corner] = bHighest ? FMath::Max(Heights[Corner], Top) : Heights[Corner] + Top / 3.0;
 		}
 	}
 	return Heights;
 }
 
 HexPlanetKit::FCellFrame HexPlanetKit::BuildFrame(const FHexSphereGrid& Grid, int32 Cell, TFunctionRef<double(int32)> GetTop, TFunctionRef<int32(int32)> GetLevel,
-	TConstArrayView<double> CornerHeights, TConstArrayView<int32> MassifSteps, TConstArrayView<float> Relief)
+	TConstArrayView<double> CornerHeights, TConstArrayView<int32> MassifSteps, TConstArrayView<float> Relief, EHexEdgeRule Rule)
 {
 	const FHexSphereCell& Each = Grid.GetCells()[Cell];
 	const int32 NumSides = Each.Neighbors.Num();
@@ -71,7 +72,7 @@ HexPlanetKit::FCellFrame HexPlanetKit::BuildFrame(const FHexSphereGrid& Grid, in
 		const double NeighborSteps = GetLevel(Neighbor) == Level ? MassifSteps[Neighbor] : 0.0;
 		const double NextSteps = GetLevel(NextNeighbor) == Level ? MassifSteps[NextNeighbor] : 0.0;
 
-		Frame.SideMiddles.Add((Frame.Top + GetTop(Neighbor)) * 0.5);
+		Frame.SideMiddles.Add(GetSideMiddle(Frame.Top, GetTop(Neighbor), Rule));
 		Frame.SameSides.Add(GetLevel(Neighbor) == Level);
 		// corner K lies between neighbors K and K + 1, and its three cells are all on the plateau when both of them share it with this one
 		const double SidePlateau = NeighborPlateau[Side];

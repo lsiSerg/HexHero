@@ -76,6 +76,14 @@ public:
 	/** Gives how the cover of a cell tints its ground from far away (UHexPlanetObjectSet::FarCover, FarColor). Returns false if it does not */
 	bool GetCellCanopy(int32 Cell, FLinearColor& OutColor, float& OutCover) const;
 
+	/** Keeps the objects off these cells, the entrances to the underground and their exits, whose markers they would hide; what the cells hold
+	 *  stays, also in objects.json, and shows again once a cell is no entrance. Places the chunks of the cells that changed again once the
+	 *  planet is built */
+	void SetClearCells(TConstArrayView<int32> Cells);
+
+	/** Returns true if no object stands on a cell, as it holds an entrance */
+	bool IsClear(int32 Cell) const { return ClearCells.Contains(Cell); }
+
 private:
 
 	/** A mesh of a kind of object, drawn by a component per chunk */
@@ -125,6 +133,9 @@ private:
 
 	/** The cells of each chunk */
 	TArray<TArray<int32>> ChunkCells;
+
+	/** The cells that hold an entrance, where nothing is drawn (SetClearCells) */
+	TSet<int32> ClearCells;
 
 	bool bGenerated = false;
 

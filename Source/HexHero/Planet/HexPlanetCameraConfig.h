@@ -4,7 +4,55 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
+#include "HexPlanetLayers.h"
 #include "HexPlanetCameraConfig.generated.h"
+
+/**
+ *  The light of a layer of the planet, which the camera applies when the layer is shown (AHexPlanetCameraPawn::ApplyLighting): the sun of the
+ *  level, which follows the point the camera looks at, and the exposure of the camera. The sky light of a layer is SkyLightColor and
+ *  SkyLightIntensity of its UHexPlanetConfig, as each layer has its own. UHexPlanetCameraConfig::GetLighting gives the light of a layer: the
+ *  surface from the values of the config as they were, the underground from UndergroundLighting, a placeholder until the light of the game
+ *  is designed
+ */
+USTRUCT()
+struct FHexLayerLighting
+{
+	GENERATED_BODY()
+
+	/** Color of the sun and its intensity in lux; an intensity of 0 keeps those of the light placed in the level */
+	UPROPERTY(EditAnywhere, Category="Light")
+	FLinearColor SunColor = FLinearColor::White;
+
+	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=0))
+	float SunIntensity = 0.0f;
+
+	/** Direction the sun shines from, as SunAzimuth of the config */
+	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=-360, ClampMax=360))
+	float SunAzimuth = 120.0f;
+
+	/** Height of the sun with the camera at its closest and at its farthest, as SunCloseElevation and SunFarElevation of the config */
+	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=1, ClampMax=90))
+	float SunCloseElevation = 40.0f;
+
+	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=1, ClampMax=90))
+	float SunFarElevation = 60.0f;
+
+	/** Exposure bias of the camera */
+	UPROPERTY(EditAnywhere, Category="Light")
+	float ExposureBias = -1.0f;
+
+	/** Returns the placeholder light of the underground, dim and cool */
+	static FHexLayerLighting MakeUnderground()
+	{
+		FHexLayerLighting Lighting;
+		Lighting.SunColor = FLinearColor(0.55f, 0.68f, 0.85f, 1.0f);
+		Lighting.SunIntensity = 1.5f;
+		Lighting.SunCloseElevation = 55.0f;
+		Lighting.SunFarElevation = 70.0f;
+		Lighting.ExposureBias = 0.5f;
+		return Lighting;
+	}
+};
 
 /**
  *  The orbit camera of the planet, AHexPlanetCameraPawn. Its inertia, edge scroll and turn limits come from DA_HexCamera, shared with the flat map.
@@ -108,4 +156,37 @@ public:
 	/** How long the sun takes to move to where it should stand, in seconds */
 	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=0.01))
 	float SunMoveTime = 1.5f;
+
+	/** The light of the underground, a placeholder for the developer to tune: a dim, cool key light that follows the camera as the sun does,
+	 *  and its own exposure; its dim sky light is that of DA_HexUnderground */
+	UPROPERTY(EditAnywhere, Category="Light|Underground")
+	FHexLayerLighting UndergroundLighting = FHexLayerLighting::MakeUnderground();
+
+	/** Returns the light of a layer: the surface keeps the sun of the level with SunAzimuth, SunCloseElevation, SunFarElevation and
+	 *  ExposureBias above, the underground takes UndergroundLighting */
+	FHexLayerLighting GetLighting(EHexPlanetLayer Layer) const
+	{
+		if (Layer == EHexPlanetLayer::Underground)
+		{
+			return UndergroundLighting;
+		}
+		FHexLayerLighting Surface;
+		Surface.SunAzimuth = SunAzimuth;
+		Surface.SunCloseElevation = SunCloseElevation;
+		Surface.SunFarElevation = SunFarElevation;
+		Surface.ExposureBias = ExposureBias;
+		return Surface;
+	}
+
+	/** How long the screen fades to black before a trip between the layers (AHexPlanetCameraPawn::TravelTo), and back after it, in seconds */
+	UPROPERTY(EditAnywhere, Category="Travel", meta=(ClampMin=0))
+	float TravelFadeOutTime = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Travel", meta=(ClampMin=0))
+	float TravelFadeInTime = 0.45f;
+
+	/** Least time the screen stays black on a trip, in seconds, while the layer shown is swapped and its pieces around the camera are built;
+	 *  it waits for them at most JumpWaitMax */
+	UPROPERTY(EditAnywhere, Category="Travel", meta=(ClampMin=0))
+	float TravelHoldMin = 0.2f;
 };

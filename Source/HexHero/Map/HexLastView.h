@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "HexPlanetLayers.h"
 #include "HexLastView.generated.h"
 
 struct FHexMapEntry;
@@ -62,6 +63,10 @@ struct FHexLastPlanetView
 	/** Distance of the camera, where 0 means none was saved */
 	UPROPERTY()
 	double Distance = 0.0;
+
+	/** Layer of the planet the camera showed, the surface when the file has none */
+	UPROPERTY()
+	EHexPlanetLayer Layer = EHexPlanetLayer::Surface;
 
 	bool operator==(const FHexLastPlanetView& Other) const = default;
 };

@@ -29,6 +29,11 @@ public:
 	UPROPERTY(EditAnywhere, Category="Biome")
 	FString PlanetLetter;
 
+	/** Letter of this biome in underground/biomes.txt of a planet, unique among the biomes of the underground, which are apart from those of
+	 *  the surface; a biome without one is not used underground */
+	UPROPERTY(EditAnywhere, Category="Biome")
+	FString UndergroundLetter;
+
 	/** Levels that can have this biome */
 	UPROPERTY(EditAnywhere, Category="Biome")
 	TArray<int32> AllowedLevels;

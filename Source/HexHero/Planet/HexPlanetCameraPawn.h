@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Pawn.h"
+#include "HexPlanetLayers.h"
 #include "HexPlanetCameraPawn.generated.h"
 
 class ADirectionalLight;
@@ -45,6 +46,8 @@ struct FHexPlanetCameraPlacement
  *  The sun follows the point the camera looks at, from a compass direction of that place, lazily so shadows stand still while the view stays
  *  about where it is, unless the console variable hex.PlanetSun is 0.
  *  hex.CopyCamera and its input copy the commands that open the planet and put the camera back where it is, with hex.PlanetSetCamera.
+ *  The camera goes between the layers of the planet (TravelTo), the surface and the underground, through a fade to black, keeping its place;
+ *  the light of each layer (FHexLayerLighting) moves the sun and sets the exposure.
  */
 UCLASS()
 class AHexPlanetCameraPawn : public APawn
@@ -130,6 +133,23 @@ public:
 
 	/** Gives whether the sun follows the camera as a pair of name and value. Returns true if it does, the usual view */
 	static bool GetSunStatus(TArray<TPair<FString, FString>>& OutLines);
+
+	/**
+	 *  Goes to a layer of the planet: ends the input held, asks the layer for the pieces around the place, fades to black, puts up the black
+	 *  screen over the widgets, shows that layer with its light and puts the camera at the same place, or at Placement, as a cut, waits for
+	 *  its pieces at most JumpWaitMax and at least TravelHoldMin, and fades back in (the Travel* times of DA_HexPlanetCamera). bStartBlack
+	 *  skips the fade out, as at the start. Returns false while a trip runs or if the planet has no such layer
+	 */
+	bool TravelTo(EHexPlanetLayer Layer, TOptional<FHexPlanetCameraPlacement> Placement = {}, bool bStartBlack = false);
+
+	/** Returns true while a trip between the layers runs */
+	bool IsTravelling() const { return TravelPhase != ETravelPhase::None; }
+
+	/** Returns the layer the camera shows, the surface until it has its planet */
+	EHexPlanetLayer GetShownLayer() const;
+
+	/** Returns the exposure bias of the camera now, which the light of the layer shown sets */
+	float GetExposureBias() const;
 
 protected:
 
@@ -276,4 +296,46 @@ private:
 
 	/** True once the sun was first placed */
 	bool bSunPlaced = false;
+
+	/** Goes to the other layer: through the entrance under the mouse to its exit, from an exit up to its entrance, else at the same place */
+	void OnLayer();
+
+	/** Runs the steps of a trip between the layers */
+	void UpdateTravel(float DeltaTime);
+
+	/** Gives the sun and the camera the light of a layer (UHexPlanetCameraConfig::GetLighting) */
+	void ApplyLighting(EHexPlanetLayer Layer);
+
+	/** Steps of a trip: the fade to black, the black screen, while the layer is swapped and its pieces are built, and the fade back */
+	enum class ETravelPhase : uint8
+	{
+		None,
+		FadingOut,
+		Black,
+		FadingIn,
+	};
+	ETravelPhase TravelPhase = ETravelPhase::None;
+
+	/** Layer and place the trip goes to */
+	EHexPlanetLayer TravelLayer = EHexPlanetLayer::Surface;
+	FHexPlanetCameraPlacement TravelPlacement;
+
+	/** Time in the step of the trip and in the whole trip, frames of the black screen, and whether the layers were swapped, when and how long that took */
+	float TravelPhaseTime = 0.0f;
+	double TravelStartTime = 0.0;
+	int32 TravelBlackFrames = 0;
+	bool bTravelSwapped = false;
+	float TravelSwapPhaseTime = 0.0f;
+	double TravelSwapMs = 0.0;
+	double TravelReadyMs = 0.0;
+
+	/** The color and intensity of the sun placed in the level, which the light of the surface keeps */
+	FLinearColor LevelSunColor = FLinearColor::White;
+	float LevelSunIntensity = 0.0f;
+
+	/** Layer of the camera that LastView.json holds */
+	EHexPlanetLayer SavedLayer = EHexPlanetLayer::Surface;
+
+	/** Returns where the camera stands for a place, its distance kept within the zoom, or the current one when it has none */
+	FVector GetCameraLocationFor(const FHexPlanetCameraPlacement& Placement) const;
 };

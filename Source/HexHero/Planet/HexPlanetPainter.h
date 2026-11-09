@@ -3,6 +3,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "HexPlanetFile.h"
+#include "HexPlanetLayers.h"
 #include "HexPlanetObjects.h"
 #include "HexPlanetSurface.h"
 #include "UObject/Object.h"
@@ -13,15 +15,6 @@ class UHexPlanetConfig;
 class UMaterialInstanceDynamic;
 class UProceduralMeshComponent;
 
-/**
- *  Paints the levels or the biomes of the cells of a planet with a brush of one to three rings of cells. While the button is held the cells
- *  painted a level show at once as flat tiles in the colors of their new levels (PaintPreview), and when it is released the stroke goes to
- *  AHexPlanet::SetCells, which rebuilds the surface around them in the background; the tiles go once it is shown. A cell whose new level does
- *  not allow its biome takes a fitting one. Biomes show at once, as the planet only uploads them to a texture, so a biome stroke goes to the
- *  planet while it is painted, and only to the cells whose level allows that biome. Each stroke is one step of Undo and Redo, with the levels
- *  and biomes it changed. The pentagons are never mountains, so a mountain brush paints them as hills. It also puts forests, bushes, stones
- *  and decor on cells and takes them off (UHexPlanetObjects), and with no tool the left button drags the planet while the palette stays.
- */
 /** What the left button does while painting is on */
 enum class EHexPaintTool : uint8
 {
@@ -38,6 +31,10 @@ enum class EHexPaintTool : uint8
 	River,
 	/** Puts bridges on the sides with a river nearest the cursor */
 	Bridge,
+	/** Puts an entrance of the chosen network on a cell of the surface, or takes it away with Ctrl */
+	Entrance,
+	/** Carves a passage underground along the shortest way from the cell pressed to the cell released, as wide as the passages of the planet */
+	Carve,
 };
 
 /** What a click of the brush in relief mode does to the mountains and hills under it, once per cell and stroke */
@@ -56,6 +53,95 @@ enum class EHexReliefTool : uint8
 	Reset,
 };
 
+/** The tabs of the palette: those of the surface, then those of the underground (GetTabLayer). Each keeps the tool chosen in it last */
+enum class EHexPaintTab : uint8
+{
+	/** Levels and biomes of the surface */
+	Ground,
+	Relief,
+	Objects,
+	Rivers,
+	/** The entrances to the underground and their networks */
+	Entrances,
+	/** Void and passages underground, carving and the cave biomes */
+	Maze,
+	/** How the passages join the entrances of their networks, and generating them again */
+	Links,
+};
+
+/** Number of tabs of the palette */
+constexpr int32 NumPaintTabs = 7;
+
+/** Old and new levels, biomes, relief, objects, rivers and entrances of the cells of one step of Undo, a stroke or a button */
+struct FHexPaintStep
+{
+	TMap<int32, int32> OldLevels;
+	TMap<int32, int32> NewLevels;
+	TMap<int32, int32> OldBiomes;
+	TMap<int32, int32> NewBiomes;
+	HexPlanetSurface::FReliefOverrides OldRelief;
+	HexPlanetSurface::FReliefOverrides NewRelief;
+	TMap<int32, FHexCellObjects> OldObjects;
+	TMap<int32, FHexCellObjects> NewObjects;
+	/** What stood on the sides of rivers before and after, by HexPlanetRivers::GetEdgeKey (UHexPlanetRivers::GetEdge) */
+	TMap<uint64, uint8> OldRivers;
+	TMap<uint64, uint8> NewRivers;
+	/** All the entrances before and after, when the step changed them (AHexPlanet::SetEntrances) */
+	bool bEntrances = false;
+	TArray<FHexEntrance> OldEntrances;
+	TArray<FHexEntrance> NewEntrances;
+
+	/** Returns true if the step changes nothing */
+	bool IsEmpty() const
+	{
+		return NewLevels.IsEmpty() && NewBiomes.IsEmpty() && NewRelief.IsEmpty() && NewObjects.IsEmpty() && NewRivers.IsEmpty() && !(bEntrances && OldEntrances != NewEntrances);
+	}
+};
+
+/** What the brush keeps of each layer it paints: its planet, the tiles of its painted cells, its own Undo and Redo, its tab, level and biome */
+USTRUCT()
+struct FHexPainterLayer
+{
+	GENERATED_BODY()
+
+	UPROPERTY(Transient)
+	TObjectPtr<AHexPlanet> Planet;
+
+	/** Values of the planet, with the colors of the levels and the height of the tiles */
+	UPROPERTY(Transient)
+	TObjectPtr<const UHexPlanetConfig> Settings;
+
+	/** Flat tiles of the painted cells until the surface shows them */
+	UPROPERTY(Transient)
+	TObjectPtr<UProceduralMeshComponent> PaintPreview;
+
+	/** Material of the tiles, the material of the cells of the planet with PreviewTile 1, so it draws them in their vertex colors */
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> PreviewMaterial;
+
+	EHexPaintTab Tab = EHexPaintTab::Ground;
+	int32 Level = 0;
+	int32 Biome = 0;
+
+	/** Cells given to the planet whose surface is not rebuilt yet, shown as tiles, with the level the surface still shows (X) and the new one (Y) */
+	TMap<int32, FIntPoint> PendingLevels;
+
+	TArray<FHexPaintStep> UndoSteps;
+	TArray<FHexPaintStep> RedoSteps;
+};
+
+/**
+ *  Paints the cells of both layers of a planet, the one shown (SetTarget, which follows UHexPlanetLayers::OnPresented), with a brush of one to
+ *  three rings of cells, each layer with its own tiles, Undo and Redo. While the button is held the cells painted a level show at once as flat
+ *  tiles in the colors of their new levels (PaintPreview), and when it is released the stroke goes to AHexPlanet::SetCells, which rebuilds the
+ *  surface around them in the background; the tiles go once it is shown. A cell whose new level does not allow its biome takes a fitting one.
+ *  Biomes show at once, as the planet only uploads them to a texture, so a biome stroke goes to the planet while it is painted, and only to the
+ *  cells whose level allows that biome. Each stroke is one step of Undo and Redo, with the levels and biomes it changed. The pentagons of the
+ *  surface are never mountains, so a mountain brush paints them as hills. On the surface it also puts forests, bushes, stones and decor on cells
+ *  and takes them off (UHexPlanetObjects), lays rivers and bridges and puts entrances to the underground; underground it paints void and passages,
+ *  carves passages and generates the passages of a network again. With no tool the left button drags the planet while the palette stays. The
+ *  tools sit in the tabs of the palette (EHexPaintTab), and each tab keeps the tool chosen in it last.
+ */
 UCLASS()
 class UHexPlanetPainter : public UObject
 {
@@ -63,15 +149,35 @@ class UHexPlanetPainter : public UObject
 
 public:
 
-	/** Lowest and highest level a brush paints: deep sea and mountains */
+	/** Lowest and highest level a brush paints on the surface: deep sea and mountains */
 	static constexpr int32 MinLevel = -2;
 	static constexpr int32 MaxLevel = 2;
 
 	/** Largest brush, in rings of cells around the one under the cursor plus one */
 	static constexpr int32 MaxBrushSize = 3;
 
-	/** Starts painting a planet, with the tiles of the preview on it */
-	void Init(AHexPlanet* InPlanet);
+	/** Starts painting the layers of a planet, the underground null on a planet without one, with the tiles of the preview on each, and paints the
+	 *  layer shown now */
+	void Init(AHexPlanet* SurfacePlanet, AHexPlanet* UndergroundPlanet);
+
+	/** Returns true if the painter has a layer */
+	bool HasLayer(EHexPlanetLayer Layer) const;
+
+	/** Returns the layer the brush paints, the one shown */
+	EHexPlanetLayer GetTarget() const { return Target; }
+
+	/** Paints another layer, as it was shown, with the tab and tool it had there; ends a stroke */
+	void SetTarget(EHexPlanetLayer Layer);
+
+	/** Returns the tab of the palette chosen on the layer painted */
+	EHexPaintTab GetTab() const;
+
+	/** Chooses a tab of the layer painted, which takes the tool chosen in it last */
+	void SetTab(EHexPaintTab Tab);
+
+	/** Returns the layer whose tools a tab holds, and its name */
+	static EHexPlanetLayer GetTabLayer(EHexPaintTab Tab) { return Tab >= EHexPaintTab::Maze ? EHexPlanetLayer::Underground : EHexPlanetLayer::Surface; }
+	static FText GetTabName(EHexPaintTab Tab);
 
 	/** Returns true while the mouse paints instead of dragging the planet */
 	bool IsActive() const { return bActive; }
@@ -79,8 +185,8 @@ public:
 	/** Turns painting on or off, which ends a stroke */
 	void SetActive(bool bInActive);
 
-	/** Returns the level the brush paints */
-	int32 GetLevel() const { return Level; }
+	/** Returns the level the brush paints on the layer painted */
+	int32 GetLevel() const;
 
 	/** Returns the tool of the left button; one is chosen at a time, and choosing one clears the others */
 	EHexPaintTool GetTool() const { return Tool; }
@@ -94,8 +200,9 @@ public:
 	/** Returns true while the brush paints levels */
 	bool IsPaintingLevels() const { return Tool == EHexPaintTool::Level; }
 
-	/** Sets the level the brush paints, and makes it paint levels */
-	void SetLevel(int32 InLevel) { Level = FMath::Clamp(InLevel, MinLevel, MaxLevel); Tool = EHexPaintTool::Level; }
+	/** Sets the level the brush paints on the layer painted, and makes it paint levels in the tab of the levels; underground a level below 0 is
+	 *  the void and any other a passage */
+	void SetLevel(int32 InLevel);
 
 	/** Returns true while the brush paints biomes */
 	bool IsPaintingBiomes() const { return Tool == EHexPaintTool::Biome; }
@@ -103,7 +210,7 @@ public:
 	/** Returns true while the brush sets the relief of mountains and hills */
 	bool IsPaintingRelief() const { return Tool == EHexPaintTool::Relief; }
 
-	/** Returns the kinds of objects that can be put on cells, their names, colors and whether they are a cover */
+	/** Returns the kinds of objects that can be put on cells of the surface, their names, colors and whether they are a cover */
 	int32 GetNumObjectSets() const;
 	FText GetObjectSetName(int32 Set) const;
 	FLinearColor GetObjectSetColor(int32 Set) const;
@@ -113,7 +220,7 @@ public:
 	int32 GetObjectSet() const { return ObjectSet; }
 
 	/** Sets the kind of object the brush puts, and makes it put objects */
-	void SetObjectSet(int32 InSet) { ObjectSet = InSet; Tool = EHexPaintTool::Object; }
+	void SetObjectSet(int32 InSet) { ObjectSet = InSet; SetTool(EHexPaintTool::Object, EHexPaintTab::Objects); }
 
 	/** Returns the density a cover is put at, 1 to 3 */
 	int32 GetObjectDensity() const { return ObjectDensity; }
@@ -121,13 +228,41 @@ public:
 
 	/** Returns true while the brush takes objects off cells */
 	bool IsErasing() const { return Tool == EHexPaintTool::Eraser; }
-	void SetEraser() { Tool = EHexPaintTool::Eraser; }
+	void SetEraser() { SetTool(EHexPaintTool::Eraser, EHexPaintTab::Objects); }
 
 	/** Returns true while the brush lays rivers, or puts bridges; Ctrl takes them away */
 	bool IsPaintingRivers() const { return Tool == EHexPaintTool::River; }
-	void SetRiverTool() { Tool = EHexPaintTool::River; }
+	void SetRiverTool() { SetTool(EHexPaintTool::River, EHexPaintTab::Rivers); }
 	bool IsPlacingBridges() const { return Tool == EHexPaintTool::Bridge; }
-	void SetBridgeTool() { Tool = EHexPaintTool::Bridge; }
+	void SetBridgeTool() { SetTool(EHexPaintTool::Bridge, EHexPaintTab::Rivers); }
+
+	/** Returns true while the brush puts entrances of the chosen network on the surface; Ctrl takes them away */
+	bool IsPlacingEntrances() const { return Tool == EHexPaintTool::Entrance; }
+	void SetEntranceTool() { SetTool(EHexPaintTool::Entrance, EHexPaintTab::Entrances); }
+
+	/** Returns true while the brush carves passages underground */
+	bool IsCarving() const { return Tool == EHexPaintTool::Carve; }
+	void SetCarveTool() { SetTool(EHexPaintTool::Carve, EHexPaintTab::Maze); }
+
+	/** Returns the network of the chips of the palette, 0 to 7 for A to H, which new entrances take and which Regenerate network makes again */
+	int32 GetNetwork() const { return Network; }
+	void SetNetwork(int32 InNetwork) { Network = FMath::Clamp(InNetwork, 0, HexPlanetFile::MaxNetworks - 1); }
+
+	/** Returns the color of a network, NetworkColors of the surface */
+	FLinearColor GetNetworkColor(int32 InNetwork) const;
+
+	/** Returns how many entrances a network has, those that cannot be used too */
+	int32 GetNetworkEntrances(int32 InNetwork) const;
+
+	/** Returns the width of a passage the brush carves, PassageWidth of the underground of the planet */
+	int32 GetPassageWidth() const;
+
+	/** Generates the passages of a network underground again, the others kept, or of all networks for INDEX_NONE, as one step of Undo of the
+	 *  underground; false if it is not painted or nothing changed */
+	bool Regenerate(int32 InNetwork);
+
+	/** Returns a few lines on how the passages and entrances of the underground fit together, for the Links tab */
+	FText GetLinksText() const;
 
 	/** Sets the point on the planet under the cursor, by which the river brush finds the nearest corner and side */
 	void SetCursorPoint(const FVector& Point) { CursorPoint = Point; }
@@ -136,24 +271,30 @@ public:
 	EHexReliefTool GetReliefTool() const { return ReliefTool; }
 
 	/** Sets the tool of relief, and makes the brush set relief */
-	void SetReliefTool(EHexReliefTool InTool) { ReliefTool = InTool; Tool = EHexPaintTool::Relief; }
+	void SetReliefTool(EHexReliefTool InTool) { ReliefTool = InTool; SetTool(EHexPaintTool::Relief, EHexPaintTab::Relief); }
 
-	/** Returns the biome the brush paints, an index into AHexPlanet::GetBiomes */
-	int32 GetBiome() const { return Biome; }
+	/** Returns the biome the brush paints on the layer painted, an index into AHexPlanet::GetBiomes */
+	int32 GetBiome() const;
 
-	/** Sets the biome the brush paints, and makes it paint biomes */
-	void SetBiome(int32 InBiome) { Biome = InBiome; Tool = EHexPaintTool::Biome; }
+	/** Sets the biome the brush paints on the layer painted, and makes it paint biomes */
+	void SetBiome(int32 InBiome);
 
-	/** Returns the number of biomes that can be painted, their names and their colors, the FileColor of their asset */
-	int32 GetNumBiomes() const;
-	FText GetBiomeName(int32 InBiome) const;
-	FLinearColor GetBiomeColor(int32 InBiome) const;
+	/** Returns the number of biomes that can be painted on a layer, their names and their colors, the FileColor of their asset */
+	int32 GetNumBiomes(EHexPlanetLayer Layer) const;
+	FText GetBiomeName(EHexPlanetLayer Layer, int32 InBiome) const;
+	FLinearColor GetBiomeColor(EHexPlanetLayer Layer, int32 InBiome) const;
 
 	/** Returns the size of the brush, 1 to MaxBrushSize */
 	int32 GetBrushSize() const { return BrushSize; }
 
 	/** Sets the size of the brush */
 	void SetBrushSize(int32 InSize) { BrushSize = FMath::Clamp(InSize, 1, MaxBrushSize); }
+
+	/** Returns how many rings of cells the outline of the brush shows: its size, or one cell for the tools that take a single cell */
+	int32 GetOutlineSize() const { return Tool == EHexPaintTool::Entrance || Tool == EHexPaintTool::Carve ? 1 : BrushSize; }
+
+	/** Makes the tools work as with Ctrl held, or not, whatever the keyboard says, for the console (hex.PlanetPaint) */
+	void SetBackwards(bool bInBackwards) { bBackwards = bInBackwards; }
 
 	/** Starts a stroke at the cell under the cursor */
 	void BeginStroke(int32 Cell);
@@ -167,69 +308,55 @@ public:
 	/** Returns true while a stroke is painted */
 	bool IsPainting() const { return bPainting; }
 
-	/** Returns true if there is a stroke to undo or redo */
-	bool CanUndo() const { return !UndoSteps.IsEmpty(); }
-	bool CanRedo() const { return !RedoSteps.IsEmpty(); }
+	/** Returns true if there is a step of the layer painted to undo or redo */
+	bool CanUndo() const;
+	bool CanRedo() const;
 
-	/** Undoes the last stroke, or redoes the last stroke undone */
+	/** Undoes the last step of the layer painted, or redoes the last step undone */
 	void Undo();
 	void Redo();
 
-	/** Returns true while the planet rebuilds the surface of changed levels */
+	/** Returns true while the planet painted rebuilds the surface of changed levels */
 	bool IsRebuilding() const;
 
-	/** Returns the color of a level on the surface, from DA_HexPlanet */
-	FLinearColor GetLevelColor(int32 InLevel) const;
+	/** Returns the color of a level on a layer: of DA_HexPlanet on the surface, and of the biome the generation gives it underground */
+	FLinearColor GetLevelColor(EHexPlanetLayer Layer, int32 InLevel) const;
 
-	/** Returns the name of a level */
-	static FText GetLevelName(int32 InLevel);
+	/** Returns the name of a level on a layer */
+	static FText GetLevelName(EHexPlanetLayer Layer, int32 InLevel);
 
 private:
 
-	/** Old and new levels and biomes of the cells of one stroke */
-	struct FStep
-	{
-		TMap<int32, int32> OldLevels;
-		TMap<int32, int32> NewLevels;
-		TMap<int32, int32> OldBiomes;
-		TMap<int32, int32> NewBiomes;
-		HexPlanetSurface::FReliefOverrides OldRelief;
-		HexPlanetSurface::FReliefOverrides NewRelief;
-		TMap<int32, FHexCellObjects> OldObjects;
-		TMap<int32, FHexCellObjects> NewObjects;
-		/** What stood on the sides of rivers before and after, by HexPlanetRivers::GetEdgeKey (UHexPlanetRivers::GetEdge) */
-		TMap<uint64, uint8> OldRivers;
-		TMap<uint64, uint8> NewRivers;
-	};
+	/** Both layers, by EHexPlanetLayer, the underground without a planet on a planet that has none */
+	UPROPERTY(Transient)
+	TArray<FHexPainterLayer> Layers;
 
-	/** Planet painted */
+	/** Planet painted and its values, those of the layer of Target */
 	UPROPERTY(Transient)
 	TObjectPtr<AHexPlanet> Planet;
 
-	/** Values of the planet, with the colors of the levels and the height of the tiles */
 	UPROPERTY(Transient)
 	TObjectPtr<const UHexPlanetConfig> Settings;
 
-	/** Flat tiles of the painted cells until the surface shows them */
-	UPROPERTY(Transient)
-	TObjectPtr<UProceduralMeshComponent> PaintPreview;
+	EHexPlanetLayer Target = EHexPlanetLayer::Surface;
 
-	/** Material of the tiles, M_HexPlanet with PreviewTile 1, so it draws them in their vertex colors */
-	UPROPERTY(Transient)
-	TObjectPtr<UMaterialInstanceDynamic> PreviewMaterial;
+	/** The tool each tab had last, by EHexPaintTab */
+	EHexPaintTool TabTools[NumPaintTabs] = {EHexPaintTool::Level, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None,
+		EHexPaintTool::Level, EHexPaintTool::None};
 
 	bool bActive = false;
 	bool bPainting = false;
+	bool bBackwards = false;
 	EHexPaintTool Tool = EHexPaintTool::Level;
 	int32 ObjectSet = 0;
 	int32 ObjectDensity = 3;
 	EHexReliefTool ReliefTool = EHexReliefTool::Version;
-	int32 Level = 0;
-	int32 Biome = 0;
 	int32 BrushSize = 1;
+	int32 Network = 0;
 
-	/** Last cell under the cursor in the stroke */
+	/** Last cell under the cursor in the stroke, and the cell the stroke of the carving brush began at */
 	int32 LastCell = INDEX_NONE;
+	int32 CarveFrom = INDEX_NONE;
 
 	/** Point on the planet under the cursor, and the corner the river brush stood at last in the stroke */
 	FVector CursorPoint = FVector::ZeroVector;
@@ -239,13 +366,20 @@ private:
 	TArray<TArray<int32, TInlineAllocator<3>>> CornerCells;
 
 	/** Stroke painted now */
-	FStep Stroke;
+	FHexPaintStep Stroke;
 
-	/** Cells given to the planet whose surface is not rebuilt yet, shown as tiles, with the level the surface still shows (X) and the new one (Y) */
-	TMap<int32, FIntPoint> PendingLevels;
+	/** Returns the state of the layer painted */
+	FHexPainterLayer& GetLayerState() { return Layers[int32(Target)]; }
+	const FHexPainterLayer& GetLayerState() const { return Layers[int32(Target)]; }
 
-	TArray<FStep> UndoSteps;
-	TArray<FStep> RedoSteps;
+	/** Chooses a tool and the tab that holds it, which keeps it as its last */
+	void SetTool(EHexPaintTool InTool, EHexPaintTab Tab);
+
+	/** Shows the links of the underground while its Links tab is chosen and painting is on */
+	void UpdateLinksShown();
+
+	/** Returns true while Ctrl is held or the console asked for it, which makes a tool take away or go back */
+	bool IsBackwards() const;
 
 	/** Paints the brush around a cell */
 	void PaintAround(int32 Cell);
@@ -253,25 +387,34 @@ private:
 	/** Lays or takes away a river from the last corner to the corner of the cell nearest the cursor, or puts or takes away a bridge */
 	void PaintRiver(int32 Cell);
 
+	/** Puts an entrance of the network on a cell, or takes one away, at once, as part of the stroke */
+	void PaintEntrance(int32 Cell);
+
+	/** Makes the stroke of the carving brush the passage along the shortest way from where it began to a cell */
+	void PaintCarve(int32 Cell);
+
 	/** Returns the sides of the shortest way along sides of cells between two corners, by HexPlanetRivers::GetEdgeKey */
 	TArray<uint64> FindCornerPath(int32 From, int32 To);
 
-	/** Gives the planet the levels and biomes of a step and shows the levels as tiles until it is rebuilt */
+	/** Gives the planet painted the levels, biomes and the rest of a step and shows the levels as tiles until it is rebuilt */
 	void Apply(const TMap<int32, int32>& Levels, const TMap<int32, int32>& Biomes, const HexPlanetSurface::FReliefOverrides& Relief = {},
-		const TMap<int32, FHexCellObjects>& Objects = {}, const TMap<uint64, uint8>& Rivers = {});
+		const TMap<int32, FHexCellObjects>& Objects = {}, const TMap<uint64, uint8>& Rivers = {}, const TArray<FHexEntrance>* Entrances = nullptr);
+
+	/** Keeps a step as the last of Undo of the layer painted, which clears its Redo */
+	void AddStep(FHexPaintStep&& Step);
 
 	/** Returns the relief a click of the tool gives a cell, or false if it cannot change it, as it has no piece or its neighbors fix it */
 	bool GetToolRelief(int32 Cell, HexPlanetSurface::FReliefOverride& OutRelief) const;
 
-	/** Drops the tiles once the planet shows every level given to it */
-	void OnLevelsRebuilt();
+	/** Drops the tiles of a layer once its planet shows every level given to it */
+	void OnLevelsRebuilt(int32 Layer);
 
-	/** Returns the level a brush gives a cell, as a pentagon is never a mountain */
+	/** Returns the level a brush gives a cell, as a pentagon of the surface is never a mountain */
 	int32 GetPaintedLevel(int32 Cell, int32 InLevel) const;
 
-	/** Returns the radius at which the tile of a cell lies */
-	double GetTileRadius(int32 OldLevel, int32 NewLevel) const;
+	/** Returns the radius at which the tile of a cell of a layer lies */
+	double GetTileRadius(const FHexPainterLayer& State, int32 OldLevel, int32 NewLevel) const;
 
-	/** Builds the tiles of the pending levels and of the stroke */
-	void UpdatePreview();
+	/** Builds the tiles of the pending levels of a layer and, on the layer painted, of the stroke */
+	void UpdatePreview(int32 Layer);
 };

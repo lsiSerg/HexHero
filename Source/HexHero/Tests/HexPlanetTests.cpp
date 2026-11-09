@@ -373,6 +373,16 @@ bool FHexLastViewBlocksTest::RunTest(const FString& Parameters)
 
 	FHexLastView Empty;
 	TestFalse(TEXT("A file with no view is not valid"), HexLastView::Parse(TEXT("{}"), Empty));
+
+	// a view without a layer is on the surface, and the layer of the underground reads back
+	TestEqual(TEXT("A view without a layer is on the surface"), Old.Planet.Layer, EHexPlanetLayer::Surface);
+	FHexLastView Below;
+	TestTrue(TEXT("A view with a layer reads"), HexLastView::Parse(TEXT(R"({"planet": {"planet": "Islet", "latitude": 1, "longitude": 2, "heading": 3, "distance": 2500, "layer": "Underground"}})"), Below));
+	TestEqual(TEXT("Its layer is the underground"), Below.Planet.Layer, EHexPlanetLayer::Underground);
+	FString BelowJson;
+	FJsonObjectConverter::UStructToJsonObjectString(Below, BelowJson);
+	FHexLastView BelowRead;
+	TestTrue(TEXT("The layer writes and reads back"), HexLastView::Parse(BelowJson, BelowRead) && BelowRead == Below);
 	return true;
 }
 
@@ -431,7 +441,6 @@ bool FHexPlanetKitSeamsTest::RunTest(const FString& Parameters)
 
 	const auto GetLevel = [&](int32 Cell) { return Levels[Cell]; };
 	const auto GetTop = [&](int32 Cell) { return 1000.0 + Levels[Cell] * 25.0; };
-	const TArray<double> CornerHeights = HexPlanetKit::FindCornerHeights(Grid, GetTop);
 
 	HexPlanetKit::FPlacement Land;
 	HexPlanetKit::FPlacement Mountain;
@@ -498,18 +507,40 @@ bool FHexPlanetKitSeamsTest::RunTest(const FString& Parameters)
 		return Random.FRandRange(Foot, 0.0);
 	};
 
+	// both rules of the edges, the shared slope of the surface and the higher cell holding the side, as the underground has it
+	int32 Compared = 0;
+	for (const EHexEdgeRule Rule : {EHexEdgeRule::Shared, EHexEdgeRule::HigherHolds})
+	{
+	const TArray<double> CornerHeights = HexPlanetKit::FindCornerHeights(Grid, GetTop, Rule);
+
 	// each cell has a shape of its own inside, a dome or a needle and turned
 	const auto MakeFrame = [&](int32 Cell)
 	{
-		HexPlanetKit::FCellFrame Frame = HexPlanetKit::BuildFrame(Grid, Cell, GetTop, GetLevel, CornerHeights, MassifSteps, Relief);
+		HexPlanetKit::FCellFrame Frame = HexPlanetKit::BuildFrame(Grid, Cell, GetTop, GetLevel, CornerHeights, MassifSteps, Relief, Rule);
 		Frame.Sharpness = 0.6 + (Cell % 7) * 0.2;
 		Frame.Twist = ((Cell % 5) - 2) * 0.2;
 		Frame.Split = (Cell % 3) * 0.5;
 		return Frame;
 	};
 
+	// with HigherHolds a corner is the highest of its three tops and the middle of a side the higher of its two
+	if (Rule == EHexEdgeRule::HigherHolds)
+	{
+		int32 WrongCorners = 0;
+		for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+		{
+			const HexPlanetKit::FCellFrame Frame = MakeFrame(Cell);
+			for (int32 Side = 0; Side < Cells[Cell].Neighbors.Num(); ++Side)
+			{
+				const double Highest = FMath::Max3(GetTop(Cell), GetTop(Cells[Cell].Neighbors[Side]), GetTop(Cells[Cell].Neighbors[(Side + 1) % Cells[Cell].Neighbors.Num()]));
+				WrongCorners += FMath::IsNearlyEqual(Frame.CornerHeights[Side], Highest) && FMath::IsNearlyEqual(Frame.SideMiddles[Side],
+					FMath::Max(GetTop(Cell), GetTop(Cells[Cell].Neighbors[Side]))) ? 0 : 1;
+			}
+		}
+		TestEqual(TEXT("With HigherHolds every corner lies at the highest top of its cells and every side at the higher of its two"), WrongCorners, 0);
+	}
+
 	double Largest = 0.0;
-	int32 Compared = 0;
 
 	for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
 	{
@@ -538,15 +569,16 @@ bool FHexPlanetKitSeamsTest::RunTest(const FString& Parameters)
 					Largest = Distance;
 					if (Distance > 1.0e-6)
 					{
-						AddError(FString::Printf(TEXT("Cell %d (level %d) and %d (level %d) are %.4f apart at %.1f of their side"),
-							Cell, Levels[Cell], Neighbor, Levels[Neighbor], Distance, S));
+						AddError(FString::Printf(TEXT("%s: cell %d (level %d) and %d (level %d) are %.4f apart at %.1f of their side"),
+							Rule == EHexEdgeRule::Shared ? TEXT("Shared") : TEXT("HigherHolds"), Cell, Levels[Cell], Neighbor, Levels[Neighbor], Distance, S));
 					}
 				}
 			}
 		}
 	}
+	}
 
-	TestTrue(TEXT("Sides were compared"), Compared > Cells.Num() * 20);
+	TestTrue(TEXT("Sides were compared"), Compared > Cells.Num() * 40);
 	return true;
 }
 
@@ -906,6 +938,99 @@ bool FHexPlanetSurfaceRebuildTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Every point on a side between mountains is built by both cells, before the change"), Old.UnmatchedRidgePoints, 0);
 	AddInfo(FString::Printf(TEXT("%d points on sides between mountains, %d mirrored cells"), Full.RidgePoints,
 		Full.CellMirrored.FilterByPredicate([](bool bMirrored) { return bMirrored; }).Num()));
+
+	// the same with the rule of the underground, where a passage holds its sides and a void carries the whole cliff: passages two cells wide
+	// around a few cells over a deep void, then one carved on across the border of two chunks and a cell of a passage sunk into the void
+	HexPlanetSurface::FParams Under = Params;
+	Under.EdgeRule = EHexEdgeRule::HigherHolds;
+	Under.DeepDepth = 200.0;
+	TArray<int8> OldMaze;
+	OldMaze.Init(-2, Cells.Num());
+	for (const int32 Seed : {40, 400, 900, 1300})
+	{
+		const int32 Center = Seed % Cells.Num();
+		OldMaze[Center] = 0;
+		for (const int32 Neighbor : Cells[Center].Neighbors)
+		{
+			OldMaze[Neighbor] = 0;
+		}
+	}
+	TArray<int8> NewMaze = OldMaze;
+	NewMaze[BorderCell] = 0;
+	for (const int32 Neighbor : Cells[BorderCell].Neighbors)
+	{
+		NewMaze[Neighbor] = 0;
+	}
+	const int32 FilledCell = Cells[40 % Cells.Num()].Neighbors[0];
+	NewMaze[FilledCell] = -2;
+
+	const TArray<int32> OldMazeMassif = HexPlanetSurface::FindMassifSteps(Grid, *Kit, OldMaze);
+	const TArray<int32> NewMazeMassif = HexPlanetSurface::FindMassifSteps(Grid, *Kit, NewMaze);
+	const HexPlanetSurface::FBuild OldUnder = HexPlanetSurface::Build(Grid, *Kit, Under, OldMaze, OldMazeMassif, AllChunks, Old.MeanPeak);
+	const HexPlanetSurface::FBuild FullUnder = HexPlanetSurface::Build(Grid, *Kit, Under, NewMaze, NewMazeMassif, AllChunks, Old.MeanPeak);
+	const TArray<int32> UnderChunks = HexPlanetSurface::FindAffectedChunks(Grid, OldMaze, NewMaze, OldMazeMassif, NewMazeMassif);
+	const HexPlanetSurface::FBuild PartialUnder = HexPlanetSurface::Build(Grid, *Kit, Under, NewMaze, NewMazeMassif, UnderChunks, Old.MeanPeak);
+	TestTrue(TEXT("HigherHolds: the change reaches some chunks, not all"), UnderChunks.Num() > 0 && UnderChunks.Num() < Grid.GetNumChunks());
+
+	for (int32 Chunk = 0; Chunk < Grid.GetNumChunks(); ++Chunk)
+	{
+		const int32 Slot = UnderChunks.IndexOfByKey(Chunk);
+		for (int32 Part = 0; Part < 2; ++Part)
+		{
+			const HexPlanetSurface::FSection& Expected = FullUnder.Sections[Chunk * 2 + Part];
+			Compare(Slot != INDEX_NONE ? PartialUnder.Sections[Slot * 2 + Part] : OldUnder.Sections[Chunk * 2 + Part], Expected,
+				FString::Printf(TEXT("HigherHolds: %s section %d"), Slot != INDEX_NONE ? TEXT("rebuilt") : TEXT("left alone"), Chunk * 2 + Part));
+		}
+		Compare(Slot != INDEX_NONE ? PartialUnder.CoarseSections[Slot] : OldUnder.CoarseSections[Chunk], FullUnder.CoarseSections[Chunk],
+			FString::Printf(TEXT("HigherHolds: %s coarse section %d"), Slot != INDEX_NONE ? TEXT("rebuilt") : TEXT("left alone"), Chunk));
+	}
+	TestEqual(TEXT("HigherHolds: every cell built again on its own has the triangles of the full build"),
+		CountCellsBuiltOtherwise(Grid, *Kit, Under, NewMaze, NewMazeMassif, FullUnder, nullptr, nullptr), 0);
+
+	// a corner lies at the highest top of its cells, so a passage is flat at its top up to its sides, in its pieces and its coarse mesh, and a
+	// void reaches the top of the passages on its sides towards them, while it stays between its floor and that top
+	const double PassageTop = Under.GetTop(0);
+	const double VoidFloor = Under.GetTop(-2);
+	int32 BentPassages = 0;
+	int32 LowSides = 0;
+	int32 OutsideVoids = 0;
+	int32 PassageCells = 0;
+	for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+	{
+		const HexPlanetSurface::FCellMesh& Range = FullUnder.CellMeshes[Cell];
+		const HexPlanetSurface::FSection& Section = FullUnder.Sections[Range.Section];
+		bool bBent = false;
+		bool bLowSide = false;
+		bool bOutside = false;
+		for (int32 Index = Range.FirstVertex; Index < Range.FirstVertex + Range.NumVertices; ++Index)
+		{
+			const double Height = FVector3d(Section.Positions[Index]).Length();
+			if (NewMaze[Cell] == 0)
+			{
+				bBent |= !FMath::IsNearlyEqual(Height, PassageTop, 1.0e-2);
+			}
+			else
+			{
+				bOutside |= Height < VoidFloor - 1.0e-2 || Height > PassageTop + 1.0e-2;
+			}
+		}
+		PassageCells += NewMaze[Cell] == 0 ? 1 : 0;
+		BentPassages += bBent ? 1 : 0;
+		OutsideVoids += bOutside ? 1 : 0;
+
+		// every corner of a void cell next to a passage lies at the top of the passages, which the coarse mesh shows as its corners
+		for (int32 Side = 0; NewMaze[Cell] < 0 && Side < Cells[Cell].Neighbors.Num(); ++Side)
+		{
+			const int32 Corner = Cells[Cell].Corners[Side];
+			const bool bByPassage = NewMaze[Cells[Cell].Neighbors[Side]] == 0 || NewMaze[Cells[Cell].Neighbors[(Side + 1) % Cells[Cell].Neighbors.Num()]] == 0;
+			bLowSide |= bByPassage && !FMath::IsNearlyEqual(FullUnder.CornerLow[Corner], PassageTop, 1.0e-6);
+		}
+		LowSides += bLowSide ? 1 : 0;
+	}
+	TestTrue(TEXT("HigherHolds: there are passages"), PassageCells > 20);
+	TestEqual(TEXT("HigherHolds: every vertex of a passage lies at its top"), BentPassages, 0);
+	TestEqual(TEXT("HigherHolds: every corner of a void next to a passage lies at the top of the passage"), LowSides, 0);
+	TestEqual(TEXT("HigherHolds: every vertex of a void lies between its floor and the top of the passages"), OutsideVoids, 0);
 	return true;
 }
 

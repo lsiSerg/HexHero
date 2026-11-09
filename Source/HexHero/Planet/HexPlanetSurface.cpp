@@ -244,7 +244,7 @@ namespace
 		};
 		const uint8 Look = uint8(Level + 2 + (Each.IsPentagon() ? 8 : 0));
 
-		HexPlanetKit::FCellFrame Frame = HexPlanetKit::BuildFrame(Grid, Cell, GetTop, GetLevel, Context.CornerLow, Context.MassifSteps, Context.Relief);
+		HexPlanetKit::FCellFrame Frame = HexPlanetKit::BuildFrame(Grid, Cell, GetTop, GetLevel, Context.CornerLow, Context.MassifSteps, Context.Relief, Context.Params.EdgeRule);
 
 		// the piece by the neighbors on the same level, with direction D of the piece towards neighbor D
 		const HexPlanetSurface::FKitLevel* Loaded = Each.IsPentagon() ? nullptr : Context.Kit.Levels.Find(Level);
@@ -599,6 +599,7 @@ HexPlanetSurface::FParams HexPlanetSurface::FParams::Make(const UHexPlanetConfig
 	Params.RiverValleyDepth = Config.RiverValleyDepth;
 	Params.RiverValleyBottom = Config.RiverValleyBottom;
 	Params.RiverValleySlope = Config.RiverValleySlope;
+	Params.EdgeRule = Config.EdgeRule;
 	Params.SandColor = Config.SandColor;
 	Params.SnowColor = Config.SnowColor;
 	Params.SlopeStart = Config.SlopeStart;
@@ -844,7 +845,7 @@ HexPlanetSurface::FBuild HexPlanetSurface::Build(const FHexSphereGrid& Grid, con
 	const bool bGivenRelief = Options.Relief.Num() == Cells.Num();
 	if (!bGivenCorners)
 	{
-		Result.CornerLow = HexPlanetKit::FindCornerHeights(Grid, [&](int32 Cell) { return Params.GetTop(Levels[Cell]); });
+		Result.CornerLow = HexPlanetKit::FindCornerHeights(Grid, [&](int32 Cell) { return Params.GetTop(Levels[Cell]); }, Params.EdgeRule);
 	}
 	if (!bGivenRelief)
 	{
@@ -954,7 +955,7 @@ HexPlanetSurface::FBuild HexPlanetSurface::Build(const FHexSphereGrid& Grid, con
 					const int32 NeighborSide = Cells[Neighbor].Neighbors.IndexOfByKey(Cell);
 					const auto GetLevel = [&Levels](int32 Other) { return int32(Levels[Other]); };
 					const auto GetTop = [&Params, &Levels](int32 Other) { return Params.GetTop(Levels[Other]); };
-					const HexPlanetKit::FCellFrame NeighborFrame = HexPlanetKit::BuildFrame(Grid, Neighbor, GetTop, GetLevel, Context.CornerLow, MassifSteps, Context.Relief);
+					const HexPlanetKit::FCellFrame NeighborFrame = HexPlanetKit::BuildFrame(Grid, Neighbor, GetTop, GetLevel, Context.CornerLow, MassifSteps, Context.Relief, Params.EdgeRule);
 					HexPlanetKit::FPlacement Ground;
 					Ground.FootDepth = Params.LevelHeight;
 					Ground.FadeHeight = Params.LevelHeight;

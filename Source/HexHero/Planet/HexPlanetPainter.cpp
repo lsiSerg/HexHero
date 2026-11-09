@@ -1,12 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "HexPlanetPainter.h"
+#include "HexHero.h"
 #include "HexPlanet.h"
 #include "HexPlanetConfig.h"
 #include "HexBiomeConfig.h"
 #include "HexPlanetObjectSet.h"
 #include "HexPlanetRivers.h"
+#include "HexPlanetUnderground.h"
 #include "HexSphereGrid.h"
+#include "Engine/Engine.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
@@ -14,28 +17,131 @@
 
 #define LOCTEXT_NAMESPACE "HexPlanetPainter"
 
-void UHexPlanetPainter::Init(AHexPlanet* InPlanet)
+void UHexPlanetPainter::Init(AHexPlanet* SurfacePlanet, AHexPlanet* UndergroundPlanet)
 {
-	Planet = InPlanet;
+	Layers.SetNum(NumPlanetLayers);
+	Layers[int32(EHexPlanetLayer::Underground)].Tab = EHexPaintTab::Maze;
+	Layers[int32(EHexPlanetLayer::Underground)].Level = HexPlanetUnderground::PassageLevel;
 
-	if (!Planet)
+	AHexPlanet* const LayerPlanets[NumPlanetLayers] = {SurfacePlanet, UndergroundPlanet};
+	for (int32 Layer = 0; Layer < NumPlanetLayers; ++Layer)
+	{
+		FHexPainterLayer& State = Layers[Layer];
+		State.Planet = LayerPlanets[Layer];
+		if (!State.Planet)
+		{
+			continue;
+		}
+
+		State.Settings = State.Planet->PlanetConfig.LoadSynchronous();
+		if (!State.Settings)
+		{
+			State.Settings = GetDefault<UHexPlanetConfig>();
+		}
+
+		// each layer draws the tiles of its own cells, hidden with it
+		State.PaintPreview = NewObject<UProceduralMeshComponent>(State.Planet, TEXT("PaintPreview"));
+		State.PaintPreview->SetupAttachment(State.Planet->GetRootComponent());
+		State.PaintPreview->SetCastShadow(false);
+		State.PaintPreview->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		State.PaintPreview->RegisterComponent();
+
+		State.Planet->OnLevelsRebuilt.AddUObject(this, &UHexPlanetPainter::OnLevelsRebuilt, Layer);
+	}
+
+	// the layer shown, and whichever is shown later
+	UHexPlanetLayers* LayerSet = SurfacePlanet ? UHexPlanetLayers::Get(SurfacePlanet->GetWorld()) : nullptr;
+	Target = EHexPlanetLayer::Surface;
+	Planet = Layers[0].Planet;
+	Settings = Layers[0].Settings;
+	if (LayerSet)
+	{
+		SetTarget(LayerSet->GetPresentedLayer());
+		LayerSet->OnPresented.AddUObject(this, &UHexPlanetPainter::SetTarget);
+	}
+}
+
+bool UHexPlanetPainter::HasLayer(EHexPlanetLayer Layer) const
+{
+	return Layers.IsValidIndex(int32(Layer)) && Layers[int32(Layer)].Planet != nullptr;
+}
+
+void UHexPlanetPainter::SetTarget(EHexPlanetLayer Layer)
+{
+	if (!HasLayer(Layer) || (Layer == Target && Planet == Layers[int32(Layer)].Planet))
 	{
 		return;
 	}
-
-	Settings = Planet->PlanetConfig.LoadSynchronous();
-	if (!Settings)
+	if (bPainting)
 	{
-		Settings = GetDefault<UHexPlanetConfig>();
+		EndStroke();
 	}
 
-	PaintPreview = NewObject<UProceduralMeshComponent>(Planet, TEXT("PaintPreview"));
-	PaintPreview->SetupAttachment(Planet->GetRootComponent());
-	PaintPreview->SetCastShadow(false);
-	PaintPreview->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	PaintPreview->RegisterComponent();
+	// each layer comes back to the tab it had, with the tool chosen there last
+	TabTools[int32(GetLayerState().Tab)] = Tool;
+	Target = Layer;
+	Planet = GetLayerState().Planet;
+	Settings = GetLayerState().Settings;
+	Tool = TabTools[int32(GetLayerState().Tab)];
+	LastCell = INDEX_NONE;
+	LastCorner = INDEX_NONE;
+	CornerCells.Reset();
+	UpdateLinksShown();
+}
 
-	Planet->OnLevelsRebuilt.AddUObject(this, &UHexPlanetPainter::OnLevelsRebuilt);
+EHexPaintTab UHexPlanetPainter::GetTab() const
+{
+	return Layers.IsValidIndex(int32(Target)) ? GetLayerState().Tab : EHexPaintTab::Ground;
+}
+
+void UHexPlanetPainter::SetTab(EHexPaintTab Tab)
+{
+	if (GetTabLayer(Tab) != Target || !Layers.IsValidIndex(int32(Target)) || GetLayerState().Tab == Tab)
+	{
+		return;
+	}
+	if (bPainting)
+	{
+		EndStroke();
+	}
+	TabTools[int32(GetLayerState().Tab)] = Tool;
+	GetLayerState().Tab = Tab;
+	Tool = TabTools[int32(Tab)];
+	UpdateLinksShown();
+}
+
+void UHexPlanetPainter::SetTool(EHexPaintTool InTool, EHexPaintTab Tab)
+{
+	// a tool of the other layer waits until that layer is painted
+	if (GetTabLayer(Tab) != Target)
+	{
+		return;
+	}
+	SetTab(Tab);
+	Tool = InTool;
+	TabTools[int32(Tab)] = InTool;
+}
+
+FText UHexPlanetPainter::GetTabName(EHexPaintTab Tab)
+{
+	switch (Tab)
+	{
+	case EHexPaintTab::Ground: return LOCTEXT("TabGround", "Ground");
+	case EHexPaintTab::Relief: return LOCTEXT("TabRelief", "Relief");
+	case EHexPaintTab::Objects: return LOCTEXT("TabObjects", "Objects");
+	case EHexPaintTab::Rivers: return LOCTEXT("TabRivers", "Rivers");
+	case EHexPaintTab::Entrances: return LOCTEXT("TabEntrances", "Entrances");
+	case EHexPaintTab::Maze: return LOCTEXT("TabMaze", "Maze");
+	default: return LOCTEXT("TabLinks", "Links");
+	}
+}
+
+void UHexPlanetPainter::UpdateLinksShown()
+{
+	if (HasLayer(EHexPlanetLayer::Underground))
+	{
+		Layers[int32(EHexPlanetLayer::Underground)].Planet->SetLinksShown(bActive && Target == EHexPlanetLayer::Underground && GetTab() == EHexPaintTab::Links);
+	}
 }
 
 void UHexPlanetPainter::SetActive(bool bInActive)
@@ -45,6 +151,12 @@ void UHexPlanetPainter::SetActive(bool bInActive)
 		EndStroke();
 	}
 	bActive = bInActive;
+	UpdateLinksShown();
+}
+
+bool UHexPlanetPainter::IsBackwards() const
+{
+	return bBackwards || (FSlateApplication::IsInitialized() && FSlateApplication::Get().GetModifierKeys().IsControlDown());
 }
 
 bool UHexPlanetPainter::IsRebuilding() const
@@ -52,25 +164,69 @@ bool UHexPlanetPainter::IsRebuilding() const
 	return Planet && Planet->IsRebuilding();
 }
 
-FLinearColor UHexPlanetPainter::GetLevelColor(int32 InLevel) const
+FLinearColor UHexPlanetPainter::GetLevelColor(EHexPlanetLayer Layer, int32 InLevel) const
 {
-	const UHexPlanetConfig* Config = Settings ? Settings.Get() : GetDefault<UHexPlanetConfig>();
+	if (!HasLayer(Layer))
+	{
+		return FLinearColor::Gray;
+	}
+	const FHexPainterLayer& State = Layers[int32(Layer)];
+
+	// underground the color of the cave biome the generation gives the level, so the tiles look like what they become
+	if (Layer == EHexPlanetLayer::Underground)
+	{
+		const TCHAR Letter = HexPlanetUnderground::IsPassage(int8(InLevel)) ? HexPlanetUnderground::Biome::Floor : HexPlanetUnderground::Biome::Abyss;
+		const int32 Biome = State.Planet->GetBiomeLetters().Find(Letter);
+		return Biome != INDEX_NONE ? GetBiomeColor(Layer, Biome) : FLinearColor::Gray;
+	}
+	const UHexPlanetConfig* Config = State.Settings ? State.Settings.Get() : GetDefault<UHexPlanetConfig>();
 	return Config->LevelColors.IsValidIndex(InLevel - MinLevel) ? Config->LevelColors[InLevel - MinLevel] : FLinearColor::Gray;
 }
 
-int32 UHexPlanetPainter::GetNumBiomes() const
+int32 UHexPlanetPainter::GetLevel() const
 {
-	return Planet ? Planet->GetBiomes().Num() : 0;
+	return Layers.IsValidIndex(int32(Target)) ? GetLayerState().Level : 0;
 }
 
-FText UHexPlanetPainter::GetBiomeName(int32 InBiome) const
+void UHexPlanetPainter::SetLevel(int32 InLevel)
 {
-	return Planet && Planet->GetBiomes().IsValidIndex(InBiome) ? FText::FromString(Planet->GetBiomes()[InBiome]->DisplayName) : FText::GetEmpty();
+	if (!Layers.IsValidIndex(int32(Target)))
+	{
+		return;
+	}
+	const bool bUnderground = Target == EHexPlanetLayer::Underground;
+	GetLayerState().Level = bUnderground ? (InLevel < 0 ? HexPlanetUnderground::VoidLevel : HexPlanetUnderground::PassageLevel) : FMath::Clamp(InLevel, MinLevel, MaxLevel);
+	SetTool(EHexPaintTool::Level, bUnderground ? EHexPaintTab::Maze : EHexPaintTab::Ground);
 }
 
-FLinearColor UHexPlanetPainter::GetBiomeColor(int32 InBiome) const
+int32 UHexPlanetPainter::GetBiome() const
 {
-	return Planet && Planet->GetBiomes().IsValidIndex(InBiome) ? FLinearColor(Planet->GetBiomes()[InBiome]->FileColor) : FLinearColor::Gray;
+	return Layers.IsValidIndex(int32(Target)) ? GetLayerState().Biome : 0;
+}
+
+void UHexPlanetPainter::SetBiome(int32 InBiome)
+{
+	if (!Layers.IsValidIndex(int32(Target)))
+	{
+		return;
+	}
+	GetLayerState().Biome = InBiome;
+	SetTool(EHexPaintTool::Biome, Target == EHexPlanetLayer::Underground ? EHexPaintTab::Maze : EHexPaintTab::Ground);
+}
+
+int32 UHexPlanetPainter::GetNumBiomes(EHexPlanetLayer Layer) const
+{
+	return HasLayer(Layer) ? Layers[int32(Layer)].Planet->GetBiomes().Num() : 0;
+}
+
+FText UHexPlanetPainter::GetBiomeName(EHexPlanetLayer Layer, int32 InBiome) const
+{
+	return InBiome >= 0 && InBiome < GetNumBiomes(Layer) ? FText::FromString(Layers[int32(Layer)].Planet->GetBiomes()[InBiome]->DisplayName) : FText::GetEmpty();
+}
+
+FLinearColor UHexPlanetPainter::GetBiomeColor(EHexPlanetLayer Layer, int32 InBiome) const
+{
+	return InBiome >= 0 && InBiome < GetNumBiomes(Layer) ? FLinearColor(Layers[int32(Layer)].Planet->GetBiomes()[InBiome]->FileColor) : FLinearColor::Gray;
 }
 
 void UHexPlanetPainter::ClearTool()
@@ -80,30 +236,127 @@ void UHexPlanetPainter::ClearTool()
 		EndStroke();
 	}
 	Tool = EHexPaintTool::None;
+	if (Layers.IsValidIndex(int32(Target)))
+	{
+		TabTools[int32(GetLayerState().Tab)] = Tool;
+	}
 }
 
 int32 UHexPlanetPainter::GetNumObjectSets() const
 {
-	return Planet && Planet->GetObjects() ? Planet->GetObjects()->GetSets().Num() : 0;
+	const AHexPlanet* SurfacePlanet = HasLayer(EHexPlanetLayer::Surface) ? Layers[0].Planet.Get() : nullptr;
+	return SurfacePlanet && SurfacePlanet->GetObjects() ? SurfacePlanet->GetObjects()->GetSets().Num() : 0;
 }
 
 FText UHexPlanetPainter::GetObjectSetName(int32 Set) const
 {
-	return Set < GetNumObjectSets() ? FText::FromString(Planet->GetObjects()->GetSets()[Set]->DisplayName) : FText::GetEmpty();
+	return Set < GetNumObjectSets() ? FText::FromString(Layers[0].Planet->GetObjects()->GetSets()[Set]->DisplayName) : FText::GetEmpty();
 }
 
 FLinearColor UHexPlanetPainter::GetObjectSetColor(int32 Set) const
 {
-	return Set < GetNumObjectSets() ? Planet->GetObjects()->GetSets()[Set]->PaletteColor : FLinearColor::Gray;
+	return Set < GetNumObjectSets() ? Layers[0].Planet->GetObjects()->GetSets()[Set]->PaletteColor : FLinearColor::Gray;
 }
 
 bool UHexPlanetPainter::IsObjectSetCover(int32 Set) const
 {
-	return Set < GetNumObjectSets() && Planet->GetObjects()->GetSets()[Set]->Layer == EHexObjectLayer::Cover;
+	return Set < GetNumObjectSets() && Layers[0].Planet->GetObjects()->GetSets()[Set]->Layer == EHexObjectLayer::Cover;
 }
 
-FText UHexPlanetPainter::GetLevelName(int32 InLevel)
+FLinearColor UHexPlanetPainter::GetNetworkColor(int32 InNetwork) const
 {
+	const UHexPlanetConfig* Config = HasLayer(EHexPlanetLayer::Surface) && Layers[0].Settings ? Layers[0].Settings.Get() : GetDefault<UHexPlanetConfig>();
+	return Config->GetNetworkColor(InNetwork);
+}
+
+int32 UHexPlanetPainter::GetNetworkEntrances(int32 InNetwork) const
+{
+	int32 Count = 0;
+	if (HasLayer(EHexPlanetLayer::Surface))
+	{
+		for (const FHexEntrance& Entrance : Layers[0].Planet->GetEntrances())
+		{
+			Count += Entrance.Network == InNetwork ? 1 : 0;
+		}
+	}
+	return Count;
+}
+
+int32 UHexPlanetPainter::GetPassageWidth() const
+{
+	return HasLayer(EHexPlanetLayer::Surface) ? FMath::Max(Layers[0].Planet->GetManifest().Underground.PassageWidth, 2) : 2;
+}
+
+FText UHexPlanetPainter::GetLinksText() const
+{
+	const HexPlanetUnderground::FReport* Report = HasLayer(EHexPlanetLayer::Underground) ? Layers[int32(EHexPlanetLayer::Underground)].Planet->GetUndergroundReport() : nullptr;
+	if (!Report)
+	{
+		return LOCTEXT("NoReport", "The underground has no data yet.");
+	}
+
+	TArray<FString> Lines;
+	TArray<FString> Split;
+	TArray<FString> Empty;
+	for (int32 Each = 0; Each < HexPlanetFile::MaxNetworks; ++Each)
+	{
+		const HexPlanetUnderground::FNetworkReport& Part = Report->Networks[Each];
+		if (Part.Entrances > 0 && Part.Components > 1)
+		{
+			Split.Add(FString::Printf(TEXT("%c in %d"), HexPlanetFile::GetNetworkLetter(Each), Part.Components));
+		}
+		else if (Part.Entrances > 0 && Part.Components == 0)
+		{
+			Empty.Add(FString::Chr(HexPlanetFile::GetNetworkLetter(Each)));
+		}
+	}
+	Lines.Add(FString::Printf(TEXT("%d networks, %d passage cells"), Report->CountNetworks(), Report->PassageCells));
+	if (Report->IsGood())
+	{
+		Lines.Add(TEXT("Every network is one piece of its own."));
+	}
+	if (!Split.IsEmpty())
+	{
+		Lines.Add(FString::Printf(TEXT("Split: %s"), *FString::Join(Split, TEXT(", "))));
+	}
+	if (!Empty.IsEmpty())
+	{
+		Lines.Add(FString::Printf(TEXT("No exit on a passage: %s"), *FString::Join(Empty, TEXT(", "))));
+	}
+	if (!Report->Merged.IsEmpty())
+	{
+		TArray<FString> Pairs;
+		for (const FIntPoint& Pair : Report->Merged)
+		{
+			Pairs.Add(FString::Printf(TEXT("%c+%c"), HexPlanetFile::GetNetworkLetter(Pair.X), HexPlanetFile::GetNetworkLetter(Pair.Y)));
+		}
+		Lines.Add(FString::Printf(TEXT("Joined: %s"), *FString::Join(Pairs, TEXT(", "))));
+	}
+	if (!Report->ExitsInVoid.IsEmpty())
+	{
+		Lines.Add(FString::Printf(TEXT("Exits in the void: %d"), Report->ExitsInVoid.Num()));
+	}
+	if (!Report->Necks.IsEmpty())
+	{
+		Lines.Add(FString::Printf(TEXT("One cell wide: %d cells"), Report->Necks.Num()));
+	}
+	if (!Report->BadEntrances.IsEmpty())
+	{
+		Lines.Add(FString::Printf(TEXT("Entrances not used: %d"), Report->BadEntrances.Num()));
+	}
+	if (Report->OrphanCells > 0)
+	{
+		Lines.Add(FString::Printf(TEXT("No exit reaches %d cells"), Report->OrphanCells));
+	}
+	return FText::FromString(FString::Join(Lines, TEXT("\n")));
+}
+
+FText UHexPlanetPainter::GetLevelName(EHexPlanetLayer Layer, int32 InLevel)
+{
+	if (Layer == EHexPlanetLayer::Underground)
+	{
+		return HexPlanetUnderground::IsPassage(int8(InLevel)) ? LOCTEXT("Passage", "Passage") : LOCTEXT("Void", "Void, the abyss");
+	}
 	switch (InLevel)
 	{
 	case -2: return LOCTEXT("DeepSea", "Deep sea");
@@ -116,7 +369,7 @@ FText UHexPlanetPainter::GetLevelName(int32 InLevel)
 
 int32 UHexPlanetPainter::GetPaintedLevel(int32 Cell, int32 InLevel) const
 {
-	return InLevel > 1 && Planet->GetGrid().GetCells()[Cell].IsPentagon() ? 1 : InLevel;
+	return Target == EHexPlanetLayer::Surface && InLevel > 1 && Planet->GetGrid().GetCells()[Cell].IsPentagon() ? 1 : InLevel;
 }
 
 void UHexPlanetPainter::BeginStroke(int32 Cell)
@@ -129,7 +382,8 @@ void UHexPlanetPainter::BeginStroke(int32 Cell)
 	bPainting = true;
 	LastCell = INDEX_NONE;
 	LastCorner = INDEX_NONE;
-	Stroke = FStep();
+	CarveFrom = Cell;
+	Stroke = FHexPaintStep();
 	ContinueStroke(Cell);
 }
 
@@ -147,6 +401,22 @@ void UHexPlanetPainter::ContinueStroke(int32 Cell)
 	}
 	if (Cell == LastCell)
 	{
+		return;
+	}
+	// an entrance goes on the cell pressed alone, and a carved passage runs from it to the cell under the cursor
+	if (Tool == EHexPaintTool::Entrance)
+	{
+		if (LastCell == INDEX_NONE)
+		{
+			PaintEntrance(Cell);
+		}
+		LastCell = Cell;
+		return;
+	}
+	if (Tool == EHexPaintTool::Carve)
+	{
+		PaintCarve(Cell);
+		LastCell = Cell;
 		return;
 	}
 
@@ -175,7 +445,7 @@ void UHexPlanetPainter::ContinueStroke(int32 Cell)
 
 	if (Stroke.NewLevels.Num() != NumBefore)
 	{
-		UpdatePreview();
+		UpdatePreview(int32(Target));
 	}
 }
 
@@ -276,6 +546,7 @@ void UHexPlanetPainter::PaintAround(int32 Cell)
 	// biomes go to the planet at once, only to the cells whose level allows them
 	if (Tool == EHexPaintTool::Biome)
 	{
+		const int32 Biome = GetBiome();
 		TMap<int32, int32> Changed;
 		for (const int32 Painted : Brush)
 		{
@@ -296,6 +567,7 @@ void UHexPlanetPainter::PaintAround(int32 Cell)
 		return;
 	}
 
+	const int32 Level = GetLevel();
 	for (const int32 Painted : Brush)
 	{
 		const int32 NewLevel = GetPaintedLevel(Painted, Level);
@@ -310,6 +582,83 @@ void UHexPlanetPainter::PaintAround(int32 Cell)
 		Stroke.OldLevels.FindOrAdd(Painted, Planet->GetCellLevel(Painted));
 		Stroke.NewLevels.Add(Painted, NewLevel);
 	}
+}
+
+void UHexPlanetPainter::PaintEntrance(int32 Cell)
+{
+	if (Target != EHexPlanetLayer::Surface)
+	{
+		return;
+	}
+
+	// a copy, as the planet keeps the list it returns and changes it
+	const TArray<FHexEntrance> Old = Planet->GetEntrances();
+	TArray<FHexEntrance> New = Old;
+	const int32 Index = New.IndexOfByPredicate([Cell](const FHexEntrance& Each) { return Each.Cell == Cell; });
+	const bool bRemove = IsBackwards();
+	if (bRemove)
+	{
+		if (Index == INDEX_NONE)
+		{
+			return;
+		}
+		New.RemoveAt(Index);
+	}
+	else
+	{
+		// on plains or hills and never on a pentagon; its exit is the same cell below, which nothing carves, so it may be in the void, which the
+		// Links tab underground shows
+		if (!HexPlanetUnderground::CanHoldEntrance(Planet->GetGrid(), Planet->GetLevels(), Cell))
+		{
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(INDEX_NONE, 3.0f, FColor::Yellow, TEXT("An entrance stands only on plains or hills, and never on a pentagon"));
+			}
+			return;
+		}
+		if (Index != INDEX_NONE)
+		{
+			if (New[Index].Network == Network)
+			{
+				return;
+			}
+			New[Index].Network = Network;
+		}
+		else
+		{
+			New.Add({Cell, Network});
+			New.Sort([](const FHexEntrance& A, const FHexEntrance& B) { return A.Cell < B.Cell; });
+		}
+	}
+
+	if (!Stroke.bEntrances)
+	{
+		Stroke.bEntrances = true;
+		Stroke.OldEntrances = Old;
+	}
+	Stroke.NewEntrances = New;
+	Planet->SetEntrances(New);
+	UE_LOG(LogHexHero, Log, TEXT("Painter: %s the entrance of network %c on cell %d, %d entrances"), bRemove ? TEXT("took away") : TEXT("put"),
+		HexPlanetFile::GetNetworkLetter(bRemove ? Old[Index].Network : Network), Cell, New.Num());
+}
+
+void UHexPlanetPainter::PaintCarve(int32 Cell)
+{
+	if (Target != EHexPlanetLayer::Underground || !Planet->GetGrid().GetCells().IsValidIndex(CarveFrom))
+	{
+		return;
+	}
+
+	// the whole way again from where the stroke began, so the passage follows the cursor and drops what it no longer needs
+	Stroke.OldLevels.Reset();
+	Stroke.NewLevels.Reset();
+	const TArray<int32> Path = HexPlanetUnderground::FindPath(Planet->GetGrid(), CarveFrom, Cell);
+	for (const int32 Carved : HexPlanetUnderground::WidenPath(Planet->GetGrid(), Planet->GetLevels(), Path, GetPassageWidth()))
+	{
+		Stroke.OldLevels.Add(Carved, Planet->GetCellLevel(Carved));
+		Stroke.NewLevels.Add(Carved, HexPlanetUnderground::PassageLevel);
+	}
+	UpdatePreview(int32(Target));
 }
 
 TArray<uint64> UHexPlanetPainter::FindCornerPath(int32 From, int32 To)
@@ -373,14 +722,14 @@ TArray<uint64> UHexPlanetPainter::FindCornerPath(int32 From, int32 To)
 void UHexPlanetPainter::PaintRiver(int32 Cell)
 {
 	UHexPlanetRivers* Rivers = Planet->GetRivers();
-	if (!Rivers)
+	if (!Rivers || Target != EHexPlanetLayer::Surface)
 	{
 		return;
 	}
 	const FHexSphereGrid& Grid = Planet->GetGrid();
 	const FHexSphereCell& Each = Grid.GetCells()[Cell];
 	const FVector3d Direction = FVector3d(CursorPoint).GetSafeNormal();
-	const bool bRemove = FSlateApplication::IsInitialized() && FSlateApplication::Get().GetModifierKeys().IsControlDown();
+	const bool bRemove = IsBackwards();
 	TMap<uint64, uint8> Changed;
 
 	const auto Change = [&](uint64 Key, uint8 New)
@@ -464,6 +813,7 @@ void UHexPlanetPainter::EndStroke()
 
 	bPainting = false;
 	LastCell = INDEX_NONE;
+	CarveFrom = INDEX_NONE;
 
 	// a cell painted back to its level or biome is no change
 	for (auto It = Stroke.NewLevels.CreateIterator(); It; ++It)
@@ -492,9 +842,10 @@ void UHexPlanetPainter::EndStroke()
 		}
 	}
 
-	if (Stroke.NewLevels.IsEmpty() && Stroke.NewBiomes.IsEmpty() && Stroke.NewRelief.IsEmpty() && Stroke.NewObjects.IsEmpty() && Stroke.NewRivers.IsEmpty())
+	if (Stroke.IsEmpty())
 	{
-		UpdatePreview();
+		Stroke = FHexPaintStep();
+		UpdatePreview(int32(Target));
 		return;
 	}
 
@@ -513,39 +864,112 @@ void UHexPlanetPainter::EndStroke()
 			Stroke.NewBiomes.Add(Each.Key, Planet->GetCellBiome(Each.Key));
 		}
 	}
-	UndoSteps.Add(MoveTemp(Stroke));
-	Stroke = FStep();
-	RedoSteps.Reset();
+	AddStep(MoveTemp(Stroke));
+	Stroke = FHexPaintStep();
+}
+
+void UHexPlanetPainter::AddStep(FHexPaintStep&& Step)
+{
+	FHexPainterLayer& State = GetLayerState();
+	State.UndoSteps.Add(MoveTemp(Step));
+	State.RedoSteps.Reset();
 
 	const int32 MaxSteps = Settings ? Settings->PaintUndoSteps : 100;
-	if (UndoSteps.Num() > MaxSteps)
+	if (State.UndoSteps.Num() > MaxSteps)
 	{
-		UndoSteps.RemoveAt(0, UndoSteps.Num() - MaxSteps);
+		State.UndoSteps.RemoveAt(0, State.UndoSteps.Num() - MaxSteps);
 	}
+}
+
+bool UHexPlanetPainter::CanUndo() const
+{
+	return Layers.IsValidIndex(int32(Target)) && !GetLayerState().UndoSteps.IsEmpty();
+}
+
+bool UHexPlanetPainter::CanRedo() const
+{
+	return Layers.IsValidIndex(int32(Target)) && !GetLayerState().RedoSteps.IsEmpty();
 }
 
 void UHexPlanetPainter::Undo()
 {
-	if (bPainting || UndoSteps.IsEmpty())
+	if (bPainting || !CanUndo())
 	{
 		return;
 	}
 
-	FStep Step = UndoSteps.Pop();
-	Apply(Step.OldLevels, Step.OldBiomes, Step.OldRelief, Step.OldObjects, Step.OldRivers);
-	RedoSteps.Add(MoveTemp(Step));
+	FHexPaintStep Step = GetLayerState().UndoSteps.Pop();
+	Apply(Step.OldLevels, Step.OldBiomes, Step.OldRelief, Step.OldObjects, Step.OldRivers, Step.bEntrances ? &Step.OldEntrances : nullptr);
+	GetLayerState().RedoSteps.Add(MoveTemp(Step));
 }
 
 void UHexPlanetPainter::Redo()
 {
-	if (bPainting || RedoSteps.IsEmpty())
+	if (bPainting || !CanRedo())
 	{
 		return;
 	}
 
-	FStep Step = RedoSteps.Pop();
-	Apply(Step.NewLevels, Step.NewBiomes, Step.NewRelief, Step.NewObjects, Step.NewRivers);
-	UndoSteps.Add(MoveTemp(Step));
+	FHexPaintStep Step = GetLayerState().RedoSteps.Pop();
+	Apply(Step.NewLevels, Step.NewBiomes, Step.NewRelief, Step.NewObjects, Step.NewRivers, Step.bEntrances ? &Step.NewEntrances : nullptr);
+	GetLayerState().UndoSteps.Add(MoveTemp(Step));
+}
+
+bool UHexPlanetPainter::Regenerate(int32 InNetwork)
+{
+	if (bPainting || Target != EHexPlanetLayer::Underground || !HasLayer(EHexPlanetLayer::Surface) || !Planet->IsDataLoaded())
+	{
+		return false;
+	}
+
+	// from the levels of the surface and the entrances, which stay as they are, so the step touches the underground alone
+	const AHexPlanet* SurfacePlanet = Layers[0].Planet;
+	const double StartTime = FPlatformTime::Seconds();
+	HexPlanetUnderground::FResult Result;
+	if (InNetwork == INDEX_NONE)
+	{
+		HexPlanetUnderground::Generate(Planet->GetGrid(), SurfacePlanet->GetLevels(), SurfacePlanet->GetManifest(), &Planet->GetEntrances(), Result);
+	}
+	else
+	{
+		HexPlanetUnderground::RegenerateNetwork(Planet->GetGrid(), SurfacePlanet->GetLevels(), SurfacePlanet->GetManifest(), Planet->GetEntrances(), Planet->GetLevels(),
+			InNetwork, Result);
+	}
+
+	// the cells whose level changed take the biome the generation gives them; the others keep theirs, painted by hand or not
+	FHexPaintStep Step;
+	const TArray<TCHAR>& Letters = Planet->GetBiomeLetters();
+	for (int32 Cell = 0; Cell < Result.Levels.Num(); ++Cell)
+	{
+		if (Result.Levels[Cell] == Planet->GetCellLevel(Cell))
+		{
+			continue;
+		}
+		Step.OldLevels.Add(Cell, Planet->GetCellLevel(Cell));
+		Step.NewLevels.Add(Cell, Result.Levels[Cell]);
+		const int32 Biome = Result.Biomes.IsValidIndex(Cell) ? Letters.Find(Result.Biomes[Cell]) : INDEX_NONE;
+		if (Biome != INDEX_NONE)
+		{
+			Step.OldBiomes.Add(Cell, Planet->GetCellBiome(Cell));
+			Step.NewBiomes.Add(Cell, Biome);
+		}
+	}
+
+	const FString What = InNetwork == INDEX_NONE ? FString(TEXT("all networks")) : FString::Printf(TEXT("network %c"), HexPlanetFile::GetNetworkLetter(InNetwork));
+	UE_LOG(LogHexHero, Log, TEXT("Painter: generated %s again in %.1f ms, %d cells changed: %s"), *What, (FPlatformTime::Seconds() - StartTime) * 1000.0,
+		Step.NewLevels.Num(), *Result.Report.ToString());
+	if (Step.IsEmpty())
+	{
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(INDEX_NONE, 3.0f, FColor::White, FString::Printf(TEXT("Generating %s again changed nothing"), *What));
+		}
+		return false;
+	}
+
+	Apply(Step.NewLevels, Step.NewBiomes);
+	AddStep(MoveTemp(Step));
+	return true;
 }
 
 bool UHexPlanetPainter::GetToolRelief(int32 Cell, HexPlanetSurface::FReliefOverride& OutRelief) const
@@ -561,7 +985,7 @@ bool UHexPlanetPainter::GetToolRelief(int32 Cell, HexPlanetSurface::FReliefOverr
 	OutRelief = Planet->GetReliefOverride(Cell);
 	const FIntPoint TurnChoice = Planet->GetCellTurnChoice(Cell);
 	// Ctrl held reverses the tool: back through versions and turns, and lower
-	const bool bBack = FSlateApplication::IsInitialized() && FSlateApplication::Get().GetModifierKeys().IsControlDown();
+	const bool bBack = IsBackwards();
 	const int32 Step = bBack ? -1 : 1;
 
 	switch (ReliefTool)
@@ -607,7 +1031,7 @@ bool UHexPlanetPainter::GetToolRelief(int32 Cell, HexPlanetSurface::FReliefOverr
 }
 
 void UHexPlanetPainter::Apply(const TMap<int32, int32>& Levels, const TMap<int32, int32>& Biomes, const HexPlanetSurface::FReliefOverrides& Relief,
-	const TMap<int32, FHexCellObjects>& Objects, const TMap<uint64, uint8>& Rivers)
+	const TMap<int32, FHexCellObjects>& Objects, const TMap<uint64, uint8>& Rivers, const TArray<FHexEntrance>* Entrances)
 {
 	if (!Objects.IsEmpty())
 	{
@@ -624,6 +1048,7 @@ void UHexPlanetPainter::Apply(const TMap<int32, int32>& Levels, const TMap<int32
 		Planet->SetReliefOverrides(Relief);
 	}
 
+	TMap<int32, FIntPoint>& PendingLevels = GetLayerState().PendingLevels;
 	for (const TPair<int32, int32>& Each : Levels)
 	{
 		// the surface still shows the level it had before the first change that is not rebuilt yet
@@ -639,53 +1064,73 @@ void UHexPlanetPainter::Apply(const TMap<int32, int32>& Levels, const TMap<int32
 	{
 		Planet->SetCells(Levels, Biomes);
 	}
-	Planet->MarkLevelsEdited();
-	UpdatePreview();
+
+	// the entrances mark themselves as edited, and a step of them alone changes no cell
+	if (Entrances)
+	{
+		Planet->SetEntrances(*Entrances);
+	}
+	if (!Entrances || !Levels.IsEmpty() || !Biomes.IsEmpty() || !Relief.IsEmpty() || !Objects.IsEmpty() || !Rivers.IsEmpty())
+	{
+		Planet->MarkLevelsEdited();
+	}
+	UpdatePreview(int32(Target));
 }
 
-void UHexPlanetPainter::OnLevelsRebuilt()
+void UHexPlanetPainter::OnLevelsRebuilt(int32 Layer)
 {
-	// a tile goes once the surface shows the level of its cell, so tiles of changes still waiting stay
-	const TArray<int8>& Shown = Planet->GetShownLevels();
-	const int32 NumBefore = PendingLevels.Num();
-
-	for (auto It = PendingLevels.CreateIterator(); It; ++It)
+	if (!Layers.IsValidIndex(Layer) || !Layers[Layer].Planet)
 	{
-		if (!Shown.IsValidIndex(It.Key()) || Shown[It.Key()] == Planet->GetCellLevel(It.Key()))
+		return;
+	}
+
+	// a tile goes once the surface shows the level of its cell, so tiles of changes still waiting stay
+	FHexPainterLayer& State = Layers[Layer];
+	const TArray<int8>& Shown = State.Planet->GetShownLevels();
+	const int32 NumBefore = State.PendingLevels.Num();
+
+	for (auto It = State.PendingLevels.CreateIterator(); It; ++It)
+	{
+		if (!Shown.IsValidIndex(It.Key()) || Shown[It.Key()] == State.Planet->GetCellLevel(It.Key()))
 		{
 			It.RemoveCurrent();
 		}
 	}
 
-	if (PendingLevels.Num() != NumBefore)
+	if (State.PendingLevels.Num() != NumBefore)
 	{
-		UpdatePreview();
+		UpdatePreview(Layer);
 	}
 }
 
-double UHexPlanetPainter::GetTileRadius(int32 OldLevel, int32 NewLevel) const
+double UHexPlanetPainter::GetTileRadius(const FHexPainterLayer& State, int32 OldLevel, int32 NewLevel) const
 {
-	const auto GetTop = [this](int32 Each)
+	const UHexPlanetConfig* Config = State.Settings;
+	const auto GetTop = [Config](int32 Each)
 	{
-		return Each >= 2 ? Settings->PaintMountainTop : Each < 0 ? Settings->PaintSeaLift : (Each + 1) * Settings->LevelHeight;
+		return Each >= 2 ? Config->PaintMountainTop : Each < 0 ? Config->PaintSeaLift : (Each + 1) * Config->LevelHeight;
 	};
-	return Planet->GetRadius() + FMath::Max(GetTop(OldLevel), GetTop(NewLevel)) + Settings->PaintLift;
+	return State.Planet->GetRadius() + FMath::Max(GetTop(OldLevel), GetTop(NewLevel)) + Config->PaintLift;
 }
 
-void UHexPlanetPainter::UpdatePreview()
+void UHexPlanetPainter::UpdatePreview(int32 Layer)
 {
-	if (!PaintPreview)
+	if (!Layers.IsValidIndex(Layer) || !Layers[Layer].PaintPreview || !Layers[Layer].Settings)
 	{
 		return;
 	}
+	FHexPainterLayer& State = Layers[Layer];
 
-	PaintPreview->ClearAllMeshSections();
+	State.PaintPreview->ClearAllMeshSections();
 
-	TMap<int32, FIntPoint> Tiles = PendingLevels;
-	for (const TPair<int32, int32>& Each : Stroke.NewLevels)
+	TMap<int32, FIntPoint> Tiles = State.PendingLevels;
+	if (Layer == int32(Target))
 	{
-		const FIntPoint* Pending = PendingLevels.Find(Each.Key);
-		Tiles.Add(Each.Key, FIntPoint(Pending ? Pending->X : Stroke.OldLevels[Each.Key], Each.Value));
+		for (const TPair<int32, int32>& Each : Stroke.NewLevels)
+		{
+			const FIntPoint* Pending = State.PendingLevels.Find(Each.Key);
+			Tiles.Add(Each.Key, FIntPoint(Pending ? Pending->X : Stroke.OldLevels[Each.Key], Each.Value));
+		}
 	}
 
 	if (Tiles.IsEmpty())
@@ -699,14 +1144,15 @@ void UHexPlanetPainter::UpdatePreview()
 	TArray<FVector2D> UVs;
 	TArray<FLinearColor> Colors;
 
-	const TArray<FHexSphereCell>& Cells = Planet->GetGrid().GetCells();
-	const TArray<FVector3d>& Corners = Planet->GetGrid().GetCorners();
+	const TArray<FHexSphereCell>& Cells = State.Planet->GetGrid().GetCells();
+	const TArray<FVector3d>& Corners = State.Planet->GetGrid().GetCorners();
+	const EHexPlanetLayer TileLayer = EHexPlanetLayer(Layer);
 
 	for (const TPair<int32, FIntPoint>& Tile : Tiles)
 	{
 		const FHexSphereCell& Each = Cells[Tile.Key];
-		const double Top = GetTileRadius(Tile.Value.X, Tile.Value.Y);
-		FLinearColor Color = GetLevelColor(Tile.Value.Y);
+		const double Top = GetTileRadius(State, Tile.Value.X, Tile.Value.Y);
+		FLinearColor Color = GetLevelColor(TileLayer, Tile.Value.Y);
 		Color.A = 0.0f;
 
 		// a fan from the center, whose U of the first UV is 0 there and 1 at the sides, so M_HexPlanet draws the grid line on it
@@ -742,17 +1188,17 @@ void UHexPlanetPainter::UpdatePreview()
 		}
 	}
 
-	PaintPreview->CreateMeshSection_LinearColor(0, Positions, Triangles, Normals, UVs, Colors, {}, false);
-	// M_HexPlanet draws the textures of the biomes, and with PreviewTile the vertex colors of the tiles instead
-	if (!PreviewMaterial)
+	State.PaintPreview->CreateMeshSection_LinearColor(0, Positions, Triangles, Normals, UVs, Colors, {}, false);
+	// the material of the cells draws the textures of the biomes, and with PreviewTile the vertex colors of the tiles instead
+	if (!State.PreviewMaterial)
 	{
-		if (UMaterialInterface* Base = Planet->Material.LoadSynchronous())
+		if (UMaterialInterface* Base = State.Planet->Material.LoadSynchronous())
 		{
-			PreviewMaterial = UMaterialInstanceDynamic::Create(Base, this);
-			PreviewMaterial->SetScalarParameterValue(TEXT("PreviewTile"), 1.0f);
+			State.PreviewMaterial = UMaterialInstanceDynamic::Create(Base, this);
+			State.PreviewMaterial->SetScalarParameterValue(TEXT("PreviewTile"), 1.0f);
 		}
 	}
-	PaintPreview->SetMaterial(0, PreviewMaterial);
+	State.PaintPreview->SetMaterial(0, State.PreviewMaterial);
 }
 
 #undef LOCTEXT_NAMESPACE

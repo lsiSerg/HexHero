@@ -3,7 +3,12 @@
 #include "HexPlanetCameraPawn.h"
 #include "Camera/CameraComponent.h"
 #include "Camera/PlayerCameraManager.h"
+#include "Components/LightComponent.h"
 #include "Components/SceneComponent.h"
+#include "Components/SkyLightComponent.h"
+#include "Materials/MaterialParameterCollection.h"
+#include "Materials/MaterialParameterCollectionInstance.h"
+#include "UObject/UObjectIterator.h"
 #include "Engine/DirectionalLight.h"
 #include "Engine/LocalPlayer.h"
 #include "EngineUtils.h"
@@ -90,8 +95,9 @@ namespace
 			Folder = Planet->Folder;
 		}
 
-		// the planet already open stays, so a camera command after this one moves the camera at once
-		TActorIterator<AHexPlanet> Open(World);
+		// the planet already open stays, so a camera command after this one moves the camera at once; both layers have its folder
+		const UHexPlanetLayers* Layers = UHexPlanetLayers::Get(World);
+		const AHexPlanet* Open = Layers ? Layers->GetSurface() : nullptr;
 
 		if (!Open || (!Folder.IsEmpty() && !Open->GetPlanetFolder().Equals(Folder, ESearchCase::IgnoreCase)))
 		{
@@ -109,28 +115,253 @@ namespace
 		return View.Planet.Distance > 0.0 && (View.Planet.Planet.IsEmpty() || View.Planet.Planet.Equals(Planet.GetPlanetFolder(), ESearchCase::IgnoreCase));
 	}
 
-	/** Place of the planet camera that hex.PlanetSetCamera asked for, kept until a camera has its planet, which may come only after the level opens */
+	/** Place of the planet camera that hex.PlanetSetCamera asked for, and its layer, kept until a camera has its planet, which may come only
+	 *  after the level opens */
 	TOptional<FHexPlanetCameraPlacement> PendingPlanetPlacement;
+	TOptional<EHexPlanetLayer> PendingPlanetLayer;
 
 	void PlanetSetCameraCommand(const TArray<FString>& Args)
 	{
 		FHexPlanetCameraPlacement Placement;
 
-		if (Args.Num() < 2 || !LexTryParseString(Placement.Latitude, *Args[0]) || !LexTryParseString(Placement.Longitude, *Args[1])
-			|| (Args.IsValidIndex(2) && !LexTryParseString(Placement.Heading, *Args[2]))
-			|| (Args.IsValidIndex(3) && !LexTryParseString(Placement.Distance, *Args[3])))
+		// the layer may come last, as hex.CopyCamera writes it
+		TArray<FString> Numbers = Args;
+		EHexPlanetLayer Layer = EHexPlanetLayer::Surface;
+		const bool bLayer = Numbers.Num() > 2 && ParsePlanetLayer(Numbers.Last(), Layer);
+		if (bLayer)
 		{
-			UE_LOG(LogHexHero, Warning, TEXT("Usage: hex.PlanetSetCamera <Latitude> <Longitude> [Heading] [Distance], in degrees, where heading 0 looks north"));
+			Numbers.Pop();
+		}
+
+		if (Numbers.Num() < 2 || Numbers.Num() > 4 || !LexTryParseString(Placement.Latitude, *Numbers[0]) || !LexTryParseString(Placement.Longitude, *Numbers[1])
+			|| (Numbers.IsValidIndex(2) && !LexTryParseString(Placement.Heading, *Numbers[2]))
+			|| (Numbers.IsValidIndex(3) && !LexTryParseString(Placement.Distance, *Numbers[3])))
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("Usage: hex.PlanetSetCamera <Latitude> <Longitude> [Heading] [Distance] [Surface|Underground], in degrees, where heading 0 looks north"));
 			return;
 		}
 
+		// a line without a layer is of the surface, as hex.CopyCamera writes it there and the last view reads it, so it brings the view back
+		// from the underground too
 		PendingPlanetPlacement = Placement;
+		PendingPlanetLayer = Layer;
 	}
 
 	FAutoConsoleCommand PlanetSetCameraConsoleCommand(TEXT("hex.PlanetSetCamera"),
 		TEXT("Puts the planet camera at once over a point, as hex.CopyCamera gives it. Arguments: latitude and longitude in degrees, ")
-		TEXT("then optionally the heading in degrees clockwise from north and the distance. After hex.LoadPlanet it waits until the planet is built."),
+		TEXT("then optionally the heading in degrees clockwise from north, the distance and the layer, Surface (when left out) or Underground, ")
+		TEXT("which it travels to from the other layer. After hex.LoadPlanet it waits until the planet is built."),
 		FConsoleCommandWithArgsDelegate::CreateStatic(&PlanetSetCameraCommand));
+
+	/** Goes to a layer of the planet at the same place, as the key of the layer does elsewhere than over an entrance */
+	void PlanetLayerCommand(const TArray<FString>& Args, UWorld* World)
+	{
+		const APlayerController* PlayerController = World ? World->GetFirstPlayerController() : nullptr;
+		AHexPlanetCameraPawn* CameraPawn = PlayerController ? Cast<AHexPlanetCameraPawn>(PlayerController->GetPawn()) : nullptr;
+		EHexPlanetLayer Layer = EHexPlanetLayer::Surface;
+
+		if (Args.Num() != 1 || !ParsePlanetLayer(Args[0], Layer))
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("Usage: hex.PlanetLayer <Surface|Underground>"));
+			return;
+		}
+		if (!CameraPawn || !CameraPawn->GetPlanet() || !CameraPawn->GetPlanet()->IsBuilt())
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("hex.PlanetLayer: no planet camera, or its planet is not built yet"));
+			return;
+		}
+		if (CameraPawn->IsTravelling())
+		{
+			UE_LOG(LogHexHero, Log, TEXT("hex.PlanetLayer: a trip between the layers runs, try again after it"));
+			return;
+		}
+		if (CameraPawn->GetShownLayer() == Layer)
+		{
+			UE_LOG(LogHexHero, Log, TEXT("hex.PlanetLayer: the %s is shown already"), GetPlanetLayerName(Layer));
+			return;
+		}
+		if (!CameraPawn->TravelTo(Layer))
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("hex.PlanetLayer: cannot go to the %s now"), GetPlanetLayerName(Layer));
+		}
+	}
+
+	FAutoConsoleCommandWithWorldAndArgs PlanetLayerConsoleCommand(TEXT("hex.PlanetLayer"),
+		TEXT("hex.PlanetLayer <Surface|Underground>: goes to a layer of the planet at the same place, through a fade to black"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&PlanetLayerCommand));
+
+	/** Logs what of each layer is in the scene, where the hidden one must have nothing, the sky lights in the scene and the values of the sun */
+	void PlanetLayerCheckCommand(const TArray<FString>& Args, UWorld* World)
+	{
+		const UHexPlanetLayers* Layers = UHexPlanetLayers::Get(World);
+		if (!Layers || !Layers->GetSurface())
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("hex.PlanetLayerCheck: no planet"));
+			return;
+		}
+
+		int32 Problems = 0;
+		for (const EHexPlanetLayer Layer : {EHexPlanetLayer::Surface, EHexPlanetLayer::Underground})
+		{
+			const AHexPlanet* Planet = Layers->GetPlanet(Layer);
+			if (!Planet)
+			{
+				UE_LOG(LogHexHero, Log, TEXT("Layer check: the %s has no planet"), GetPlanetLayerName(Layer));
+				continue;
+			}
+
+			// a primitive is in the scene while it has a scene proxy
+			TInlineComponentArray<UPrimitiveComponent*> Primitives(Planet);
+			int32 InScene = 0;
+			TArray<FString> Names;
+			for (const UPrimitiveComponent* Primitive : Primitives)
+			{
+				if (Primitive->SceneProxy)
+				{
+					++InScene;
+					if (Names.Num() < 12)
+					{
+						Names.Add(Primitive->GetName());
+					}
+				}
+			}
+			const bool bShown = Planet->IsPresented();
+			UE_LOG(LogHexHero, Log, TEXT("Layer check: the %s is %s, %s, %d of its %d primitives are in the scene%s%s"), GetPlanetLayerName(Layer),
+				bShown ? TEXT("shown") : TEXT("hidden"), Planet->IsBuilt() ? TEXT("built") : Planet->IsDataLoaded() ? TEXT("with its data, its meshes not built") : TEXT("without its data yet"),
+				InScene, Primitives.Num(), Names.IsEmpty() ? TEXT("") : TEXT(": "), *FString::Join(Names, TEXT(", ")));
+			if (!bShown && InScene > 0)
+			{
+				UE_LOG(LogHexHero, Error, TEXT("Layer check: the hidden %s has %d primitives in the scene"), GetPlanetLayerName(Layer), InScene);
+				++Problems;
+			}
+
+			// the panel at the cursor for a cell, as it reads on this layer
+			int32 Cell = INDEX_NONE;
+			if (!Args.IsEmpty() && LexTryParseString(Cell, *Args[0]) && Planet->IsBuilt() && Planet->GetGrid().GetCells().IsValidIndex(Cell))
+			{
+				UE_LOG(LogHexHero, Log, TEXT("Layer check: cell %d on the %s reads:\n%s"), Cell, GetPlanetLayerName(Layer), *Planet->GetCellDebugText(Cell));
+
+				// picking from the camera underground, where it follows the triangles: rays to the ground of the cells up to three rings around the
+				// cell, in their middles and towards the middles of their sides, on a void down its cliffs, must find the cell where they reach
+				// that ground, or a cell in front of it that hides it, and never pass through the ground into a cell behind. The surface picks by
+				// the tops of the cells, so it is not checked
+				const APlayerController* Player = World->GetFirstPlayerController();
+				if (Layer == EHexPlanetLayer::Underground && Planet->IsPresented() && Player && Player->PlayerCameraManager)
+				{
+					const FVector CameraLocation = Player->PlayerCameraManager->GetCameraLocation();
+					const FHexSphereGrid& Grid = Planet->GetGrid();
+					TArray<int32> Checked{Cell};
+					for (int32 Ring = 0, First = 0; Ring < 3; ++Ring)
+					{
+						const int32 Last = Checked.Num();
+						for (int32 Index = First; Index < Last; ++Index)
+						{
+							for (const int32 Neighbor : Grid.GetCells()[Checked[Index]].Neighbors)
+							{
+								Checked.AddUnique(Neighbor);
+							}
+						}
+						First = Last;
+					}
+					int32 Rays = 0;
+					int32 Found = 0;
+					int32 Hidden = 0;
+					int32 Wrong = 0;
+					int32 Voids = 0;
+					for (const int32 Each : Checked)
+					{
+						const FHexSphereCell& Checking = Grid.GetCells()[Each];
+						Voids += Planet->GetCellLevel(Each) < 0 ? 1 : 0;
+						TArray<FVector3d> Directions{Checking.Center};
+						for (int32 Side = 0; Side < Checking.Corners.Num(); ++Side)
+						{
+							const FVector3d Middle = (Grid.GetCorners()[Checking.Corners[(Side + Checking.Corners.Num() - 1) % Checking.Corners.Num()]]
+								+ Grid.GetCorners()[Checking.Corners[Side]]).GetSafeNormal();
+							for (const double Share : {0.5, 0.8})
+							{
+								Directions.Add(FMath::Lerp(Checking.Center, Middle, Share).GetSafeNormal());
+							}
+						}
+						for (const FVector3d& Direction : Directions)
+						{
+							const FVector Target(Direction * Planet->FindGroundRadius(Each, Direction));
+							FVector Hit = Target;
+							const int32 Picked = Planet->FindCellAlongRay(CameraLocation, Target - CameraLocation, &Hit);
+							const double Short = FVector::Distance(CameraLocation, Target) - FVector::Distance(CameraLocation, Hit);
+							++Rays;
+							if (Picked == Each && FMath::Abs(Short) < 1.0)
+							{
+								++Found;
+							}
+							else if (Picked != INDEX_NONE && Short >= 1.0)
+							{
+								++Hidden;
+							}
+							else
+							{
+								++Wrong;
+								UE_LOG(LogHexHero, Warning, TEXT("Layer check: a ray to %s on cell %d picked cell %d %.1f short of it"), *Target.ToString(), Each, Picked, Short);
+							}
+						}
+					}
+					UE_LOG(LogHexHero, Log, TEXT("Layer check: picking on the %s, %d cells up to three rings around cell %d (%d voids), %d rays to their ground: %d found their cell, %d met a cell in front of it, %d went wrong"),
+						GetPlanetLayerName(Layer), Checked.Num(), Cell, Voids, Rays, Found, Hidden, Wrong);
+					Problems += Wrong;
+				}
+			}
+		}
+
+		// the sky lights the scene could take, of which there must be one
+		int32 SkyLights = 0;
+		for (TObjectIterator<USkyLightComponent> It; It; ++It)
+		{
+			// as USkyLightComponent::CreateRenderState_Concurrent decides, which also hides it with its actor
+			const bool bValid = It->SourceType != SLS_SpecifiedCubemap || It->Cubemap != nullptr || It->IsRealTimeCaptureEnabled();
+			if (It->GetWorld() == World && It->IsRegistered() && It->bAffectsWorld && bValid && It->ShouldComponentAddToScene() && It->ShouldRender())
+			{
+				++SkyLights;
+				const AActor* Owner = It->GetOwner();
+				const AHexPlanet* OwnerPlanet = Cast<AHexPlanet>(Owner);
+				UE_LOG(LogHexHero, Log, TEXT("Layer check: sky light %s of %s%s, intensity %.2f, color %s"), *It->GetName(), Owner ? *Owner->GetName() : TEXT("nothing"),
+					OwnerPlanet ? *FString::Printf(TEXT(" (the %s)"), GetPlanetLayerName(OwnerPlanet->GetLayer())) : TEXT(""), It->Intensity, *It->GetLightColor().ToString());
+			}
+		}
+		if (SkyLights != 1)
+		{
+			UE_LOG(LogHexHero, Error, TEXT("Layer check: %d sky lights are in the scene, not one"), SkyLights);
+			++Problems;
+		}
+
+		// the sun, the exposure and what the materials read of the sun
+		for (TActorIterator<ADirectionalLight> It(World); It; ++It)
+		{
+			const ULightComponent* Light = It->GetLightComponent();
+			UE_LOG(LogHexHero, Log, TEXT("Layer check: sun %s shines from %s, intensity %.2f, color %s"), *It->GetName(), *(-It->GetActorForwardVector()).ToString(),
+				Light ? Light->Intensity : 0.0f, Light ? *Light->GetLightColor().ToString() : TEXT("none"));
+		}
+		const APlayerController* PlayerController = World->GetFirstPlayerController();
+		if (const AHexPlanetCameraPawn* CameraPawn = PlayerController ? Cast<AHexPlanetCameraPawn>(PlayerController->GetPawn()) : nullptr)
+		{
+			UE_LOG(LogHexHero, Log, TEXT("Layer check: the camera shows the %s with exposure bias %.2f%s"), GetPlanetLayerName(CameraPawn->GetShownLayer()),
+				CameraPawn->GetExposureBias(), CameraPawn->IsTravelling() ? TEXT(", travelling") : TEXT(""));
+		}
+		if (const AHexPlanet* Shown = Layers->GetPresented(); Shown && Shown->ParameterCollection.Get())
+		{
+			if (const UMaterialParameterCollectionInstance* Parameters = World->GetParameterCollectionInstance(Shown->ParameterCollection.Get()))
+			{
+				FLinearColor SunDirection;
+				float PlanetRadius = 0.0f;
+				Parameters->GetVectorParameterValue(TEXT("SunDirection"), SunDirection);
+				Parameters->GetScalarParameterValue(TEXT("PlanetRadius"), PlanetRadius);
+				UE_LOG(LogHexHero, Log, TEXT("Layer check: MPC_HexPlanet has SunDirection %s and PlanetRadius %.0f"), *SunDirection.ToString(), PlanetRadius);
+			}
+		}
+		UE_LOG(LogHexHero, Log, TEXT("Layer check: %s"), Problems == 0 ? TEXT("nothing of the hidden layer is in the scene") : *FString::Printf(TEXT("%d problems"), Problems));
+	}
+
+	FAutoConsoleCommandWithWorldAndArgs PlanetLayerCheckConsoleCommand(TEXT("hex.PlanetLayerCheck"),
+		TEXT("hex.PlanetLayerCheck [Cell]: logs the primitives of each layer of the planet in the scene, where the hidden one must have none, the sky lights in the scene and the values of the sun, and with a cell the panel at the cursor for it on each layer that is built"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&PlanetLayerCheckCommand));
 
 	/** Returns the planet camera saved in the last view */
 	FHexPlanetCameraPlacement GetSavedPlacement(const FHexLastView& View)
@@ -199,6 +430,244 @@ void AHexPlanetCameraPawn::BeginPlay()
 		Sun = *It;
 		break;
 	}
+
+	// the light of the surface keeps the sun as the level has it, which the underground changes
+	if (const ULightComponent* Light = Sun ? Sun->GetLightComponent() : nullptr)
+	{
+		LevelSunColor = Light->GetLightColor();
+		LevelSunIntensity = Light->Intensity;
+	}
+}
+
+EHexPlanetLayer AHexPlanetCameraPawn::GetShownLayer() const
+{
+	return Planet ? Planet->GetLayer() : EHexPlanetLayer::Surface;
+}
+
+float AHexPlanetCameraPawn::GetExposureBias() const
+{
+	return Camera->PostProcessSettings.AutoExposureBias;
+}
+
+void AHexPlanetCameraPawn::ApplyLighting(EHexPlanetLayer Layer)
+{
+	const FHexLayerLighting Lighting = Settings()->GetLighting(Layer);
+	Camera->PostProcessSettings.AutoExposureBias = Lighting.ExposureBias;
+
+	if (ULightComponent* Light = Sun ? Sun->GetLightComponent() : nullptr)
+	{
+		const bool bLevel = Lighting.SunIntensity <= 0.0f;
+		Light->SetIntensity(bLevel ? LevelSunIntensity : Lighting.SunIntensity);
+		Light->SetLightColor(bLevel ? LevelSunColor : Lighting.SunColor);
+	}
+	// the sun of the new light stands where it should at once
+	SunFrom = FVector::ZeroVector;
+	bSunPlaced = false;
+}
+
+FVector AHexPlanetCameraPawn::GetCameraLocationFor(const FHexPlanetCameraPlacement& Placement) const
+{
+	const double Distance = Placement.Distance > 0.0 ? FMath::Clamp(Placement.Distance, double(Settings()->MinDistance), GetMaxDistance()) : TargetDistance;
+	return GetCameraLocationAt(Placement.ToOrientation(), Distance);
+}
+
+bool AHexPlanetCameraPawn::TravelTo(EHexPlanetLayer Layer, TOptional<FHexPlanetCameraPlacement> Placement, bool bStartBlack)
+{
+	const UHexPlanetLayers* LayerSet = UHexPlanetLayers::Get(GetWorld());
+	AHexPlanet* Target = LayerSet ? LayerSet->GetPlanet(Layer) : nullptr;
+	if (IsTravelling() || !Target || !Planet || !Planet->IsBuilt())
+	{
+		return false;
+	}
+	if (Target == Planet)
+	{
+		if (Placement.IsSet())
+		{
+			SetPlacement(Placement.GetValue());
+		}
+		return true;
+	}
+
+	// the keys held now would get no release while the screen is black, and a stroke, drag or turn ends here
+	AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController());
+	if (PlayerController)
+	{
+		PlayerController->FlushPressedKeys();
+		// the brush stays on and paints the layer the trip goes to, once it is shown (UHexPlanetPainter::SetTarget)
+		PlayerController->EndPaintStroke();
+	}
+	bDragging = false;
+	bTurning = false;
+	bFocusing = false;
+	bMiddleDown = false;
+	MoveInput = FVector2D::ZeroVector;
+	TurnKeyInput = 0.0f;
+	AngularVelocity = FVector::ZeroVector;
+
+	TravelLayer = Layer;
+	TravelPlacement = Placement.Get(GetPlacement());
+	if (TravelPlacement.Distance <= 0.0)
+	{
+		TravelPlacement.Distance = TargetDistance;
+	}
+
+	// a jump on the layer left behind that still waits for its pieces gives way to the trip, and that layer, hidden, streams nothing for it
+	if (PendingPlanetPlacement.IsSet() && PendingPlanetLayer.Get(EHexPlanetLayer::Surface) == Planet->GetLayer())
+	{
+		UE_LOG(LogHexHero, Log, TEXT("Travel: the jump of hex.PlanetSetCamera on the %s that waited %.0f ms is dropped"), GetPlanetLayerName(Planet->GetLayer()), JumpWaitTime * 1000.0f);
+		PendingPlanetPlacement.Reset();
+		PendingPlanetLayer.Reset();
+	}
+	JumpWaitTime = 0.0f;
+	Planet->SetPiecePrefetch({});
+
+	// the hidden layer builds the pieces around the place while the screen fades, so it is whole when it is shown; a layer not built yet
+	// builds all of it when it is first shown
+	Target->SetPiecePrefetch(GetCameraLocationFor(TravelPlacement));
+
+	TravelPhase = bStartBlack ? ETravelPhase::Black : ETravelPhase::FadingOut;
+	TravelPhaseTime = 0.0f;
+	TravelBlackFrames = 0;
+	bTravelSwapped = false;
+	TravelStartTime = FPlatformTime::Seconds();
+	TravelSwapMs = TravelReadyMs = 0.0;
+	if (APlayerCameraManager* CameraManager = PlayerController ? PlayerController->PlayerCameraManager.Get() : nullptr)
+	{
+		CameraManager->StartCameraFade(bStartBlack ? 1.0f : 0.0f, 1.0f, bStartBlack ? 0.0f : Settings()->TravelFadeOutTime, FLinearColor::Black, false, true);
+	}
+	if (bStartBlack && PlayerController)
+	{
+		PlayerController->SetTravelScreen(true);
+	}
+	UE_LOG(LogHexHero, Log, TEXT("Travel from the %s to the %s at %.4f %.4f, heading %.1f at %.0f%s"), GetPlanetLayerName(Planet->GetLayer()), GetPlanetLayerName(Layer),
+		TravelPlacement.Latitude, TravelPlacement.Longitude, TravelPlacement.Heading, TravelPlacement.Distance, Target->IsBuilt() ? TEXT("") : TEXT(", which builds its meshes"));
+	return true;
+}
+
+void AHexPlanetCameraPawn::UpdateTravel(float DeltaTime)
+{
+	const UHexPlanetCameraConfig* Config = Settings();
+	AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController());
+	UHexPlanetLayers* LayerSet = UHexPlanetLayers::Get(GetWorld());
+	AHexPlanet* Target = LayerSet ? LayerSet->GetPlanet(TravelLayer) : nullptr;
+	TravelPhaseTime += DeltaTime;
+
+	if (!Target)
+	{
+		// the layer went away, as when the level closes
+		TravelPhase = ETravelPhase::None;
+		if (PlayerController)
+		{
+			PlayerController->SetTravelScreen(false);
+			if (PlayerController->PlayerCameraManager)
+			{
+				PlayerController->PlayerCameraManager->StopCameraFade();
+			}
+		}
+		return;
+	}
+
+	switch (TravelPhase)
+	{
+	case ETravelPhase::FadingOut:
+		// the black screen covers the widgets too, which the fade of the camera does not
+		if (TravelPhaseTime >= Config->TravelFadeOutTime)
+		{
+			TravelPhase = ETravelPhase::Black;
+			TravelPhaseTime = 0.0f;
+			TravelBlackFrames = 0;
+			if (PlayerController)
+			{
+				PlayerController->SetTravelScreen(true);
+			}
+		}
+		break;
+
+	case ETravelPhase::Black:
+	{
+		++TravelBlackFrames;
+		const FVector CameraLocation = GetCameraLocationFor(TravelPlacement);
+		if (!bTravelSwapped)
+		{
+			// once the black screen has been drawn, and the hidden layer has streamed the pieces around the place, which a layer not built has
+			// none of yet; at most JumpWaitMax
+			const bool bReady = !Target->IsBuilt() || Target->ArePiecesReadyAt(CameraLocation);
+			if (TravelBlackFrames < 3 || (!bReady && TravelPhaseTime < Config->JumpWaitMax))
+			{
+				break;
+			}
+			TravelReadyMs = (FPlatformTime::Seconds() - TravelStartTime) * 1000.0;
+			const double SwapStart = FPlatformTime::Seconds();
+			LayerSet->Present(TravelLayer);
+			Planet = Target;
+			Target->SetPiecePrefetch({});
+			ApplyLighting(TravelLayer);
+			SetPlacement(TravelPlacement);
+			TravelSwapMs = (FPlatformTime::Seconds() - SwapStart) * 1000.0;
+			TravelSwapPhaseTime = TravelPhaseTime;
+			bTravelSwapped = true;
+			if (!bReady)
+			{
+				UE_LOG(LogHexHero, Warning, TEXT("Travel: the %s did not have all the pieces around the place after %.0f ms"), GetPlanetLayerName(TravelLayer), Config->JumpWaitMax * 1000.0f);
+			}
+			break;
+		}
+
+		// the layer shown holds black at least TravelHoldMin, and until its pieces around the camera are there
+		const bool bReady = Target->ArePiecesReadyAt(CameraLocation) || TravelPhaseTime - TravelSwapPhaseTime >= Config->JumpWaitMax;
+		if (TravelPhaseTime < Config->TravelHoldMin || !bReady)
+		{
+			break;
+		}
+		TravelPhase = ETravelPhase::FadingIn;
+		TravelPhaseTime = 0.0f;
+		if (PlayerController)
+		{
+			PlayerController->SetTravelScreen(false);
+			if (PlayerController->PlayerCameraManager)
+			{
+				PlayerController->PlayerCameraManager->StartCameraFade(1.0f, 0.0f, Config->TravelFadeInTime, FLinearColor::Black, false, false);
+			}
+		}
+		UE_LOG(LogHexHero, Log, TEXT("Travel: the %s is shown after %.0f ms, the old layer had faded and the new one had its pieces at %.0f ms, the swap took %.0f ms"),
+			GetPlanetLayerName(TravelLayer), (FPlatformTime::Seconds() - TravelStartTime) * 1000.0, TravelReadyMs, TravelSwapMs);
+		break;
+	}
+
+	case ETravelPhase::FadingIn:
+		if (TravelPhaseTime >= Config->TravelFadeInTime)
+		{
+			TravelPhase = ETravelPhase::None;
+		}
+		break;
+
+	default:
+		break;
+	}
+}
+
+void AHexPlanetCameraPawn::OnLayer()
+{
+	AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController());
+	if (IsTravelling() || !Planet || !Planet->IsBuilt())
+	{
+		return;
+	}
+	const EHexPlanetLayer Target = Planet->GetLayer() == EHexPlanetLayer::Surface ? EHexPlanetLayer::Underground : EHexPlanetLayer::Surface;
+	FHexPlanetCameraPlacement Placement = GetPlacement();
+
+	// an entrance under the mouse leads down to its exit, the same cell below, and an exit up to its entrance, which the camera then looks at
+	const int32 Cell = PlayerController ? PlayerController->GetMouseCell() : INDEX_NONE;
+	const int32 Entrance = Planet->FindEntrance(Cell);
+	if (Entrance != INDEX_NONE && Planet->GetEntranceProblem(Entrance) == HexPlanetUnderground::EEntranceProblem::None)
+	{
+		const FVector3d Center = Planet->GetGrid().GetCells()[Cell].Center;
+		Placement.Latitude = FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(Center.Z, -1.0, 1.0)));
+		Placement.Longitude = FMath::RadiansToDegrees(FMath::Atan2(Center.Y, Center.X));
+		UE_LOG(LogHexHero, Log, TEXT("Through the %s %c at cell %d"), Target == EHexPlanetLayer::Underground ? TEXT("entrance") : TEXT("exit"),
+			HexPlanetFile::GetNetworkLetter(Planet->GetEntrances()[Entrance].Network), Cell);
+	}
+	TravelTo(Target, Placement);
 }
 
 void AHexPlanetCameraPawn::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -241,6 +710,10 @@ void AHexPlanetCameraPawn::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 		{
 			EnhancedInputComponent->BindAction(InputConfig->SunFollowAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnToggleSunFollowing);
 		}
+		if (InputConfig->LayerAction)
+		{
+			EnhancedInputComponent->BindAction(InputConfig->LayerAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnLayer);
+		}
 
 		// painting the levels, whose actions are missing until Tools/create_input_assets.py has made them
 		if (InputConfig->PaintModeAction && InputConfig->PaintLevelAction && InputConfig->BrushSizeAction && InputConfig->UndoAction && InputConfig->RedoAction)
@@ -266,13 +739,11 @@ void AHexPlanetCameraPawn::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
+	// the layer shown, which a trip changes
 	if (!Planet)
 	{
-		for (TActorIterator<AHexPlanet> It(GetWorld()); It; ++It)
-		{
-			Planet = *It;
-			break;
-		}
+		const UHexPlanetLayers* LayerSet = UHexPlanetLayers::Get(GetWorld());
+		Planet = LayerSet ? LayerSet->GetPresented() : nullptr;
 	}
 
 	// the planet builds itself in its BeginPlay, which may come after this one
@@ -284,6 +755,7 @@ void AHexPlanetCameraPawn::Tick(float DeltaTime)
 	if (TargetDistance <= 0.0)
 	{
 		TargetDistance = CurrentDistance = GetMaxDistance();
+		ApplyLighting(Planet->GetLayer());
 
 		// the camera saved with the view key, unless a command asks for another place
 		FHexLastView LastView;
@@ -293,16 +765,48 @@ void AHexPlanetCameraPawn::Tick(float DeltaTime)
 		if (bSaved)
 		{
 			SavedPlacement = GetSavedPlacement(LastView);
+			SavedLayer = LastView.Planet.Layer;
 		}
 
 		if (bSaved && !PendingPlanetPlacement.IsSet() && PendingFocusCell == INDEX_NONE)
 		{
 			SetPlacement(SavedPlacement);
+
+			// a view saved underground goes there behind black, as the planet comes from its loading screen
+			if (SavedLayer != Planet->GetLayer())
+			{
+				TravelTo(SavedLayer, SavedPlacement, true);
+			}
 		}
+	}
+
+	// a trip between the layers holds the camera where it is until it ends
+	if (IsTravelling())
+	{
+		UpdateTravel(DeltaTime);
+		UpdateCameraPosition();
+		UpdateSun(DeltaTime);
+		return;
 	}
 
 	// a place asked for before hex.LoadPlanet opened this level waits until then, as the camera of the level before would be gone at once
 	const FWorldContext* WorldContext = GEngine ? GEngine->GetWorldContextFromWorld(GetWorld()) : nullptr;
+
+	// on another layer, the camera travels there, which builds the pieces around the place and waits for them
+	if (PendingPlanetPlacement.IsSet() && !(WorldContext && !WorldContext->TravelURL.IsEmpty()) && PendingPlanetLayer.IsSet()
+		&& PendingPlanetLayer.GetValue() != Planet->GetLayer())
+	{
+		const FHexPlanetCameraPlacement Placement = PendingPlanetPlacement.GetValue();
+		const EHexPlanetLayer Layer = PendingPlanetLayer.GetValue();
+		PendingPlanetPlacement.Reset();
+		PendingPlanetLayer.Reset();
+		if (!TravelTo(Layer, Placement))
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("hex.PlanetSetCamera: the planet has no %s, the camera stays on the %s"), GetPlanetLayerName(Layer), GetPlanetLayerName(Planet->GetLayer()));
+			SetPlacement(Placement);
+		}
+		return;
+	}
 
 	if (PendingPlanetPlacement.IsSet() && !(WorldContext && !WorldContext->TravelURL.IsEmpty()))
 	{
@@ -326,6 +830,7 @@ void AHexPlanetCameraPawn::Tick(float DeltaTime)
 					bReady ? TEXT("") : TEXT(", not all of them"));
 			}
 			PendingPlanetPlacement.Reset();
+			PendingPlanetLayer.Reset();
 			Planet->SetPiecePrefetch({});
 			JumpWaitTime = 0.0f;
 			SetPlacement(Placement);
@@ -513,11 +1018,12 @@ FVector AHexPlanetCameraPawn::GetIdealSunFrom() const
 	// the right of the screen of a camera facing north, as the orientation has it
 	const FVector Right = FVector::CrossProduct(Up, North);
 
-	// the elevation changes with the zoom as the pitch does
+	// the elevation changes with the zoom as the pitch does, by the light of the layer shown
+	const FHexLayerLighting Lighting = Config->GetLighting(GetShownLayer());
 	const double MaxDistance = FMath::Max(GetMaxDistance(), Config->MinDistance * 1.01);
 	const double Alpha = FMath::Clamp(FMath::Loge(FMath::Max(CurrentDistance, 1.0) / Config->MinDistance) / FMath::Loge(MaxDistance / Config->MinDistance), 0.0, 1.0);
-	const double Elevation = FMath::DegreesToRadians(FMath::Lerp(Config->SunCloseElevation, Config->SunFarElevation, Alpha));
-	const double Azimuth = FMath::DegreesToRadians(Config->SunAzimuth);
+	const double Elevation = FMath::DegreesToRadians(FMath::Lerp(Lighting.SunCloseElevation, Lighting.SunFarElevation, Alpha));
+	const double Azimuth = FMath::DegreesToRadians(Lighting.SunAzimuth);
 
 	const FVector Horizontal = North * FMath::Cos(Azimuth) + Right * FMath::Sin(Azimuth);
 	return (Horizontal * FMath::Cos(Elevation) + Up * FMath::Sin(Elevation)).GetSafeNormal();
@@ -619,6 +1125,12 @@ void AHexPlanetCameraPawn::OnMove(const FInputActionValue& Value)
 
 void AHexPlanetCameraPawn::OnZoom(const FInputActionValue& Value)
 {
+	// a trip keeps the distance it goes with
+	if (IsTravelling())
+	{
+		return;
+	}
+
 	// scrolling up moves closer
 	TargetDistance = FMath::Clamp(TargetDistance * FMath::Pow(1.0f - Settings()->ZoomStep, Value.Get<float>()), Settings()->MinDistance, GetMaxDistance());
 }
@@ -630,6 +1142,12 @@ void AHexPlanetCameraPawn::OnTurnKeys(const FInputActionValue& Value)
 
 void AHexPlanetCameraPawn::OnDragStarted()
 {
+	// nothing is grabbed while the screen is black between the layers
+	if (IsTravelling())
+	{
+		return;
+	}
+
 	// while a tool of the brush is chosen the left button paints, and the camera moves with the keys, the edges of the screen and the other buttons
 	if (AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController()); PlayerController && PlayerController->IsBrushArmed())
 	{
@@ -659,6 +1177,11 @@ void AHexPlanetCameraPawn::OnDragCompleted()
 
 void AHexPlanetCameraPawn::OnMiddleStarted()
 {
+	if (IsTravelling())
+	{
+		return;
+	}
+
 	const APlayerController* PlayerController = Cast<APlayerController>(GetController());
 	float MouseX = 0.0f;
 	float MouseY = 0.0f;
@@ -698,6 +1221,11 @@ void AHexPlanetCameraPawn::OnMiddleCompleted()
 
 void AHexPlanetCameraPawn::OnTurnStarted()
 {
+	if (IsTravelling())
+	{
+		return;
+	}
+
 	float MouseY = 0.0f;
 	const APlayerController* PlayerController = Cast<APlayerController>(GetController());
 	bTurning = PlayerController && PlayerController->GetMousePosition(LastTurnMouseX, MouseY);
@@ -836,7 +1364,9 @@ void AHexPlanetCameraPawn::CopyCameraToClipboard() const
 	const FHexPlanetCameraPlacement Placement = GetPlacement();
 
 	// the console runs commands joined by | one after another; a planet that is not saved has no folder to open, so only the camera is copied
-	const FString SetCamera = FString::Printf(TEXT("hex.PlanetSetCamera %.4f %.4f %.1f %.0f"), Placement.Latitude, Placement.Longitude, Placement.Heading, Placement.Distance);
+	// the layer only when it is not the surface, so the commands of the surface stay as they were
+	const FString SetCamera = FString::Printf(TEXT("hex.PlanetSetCamera %.4f %.4f %.1f %.0f%s"), Placement.Latitude, Placement.Longitude, Placement.Heading, Placement.Distance,
+		GetShownLayer() == EHexPlanetLayer::Surface ? TEXT("") : *FString::Printf(TEXT(" %s"), GetPlanetLayerName(GetShownLayer())));
 	const FString Commands = Planet && !Planet->IsSaved() ? SetCamera : FString::Printf(TEXT("hex.LoadPlanet %s | %s"), Planet ? *Planet->GetPlanetFolder() : TEXT(""), *SetCamera);
 
 	FPlatformApplicationMisc::ClipboardCopy(*Commands);
@@ -943,10 +1473,12 @@ void AHexPlanetCameraPawn::SaveView()
 	View.Planet.Longitude = Placement.Longitude;
 	View.Planet.Heading = Placement.Heading;
 	View.Planet.Distance = Placement.Distance;
+	View.Planet.Layer = GetShownLayer();
 
 	if (HexLastView::Save(View))
 	{
 		SavedPlacement = Placement;
+		SavedLayer = View.Planet.Layer;
 
 		if (GEngine)
 		{
@@ -962,10 +1494,14 @@ bool AHexPlanetCameraPawn::IsLastViewSaved() const
 		return true;
 	}
 
-	// the file keeps the place rounded, and a heading of -180 is the same as 180
+	// the file keeps the place rounded, and a heading of -180 is the same as 180; a trip shows the view it goes to as saved
+	if (IsTravelling())
+	{
+		return true;
+	}
 	const FHexPlanetCameraPlacement Placement = RoundPlacement(GetPlacement());
 	return Placement.Latitude == SavedPlacement.Latitude && Placement.Longitude == SavedPlacement.Longitude && Placement.Distance == SavedPlacement.Distance
-		&& FMath::IsNearlyZero(FRotator::NormalizeAxis(Placement.Heading - SavedPlacement.Heading), 0.01);
+		&& FMath::IsNearlyZero(FRotator::NormalizeAxis(Placement.Heading - SavedPlacement.Heading), 0.01) && GetShownLayer() == SavedLayer;
 }
 
 bool AHexPlanetCameraPawn::GetViewStatus(TArray<TPair<FString, FString>>& OutLines) const
@@ -1044,8 +1580,8 @@ void AHexPlanetCameraPawn::OnPaintLevel(const FInputActionValue& Value)
 {
 	if (AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController()))
 	{
-		// the number keys give 1 for deep sea up to 5 for mountains, and choosing a level turns painting on
-		PlayerController->SetPaintLevel(FMath::RoundToInt32(Value.Get<float>()) - 3);
+		// the number keys give 1 for deep sea up to 5 for mountains, underground 1 the void and 2 a passage, and choosing a level turns painting on
+		PlayerController->SetPaintLevelKey(FMath::RoundToInt32(Value.Get<float>()));
 	}
 }
 

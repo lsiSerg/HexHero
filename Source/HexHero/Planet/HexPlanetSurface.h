@@ -183,6 +183,8 @@ namespace HexPlanetSurface
 		double RiverValleyDepth = 0.0;
 		double RiverValleyBottom = 20.0;
 		double RiverValleySlope = 20.0;
+		/** Where corners and sides lie between levels (UHexPlanetConfig::EdgeRule) */
+		EHexEdgeRule EdgeRule = EHexEdgeRule::Shared;
 
 		static FParams Make(const UHexPlanetConfig& Config, const FKit& Kit, double Radius);
 

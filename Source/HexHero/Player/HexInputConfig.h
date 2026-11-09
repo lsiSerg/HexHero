@@ -111,6 +111,11 @@ public:
 	UPROPERTY(EditAnywhere, Category="Input")
 	TObjectPtr<UInputAction> SunFollowAction;
 
+	/** Goes between the surface of the planet and its underground: through the entrance under the mouse to its exit, from an exit up to
+	 *  its entrance, else at the same place */
+	UPROPERTY(EditAnywhere, Category="Input")
+	TObjectPtr<UInputAction> LayerAction;
+
 	/**
 	 *  Returns the keys of one action from the mapping context as the legend shows them, or nothing if it has none.
 	 *  A key chorded with another action comes after the key of that action, as in Shift+F

@@ -1,13 +1,17 @@
 """Creates the planet prototype: M_HexPlanet with its masked instance M_HexPlanet_Cut, M_HexPlanetWater, M_HexPlanetClouds, M_HexPlanetAurora and M_HexPlanetAuroraSpark with MPC_HexPlanet, M_HexPlanetWireframe and Lvl_HexPlanet,
-and DA_HexPlanet, DA_HexPlanetWater, DA_HexPlanetClouds and DA_HexPlanetCamera when they are missing.
+and DA_HexPlanet, DA_HexPlanetWater, DA_HexPlanetClouds and DA_HexPlanetCamera when they are missing, and DA_HexUnderground as a copy of
+DA_HexPlanet with the features of the surface off (UNDERGROUND_VALUES), with M_HexUnderground and its masked M_HexUnderground_Cut, the fog
+M_HexUndergroundFog and the materials of the markers of entrances, M_HexPlanetMarker and M_HexPlanetShaft.
 Every value a material takes from a config is a parameter named as it, whose default here comes from the class, and AHexPlanet sets it from the asset
 with the planet, a movable sun and the planet game mode.
 
 Run with UnrealEditor-Cmd.exe <uproject> -run=pythonscript -script=<this file> -unattended -nullrhi
-Running it again rebuilds the material and the level.
+Running it again rebuilds the material and the level; -script="<this file> configs" only makes the data assets that are missing, and
+-script="<this file> underground" only those and the materials of the underground and of the markers.
 """
 
 import re
+import sys
 
 import unreal
 
@@ -1480,6 +1484,17 @@ CLOUD_MATERIAL = FOLDER + '/M_HexPlanetClouds'
 HAZE_MATERIAL = FOLDER + '/M_HexPlanetHaze'
 CONFIGS = [(FOLDER + '/DA_HexPlanet', unreal.HexPlanetConfig), (FOLDER + '/DA_HexPlanetWater', unreal.HexPlanetWaterConfig),
     (FOLDER + '/DA_HexPlanetClouds', unreal.HexPlanetCloudConfig), (FOLDER + '/DA_HexPlanetCamera', unreal.HexPlanetCameraConfig)]
+# the config of the underground, which the surface gives the underground it spawns: made once as a copy of DA_HexPlanet, so its cells are as
+# large and its surface is drawn alike, with these values, and then tuned by hand. Its features are off, as it has no sea and no sky
+UNDERGROUND_CONFIG = FOLDER + '/DA_HexUnderground'
+UNDERGROUND_VALUES = {
+    'sea': False, 'clouds': False, 'haze': False, 'auroras': False, 'rivers': False, 'generate_objects': False, 'fog': True,
+    # a passage holds its sides and a void carries its whole cliff, so passages stay flat ledges over the voids
+    'edge_rule': unreal.HexEdgeRule.HIGHER_HOLDS,
+    'deep_depth': 200.0,
+    # a dim, cool light of the sky, a placeholder until the light of the game is designed
+    'sky_light_color': unreal.LinearColor(0.32, 0.42, 0.48, 1.0), 'sky_light_intensity': 0.3,
+}
 
 
 def clear_expressions(material):
@@ -1554,6 +1569,19 @@ def build_configs():
         if not unreal.EditorAssetLibrary.does_asset_exist(path):
             unreal.AssetToolsHelpers.get_asset_tools().create_asset(path.split('/')[-1], FOLDER, config_class, unreal.DataAssetFactory())
             unreal.EditorAssetLibrary.save_asset(path, only_if_is_dirty=False)
+    build_underground_config()
+
+
+def build_underground_config():
+    if unreal.EditorAssetLibrary.does_asset_exist(UNDERGROUND_CONFIG):
+        return
+    config = unreal.EditorAssetLibrary.duplicate_asset(CONFIGS[0][0], UNDERGROUND_CONFIG)
+    if not config:
+        config = unreal.AssetToolsHelpers.get_asset_tools().create_asset(UNDERGROUND_CONFIG.split('/')[-1], FOLDER, unreal.HexPlanetConfig, unreal.DataAssetFactory())
+    for name, value in UNDERGROUND_VALUES.items():
+        config.set_editor_property(name, value)
+    unreal.EditorAssetLibrary.save_asset(UNDERGROUND_CONFIG, only_if_is_dirty=False)
+    unreal.log('PLANET created %s from %s' % (UNDERGROUND_CONFIG, CONFIGS[0][0]))
 
 
 def build_material():
@@ -2359,8 +2387,385 @@ def build_auroras():
     build_aurora_material(AURORA_SPARK_MATERIAL, AURORA_SPARK_CODE, AURORA_DEFAULTS + [('AuroraSparkSoftness', 2.0)], [], collection)
 
 
+# The underground (DA_HexUnderground, EdgeRule HigherHolds): M_HexUnderground draws its surface as M_HexPlanet does, from the layers of its cave
+# biomes with the grid lines and the outlines, but without the sea, the beach, rivers, the run-up, the canopy and the shadows of clouds. Every
+# height is measured below the top of the passages, the level 0 that lies LevelHeight above the sea: the rock of a cliff darkens down into the
+# abyss (AbyssFadeStart, AbyssFadeEnd), and the floor of a void draws a teal grey mist as its light, a noise taken in AbyssSlices layers under the
+# floor along the view, so they slide against the floor and each other as the camera moves and the floor reads as bottomless. Along the sides
+# of a passage towards a void a faint lip lights the edge of the ledge (AbyssLip*), found from the bits of CellBiomes that say which neighbors
+# lie below the sea, the voids here. The grid lines fade out below the passages (AbyssGridFade), and the outlines show on the voids too. In the
+# Links tab of the editor the blue of CellMarks tints each passage by the color of its network (NetworkColor0..7) and what is wrong in ProblemColor
+UNDERGROUND_MATERIAL = FOLDER + '/M_HexUnderground'
+UNDERGROUND_FOG_MATERIAL = FOLDER + '/M_HexUndergroundFog'
+_BEACH_START = BIOME_CODE.index('// the beach of each layer (BeachLayers0..2')
+_ROCK_START = BIOME_CODE.index('// rock on slopes above the coast')
+UNDERGROUND_BIOME_CODE = BIOME_CODE[:_BEACH_START] + '''float slopeRock = 1.0 - smoothstep(SlopeStart, max(SlopeEnd, SlopeStart + 1e-3), flatness);
+float shoreSlope = 0.0;
+''' + BIOME_CODE[_ROCK_START:]
+_SEABED_DARKENING = 'albedo *= lerp(1.0, SeabedDarkening, saturate(-height / max(DeepDepth, 1.0)));\n'
+assert _SEABED_DARKENING in UNDERGROUND_BIOME_CODE
+UNDERGROUND_BIOME_CODE = UNDERGROUND_BIOME_CODE.replace(_SEABED_DARKENING, '')
+# the value noise of the clouds without the clouds, which BIOME_CODE and the mist take
+NOISE_CODE = CLOUD_CODE[:CLOUD_CODE.index('float cloudAngle')]
+UNDERGROUND_CODE = NOISE_CODE + GRID_LINE_CODE + MARK_CODE.replace('MARK_HOLE_BITS', '0u') + UNDERGROUND_BIOME_CODE + r'''
+float depthBelow = LevelHeight - height;
+float3 viewRay = normalize(WorldPos - CameraPos);
+
+// the rock darkens down the cliffs, into the dark of the abyss
+albedo *= lerp(1.0, AbyssDarkness, smoothstep(AbyssFadeStart, max(AbyssFadeEnd, AbyssFadeStart + 1.0), depthBelow));
+
+// the mist of the floor of a void: a noise in slices under the floor along the view, deeper ones fainter, drifting each at its own pace
+float mistShare = smoothstep(AbyssMistStart, max(AbyssMistEnd, AbyssMistStart + 1.0), depthBelow);
+float mist = 0.0;
+[branch] if (mistShare > 0.001)
+{
+    float cosView = max(dot(-viewRay, surfaceUp), AbyssViewFloor);
+    float3 drift = float3(0.37, -0.21, 0.13) * Time * AbyssSpeed / max(AbyssScale, 1.0);
+    // the finer octave fades where a pixel covers much of its cells, as from far away it only speckles
+    float mistDetail = AbyssDetail * (1.0 - smoothstep(AbyssDetailFadeStart, max(AbyssDetailFadeEnd, AbyssDetailFadeStart + 1e-3),
+        (length(PosDdx) + length(PosDdy)) * AbyssDetailScale / max(AbyssScale, 1.0)));
+    float sliceSum = 0.0;
+    int slices = (int)clamp(round(AbyssSlices), 1.0, 6.0);
+    [loop] for (int slice = 0; slice < 6; ++slice)
+    {
+        if (slice >= slices)
+        {
+            break;
+        }
+        float3 at = WorldPos + viewRay * ((slice + 0.5) * AbyssSliceDepth / cosView);
+        float3 p = at / max(AbyssScale, 1.0) + drift * (1.0 + slice * AbyssSliceDrift) + slice * 7.31;
+        float n = lerp(cloudNoise.Value(p), cloudNoise.Value(p * AbyssDetailScale + 3.3), mistDetail * 0.5);
+        float weight = exp2(-slice * AbyssSliceFalloff);
+        mist += saturate((n - 0.5) * AbyssContrast + 0.5) * weight;
+        sliceSum += weight;
+    }
+    mist = mist / max(sliceSum, 1e-3);
+}
+float3 mistLight = AbyssColor.rgb * AbyssBrightness * mistShare * lerp(AbyssMistFloor, 1.0, mist * mist);
+// the floor itself gives way to the mist, so nothing of it shows through
+albedo *= 1.0 - mistShare * AbyssFloorHide;
+
+// the lip of a passage: the sides between a passage and a void, seen from either cell, near the top of the passages
+uint lipBits = biomeOwn.a;
+uint lipOwn = (lipBits >> 6) & 1u;
+float lipDistance = 1.0;
+[unroll] for (int lipSide = 0; lipSide < 6; ++lipSide)
+{
+    if (lipSide < biomeSides && ((lipBits >> lipSide) & 1u) != lipOwn)
+    {
+        lipDistance = min(lipDistance, apothem - dot(LocalUV, float2(cos(lipSide * biomeTurn), sin(lipSide * biomeTurn))));
+    }
+}
+float lip = (1.0 - smoothstep(0.0, AbyssLipWidth, lipDistance)) * (1.0 - smoothstep(0.0, AbyssLipDepth, depthBelow));
+
+// the Links tab of the editor (AHexPlanet::UpdateLinkMarks): the blue of CellMarks is 1 + the network of a passage, 9 where something is wrong and
+// 10 for a passage no exit reaches; the cell takes LinksTint of that color and glows by LinksGlow of it, also on the mist of a void
+uint linkMark = (uint)round(markPixel.b * 255.0);
+float3 linkGlow = 0.0;
+[branch] if (linkMark > 0u && PreviewTile < 0.5)
+{
+    float3 networkColors[8] = {NetworkColor0.rgb, NetworkColor1.rgb, NetworkColor2.rgb, NetworkColor3.rgb, NetworkColor4.rgb, NetworkColor5.rgb, NetworkColor6.rgb, NetworkColor7.rgb};
+    float3 linkColor = linkMark == 9u ? ProblemColor.rgb : linkMark >= 10u ? LinksOrphanColor.rgb : networkColors[min(linkMark - 1u, 7u)];
+    albedo = lerp(albedo, linkColor, LinksTint);
+    linkGlow = linkColor * LinksGlow;
+}
+
+// the grid lines show on the passages and fade out down the cliffs; the outlines show everywhere, for painting the voids
+float opacity = GridOpacity * (1.0 - smoothstep(0.0, AbyssGridFade, depthBelow - 0.5));
+float3 color = lerp(albedo, albedo * GridDarkness, gridLine * opacity);
+OutRoughness = Roughness;
+OutEmissive = lerp(color * (Ambient + Glow * Alpha * PreviewTile) + mistLight + AbyssLipColor.rgb * lip + linkGlow, markColor * MarkGlow, markLine);
+return lerp(color, markColor, markLine);
+'''
+UNDERGROUND_PARAMETERS = ['LevelHeight', 'AbyssFadeStart', 'AbyssFadeEnd', 'AbyssDarkness', 'AbyssColor', 'AbyssBrightness', 'AbyssMistStart', 'AbyssMistEnd',
+    'AbyssScale', 'AbyssDetail', 'AbyssContrast', 'AbyssSlices', 'AbyssSliceDepth', 'AbyssSpeed', 'AbyssViewFloor', 'AbyssDetailScale', 'AbyssDetailFadeStart',
+    'AbyssDetailFadeEnd', 'AbyssSliceDrift', 'AbyssSliceFalloff', 'AbyssMistFloor', 'AbyssFloorHide', 'AbyssLipColor', 'AbyssLipWidth', 'AbyssLipDepth', 'AbyssGridFade', 'Roughness',
+    'ProblemColor', 'LinksOrphanColor', 'LinksTint', 'LinksGlow']
+# the colors of the networks, NetworkColors of the surface, which AHexPlanet::SetLinksShown gives the material, as a config gives no arrays
+LINK_NETWORK_COLORS = [(1.0, 0.55, 0.1), (0.1, 0.7, 1.0), (0.95, 0.25, 0.8), (0.45, 0.95, 0.15), (0.6, 0.4, 1.0), (1.0, 0.22, 0.18), (0.15, 0.95, 0.75), (1.0, 0.9, 0.25)]
+
+
+def build_underground_material():
+    library = unreal.MaterialEditingLibrary
+    assets = unreal.EditorAssetLibrary
+    material = unreal.load_asset(UNDERGROUND_MATERIAL) if assets.does_asset_exist(UNDERGROUND_MATERIAL) else unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+        UNDERGROUND_MATERIAL.split('/')[-1], FOLDER, unreal.Material, unreal.MaterialFactoryNew())
+    clear_expressions(material)
+    material.set_editor_property('tangent_space_normal', False)
+
+    custom = library.create_material_expression(material, unreal.MaterialExpressionCustom, -200, 0)
+    custom.set_editor_property('code', UNDERGROUND_CODE)
+    custom.set_editor_property('output_type', unreal.CustomMaterialOutputType.CMOT_FLOAT3)
+    outputs = []
+    for output_name, output_type in (('OutEmissive', unreal.CustomMaterialOutputType.CMOT_FLOAT3), ('OutNormal', unreal.CustomMaterialOutputType.CMOT_FLOAT3),
+                                     ('OutRoughness', unreal.CustomMaterialOutputType.CMOT_FLOAT1)):
+        output = unreal.CustomOutput()
+        output.set_editor_property('output_name', output_name)
+        output.set_editor_property('output_type', output_type)
+        outputs.append(output)
+    custom.set_editor_property('additional_outputs', outputs)
+
+    vertex_color = library.create_material_expression(material, unreal.MaterialExpressionVertexColor, -900, -300)
+    u = add_uv_channel(library, material, 0, 'r', -100)
+    v = add_uv_channel(library, material, 0, 'g', 100)
+    u_ddx = library.create_material_expression(material, unreal.MaterialExpressionDDX, -700, -100)
+    u_ddy = library.create_material_expression(material, unreal.MaterialExpressionDDY, -700, 0)
+    library.connect_material_expressions(u, '', u_ddx, '')
+    library.connect_material_expressions(u, '', u_ddy, '')
+    position = library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1100, 3200)
+    position_ddx = library.create_material_expression(material, unreal.MaterialExpressionDDX, -900, 3200)
+    position_ddy = library.create_material_expression(material, unreal.MaterialExpressionDDY, -900, 3250)
+    library.connect_material_expressions(position, '', position_ddx, '')
+    library.connect_material_expressions(position, '', position_ddy, '')
+
+    connections = [('Color', vertex_color, ''), ('Alpha', vertex_color, 'A'), ('U', u, ''), ('UDdx', u_ddx, ''), ('UDdy', u_ddy, ''), ('PeakShare', v, '')
+        ] + add_config_parameters(library, material, unreal.HexPlanetConfig, ['GridWidth', 'GridMinPixels', 'GridMaxPixels', 'GridOpacity', 'GridDarkness', 'Ambient', 'Glow'], 100) + [
+        ('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1000, 450), ''),
+        ('Time', library.create_material_expression(material, unreal.MaterialExpressionTime, -1000, 500), ''),
+        ('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1000, 550), ''),
+        ('PlanetRadius', add_scalar(library, material, 'PlanetRadius', 11503.0, 600), ''),
+        ] + add_mark_inputs(library, material, 2500) + [
+        ('PosDdx', position_ddx, ''), ('PosDdy', position_ddy, ''),
+        ('VertexNormal', library.create_material_expression(material, unreal.MaterialExpressionVertexNormalWS, -1000, 3300), ''),
+        ('CellBiomes', add_texture(library, material, DEFAULT_MARKS, 'CellBiomes', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 3350), ''),
+        ('Colors', add_texture(library, material, COLORS, 'Colors', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 3400), ''),
+        ('Normals', add_texture(library, material, NORMALS, 'Normals', unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL, 3450), ''),
+        ('LayerParams', add_texture(library, material, DEFAULT_MARKS, 'LayerParams', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 3460), ''),
+        ('PreviewTile', add_scalar(library, material, 'PreviewTile', 0.0, 3500), ''),
+        ('FacetShare', add_uv_channel(library, material, 1, 'r', 3525), ''),
+        ('CreviceShare', add_uv_channel(library, material, 1, 'g', 3540), ''),
+        ] + [('%sLayers%d' % (kind, group), add_vector4(library, material, '%sLayers%d' % (kind, group), unreal.LinearColor(*table[group * 4:group * 4 + 4]),
+            3545 + group * 5), '') for kind, table in (('Beach', BEACH_LAYERS), ('Rock', ROCK_LAYERS), ('Seabed', SEABED_LAYERS)) for group in range(3)
+        ] + add_config_parameters(library, material, unreal.HexPlanetConfig, BIOME_PARAMETERS + UNDERGROUND_PARAMETERS, 3600) + [
+        ('NetworkColor%d' % index, add_vector(library, material, 'NetworkColor%d' % index, unreal.LinearColor(*color, 1.0), 5600 + index * 50), '')
+        for index, color in enumerate(LINK_NETWORK_COLORS)]
+
+    inputs = []
+    for name, _, _ in connections:
+        item = unreal.CustomInput()
+        item.set_editor_property('input_name', name)
+        inputs.append(item)
+    custom.set_editor_property('inputs', inputs)
+    for name, node, pin in connections:
+        library.connect_material_expressions(node, pin, custom, name)
+
+    library.connect_material_property(custom, '', unreal.MaterialProperty.MP_BASE_COLOR)
+    library.connect_material_property(custom, 'OutEmissive', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    library.connect_material_property(custom, 'OutNormal', unreal.MaterialProperty.MP_NORMAL)
+    library.connect_material_property(custom, 'OutRoughness', unreal.MaterialProperty.MP_ROUGHNESS)
+
+    # the same mask as M_HexPlanet, for the debug view and the band where the pieces dissolve into the coarse mesh, which the masked copy
+    # M_HexUnderground_Cut draws (AHexPlanet finds it by name)
+    cut_connections = [('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1000, 700), ''),
+        ('HideCount', add_scalar(library, material, 'HideCount', 0.0, 750), ''),
+        ('LodSide', add_scalar(library, material, 'LodSide', 0.0, 1800), ''),
+        ('LodCamera', add_vector(library, material, 'LodCamera', unreal.LinearColor(0.0, 0.0, 0.0, 0.0), 1850), '')
+        ] + add_config_parameters(library, material, unreal.HexPlanetConfig, ['CoarseDistance', 'CoarseBand'], 1900)
+    for index in range(HIDE_CELLS):
+        cut_connections.append(('HideCell%d' % index, add_vector(library, material, 'HideCell%d' % index, unreal.LinearColor(0.0, 0.0, 0.0, 0.0), 800 + index * 50), ''))
+    cut = add_custom(library, material, SURFACE_CUT_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT1, cut_connections, 700)
+    library.connect_material_property(cut, '', unreal.MaterialProperty.MP_OPACITY_MASK)
+
+    library.recompile_material(material)
+    assets.save_asset(UNDERGROUND_MATERIAL)
+
+    cut_path = UNDERGROUND_MATERIAL + '_Cut'
+    instance = unreal.load_asset(cut_path) if assets.does_asset_exist(cut_path) else unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+        cut_path.split('/')[-1], FOLDER, unreal.MaterialInstanceConstant, unreal.MaterialInstanceConstantFactoryNew())
+    library.set_material_instance_parent(instance, material)
+    overrides = instance.get_editor_property('base_property_overrides')
+    overrides.set_editor_property('override_blend_mode', True)
+    overrides.set_editor_property('blend_mode', unreal.BlendMode.BLEND_MASKED)
+    instance.set_editor_property('base_property_overrides', overrides)
+    library.update_material_instance(instance)
+    assets.save_asset(cut_path, only_if_is_dirty=False)
+    return material
+
+
+# the fog of the underground, a post process before the translucency in place of the haze (bFog of DA_HexUnderground): the scene fades to FogColor
+# with the length of the view past FogStart, and the part of the view below FogMistTop under the passages goes through a mist that thickens over
+# FogMistDepth, marched in eight steps, so a view into a chasm meets more of it the deeper it goes; the space past the globe is FogSpaceColor
+UNDERGROUND_FOG_CODE = r'''
+float3 fogDir = -normalize(CameraVector);
+bool fogSpace = SceneDepth > 1e6;
+float fogEnd = fogSpace ? 1e9 : length(WorldPos - CameraPos);
+float darkAmount = FogMax * (1.0 - exp(-max(min(fogEnd, 1e6) - FogStart, 0.0) * FogDensity));
+float mistTop = PlanetRadius + LevelHeight - FogMistTop;
+float mistB = dot(CameraPos, fogDir);
+float mistDisc = mistB * mistB - (dot(CameraPos, CameraPos) - mistTop * mistTop);
+float mistAmount = 0.0;
+if (mistDisc > 0.0 && PlanetRadius > 0.0)
+{
+    float mistRoot = sqrt(mistDisc);
+    float mistIn = max(-mistB - mistRoot, 0.0);
+    float mistOut = min(-mistB + mistRoot, fogEnd);
+    if (mistOut > mistIn)
+    {
+        float mistStep = (mistOut - mistIn) / 8.0;
+        float mistDepth = 0.0;
+        for (int mistIndex = 0; mistIndex < 8; ++mistIndex)
+        {
+            float3 mistP = CameraPos + fogDir * (mistIn + (mistIndex + 0.5) * mistStep);
+            mistDepth += smoothstep(0.0, max(FogMistDepth, 1.0), mistTop - length(mistP));
+        }
+        mistAmount = FogMistMax * (1.0 - exp(-mistDepth * mistStep * FogMistDensity));
+    }
+}
+float3 fogColor = lerp(SceneColor.rgb, FogMistColor.rgb, mistAmount);
+return lerp(fogColor, fogSpace ? FogSpaceColor.rgb : FogColor.rgb, fogSpace ? 1.0 : darkAmount);
+'''
+UNDERGROUND_FOG_PARAMETERS = ['LevelHeight', 'FogColor', 'FogStart', 'FogDensity', 'FogMax', 'FogSpaceColor', 'FogMistColor', 'FogMistTop', 'FogMistDepth',
+    'FogMistDensity', 'FogMistMax']
+
+
+def build_underground_fog():
+    library = unreal.MaterialEditingLibrary
+    assets = unreal.EditorAssetLibrary
+    material = unreal.load_asset(UNDERGROUND_FOG_MATERIAL) if assets.does_asset_exist(UNDERGROUND_FOG_MATERIAL) else unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+        UNDERGROUND_FOG_MATERIAL.split('/')[-1], FOLDER, unreal.Material, unreal.MaterialFactoryNew())
+    clear_expressions(material)
+    material.set_editor_property('material_domain', unreal.MaterialDomain.MD_POST_PROCESS)
+    material.set_editor_property('blendable_location', unreal.BlendableLocation.BL_SCENE_COLOR_BEFORE_DOF)
+
+    scene = library.create_material_expression(material, unreal.MaterialExpressionSceneTexture, -1000, -400)
+    scene.set_editor_property('scene_texture_id', unreal.SceneTextureId.PPI_POST_PROCESS_INPUT0)
+    connections = [('SceneColor', scene, 'Color'),
+        ('SceneDepth', library.create_material_expression(material, unreal.MaterialExpressionSceneDepth, -1000, -300), ''),
+        ('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1000, -250), ''),
+        ('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1000, -200), ''),
+        ('CameraVector', library.create_material_expression(material, unreal.MaterialExpressionCameraVectorWS, -1000, -150), ''),
+        ('PlanetRadius', add_scalar(library, material, 'PlanetRadius', 0.0, -50), '')
+        ] + add_config_parameters(library, material, unreal.HexPlanetConfig, UNDERGROUND_FOG_PARAMETERS, 0)
+    custom = add_custom(library, material, UNDERGROUND_FOG_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, connections, 0)
+    library.connect_material_property(custom, '', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    library.recompile_material(material)
+    assets.save_asset(UNDERGROUND_FOG_MATERIAL)
+    return material
+
+
+# the markers of the entrances (AHexPlanet::UpdateMarkers): the cave mouth on the surface and the ring of rocks underground are rock of the layer of
+# the first custom data of an instance, projected as the boulders are, and glow in the color of their network (custom data 1 to 3) by the alpha of
+# the color of their vertices, the mouth of the cave and the glyph in the ring, which slowly breathes (MarkerGlow, MarkerPulse*), while the rock
+# gives Ambient and MarkerRockLight of that color as its own light; the shaft over an exit is light alone, added, brightest at its foot by the red
+# of its vertices, softer at its edges, flickering up it and gone next to the camera (Shaft*)
+MARKER_MATERIAL = FOLDER + '/M_HexPlanetMarker'
+SHAFT_MATERIAL = FOLDER + '/M_HexPlanetShaft'
+MARKER_CODE = r'''
+float3 n = normalize(VertexNormal);
+float3 planes = pow(abs(n), TriplanarSharpness);
+planes /= planes.x + planes.y + planes.z;
+float3 pos = WorldPos / BiomeTileSize;
+float3 dx = PosDdx / BiomeTileSize;
+float3 dy = PosDdy / BiomeTileSize;
+float layer = round(RockLayer);
+float3 rock = Colors.SampleGrad(ColorsSampler, float3(pos.yz, layer), dx.yz, dy.yz).rgb * planes.x
+    + Colors.SampleGrad(ColorsSampler, float3(pos.xz, layer), dx.xz, dy.xz).rgb * planes.y
+    + Colors.SampleGrad(ColorsSampler, float3(pos.xy, layer), dx.xy, dy.xy).rgb * planes.z;
+float glowMask = saturate(VertexAlpha);
+float breathe = 1.0 - MarkerPulse + MarkerPulse * sin(Time * MarkerPulseSpeed + InstanceRandom * 6.2831853);
+float3 albedo = rock * (1.0 - glowMask * MarkerRockDarkening);
+// the rock gives light of its own as the ground does (Ambient), and some of the glow of its network, so its stones do not stand black
+OutEmissive = NetworkColor * MarkerGlow * glowMask * breathe + albedo * (Ambient + NetworkColor * MarkerRockLight) * (1.0 - glowMask);
+return albedo;
+'''
+SHAFT_CODE = r'''
+float3 n = normalize(VertexNormal);
+float facing = abs(dot(n, normalize(CameraVector)));
+float rise = saturate(VertexRed);
+float flicker = 1.0 - ShaftFlicker + ShaftFlicker * sin(Time * ShaftFlickerSpeed + rise * ShaftFlickerRise + InstanceRandom * 6.2831853);
+float near = smoothstep(ShaftNearFadeStart, max(ShaftNearFade, ShaftNearFadeStart + 1.0), length(WorldPos - CameraPos));
+return NetworkColor * ShaftBrightness * pow(facing, ShaftFacingPower) * (1.0 - rise) * (1.0 - rise) * flicker * near;
+'''
+
+
+def add_network_color(library, material, y):
+    """The color of the network of an instance, its custom data 1 to 3"""
+    channels = []
+    for index in range(3):
+        data = library.create_material_expression(material, unreal.MaterialExpressionPerInstanceCustomData, -1100, y + index * 50)
+        data.set_editor_property('data_index', index + 1)
+        channels.append(data)
+    first = library.create_material_expression(material, unreal.MaterialExpressionAppendVector, -900, y)
+    library.connect_material_expressions(channels[0], '', first, 'A')
+    library.connect_material_expressions(channels[1], '', first, 'B')
+    color = library.create_material_expression(material, unreal.MaterialExpressionAppendVector, -800, y)
+    library.connect_material_expressions(first, '', color, 'A')
+    library.connect_material_expressions(channels[2], '', color, 'B')
+    return color
+
+
+def build_marker_materials():
+    library = unreal.MaterialEditingLibrary
+    assets = unreal.EditorAssetLibrary
+    material = unreal.load_asset(MARKER_MATERIAL) if assets.does_asset_exist(MARKER_MATERIAL) else unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+        MARKER_MATERIAL.split('/')[-1], FOLDER, unreal.Material, unreal.MaterialFactoryNew())
+    clear_expressions(material)
+    material.set_editor_property('used_with_instanced_static_meshes', True)
+    position = library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1100, 0)
+    position_ddx = library.create_material_expression(material, unreal.MaterialExpressionDDX, -900, 0)
+    position_ddy = library.create_material_expression(material, unreal.MaterialExpressionDDY, -900, 50)
+    library.connect_material_expressions(position, '', position_ddx, '')
+    library.connect_material_expressions(position, '', position_ddy, '')
+    rock_layer = library.create_material_expression(material, unreal.MaterialExpressionPerInstanceCustomData, -900, 150)
+    rock_layer.set_editor_property('data_index', 0)
+    vertex_color = library.create_material_expression(material, unreal.MaterialExpressionVertexColor, -900, 175)
+    connections = [('WorldPos', position, ''), ('PosDdx', position_ddx, ''), ('PosDdy', position_ddy, ''),
+        ('VertexNormal', library.create_material_expression(material, unreal.MaterialExpressionVertexNormalWS, -1000, 100), ''),
+        ('RockLayer', rock_layer, ''), ('VertexAlpha', vertex_color, 'A'), ('NetworkColor', add_network_color(library, material, 400), ''),
+        ('Time', library.create_material_expression(material, unreal.MaterialExpressionTime, -900, 200), ''),
+        ('InstanceRandom', library.create_material_expression(material, unreal.MaterialExpressionPerInstanceRandom, -900, 225), ''),
+        ('Colors', add_texture(library, material, COLORS, 'Colors', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 250), '')
+        ] + add_config_parameters(library, material, unreal.HexPlanetConfig, ['BiomeTileSize', 'TriplanarSharpness', 'MarkerGlow', 'MarkerPulse',
+            'MarkerPulseSpeed', 'MarkerRockDarkening', 'MarkerRockLight', 'Ambient'], 300)
+    custom = add_custom(library, material, MARKER_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, connections, 0,
+        ('OutEmissive', unreal.CustomMaterialOutputType.CMOT_FLOAT3))
+    library.connect_material_property(custom, '', unreal.MaterialProperty.MP_BASE_COLOR)
+    library.connect_material_property(custom, 'OutEmissive', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    roughness = add_config_parameters(library, material, unreal.HexPlanetConfig, ['Roughness'], 600)[0][1]
+    library.connect_material_property(roughness, '', unreal.MaterialProperty.MP_ROUGHNESS)
+    library.recompile_material(material)
+    assets.save_asset(MARKER_MATERIAL)
+
+    shaft = unreal.load_asset(SHAFT_MATERIAL) if assets.does_asset_exist(SHAFT_MATERIAL) else unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+        SHAFT_MATERIAL.split('/')[-1], FOLDER, unreal.Material, unreal.MaterialFactoryNew())
+    clear_expressions(shaft)
+    shaft.set_editor_property('used_with_instanced_static_meshes', True)
+    shaft.set_editor_property('blend_mode', unreal.BlendMode.BLEND_ADDITIVE)
+    shaft.set_editor_property('shading_model', unreal.MaterialShadingModel.MSM_UNLIT)
+    shaft.set_editor_property('two_sided', True)
+    vertex_color = library.create_material_expression(shaft, unreal.MaterialExpressionVertexColor, -900, 175)
+    connections = [('WorldPos', library.create_material_expression(shaft, unreal.MaterialExpressionWorldPosition, -1100, 0), ''),
+        ('CameraPos', library.create_material_expression(shaft, unreal.MaterialExpressionCameraPositionWS, -1100, 50), ''),
+        ('CameraVector', library.create_material_expression(shaft, unreal.MaterialExpressionCameraVectorWS, -1100, 100), ''),
+        ('VertexNormal', library.create_material_expression(shaft, unreal.MaterialExpressionVertexNormalWS, -1000, 150), ''),
+        ('VertexRed', vertex_color, 'R'), ('NetworkColor', add_network_color(library, shaft, 400), ''),
+        ('Time', library.create_material_expression(shaft, unreal.MaterialExpressionTime, -900, 200), ''),
+        ('InstanceRandom', library.create_material_expression(shaft, unreal.MaterialExpressionPerInstanceRandom, -900, 225), '')
+        ] + add_config_parameters(library, shaft, unreal.HexPlanetConfig, ['ShaftBrightness', 'ShaftFlicker', 'ShaftFlickerSpeed', 'ShaftFlickerRise',
+            'ShaftFacingPower', 'ShaftNearFadeStart', 'ShaftNearFade'], 300)
+    custom = add_custom(library, shaft, SHAFT_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, connections, 0)
+    library.connect_material_property(custom, '', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    library.recompile_material(shaft)
+    assets.save_asset(SHAFT_MATERIAL)
+
+
+def build_underground():
+    build_underground_material()
+    build_underground_fog()
+    build_marker_materials()
+
+
 def main():
     build_configs()
+    # with the argument configs it only makes the data assets that are missing, so the materials and the level stay as they are
+    if 'configs' in sys.argv[1:]:
+        unreal.log('PLANET configs created')
+        return
+    # with underground only the materials of the underground and the markers of the entrances
+    if 'underground' in sys.argv[1:]:
+        build_underground()
+        unreal.log('PLANET underground assets created')
+        return
     material = build_material()
     water_material = build_water()
     water_grid_material = build_water_grid()
@@ -2370,6 +2775,7 @@ def main():
     build_boulder_material()
     build_floe_material()
     build_foliage_material(build_parameter_collection())
+    build_underground()
     wire_material = build_wireframe()
     build_level(material, water_material, water_grid_material, wire_material)
     unreal.log('PLANET assets created')

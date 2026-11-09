@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "HexPlanetConfig.h"
 
 class FHexSphereGrid;
 class UStaticMesh;
@@ -17,7 +18,9 @@ class UStaticMesh;
  *  Heights follow two surfaces of the cell. The top is where height 0 of the piece goes and the side line is where its foot goes; a vertex
  *  in between blends them by its height. Two levels share the slope between them: every corner of the grid lies at the mean top of its three
  *  cells, and a side at the height GetSideHeight gives, the mean of the tops of its two cells in its middle, bending linearly to its corners,
- *  which both cells find alike. So the higher cell falls to the line of the side and the lower one rises to it. Land bends its top onto that
+ *  which both cells find alike. So the higher cell falls to the line of the side and the lower one rises to it. With EHexEdgeRule::HigherHolds
+ *  a corner lies at the highest of the three tops and a side at the higher of the two, so the higher cell stays at its top up to its sides and
+ *  the lower one carries the whole slope. Land bends its top onto that
  *  line near a side to the same level (bTopFollowsCorners), so a side that a piece models anywhere between 0 and the foot lands on its
  *  neighbor, and a point on a side towards another level, or at a corner of such a side, is put on the line whatever its height.
  */
@@ -29,7 +32,8 @@ namespace HexPlanetKit
 		/** Radius of the top of the cell */
 		double Top = 0.0;
 
-		/** By side: the height of the middle of that side, the mean of the tops of the cell and that neighbor */
+		/** By side: the height of the middle of that side, the mean of the tops of the cell and that neighbor, or the higher of them with
+		 *  EHexEdgeRule::HigherHolds */
 		TArray<double, TInlineAllocator<6>> SideMiddles;
 
 		/** By side: true if that neighbor has the same level */
@@ -43,7 +47,7 @@ namespace HexPlanetKit
 		TArray<double, TInlineAllocator<6>> PlateauSides;
 		TArray<double, TInlineAllocator<6>> PlateauCorners;
 
-		/** By corner of the cell: the mean top of the three cells there */
+		/** By corner of the cell: the mean top of the three cells there, or the highest with EHexEdgeRule::HigherHolds */
 		TArray<double, TInlineAllocator<6>> CornerHeights;
 
 		/** Steps inside a group, in the center, by the middle of each side and by corner */
@@ -167,15 +171,22 @@ namespace HexPlanetKit
 		TArray<int32> Triangles;
 	};
 
-	/** Returns for every corner of the grid the mean top of its three cells */
-	TArray<double> FindCornerHeights(const FHexSphereGrid& Grid, TFunctionRef<double(int32)> GetTop);
+	/** Returns for every corner of the grid the mean top of its three cells, or the highest of them with EHexEdgeRule::HigherHolds */
+	TArray<double> FindCornerHeights(const FHexSphereGrid& Grid, TFunctionRef<double(int32)> GetTop, EHexEdgeRule Rule = EHexEdgeRule::Shared);
+
+	/** Returns the height of the middle of a side between two cells of these tops by a rule */
+	inline double GetSideMiddle(double Top, double OtherTop, EHexEdgeRule Rule)
+	{
+		return Rule == EHexEdgeRule::HigherHolds ? FMath::Max(Top, OtherTop) : (Top + OtherTop) * 0.5;
+	}
 
 	/**
 	 *  Builds the frame of a cell. MassifSteps holds for each cell how many steps it lies inside its group, and counts only between
-	 *  cells of the same level. Relief holds the factor of the height of each cell (1 without it), which counts whatever the levels
+	 *  cells of the same level. Relief holds the factor of the height of each cell (1 without it), which counts whatever the levels. CornerHeights
+	 *  must come from FindCornerHeights by the same Rule
 	 */
 	FCellFrame BuildFrame(const FHexSphereGrid& Grid, int32 Cell, TFunctionRef<double(int32)> GetTop, TFunctionRef<int32(int32)> GetLevel,
-		TConstArrayView<double> CornerHeights, TConstArrayView<int32> MassifSteps, TConstArrayView<float> Relief = {});
+		TConstArrayView<double> CornerHeights, TConstArrayView<int32> MassifSteps, TConstArrayView<float> Relief = {}, EHexEdgeRule Rule = EHexEdgeRule::Shared);
 
 	/** Moves a height on a slope below the plains by the wobble of the coast: a pure function of the place, so cells that share a point agree */
 	double ApplyWobble(const FPlacement& Placement, const FVector3d& Direction, double Height);
