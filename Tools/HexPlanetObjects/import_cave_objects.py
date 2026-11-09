@@ -35,25 +35,32 @@ MUSHROOM_GLOW = {'color': (0.12, 0.9, 1.0), 'strength': 0.7, 'pulse': 0.25, 'spe
 CRYSTAL_GLOW = {'color': (0.25, 0.85, 0.8), 'strength': 0.9, 'pulse': 0.1, 'speed': 0.6, 'pool': 0.6, 'spores': 0}
 RUNE_GLOW = {'color': (0.8, 0.85, 0.9), 'strength': 0.4, 'pulse': 0.3, 'speed': 0.7, 'pool': 0.0, 'spores': 0}
 
-# the rims of the chasms (EHexObjectLayer::Rim): placed along every side of a passage towards a void, never stored, painted or generated; sorted
-# after every other kind, so the indices of the cave kinds stay. 'counts' is the fewest and the most on a side (RimCountMin, CountByDensity),
-# 'share' the share of the sides that take the kind, 'inset' how far onto the passage a rim stands (RimInset) and 'out' how far past the side the
+# the rims of the chasms (EHexObjectLayer::Rim): never stored, painted or generated; sorted after every other kind, so the indices of the cave kinds
+# stay. Where the layer has walls on its lips (bWalls of DA_HexUnderground) a kind of 'seat' foot or face stands at points of the walls, 'share'
+# of their samples (RimSideShare) by a hash of where each lies, so nothing repeats: small spires on the rounded foot, and rocks, stalactites,
+# crystals and carved blocks out of the inner face at 'heights' of the wall (RimWallHeights); without walls they stand along the sides, 'counts'
+# the fewest and the most on a side (RimCountMin, CountByDensity), 'inset' how far onto the passage (RimInset) and 'out' how far past the side the
 # face of the cliff is looked up for one that hangs (RimHangOut). They reach about CoarseDistance, as at 4000 the ground in view lies 3,700 to 6,000
-# away and a shorter cull cut the rims off the top of the screen where the straight edges show most; the low rocks cast no shadow worth drawing
+# away; small ones cast no shadow worth drawing
 RIM_SETS = [
-    {'id': 'CaveRim', 'name': 'Chasm rim', 'order': 310, 'color': (0.3, 0.28, 0.26), 'counts': (2, 4), 'share': 1.0, 'scale': (1.0, 1.6),
-     'giant': (0.05, 1.6), 'spacing': 8.0, 'inset': 0.16, 'turn': 12.0, 'align': 0.6, 'tilt': 8.0, 'sink': 0.8, 'shadow': False, 'cull': 9000.0,
-     'rings': 0, 'meshes': ['RimRock_0', 'RimRock_1']},
-    {'id': 'CaveRimSpires', 'name': 'Rim spires', 'order': 320, 'color': (0.32, 0.29, 0.26), 'counts': (1, 2), 'share': 1.0, 'scale': (0.9, 1.5),
-     'giant': (0.1, 1.6), 'spacing': 10.0, 'inset': 0.08, 'turn': 25.0, 'align': 0.2, 'tilt': 8.0, 'sink': 1.5, 'shadow': False, 'cull': 9000.0,
-     'rings': 0, 'meshes': ['RimSpire_0', 'RimSpire_1']},
-    {'id': 'CaveStalactites', 'name': 'Stalactites', 'order': 330, 'color': (0.28, 0.26, 0.24), 'counts': (0, 2), 'share': 1.0, 'scale': (1.0, 1.6),
-     'giant': (0.1, 1.8), 'spacing': 9.0, 'out': 2.0, 'turn': 6.0, 'align': 0.0, 'tilt': 6.0, 'sink': 1.0, 'shadow': False, 'cull': 7000.0,
-     'rings': 0, 'hang': True, 'meshes': ['Stalactites_0', 'Stalactites_1']},
-    {'id': 'CaveRimRunes', 'name': 'Carved rim block', 'order': 340, 'color': (0.5, 0.5, 0.56), 'counts': (1, 1), 'share': 0.05, 'scale': (1.4, 1.7),
-     'giant': (0.0, 1.0), 'spacing': 12.0, 'inset': 0.06, 'turn': 5.0, 'align': 0.8, 'tilt': 3.0, 'sink': 0.5, 'shadow': False, 'cull': 6000.0,
-     'rings': 2, 'glow': RUNE_GLOW, 'meshes': ['RuneBlock_0', 'RuneBlock_1']},
+    {'id': 'CaveRim', 'name': 'Chasm rim', 'order': 310, 'color': (0.3, 0.28, 0.26), 'counts': (1, 3), 'share': 0.035, 'scale': (1.4, 2.4),
+     'giant': (0.05, 1.6), 'spacing': 8.0, 'inset': 0.16, 'turn': 40.0, 'align': 0.6, 'tilt': 20.0, 'sink': 2.5, 'shadow': False, 'cull': 9000.0,
+     'rings': 0, 'seat': 'face', 'heights': (0.08, 0.75), 'meshes': ['RimRock_0', 'RimRock_1']},
+    {'id': 'CaveRimSpires', 'name': 'Wall foot spires', 'order': 320, 'color': (0.32, 0.29, 0.26), 'counts': (1, 2), 'share': 0.22, 'scale': (0.35, 0.8),
+     'giant': (0.06, 1.6), 'spacing': 10.0, 'inset': 0.08, 'turn': 180.0, 'align': 0.0, 'tilt': 12.0, 'sink': 1.0, 'shadow': False, 'cull': 7000.0,
+     'rings': 0, 'seat': 'foot', 'meshes': ['RimSpire_0', 'RimSpire_1']},
+    {'id': 'CaveStalactites', 'name': 'Stalactites', 'order': 330, 'color': (0.28, 0.26, 0.24), 'counts': (0, 2), 'share': 0.04, 'scale': (1.0, 1.8),
+     'giant': (0.1, 1.8), 'spacing': 9.0, 'out': 2.0, 'turn': 6.0, 'align': 0.0, 'tilt': 6.0, 'sink': 1.5, 'shadow': False, 'cull': 7000.0,
+     'rings': 0, 'hang': True, 'seat': 'face', 'heights': (0.35, 0.92), 'meshes': ['Stalactites_0', 'Stalactites_1']},
+    {'id': 'CaveRimRunes', 'name': 'Carved block', 'order': 340, 'color': (0.5, 0.5, 0.56), 'counts': (1, 1), 'share': 0.006, 'scale': (1.4, 1.7),
+     'giant': (0.0, 1.0), 'spacing': 12.0, 'inset': 0.06, 'turn': 10.0, 'align': 0.8, 'tilt': 3.0, 'sink': 1.5, 'shadow': False, 'cull': 6000.0,
+     'rings': 2, 'seat': 'face', 'heights': (0.1, 0.3), 'glow': RUNE_GLOW, 'meshes': ['RuneBlock_0', 'RuneBlock_1']},
+    {'id': 'CaveWallCrystals', 'name': 'Wall crystals', 'order': 350, 'color': (0.6, 0.95, 0.95), 'counts': (1, 1), 'share': 0.012, 'scale': (0.5, 1.0),
+     'giant': (0.1, 1.5), 'spacing': 10.0, 'turn': 60.0, 'align': 0.0, 'tilt': 25.0, 'sink': 2.0, 'shadow': False, 'cull': 7000.0,
+     'rings': 1, 'seat': 'face', 'heights': (0.1, 0.65), 'glow': dict(CRYSTAL_GLOW, pool=0.0),
+     'meshes': ['Crystals_0', 'Crystals_1', 'Crystals_2']},
 ]
+SEATS = {'lip': 'LIP', 'foot': 'WALL_FOOT', 'face': 'WALL_FACE'}
 
 # each kind: its values, its meshes, the share of the passages the generation gives it, and its group, patches and the rings of an exit it keeps
 # clear of; all stand on passages (level 0) of every cave floor, block nothing and keep their meshes off the voids. Glowing and tall kinds keep
@@ -248,6 +255,8 @@ def make_rim_set(entry):
     config.set_editor_property('cast_shadow', entry['shadow'])
     config.set_editor_property('cull_distance', entry['cull'])
     config.set_editor_property('exit_clear_rings', entry['rings'])
+    config.set_editor_property('rim_seat', getattr(unreal.HexRimSeat, SEATS[entry.get('seat', 'lip')]))
+    config.set_editor_property('rim_wall_heights', unreal.Vector2D(*entry.get('heights', (0.15, 0.7))))
     glow = entry.get('glow')
     if glow:
         config.set_editor_property('glow_color', unreal.LinearColor(*glow['color'], 1.0))

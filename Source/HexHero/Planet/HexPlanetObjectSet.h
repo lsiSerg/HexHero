@@ -23,6 +23,20 @@ enum class EHexObjectLayer : uint8
 	Rim,
 };
 
+/** Where a rim (EHexObjectLayer::Rim) stands: along the sides of a passage over a void, or, where the layer has walls on its lips
+ *  (UHexPlanetConfig::bWalls, HexPlanetWalls), at points of those walls taken by a hash of the point and the Id, so no pattern repeats */
+UENUM(BlueprintType)
+enum class EHexRimSeat : uint8
+{
+	/** Along the sides: RimCountMin to the first of CountByDensity a side on the lip, or down the cliff below it with bRimHang */
+	Lip,
+	/** On the rounded foot of a wall inside the passage, upright, RimSideShare of the points of the walls */
+	WallFoot,
+	/** Out of the inner face of a wall, at RimWallHeights of its height, its +Y out of the face as a rim that hangs (bRimHang), else its Z;
+	 *  RimSideShare of the points of the walls */
+	WallFace,
+};
+
 /** The look of a kind of object on some biomes: its meshes and how they stand there */
 USTRUCT(BlueprintType)
 struct FHexObjectVariant
@@ -202,6 +216,14 @@ public:
 	/** Share of a side kept free of the kind at each of its corners, where the lip turns to the next side; the objects spread over the rest */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rim", meta=(ClampMin=0, ClampMax=0.45))
 	float RimCornerGap = 0.08f;
+
+	/** Where the kind stands on a layer with walls; on a layer without them it stands on the lip */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rim")
+	EHexRimSeat RimSeat = EHexRimSeat::Lip;
+
+	/** The heights out of the inner face of a wall a rim of EHexRimSeat::WallFace takes, at random between them, as shares of the height of the wall */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rim")
+	FVector2D RimWallHeights = FVector2D(0.15, 0.7);
 
 	/** Kinds of one group share one noise of patches in the generation of the underground, so the decor of a group stands in the hearts of the
 	 *  patches of its cover and a fungus grove or a crystal cavern is one place; None for a noise of its own */

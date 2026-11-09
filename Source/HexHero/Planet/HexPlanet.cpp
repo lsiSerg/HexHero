@@ -69,6 +69,9 @@ namespace
 	TAutoConsoleVariable<bool> CVarHexPlanetRims(TEXT("hex.PlanetRims"), true,
 		TEXT("Draws the rims of the chasms of the underground, the rocks, spires and runes on the lips of the passages and the stalactites below them (1), or hides them (0), to see what they cost."));
 
+	TAutoConsoleVariable<bool> CVarHexPlanetWalls(TEXT("hex.PlanetWalls"), true,
+		TEXT("Draws the walls on the lips of the passages of the underground (1), or hides them (0), to see what they cost."));
+
 	TAutoConsoleVariable<bool> CVarHexPlanetMotes(TEXT("hex.PlanetMotes"), true,
 		TEXT("Draws the motes drifting over the passages of the underground and the spores rising from its mushrooms (1), or hides them (0), to see what they cost."));
 
@@ -1352,6 +1355,8 @@ void AHexPlanet::BuildPlanet()
 	}
 	LoadRelief();
 	// the objects are placed on the surface as it is built, so they are read first, and they keep out of the rivers
+	// the values of the layers, which the materials of the surface and of the walls of the underground take (UpdateWalls)
+	LayerParamsTexture = GetDefault<UHexMapSettings>()->LoadTerrainLayers()->CreateParamsTexture();
 	Rivers->Init(this, Settings);
 	Objects->Init(this, Settings);
 	// nothing stands on an entrance, once the underground has its data, which is after the surface is built
@@ -1368,7 +1373,6 @@ void AHexPlanet::BuildPlanet()
 	CreateBiomeTexture();
 	// before the materials of the surface are made, which take the texture
 	UpdateCanopy();
-	LayerParamsTexture = GetDefault<UHexMapSettings>()->LoadTerrainLayers()->CreateParamsTexture();
 
 	// a component per chunk, so what lies behind the planet or off the screen is culled, and a rebuild of changed levels recreates the render
 	// state of its chunks alone
@@ -2303,6 +2307,14 @@ void AHexPlanet::Tick(float DeltaTime)
 	}
 
 	Objects->SetShown(CVarHexPlanetObjects.GetValueOnGameThread(), CVarHexPlanetRims.GetValueOnGameThread());
+	const bool bWallsShown = CVarHexPlanetWalls.GetValueOnGameThread();
+	for (UHexPlanetMeshComponent* Wall : WallChunks)
+	{
+		if (Wall && Wall->IsVisible() != bWallsShown)
+		{
+			Wall->SetVisibility(bWallsShown);
+		}
+	}
 
 	const APlayerController* PlayerController = GetWorld()->GetFirstPlayerController();
 
@@ -4569,7 +4581,10 @@ void AHexPlanet::ApplySurface(HexPlanetSurface::FBuild& Build, bool bStartup)
 	// the objects stand on the ground of their cells, which these chunks changed, read from this build
 	const HexPlanetSurface::FBuild* OldSource = TriangleSource;
 	TriangleSource = &Build;
-	Objects->RebuildChunks(Build.Chunks);
+	// the walls follow the levels shown, and the objects of the chunks whose walls changed stand on them too
+	TArray<int32> ObjectChunks = Build.Chunks;
+	UpdateWalls(ObjectChunks);
+	Objects->RebuildChunks(ObjectChunks);
 	TriangleSource = OldSource;
 
 	// the debug view puts its materials and visibility on the sections again
@@ -5592,6 +5607,140 @@ void AHexPlanet::UploadCellMarks()
 			FMemory::Free(InData);
 			delete InRegion;
 		});
+}
+
+void AHexPlanet::SetFadeFocus(bool bOnPlanet, const FVector& Point)
+{
+	if (WallMaterial)
+	{
+		WallMaterial->SetVectorParameterValue(TEXT("WallFadeCenter"), bOnPlanet ? FLinearColor(float(Point.X), float(Point.Y), float(Point.Z), 1.0f) : FLinearColor::Transparent);
+	}
+}
+
+void AHexPlanet::UpdateWalls(TArray<int32>& Chunks)
+{
+	if (!Settings || !Settings->bWalls || ShownLevels.Num() != Grid.GetCells().Num())
+	{
+		return;
+	}
+	const double StartTime = FPlatformTime::Seconds();
+	if (!WallMaterial)
+	{
+		if (UMaterialInterface* Base = WallMaterialAsset.LoadSynchronous())
+		{
+			WallMaterial = UMaterialInstanceDynamic::Create(Base, this);
+			HexMaterialConfig::Apply(WallMaterial, Settings);
+			if (LayerParamsTexture)
+			{
+				WallMaterial->SetTextureParameterValue(TEXT("LayerParams"), LayerParamsTexture);
+			}
+			WallMaterial->SetScalarParameterValue(TEXT("FloorRadius"), float(Radius + Settings->LevelHeight));
+		}
+		else
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("Planet: the material of the walls %s is missing, run Tools/create_planet_assets.py underground"), *WallMaterialAsset.ToString());
+		}
+	}
+
+	// the walls stand on the lips of the passages, the rock of the cliff below them, which is the rock of the void, and their foot is the floor of
+	// the passages, the terrain layer of their biome
+	int32 RockCell = INDEX_NONE;
+	int32 FloorCell = INDEX_NONE;
+	for (int32 Cell = 0; Cell < ShownLevels.Num() && (RockCell == INDEX_NONE || FloorCell == INDEX_NONE); ++Cell)
+	{
+		RockCell = RockCell == INDEX_NONE && ShownLevels[Cell] < 0 ? Cell : RockCell;
+		FloorCell = FloorCell == INDEX_NONE && ShownLevels[Cell] >= 0 ? Cell : FloorCell;
+	}
+	if (WallMaterial && RockCell != INDEX_NONE)
+	{
+		WallMaterial->SetScalarParameterValue(TEXT("RockLayer"), float(GetCellRockLayer(RockCell)));
+	}
+	const int32 FloorBiome = FloorCell == INDEX_NONE ? INDEX_NONE : GetCellBiome(FloorCell);
+	if (WallMaterial && BiomeConfigs.IsValidIndex(FloorBiome) && BiomeConfigs[FloorBiome])
+	{
+		WallMaterial->SetScalarParameterValue(TEXT("FloorLayer"), float(FMath::Max(BiomeConfigs[FloorBiome]->TerrainLayer, 0)));
+	}
+
+	WallParams = HexPlanetWalls::FParams::FromConfig(*Settings, Radius + Settings->LevelHeight, HexPlanetUnderground::GetSeed(GetManifest()));
+	HexPlanetWalls::Build(Grid, ShownLevels, [this](int32 Cell) { return ShownLevels[Cell] >= 0; }, WallParams, Walls);
+	const double LineTime = FPlatformTime::Seconds();
+
+	// the chunks whose samples changed, built in parallel and packed for the GPU
+	const int32 NumChunks = Grid.GetNumChunks();
+	WallHashes.SetNum(NumChunks);
+	WallChunks.SetNum(NumChunks);
+	TArray<int32> Changed;
+	for (int32 Chunk = 0; Chunk < NumChunks; ++Chunk)
+	{
+		const uint32 Hash = HexPlanetWalls::HashChunk(Walls, Chunk);
+		if (Hash != WallHashes[Chunk] || (!WallChunks[Chunk] && !Walls.ChunkSamples[Chunk].IsEmpty()))
+		{
+			WallHashes[Chunk] = Hash;
+			Changed.Add(Chunk);
+		}
+	}
+	TArray<FHexPlanetMeshSectionRef> Prepared;
+	Prepared.SetNum(Changed.Num());
+	TArray<int32> Triangles;
+	Triangles.Init(0, Changed.Num());
+	ParallelFor(Changed.Num(), [&](int32 Index)
+	{
+		HexPlanetWalls::FMesh Mesh;
+		HexPlanetWalls::BuildChunk(Walls, Changed[Index], WallParams, Mesh);
+		Triangles[Index] = Mesh.Triangles.Num() / 3;
+		if (Mesh.Triangles.IsEmpty())
+		{
+			return;
+		}
+		TArray<FVector2f> Zeros;
+		Zeros.SetNumZeroed(Mesh.Positions.Num());
+		FHexPlanetMeshSource Source;
+		Source.Positions = Mesh.Positions;
+		Source.Normals = Mesh.Normals;
+		Source.UVs[0] = Mesh.UVs;
+		Source.UVs[1] = Mesh.UV1s;
+		Source.UVs[2] = Zeros;
+		Source.UVs[3] = Zeros;
+		Source.Triangles = Mesh.Triangles;
+		Prepared[Index] = UHexPlanetMeshComponent::PrepareSection(Source, FName(*FString::Printf(TEXT("WallChunk%d"), Changed[Index])));
+	});
+
+	int64 Total = 0;
+	for (int32 Index = 0; Index < Changed.Num(); ++Index)
+	{
+		const int32 Chunk = Changed[Index];
+		Total += Triangles[Index];
+		UHexPlanetMeshComponent* Mesh = WallChunks[Chunk];
+		if (!Mesh && Prepared[Index])
+		{
+			Mesh = NewObject<UHexPlanetMeshComponent>(this, *FString::Printf(TEXT("WallChunk%d"), Chunk));
+			Mesh->SetupAttachment(Surface);
+			Mesh->SetCastShadow(true);
+			// light added by ray tracing would need its geometry too, a third of the triangles of the underground again
+			Mesh->SetVisibleInRayTracing(false);
+			Mesh->bAffectDistanceFieldLighting = false;
+			Mesh->RegisterComponent();
+			WallChunks[Chunk] = Mesh;
+		}
+		if (Mesh)
+		{
+			Mesh->SetSection(0, MoveTemp(Prepared[Index]));
+			Mesh->SetMaterial(0, WallMaterial);
+			Mesh->UpdateBounds();
+			if (Settings->WallCullDistance > 0.0f)
+			{
+				Mesh->SetCullDistance(Settings->WallCullDistance + Mesh->Bounds.SphereRadius);
+			}
+		}
+		Chunks.AddUnique(Chunk);
+	}
+	int32 Samples = 0;
+	for (const TArray<HexPlanetWalls::FSample>& Line : Walls.Lines)
+	{
+		Samples += Line.Num();
+	}
+	UE_LOG(LogHexHero, Log, TEXT("Planet: walls of the %s: %d lines, %d samples, %d chunks built again with %lld triangles, lines in %.1f ms, meshes in %.1f ms"),
+		GetPlanetLayerName(PlanetLayer), Walls.Lines.Num(), Samples, Changed.Num(), Total, (LineTime - StartTime) * 1000.0, (FPlatformTime::Seconds() - LineTime) * 1000.0);
 }
 
 void AHexPlanet::SetHoveredCell(int32 Cell, int32 BrushSize)

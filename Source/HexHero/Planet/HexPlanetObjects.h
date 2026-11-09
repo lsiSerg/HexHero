@@ -242,6 +242,10 @@ private:
 	 *  from the height of the lip; the stream of each side comes from its cell, side and Id, so the rims stand where they stood */
 	void PlaceRims(int32 Chunk, TArray<FInstance>& Out, FPlaceStats& Stats) const;
 
+	/** On a layer with walls (AHexPlanet::GetWalls), adds the rims of a chunk that stand on them (EHexRimSeat::WallFoot and WallFace): RimSideShare
+	 *  of the samples of its walls, each by a hash of where it lies and the Id, on the rounded foot or out of the inner face */
+	void PlaceOnWalls(int32 Chunk, TArray<FInstance>& Out, FPlaceStats& Stats) const;
+
 	/** Gives the components of a chunk its objects, making the components it lacks */
 	void ApplyChunk(int32 Chunk, const TArray<FInstance>& Instances);
 };

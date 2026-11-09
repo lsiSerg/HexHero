@@ -1007,9 +1007,15 @@ void UHexPlanetObjects::PlaceRims(int32 Chunk, TArray<FInstance>& Out, FPlaceSta
 			GroundOf.Add(Cell, GroundCells.Add(Cell));
 		}
 	};
+	// on a layer with walls a kind with a seat on them stands at points of the walls instead of along the sides
+	const bool bWalls = Planet->HasWalls();
 	for (int32 Rim = 0; Rim < RimSets.Num(); ++Rim)
 	{
 		const UHexPlanetObjectSet& Set = *Sets[RimSets[Rim]];
+		if (bWalls && Set.RimSeat != EHexRimSeat::Lip)
+		{
+			continue;
+		}
 		const int32 Rings = FMath::Clamp(Set.ExitClearRings, 0, 3);
 		const uint32 IdHash = FCrc::StrCrc32(*Set.Id.ToString());
 		HexPlanetUnderground::FindRimSides(Grid, Levels, FMath::Max(Set.RimMinDrop, 1), [this, Rings](int32 Cell)
@@ -1030,6 +1036,10 @@ void UHexPlanetObjects::PlaceRims(int32 Chunk, TArray<FInstance>& Out, FPlaceSta
 			}
 		}
 		Stats.RimSides[RimSets[Rim]] = SidesBySet[Rim].Num();
+	}
+	if (bWalls)
+	{
+		PlaceOnWalls(Chunk, Out, Stats);
 	}
 	if (GroundCells.IsEmpty())
 	{
@@ -1248,6 +1258,108 @@ void UHexPlanetObjects::PlaceRims(int32 Chunk, TArray<FInstance>& Out, FPlaceSta
 	}
 }
 
+void UHexPlanetObjects::PlaceOnWalls(int32 Chunk, TArray<FInstance>& Out, FPlaceStats& Stats) const
+{
+	const HexPlanetWalls::FWalls& Walls = Planet->GetWalls();
+	const HexPlanetWalls::FParams& WallParams = Planet->GetWallParams();
+	if (!Walls.ChunkSamples.IsValidIndex(Chunk))
+	{
+		return;
+	}
+	for (const int32 SetIndex : RimSets)
+	{
+		const UHexPlanetObjectSet& Set = *Sets[SetIndex];
+		if (Set.RimSeat == EHexRimSeat::Lip)
+		{
+			continue;
+		}
+		const uint32 IdHash = FCrc::StrCrc32(*Set.Id.ToString());
+		const float TurnRange = FMath::DegreesToRadians(Set.RimTurn);
+		int32 Taken = 0;
+		for (const FIntPoint& At : Walls.ChunkSamples[Chunk])
+		{
+			// a sample takes the kind by a hash of where it lies and the Id, so a rebuild that moves the start of its line keeps the objects
+			// where they stood, and no pattern repeats along the walls
+			const HexPlanetWalls::FSample& Sample = Walls.Get(At);
+			const FIntVector Key(FMath::RoundToInt32(Sample.Position.X * 0.5), FMath::RoundToInt32(Sample.Position.Y * 0.5), FMath::RoundToInt32(Sample.Position.Z * 0.5));
+			FRandomStream Random(int32(HashCombine(GetTypeHash(Key), IdHash)));
+			if (Random.FRand() >= Set.RimSideShare)
+			{
+				continue;
+			}
+			const FHexObjectVariant* Variant = Set.FindVariant(Planet->GetCellBiomeLetter(Sample.Cell));
+			if (!Variant || !Set.AllowedLevels.Contains(Planet->GetCellLevel(Sample.Cell)) || IsClear(Sample.Cell))
+			{
+				continue;
+			}
+			const TArray<int32>& Meshes = VariantSlots[SetIndex][int32(Variant - Set.Variants.GetData())];
+			if (Meshes.IsEmpty())
+			{
+				continue;
+			}
+			float Scale = Random.FRandRange(Set.ScaleMin, FMath::Max(Set.ScaleMin, Set.ScaleMax)) * Variant->ScaleFactor;
+			if (Random.FRand() < Set.GiantChance)
+			{
+				Scale *= Set.GiantScale;
+			}
+			const int32 Slot = Meshes[Random.RandHelper(Meshes.Num())];
+			const float Turn = Random.FRandRange(-TurnRange, TurnRange);
+			const float TiltAngle = FMath::DegreesToRadians(Random.FRandRange(0.0f, Set.Tilt));
+			const float TiltDirection = Random.FRandRange(0.0f, 2.0f * UE_PI);
+			const FVector3d Slide = Sample.Along * (Random.FRandRange(-0.5f, 0.5f) * WallParams.Step);
+
+			FVector3d Position;
+			FQuat4f Rotation;
+			if (Set.RimSeat == EHexRimSeat::WallFoot)
+			{
+				// upright on the rounded foot, from its upper half to the floor before it, where the line cut a corner the floor the foot lays
+				const double FootEnd = FMath::Max(WallParams.FootReach, Sample.Gap);
+				const double Reach = FMath::Lerp(WallParams.FootReach - WallParams.Fillet * 0.6, FootEnd + 3.0, double(Random.FRand()));
+				Position = (Sample.Position + Sample.Inward * Reach + Slide).GetSafeNormal() * WallParams.FloorRadius;
+				const FVector3f Up = FVector3f(Planet->GetUpAt(Position));
+				const FVector3f X = FQuat4f(Up, Turn).RotateVector(FVector3f(Sample.Along));
+				const FQuat4f Base = FRotationMatrix44f::MakeFromZX(Up, X).ToQuat();
+				const FVector3f TiltAxis = Base.GetAxisX() * FMath::Cos(TiltDirection) + Base.GetAxisY() * FMath::Sin(TiltDirection);
+				Rotation = FQuat4f(TiltAxis, TiltAngle) * Base;
+				Position -= FVector3d(Up) * (Set.Sink * Scale);
+			}
+			else
+			{
+				// out of the inner face at a height of the wall: one that hangs along the face down it in front of it, else standing out of it
+				const double Height = HexPlanetWalls::GetHeight(Sample, WallParams)
+					* Random.FRandRange(float(Set.RimWallHeights.X), float(FMath::Max(Set.RimWallHeights.X, Set.RimWallHeights.Y)));
+				FVector3d Face;
+				FVector3d Normal;
+				HexPlanetWalls::GetInnerFace(Walls, At, Height, WallParams, Face, Normal);
+				const FVector3f Out3 = FVector3f(Normal);
+				const FVector3f Up = FVector3f(Sample.Up);
+				if (Set.bRimHang)
+				{
+					const FVector3f UpFace = (Up - Out3 * FVector3f::DotProduct(Up, Out3)).GetSafeNormal();
+					const FQuat4f Base = FRotationMatrix44f::MakeFromZY(UpFace, Out3).ToQuat();
+					const FVector3f TiltAxis = Base.GetAxisX() * FMath::Cos(TiltDirection) + Base.GetAxisZ() * FMath::Sin(TiltDirection);
+					Rotation = FQuat4f(TiltAxis, TiltAngle) * FQuat4f(Out3, Turn) * Base;
+				}
+				else
+				{
+					const FQuat4f Base = FRotationMatrix44f::MakeFromZX(Out3, Up).ToQuat();
+					const FVector3f TiltAxis = Base.GetAxisX() * FMath::Cos(TiltDirection) + Base.GetAxisY() * FMath::Sin(TiltDirection);
+					Rotation = FQuat4f(TiltAxis, TiltAngle) * FQuat4f(Out3, Turn) * Base;
+				}
+				Position = Face + Slide * 0.3 - Normal * (Set.Sink * Scale);
+			}
+
+			FInstance& Instance = Out.AddDefaulted_GetRef();
+			Instance.Slot = Slot;
+			Instance.Transform = FTransform(FQuat(Rotation), Position, FVector(Scale));
+			Instance.Rock = float(Planet->GetCellRockLayer(Sample.Cell));
+			Instance.Snow = Variant->Snow;
+			++Taken;
+		}
+		Stats.RimSides[SetIndex] = Taken;
+	}
+}
+
 void UHexPlanetObjects::PlaceInCell(int32 Cell, int32 SetIndex, int32 Density, bool bDecor, const TArray<FVector3f>& Triangles, TArray<FInstance>& Out) const
 {
 	const UHexPlanetObjectSet& Set = *Sets[SetIndex];
@@ -1313,6 +1425,7 @@ void UHexPlanetObjects::PlaceInCell(int32 Cell, int32 SetIndex, int32 Density, b
 	FRandomStream Random(int32(HashCombine(GetTypeHash(Cell), FCrc::StrCrc32(*Set.Id.ToString())) + (bDecor ? 7 : 0)));
 	const float Rock = float(Planet->GetCellRockLayer(Cell));
 	const float MinUp = FMath::Clamp(Set.MinUp, 0.0f, 1.0f);
+	const double WallClearance = Planet->HasWalls() ? HexPlanetWalls::GetFootReach(Planet->GetWallParams()) : 0.0;
 	const double RiverClearance = Planet->GetRivers() && !Planet->GetRivers()->GetShownNet().IsEmpty()
 		? Settings->RiverWidth * 0.5 + Settings->RiverMeander + Settings->RiverBankWidth : 0.0;
 	TArray<FVector3f, TInlineAllocator<64>> Taken;
@@ -1354,6 +1467,12 @@ void UHexPlanetObjects::PlaceInCell(int32 Cell, int32 SetIndex, int32 Density, b
 		}
 		// not in a river, nor on its banks
 		if (RiverClearance > 0.0 && Planet->GetRivers()->GetRiverDistance(Cell, FVector3d(Position)) < RiverClearance + Set.Spacing * Scale * 0.5)
+		{
+			continue;
+		}
+		// nor in the wall on a lip or on its foot
+		if (WallClearance > 0.0 && Set.bClipFootprint
+			&& HexPlanetWalls::GetDistanceToLine(Planet->GetWalls(), Cell, FVector3d(Position)) < WallClearance + Slots[Slot].FootprintRadius * Scale + Settings->ObjectFootprintMargin)
 		{
 			continue;
 		}

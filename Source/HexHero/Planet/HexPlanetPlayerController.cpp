@@ -27,6 +27,15 @@
 #include "Styling/CoreStyle.h"
 #include "Widgets/Layout/SBorder.h"
 
+namespace
+{
+	TAutoConsoleVariable<int32> CVarPlanetWallFade(TEXT("hex.PlanetWallFade"), 1,
+		TEXT("1: the walls of the underground dissolve in front of the point under the cursor (CaveWallFade values of DA_HexUnderground); 2: in front of the point in the middle of the screen, or as high as hex.PlanetWallFadeScreenY says, for screenshots; 0: they stay whole"));
+
+	TAutoConsoleVariable<float> CVarPlanetWallFadeScreenY(TEXT("hex.PlanetWallFadeScreenY"), 0.5f,
+		TEXT("Where hex.PlanetWallFade 2 puts the point the walls dissolve in front of, as a share of the height of the screen from its top"));
+}
+
 AHexPlanetPlayerController::AHexPlanetPlayerController()
 {
 	bShowMouseCursor = true;
@@ -319,6 +328,22 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 	}
 
 	Planet->SetHoveredCell(Cell, IsBrushArmed() ? Painter->GetOutlineSize() : 0);
+	// the walls of the underground dissolve in front of the point under the cursor, as in a game seen from above (M_HexUndergroundWall)
+	const int32 WallFade = CVarPlanetWallFade.GetValueOnGameThread();
+	if (WallFade == 2)
+	{
+		int32 Width = 0;
+		int32 Height = 0;
+		GetViewportSize(Width, Height);
+		FVector MiddlePoint = FVector::ZeroVector;
+		const bool bMiddle = DeprojectScreenPositionToWorld(Width * 0.5f, Height * FMath::Clamp(CVarPlanetWallFadeScreenY.GetValueOnGameThread(), 0.0f, 1.0f), Origin, Direction)
+			&& Planet->FindCellAlongRay(Origin, Direction, &MiddlePoint) != INDEX_NONE;
+		Planet->SetFadeFocus(bMiddle, MiddlePoint);
+	}
+	else
+	{
+		Planet->SetFadeFocus(Cell != INDEX_NONE && WallFade != 0, MousePoint);
+	}
 
 	// the panel follows hex.HoverInfo of the flat map
 	static const IConsoleVariable* HoverInfoVariable = IConsoleManager::Get().FindConsoleVariable(TEXT("hex.HoverInfo"));

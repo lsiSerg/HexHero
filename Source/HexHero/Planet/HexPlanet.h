@@ -9,6 +9,7 @@
 #include "HexPlanetMeshComponent.h"
 #include "HexPlanetSurface.h"
 #include "HexPlanetUnderground.h"
+#include "HexPlanetWalls.h"
 #include "HexSphereGrid.h"
 #include "HexWorldMap.h"
 #include "Tasks/Task.h"
@@ -342,6 +343,10 @@ public:
 	UPROPERTY(EditAnywhere, Category="Planet|Underground")
 	TSoftObjectPtr<UMaterialInterface> UndergroundMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/HexPlanet/M_HexUnderground.M_HexUnderground")));
 
+	/** Material of the walls on the lips of the passages (UHexPlanetConfig::bWalls), from Tools/create_planet_assets.py */
+	UPROPERTY(EditAnywhere, Category="Planet|Underground")
+	TSoftObjectPtr<UMaterialInterface> WallMaterialAsset = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/HexPlanet/M_HexUndergroundWall.M_HexUndergroundWall")));
+
 	/** Constructor */
 	AHexPlanet();
 
@@ -519,6 +524,15 @@ public:
 
 	/** Returns the forests, bushes, stones and decor of the cells */
 	UHexPlanetObjects* GetObjects() const { return Objects; }
+
+	/** Returns the walls on the lips of the passages, empty without UHexPlanetConfig::bWalls, and the values they are built with */
+	const HexPlanetWalls::FWalls& GetWalls() const { return Walls; }
+	const HexPlanetWalls::FParams& GetWallParams() const { return WallParams; }
+	bool HasWalls() const { return !Walls.Lines.IsEmpty(); }
+
+	/** Gives the walls the point under the cursor, around which they dissolve where they stand in front of it (WallFadeCenter of
+	 *  M_HexUndergroundWall), or none while the cursor is off the planet */
+	void SetFadeFocus(bool bOnPlanet, const FVector& Point);
 
 	/** Returns the rivers and bridges */
 	UHexPlanetRivers* GetRivers() const { return Rivers; }
@@ -755,6 +769,22 @@ private:
 	/** The values of each texture layer of UHexTerrainLayersConfig, which M_HexPlanet reads as LayerParams (CreateParamsTexture) */
 	UPROPERTY(Transient)
 	TObjectPtr<UTexture2D> LayerParamsTexture;
+
+	/** The walls on the lips of the passages (UHexPlanetConfig::bWalls, HexPlanetWalls), built from the levels shown, their mesh per chunk
+	 *  (WallChunks, under the empty root Surface), the hash of the samples each was built from, and their material */
+	HexPlanetWalls::FWalls Walls;
+	HexPlanetWalls::FParams WallParams;
+	TArray<uint32> WallHashes;
+
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UHexPlanetMeshComponent>> WallChunks;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> WallMaterial;
+
+	/** Builds the walls again from the levels shown, gives the chunks whose walls changed their meshes, and adds those chunks to Chunks, whose
+	 *  objects stand on the walls too */
+	void UpdateWalls(TArray<int32>& Chunks);
 
 	/** Frozen cells of the sea the sea field shown now was built from, see GetFrozenCells */
 	TArray<uint8> ShownFrozen;

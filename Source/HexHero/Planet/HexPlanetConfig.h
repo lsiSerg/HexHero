@@ -1387,6 +1387,199 @@ public:
 	UPROPERTY(EditAnywhere, Category="Underground|Objects", meta=(ClampMin=0))
 	float ObjectFootprintMargin = 2.0f;
 
+	/** The walls on the lips of the passages (HexPlanetWalls, AHexPlanet::UpdateWalls), one mesh per chunk. Their line follows the sides of the
+	 *  passages towards a void, keeping the tips of the hexes, cuts across each corner of a void between two passages by WallCornerCut of its
+	 *  sides, as if the floor went on into that void (0 follows the sides, 1 runs from tip to tip), so the walls still show the hexes they stand on,
+	 *  rounds every corner by WallCornerRound and is sampled every WallStep world units. The wall stands on the void side of the line, WallHeight
+	 *  high, about a mountain of the surface, higher or lower by WallHeightNoise in stretches of WallHeightNoiseScale, and WallThickness thick at
+	 *  the floor: its inner face rises from a rounded foot of WallFillet that reaches WallFootReach onto the floor, and from a flat floor where the
+	 *  line cut a corner, leans back by WallLean of its height and bulges out by WallOverhang at its top; from that overhang hang stalactites, ribs
+	 *  of a cellular pattern of the place about WallRibSize across that stand out up to WallRibDepth and end between WallRibTipMin and WallRibTipMax
+	 *  of the height, WallColumnShare of them reaching the floor as columns, with flutes WallFluteDepth deep scooped down the face between them
+	 *  (WallFluteWidth wide, a share of a rib), as with a spoon; its crest rises and falls by WallCrestJag over each stalactite and dips by
+	 *  WallCrestNotch between them, and its outer face goes down WallOuterDepth into the chasm, flared by WallOuterFlare, from the line smoothed over
+	 *  WallOuterSmooth each way, so a thick wall does not pinch at a corner. A 3D noise of the place bulges the faces (WallBulge at WallBulgeScale,
+	 *  WallDetail at WallDetailScale) and lifts the crest (WallCrestNoise), so no stretch repeats from any distance. Not drawn past
+	 *  WallCullDistance; the rims of EHexRimSeat::WallFoot and WallFace stand on it */
+	UPROPERTY(EditAnywhere, Category="Features")
+	bool bWalls = false;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
+	float WallCornerCut = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float WallCornerRound = 30.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float WallOuterSmooth = 90.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=1))
+	float WallHeight = 170.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=0.9))
+	float WallHeightNoise = 0.25f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=1))
+	float WallHeightNoiseScale = 320.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=1))
+	float WallThickness = 75.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=1))
+	float WallStep = 6.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float WallFootReach = 12.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float WallFillet = 30.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=0.5))
+	float WallLean = 0.05f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float WallOverhang = 12.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float WallOuterDepth = 160.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float WallOuterFlare = 25.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float WallBulge = 6.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=1))
+	float WallBulgeScale = 55.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float WallDetail = 2.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=1))
+	float WallDetailScale = 15.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float WallCrestNoise = 0.1f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=0.5))
+	float WallCrestJag = 0.12f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=0.5))
+	float WallCrestNotch = 0.08f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=4))
+	float WallRibSize = 50.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float WallRibDepth = 12.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=0.85))
+	float WallRibTipMin = 0.25f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=0.85))
+	float WallRibTipMax = 0.7f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
+	float WallColumnShare = 0.12f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float WallFluteDepth = 7.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0.01, ClampMax=1))
+	float WallFluteWidth = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float WallCullDistance = 9000.0f;
+
+	/** The look of the walls (M_HexUndergroundWall): the rock layer of the cliff below them (the rock of the abyss) with the values of that layer
+	 *  (LayerParams), times CaveWallColor, and lighter and warmer on the stalactites by CaveWallRibTint, as dripstone; streaked down the faces by
+	 *  CaveWallStreaks in streaks about CaveWallStreakScale wide, lighter or darker by CaveWallTone in patches of CaveWallToneScale, darker by
+	 *  CaveWallCavityShade in the flutes, under the overhang and between the stalactites, and from CaveWallTopStart of the height up to the crest by
+	 *  CaveWallTopShade, as the light of a cave comes from its floor, and down the outer face below the floor as the cliffs are (AbyssDepthHalf);
+	 *  its normal bent by CaveWallNormalStrength of the layer, CaveWallRoughness rough and CaveWallRibRoughness on the stalactites. The rounded foot
+	 *  and the floor before it take the floor of the passages (the layer of their biome, CaveFloorTint, CaveFloorBrightness and CaveFloorPools), the
+	 *  edge between them moved by CaveWallFloorNoise, so the wall rises out of the floor. Lighter and warmer than 1, as a wall is steep, so it draws
+	 *  the cliff of the basalt alone, a dark photo scan, where the cliffs mix in its lighter scree (tune it again with the light of the game) */
+	UPROPERTY(EditAnywhere, Category="Underground|Walls")
+	FLinearColor CaveWallColor = FLinearColor(2.6f, 2.3f, 2.0f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls")
+	FLinearColor CaveWallRibTint = FLinearColor(1.3f, 1.2f, 1.05f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
+	float CaveWallStreaks = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0.5))
+	float CaveWallStreakScale = 9.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
+	float CaveWallTone = 0.2f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=1))
+	float CaveWallToneScale = 260.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
+	float CaveWallCavityShade = 0.55f;
+
+	/** The stone of the walls splits along its joints into slabs, cells of a pattern of the place CaveWallFacetCell across and CaveWallFacetStretch
+	 *  times as tall, each leaning its normal its own way by CaveWallFacetTilt, with cracks between them in patches, CaveWallCrackWidth of a slab
+	 *  wide and darkened by CaveWallCrackShade, fading out where a slab covers only a few pixels; and it lies in layers CaveWallStrataSpacing
+	 *  apart, each lighter or darker by CaveWallStrata, but on the stalactites */
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=1))
+	float CaveWallFacetCell = 18.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0.2, ClampMax=10))
+	float CaveWallFacetStretch = 3.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=2))
+	float CaveWallFacetTilt = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
+	float CaveWallCrackShade = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0.01, ClampMax=1))
+	float CaveWallCrackWidth = 0.05f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
+	float CaveWallStrata = 0.18f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=1))
+	float CaveWallStrataSpacing = 24.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
+	float CaveWallTopShade = 0.7f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
+	float CaveWallTopStart = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float CaveWallNormalStrength = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
+	float CaveWallRoughness = 0.85f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
+	float CaveWallRibRoughness = 0.55f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=2))
+	float CaveWallFloorNoise = 0.6f;
+
+	/** The walls dissolve around the line from the camera to the point under the cursor, as in a game seen from above, where they stand in front
+	 *  of that point: within CaveWallFadeRadius world units of the line, softer over CaveWallFadeSoftness of it at its edge, fully from
+	 *  CaveWallFadeDepth units nearer the camera than the point, keeping CaveWallFadeKeep of their pixels, which the temporal filter blends into a
+	 *  ghost; their shadows and what ray tracing sees stay whole. hex.PlanetWallFade 0 turns it off */
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float CaveWallFadeRadius = 150.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0.01, ClampMax=1))
+	float CaveWallFadeSoftness = 0.4f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0.1))
+	float CaveWallFadeDepth = 15.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
+	float CaveWallFadeKeep = 0.15f;
+
 	/** The floor of the passages in M_HexUnderground, on their tops (within CaveFloorTopDepth below them): its layer (OchreScree, earth with
 	 *  pebbles) times CaveFloorTint and CaveFloorBrightness, warm, as the placeholder light of the underground is cool (tune both again once the
 	 *  light of the game is decided, UndergroundLighting of DA_HexPlanetCamera), and lighter or darker by CaveFloorPools in pools of tone of a noise

@@ -1490,7 +1490,7 @@ CONFIGS = [(FOLDER + '/DA_HexPlanet', unreal.HexPlanetConfig), (FOLDER + '/DA_He
 # large and its surface is drawn alike, with these values, and then tuned by hand. Its features are off, as it has no sea and no sky
 UNDERGROUND_CONFIG = FOLDER + '/DA_HexUnderground'
 UNDERGROUND_VALUES = {
-    'sea': False, 'clouds': False, 'haze': False, 'auroras': False, 'rivers': False, 'generate_objects': True, 'fog': True,
+    'sea': False, 'clouds': False, 'haze': False, 'auroras': False, 'rivers': False, 'generate_objects': True, 'fog': True, 'walls': True,
     # a passage holds its sides and a void carries its whole cliff, so passages stay flat ledges over the voids
     'edge_rule': unreal.HexEdgeRule.HIGHER_HOLDS,
     'deep_depth': 200.0,
@@ -1500,7 +1500,7 @@ UNDERGROUND_VALUES = {
 # values of an existing DA_HexUnderground that a later stage changed, as (property, old value, new value): each is set only while the asset still
 # holds the old value, so tuning by hand is never overwritten. The cave objects are generated on the passages since 2026-11-09, and the motes drift
 # over them since then too
-UNDERGROUND_MIGRATIONS = [('generate_objects', False, True), ('motes', False, True)]
+UNDERGROUND_MIGRATIONS = [('generate_objects', False, True), ('motes', False, True), ('walls', False, True)]
 
 
 def clear_expressions(material):
@@ -3170,6 +3170,255 @@ def build_cave_object_material():
     return material
 
 
+# the walls on the lips of the passages (HexPlanetWalls, AHexPlanet::UpdateWalls): the rock layer of the cliff below them (RockLayer, which AHexPlanet
+# gives from the rock of the void), projected from the three planes of the world at the tile size, tint and normal strength of that layer
+# (LayerParams), so a wall goes on up from the cliff in the same stone, times CaveWallColor, as dripstone: lighter and warmer on the stalactites
+# (CaveWallRibTint, by how much of one stands out in V of the second UV), streaked down the faces (CaveWallStreaks, a noise of the direction from
+# the center, which a vertical line of a wall keeps), lighter or darker in broad patches (CaveWallTone) and in layers (CaveWallStrata), split into
+# facets that lean their own ways with cracks between them (CaveWallFacet*, CaveWallCrack*, a cellular pattern of the place); darker in its hollows (CaveWallCavityShade,
+# by U of the first UV) and towards its crest (CaveWallTopShade from CaveWallTopStart, by the height share in V of the first UV), as the light of a
+# cave comes from its floor, and down its outer face below the floor (FloorRadius) as the cliffs darken into the abyss (AbyssDepthHalf), with Ambient
+# as the ground has. Its rounded foot and the floor before it (U of the second UV) are the floor of the passages, the terrain layer of their biome
+# (FloorLayer) taken as M_HexUnderground takes it, with CaveFloorTint, CaveFloorBrightness and its pools of tone, the edge moved by a noise
+# (CaveWallFloorNoise), so the wall rises out of the floor without a seam. Masked: around the line from the camera to the point under the cursor
+# (WallFadeCenter, its alpha 1 while the cursor is on the planet, AHexPlanet::SetFadeFocus) a wall dissolves where it stands in front of that point,
+# keeping CaveWallFadeKeep of its pixels by a noise of the pixel that changes every frame, which the temporal filter blends into a ghost, as a game
+# seen from above shows what lies behind a wall. The shadow pass and ray tracing take it whole, so its shadow does not flicker
+WALL_MATERIAL = FOLDER + '/M_HexUndergroundWall'
+# the value noise hashed in integers of the cracks of lava
+CAVE_NOISE_CODE = CAVE_RUNES_CODE[CAVE_RUNES_CODE.index('// a value noise whose lattice is hashed in integers'):]
+WALL_CODE = NOISE_CODE + CAVE_NOISE_CODE + r'''
+// a layer from the three planes of the world, as the ground takes it (FBiomeLayers::SampleOne), so the floor at the foot of a wall is the floor
+// of the passages next to it
+struct FWallLayers
+{
+    float3 Planes;
+    float3 Pos;
+    float3 Ddx;
+    float3 Ddy;
+    float DefaultTile;
+    float3 Sample(Texture2DArray colors, SamplerState colorsSampler, Texture2DArray normals, SamplerState normalsSampler, Texture2D params, float layer, out float3 bend)
+    {
+        float4 look = params.Load(int3(layer, 0, 0));
+        float4 shape = params.Load(int3(layer, 1, 0));
+        bool known = look.w > 0.5;
+        float tile = known ? look.w : DefaultTile;
+        float3 pos = Pos / tile;
+        float3 ddx = Ddx / tile;
+        float3 ddy = Ddy / tile;
+        float3 color = 0.0;
+        bend = 0.0;
+        [branch] if (Planes.x > 0.0)
+        {
+            color += colors.SampleGrad(colorsSampler, float3(pos.yz, layer), ddx.yz, ddy.yz).rgb * Planes.x;
+            float2 slope = normals.SampleGrad(normalsSampler, float3(pos.yz, layer), ddx.yz, ddy.yz).xy * 2.0 - 1.0;
+            bend += float3(0.0, slope.x, slope.y) * Planes.x;
+        }
+        [branch] if (Planes.y > 0.0)
+        {
+            color += colors.SampleGrad(colorsSampler, float3(pos.xz, layer), ddx.xz, ddy.xz).rgb * Planes.y;
+            float2 slope = normals.SampleGrad(normalsSampler, float3(pos.xz, layer), ddx.xz, ddy.xz).xy * 2.0 - 1.0;
+            bend += float3(slope.x, 0.0, slope.y) * Planes.y;
+        }
+        [branch] if (Planes.z > 0.0)
+        {
+            color += colors.SampleGrad(colorsSampler, float3(pos.xy, layer), ddx.xy, ddy.xy).rgb * Planes.z;
+            float2 slope = normals.SampleGrad(normalsSampler, float3(pos.xy, layer), ddx.xy, ddy.xy).xy * 2.0 - 1.0;
+            bend += float3(slope.x, slope.y, 0.0) * Planes.z;
+        }
+        if (known)
+        {
+            color *= look.rgb;
+            bend *= shape.x;
+        }
+        return color;
+    }
+};
+float3 n = normalize(VertexNormal);
+float3 up = normalize(WorldPos);
+float3 planes = pow(abs(n), TriplanarSharpness);
+planes /= planes.x + planes.y + planes.z;
+planes = saturate((planes - 0.04) / 0.96);
+planes /= planes.x + planes.y + planes.z;
+FWallLayers layers;
+layers.Planes = planes;
+layers.Pos = WorldPos;
+layers.Ddx = PosDdx;
+layers.Ddy = PosDdy;
+layers.DefaultTile = max(BiomeTileSize, 1.0);
+float cavity = saturate(WallUV.x);
+float rise = WallUV.y;
+float floorShare = saturate(WallUV1.x);
+float ribShare = saturate(WallUV1.y);
+
+// the rock of the cliff below, as dripstone: lighter and warmer on the stalactites, streaked down the faces, in broad patches of tone
+float3 rockBend;
+float3 albedo = layers.Sample(Colors, ColorsSampler, Normals, NormalsSampler, LayerParams, round(RockLayer), rockBend) * CaveWallColor.rgb;
+albedo *= lerp(1.0, CaveWallRibTint.rgb, ribShare);
+// a vertical line of a wall keeps its direction from the center, so a noise of that direction runs down the faces as streaks, changing slowly
+// with the height
+float streakScale = max(CaveWallStreakScale, 0.5);
+float3 streakPoint = up * (FloorRadius / streakScale) + (length(WorldPos) - FloorRadius) / (streakScale * 12.0);
+float streak = caveNoise.Value(streakPoint) * 0.65 + caveNoise.Value(streakPoint * 2.7 + 5.1) * 0.35;
+albedo *= 1.0 + (streak - 0.5) * 2.0 * CaveWallStreaks;
+albedo *= 1.0 + (caveNoise.Value(WorldPos / max(CaveWallToneScale, 1.0) + 3.3) - 0.5) * 2.0 * CaveWallTone;
+// layers of the rock, each of its own tone, blending into the next near its top, their heights bent a little by a noise, but not on the
+// stalactites
+float strataPhase = (length(WorldPos) - FloorRadius + (caveNoise.Value(WorldPos / 60.0 + 7.7) - 0.5) * CaveWallStrataSpacing * 0.8) / max(CaveWallStrataSpacing, 1.0);
+int strataBand = (int)floor(strataPhase);
+float strataTone = lerp(caveNoise.Hash(int3(strataBand, 17, 5)), caveNoise.Hash(int3(strataBand + 1, 17, 5)), smoothstep(0.65, 1.0, frac(strataPhase)));
+albedo *= 1.0 + (strataTone - 0.5) * 2.0 * CaveWallStrata * (1.0 - ribShare) * (1.0 - floorShare);
+// the stone splits along its joints into slabs, cells of a pattern CaveWallFacetCell across and CaveWallFacetStretch times as tall, the height
+// above the floor being one of its axes, each leaning its normal its own way, with cracks between them in patches, fading out where a slab
+// covers only a few pixels
+float pixelWorld = (length(PosDdx) + length(PosDdy)) * 0.5;
+float facetCell = max(CaveWallFacetCell, 1.0);
+float facetFade = (1.0 - smoothstep(facetCell * 0.15, facetCell * 0.4, pixelWorld)) * (1.0 - floorShare);
+float3 facetNormal = n;
+[branch] if (facetFade > 0.001)
+{
+    float3 facetPos = up * (FloorRadius / facetCell + (length(WorldPos) - FloorRadius) / (facetCell * max(CaveWallFacetStretch, 0.1)));
+    float3 facetBase = floor(facetPos);
+    float nearest = 1e9;
+    float second = 1e9;
+    float3 lean = 0.0;
+    for (int x = -1; x <= 1; ++x)
+    for (int y = -1; y <= 1; ++y)
+    for (int z = -1; z <= 1; ++z)
+    {
+        float3 c = facetBase + float3(x, y, z);
+        float3 h = frac(c * float3(0.1031, 0.1030, 0.0973));
+        h += dot(h, h.yxz + 33.33);
+        h = frac((h.xxy + h.yxx) * h.zyx);
+        float3 toPoint = c + h - facetPos;
+        float d = dot(toPoint, toPoint);
+        if (d < nearest)
+        {
+            second = nearest;
+            nearest = d;
+            lean = h * 2.0 - 1.0;
+        }
+        else if (d < second)
+        {
+            second = d;
+        }
+    }
+    facetNormal = normalize(n + (lean - n * dot(lean, n)) * CaveWallFacetTilt * facetFade);
+    float crackPatch = smoothstep(0.4, 0.7, caveNoise.Value(WorldPos / (facetCell * 3.0) + 2.2));
+    albedo *= 1.0 - CaveWallCrackShade * facetFade * crackPatch * (1.0 - smoothstep(0.0, max(CaveWallCrackWidth, 1e-3), sqrt(second) - sqrt(nearest)));
+}
+// hollows lie in the shade, and the light of a cave comes from its floor, so the crest falls into the dark
+albedo *= 1.0 - CaveWallCavityShade * cavity;
+albedo *= 1.0 - CaveWallTopShade * smoothstep(CaveWallTopStart, 1.0, rise);
+// down the outer face below the floor it darkens into the abyss as the cliffs do
+albedo *= exp2(-max(FloorRadius - length(WorldPos), 0.0) / max(AbyssDepthHalf, 1.0));
+
+// the foot and the floor before it are the floor of the passages, so the wall rises out of it
+float3 floorBend = 0.0;
+float3 floorColor = 0.0;
+float floorMix = 0.0;
+[branch] if (floorShare > 0.001)
+{
+    floorColor = layers.Sample(Colors, ColorsSampler, Normals, NormalsSampler, LayerParams, round(FloorLayer), floorBend) * CaveFloorTint.rgb * CaveFloorBrightness;
+    floorColor *= 1.0 + (cloudNoise.Value(WorldPos / max(CaveFloorPoolScale, 1.0) + 2.9) - 0.5) * 2.0 * CaveFloorPools;
+    floorMix = smoothstep(0.35, 0.65, floorShare + (caveNoise.Value(WorldPos / 7.0 + 1.7) - 0.5) * CaveWallFloorNoise);
+}
+albedo = lerp(albedo, floorColor, floorMix);
+float3 rockNormal = normalize(facetNormal + rockBend * CaveWallNormalStrength);
+float3 floorNormal = normalize(n + (floorBend - n * dot(floorBend, n)) * BiomeNormalStrength);
+OutNormal = normalize(lerp(rockNormal, floorNormal, floorMix));
+OutRoughness = lerp(lerp(CaveWallRoughness, CaveWallRibRoughness, ribShare), Roughness, floorMix);
+OutEmissive = albedo * Ambient;
+return albedo;
+'''
+WALL_FADE_CODE = r'''
+float3 toFocus = WallFadeCenter.xyz - CameraPos;
+float focusDistance = length(toFocus);
+float3 axis = toFocus / max(focusDistance, 1.0);
+float3 toPixel = WorldPos - CameraPos;
+float along = dot(toPixel, axis);
+float off = length(toPixel - axis * along);
+float radius = max(CaveWallFadeRadius, 1.0);
+float fade = WallFadeCenter.w * (1.0 - smoothstep(radius * (1.0 - CaveWallFadeSoftness), radius, off))
+    * saturate((focusDistance - along) / max(CaveWallFadeDepth, 0.1));
+float2 pixel = Parameters.SvPosition.xy + 5.588238 * (float)View.StateFrameIndexMod8;
+float noise = frac(52.9829189 * frac(dot(pixel, float2(0.06711056, 0.00583715))));
+return noise < 1.0 - fade * (1.0 - CaveWallFadeKeep) ? 1.0 : 0.0;
+'''
+WALL_PARAMETERS = ['BiomeTileSize', 'TriplanarSharpness', 'BiomeNormalStrength', 'Roughness', 'CaveWallColor', 'CaveWallRibTint', 'CaveWallStreaks',
+                   'CaveWallStreakScale', 'CaveWallTone', 'CaveWallToneScale', 'CaveWallCavityShade', 'CaveWallTopShade', 'CaveWallTopStart',
+                   'CaveWallNormalStrength', 'CaveWallRoughness', 'CaveWallRibRoughness', 'CaveWallFloorNoise', 'CaveWallFacetCell', 'CaveWallFacetStretch',
+                   'CaveWallFacetTilt', 'CaveWallCrackShade', 'CaveWallCrackWidth', 'CaveWallStrata', 'CaveWallStrataSpacing', 'CaveFloorTint', 'CaveFloorBrightness',
+                   'CaveFloorPools', 'CaveFloorPoolScale', 'AbyssDepthHalf', 'Ambient']
+WALL_FADE_PARAMETERS = ['CaveWallFadeRadius', 'CaveWallFadeSoftness', 'CaveWallFadeDepth', 'CaveWallFadeKeep']
+for _name in WALL_PARAMETERS:
+    assert _name in WALL_CODE, _name
+for _name in WALL_FADE_PARAMETERS:
+    assert _name in WALL_FADE_CODE, _name
+
+
+def build_wall_material():
+    library = unreal.MaterialEditingLibrary
+    assets = unreal.EditorAssetLibrary
+    material = unreal.load_asset(WALL_MATERIAL) if assets.does_asset_exist(WALL_MATERIAL) else unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+        WALL_MATERIAL.split('/')[-1], FOLDER, unreal.Material, unreal.MaterialFactoryNew())
+    clear_expressions(material)
+    material.set_editor_property('blend_mode', unreal.BlendMode.BLEND_MASKED)
+    material.set_editor_property('tangent_space_normal', False)
+
+    position = library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1100, 0)
+    position_ddx = library.create_material_expression(material, unreal.MaterialExpressionDDX, -900, 0)
+    position_ddy = library.create_material_expression(material, unreal.MaterialExpressionDDY, -900, 50)
+    library.connect_material_expressions(position, '', position_ddx, '')
+    library.connect_material_expressions(position, '', position_ddy, '')
+    wall_uv1 = library.create_material_expression(material, unreal.MaterialExpressionTextureCoordinate, -1000, 160)
+    wall_uv1.set_editor_property('coordinate_index', 1)
+    connections = [('WorldPos', position, ''), ('PosDdx', position_ddx, ''), ('PosDdy', position_ddy, ''),
+        ('VertexNormal', library.create_material_expression(material, unreal.MaterialExpressionVertexNormalWS, -1000, 100), ''),
+        ('WallUV', library.create_material_expression(material, unreal.MaterialExpressionTextureCoordinate, -1000, 150), ''),
+        ('WallUV1', wall_uv1, ''),
+        ('RockLayer', add_scalar(library, material, 'RockLayer', 7.0, 175), ''),
+        ('FloorLayer', add_scalar(library, material, 'FloorLayer', 15.0, 185), ''),
+        ('FloorRadius', add_scalar(library, material, 'FloorRadius', 11528.0, 200), ''),
+        ('Colors', add_texture(library, material, COLORS, 'Colors', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 250), ''),
+        ('Normals', add_texture(library, material, NORMALS, 'Normals', unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL, 275), ''),
+        ('LayerParams', add_texture(library, material, DEFAULT_MARKS, 'LayerParams', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 290), '')
+        ] + add_config_parameters(library, material, unreal.HexPlanetConfig, WALL_PARAMETERS, 300)
+    custom = add_custom(library, material, WALL_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, connections, 0,
+        ('OutEmissive', unreal.CustomMaterialOutputType.CMOT_FLOAT3))
+    # more extra outputs for the normal and the roughness, as add_custom takes one
+    outputs = list(custom.get_editor_property('additional_outputs'))
+    for name, output_type in (('OutNormal', unreal.CustomMaterialOutputType.CMOT_FLOAT3), ('OutRoughness', unreal.CustomMaterialOutputType.CMOT_FLOAT1)):
+        output = unreal.CustomOutput()
+        output.set_editor_property('output_name', name)
+        output.set_editor_property('output_type', output_type)
+        outputs.append(output)
+    custom.set_editor_property('additional_outputs', outputs)
+    library.connect_material_property(custom, '', unreal.MaterialProperty.MP_BASE_COLOR)
+    library.connect_material_property(custom, 'OutEmissive', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    library.connect_material_property(custom, 'OutNormal', unreal.MaterialProperty.MP_NORMAL)
+    library.connect_material_property(custom, 'OutRoughness', unreal.MaterialProperty.MP_ROUGHNESS)
+
+    fade_connections = [('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1100, 1000), ''),
+        ('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1100, 1050), ''),
+        ('WallFadeCenter', add_vector4(library, material, 'WallFadeCenter', unreal.LinearColor(0.0, 0.0, 0.0, 0.0), 1100), '')
+        ] + add_config_parameters(library, material, unreal.HexPlanetConfig, WALL_FADE_PARAMETERS, 1150)
+    fade = add_custom(library, material, WALL_FADE_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT1, fade_connections, 1000)
+    whole = library.create_material_expression(material, unreal.MaterialExpressionConstant, -200, 1400)
+    whole.set_editor_property('r', 1.0)
+    # whole in ray tracing and in the shadow pass, where the camera of the view is not the camera
+    switch = library.create_material_expression(material, unreal.MaterialExpressionRayTracingQualitySwitch, 0, 1000)
+    library.connect_material_expressions(fade, '', switch, 'Normal')
+    library.connect_material_expressions(whole, '', switch, 'RayTraced')
+    shadow = library.create_material_expression(material, unreal.MaterialExpressionShadowReplace, 200, 1000)
+    library.connect_material_expressions(switch, '', shadow, 'Default')
+    library.connect_material_expressions(whole, '', shadow, 'Shadow')
+    library.connect_material_property(shadow, '', unreal.MaterialProperty.MP_OPACITY_MASK)
+    library.recompile_material(material)
+    assets.save_asset(WALL_MATERIAL)
+    return material
+
+
 # The motes and spores of the underground (UHexPlanetMotes, bMotes of DA_HexUnderground), quads of a plane, additive and unlit. Each vertex is moved
 # in its world position offset, so the CPU sends only MoteOrigin, the point the camera looks at, and MotePixelScale. A mote (MoteAnchored 0, custom
 # data its seed) wraps in a box of the world MoteBox wide around MoteOrigin, so it stays where it is in the world while the box follows the camera
@@ -3331,6 +3580,7 @@ def build_underground(markers=True):
     if markers:
         build_marker_materials()
     build_cave_object_material()
+    build_wall_material()
     build_mote_material()
 
 

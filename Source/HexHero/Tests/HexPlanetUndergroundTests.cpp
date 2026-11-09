@@ -9,6 +9,7 @@
 #include "HexPlanetObjects.h"
 #include "HexPlanetObjectSet.h"
 #include "HexPlanetUnderground.h"
+#include "HexPlanetWalls.h"
 #include "HexSphereGrid.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
@@ -437,6 +438,216 @@ bool FHexPlanetUndergroundFootprintTest::RunTest(const FString& Parameters)
 		TestFalse(*(TEXT("Pentagon, its last side") + Way), IsFootprintClear(At(bReversed ? -324.0f : 324.0f, 70.0f), 15.0f, Pentagon, 1u << 0));
 		TestTrue(*(TEXT("Pentagon, another side") + Way), IsFootprintClear(At(bReversed ? -324.0f : 324.0f, 70.0f), 15.0f, Pentagon, 1u << 2));
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHexPlanetUndergroundWallsTest, "HexHero.Planet.Underground.Walls",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FHexPlanetUndergroundWallsTest::RunTest(const FString& Parameters)
+{
+	using namespace HexPlanetUnderground;
+
+	FUndergroundCase Case = MakeSurface(20, 9, 0.55);
+	Case.Manifest.Underground.EntranceCount = 10;
+	Case.Manifest.Underground.NetworkCount = 3;
+	Generate(Case.Grid, Case.Surface, Case.Manifest, nullptr, Case.Result);
+	const FHexSphereGrid& Grid = Case.Grid;
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+	const TArray<int8>& Levels = Case.Result.Levels;
+
+	// a floor of the size of the cells of the planet, about 100 from the center of a cell to its corners
+	HexPlanetWalls::FParams Params;
+	Params.FloorRadius = FVector3d::Distance(Cells[100].Center, Grid.GetCorners()[Cells[100].Corners[0]]) > 0.0
+		? 100.0 / FVector3d::Distance(Cells[100].Center, Grid.GetCorners()[Cells[100].Corners[0]]) : 3000.0;
+	HexPlanetWalls::FWalls Walls;
+	HexPlanetWalls::Build(Grid, Levels, [&Levels](int32 Cell) { return IsPassage(Levels[Cell]); }, Params, Walls);
+	TestTrue(TEXT("The maze has walls"), Walls.Lines.Num() > 0);
+
+	// the samples lie evenly along closed loops, onto the passage of their cell
+	int32 Samples = 0;
+	int32 WrongWay = 0;
+	int32 Uneven = 0;
+	for (const TArray<HexPlanetWalls::FSample>& Line : Walls.Lines)
+	{
+		for (int32 Index = 0; Index < Line.Num(); ++Index)
+		{
+			const HexPlanetWalls::FSample& Sample = Line[Index];
+			++Samples;
+			WrongWay += FVector3d::DotProduct(Sample.Inward, Cells[Sample.Cell].Center * Params.FloorRadius - Sample.Position) > 0.0 ? 0 : 1;
+			const double Gap = FVector3d::Distance(Sample.Position, Line[(Index + 1) % Line.Num()].Position);
+			Uneven += Gap > Params.Step * 1.5 || Gap < Params.Step * 0.5 ? 1 : 0;
+		}
+	}
+	AddInfo(FString::Printf(TEXT("%d lines, %d samples, %d facing away from their passage"), Walls.Lines.Num(), Samples, WrongWay));
+	TestTrue(TEXT("Onto the passage"), WrongWay * 50 < Samples);
+	TestEqual(TEXT("Evenly spaced and closed"), Uneven, 0);
+
+	// the distance from a point to the nearest side of a passage towards a void, of a cell and its neighbors
+	const TArray<FVector3d>& Corners = Grid.GetCorners();
+	const auto DistanceToSides = [&](int32 Cell, const FVector3d& Point)
+	{
+		double Nearest = TNumericLimits<double>::Max();
+		TArray<int32, TInlineAllocator<8>> Near = {Cell};
+		Near.Append(Cells[Cell].Neighbors);
+		for (const int32 Each : Near)
+		{
+			const int32 Count = Cells[Each].Corners.Num();
+			for (int32 Side = 0; Side < Count && IsPassage(Levels[Each]); ++Side)
+			{
+				if (!IsPassage(Levels[Cells[Each].Neighbors[Side]]))
+				{
+					Nearest = FMath::Min(Nearest, FMath::PointDistToSegment(Point, Corners[Cells[Each].Corners[(Side + Count - 1) % Count]] * Params.FloorRadius,
+						Corners[Cells[Each].Corners[Side]] * Params.FloorRadius));
+				}
+			}
+		}
+		return Nearest;
+	};
+
+	// without a cut or rounding the line follows the sides of the passages, and the floor reaches it everywhere
+	HexPlanetWalls::FParams Sharp = Params;
+	Sharp.CornerCut = 0.0;
+	Sharp.CornerRound = 0.0;
+	HexPlanetWalls::FWalls SharpWalls;
+	HexPlanetWalls::Build(Grid, Levels, [&Levels](int32 Cell) { return IsPassage(Levels[Cell]); }, Sharp, SharpWalls);
+	int32 OffSides = 0;
+	int32 SharpGaps = 0;
+	for (const TArray<HexPlanetWalls::FSample>& Line : SharpWalls.Lines)
+	{
+		for (const HexPlanetWalls::FSample& Sample : Line)
+		{
+			OffSides += DistanceToSides(Sample.Cell, Sample.Position) > 1.0 ? 1 : 0;
+			SharpGaps += Sample.Gap > 0.5 ? 1 : 0;
+		}
+	}
+	TestEqual(TEXT("Without a cut the line follows the sides"), OffSides, 0);
+	TestEqual(TEXT("Without a cut the floor reaches the line"), SharpGaps, 0);
+
+	// with the cut, every side of a passage over a void still has the line at its middle, as the cut takes at most half of a side, and the line
+	// cuts into the floor no more than the rounding of the tip of a hex does, while where it runs over the corner of a void the floor goes on
+	// from where its gap says
+	int32 Far = 0;
+	int32 Sides = 0;
+	for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+	{
+		for (int32 Side = 0; Side < Cells[Cell].Neighbors.Num(); ++Side)
+		{
+			if (!IsPassage(Levels[Cell]) || IsPassage(Levels[Cells[Cell].Neighbors[Side]]))
+			{
+				continue;
+			}
+			++Sides;
+			const int32 Count = Cells[Cell].Corners.Num();
+			const FVector3d Middle = (Corners[Cells[Cell].Corners[(Side + Count - 1) % Count]] + Corners[Cells[Cell].Corners[Side]]).GetSafeNormal() * Params.FloorRadius;
+			double Nearest = TNumericLimits<double>::Max();
+			for (const FIntPoint& At : Walls.CellSamples[Cell])
+			{
+				Nearest = FMath::Min(Nearest, FVector3d::Distance(Walls.Get(At).Position, Middle));
+			}
+			Far += Nearest > 8.0 ? 1 : 0;
+		}
+	}
+	// whether a point lies on the floor, in the polygon of a passage within two rings of a cell, whose corners go counterclockwise seen from outside
+	const auto IsOnFloor = [&](int32 Cell, const FVector3d& Point)
+	{
+		TArray<int32, TInlineAllocator<32>> Near = {Cell};
+		for (int32 Ring = 0, Begin = 0; Ring < 2; ++Ring)
+		{
+			const int32 End = Near.Num();
+			for (int32 Index = Begin; Index < End; ++Index)
+			{
+				for (const int32 Neighbor : Cells[Near[Index]].Neighbors)
+				{
+					Near.AddUnique(Neighbor);
+				}
+			}
+			Begin = End;
+		}
+		for (const int32 Each : Near)
+		{
+			bool bInside = IsPassage(Levels[Each]);
+			const int32 Count = Cells[Each].Corners.Num();
+			for (int32 Side = 0; Side < Count && bInside; ++Side)
+			{
+				bInside = FVector3d::DotProduct(FVector3d::CrossProduct(Corners[Cells[Each].Corners[Side]], Corners[Cells[Each].Corners[(Side + 1) % Count]]), Point) >= 0.0;
+			}
+			if (bInside)
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+	int32 Deep = 0;
+	int32 Gapped = 0;
+	int32 Unreached = 0;
+	for (const TArray<HexPlanetWalls::FSample>& Line : Walls.Lines)
+	{
+		for (const HexPlanetWalls::FSample& Sample : Line)
+		{
+			if (Sample.Gap <= 0.01)
+			{
+				Deep += DistanceToSides(Sample.Cell, Sample.Position) > Params.CornerRound * 0.2 + 1.0 ? 1 : 0;
+				continue;
+			}
+			++Gapped;
+			Unreached += !IsOnFloor(Sample.Cell, Sample.Position + Sample.Inward * (Sample.Gap + 0.5)) || IsOnFloor(Sample.Cell, Sample.Position + Sample.Inward * (Sample.Gap - 0.5))
+				|| Sample.Gap > 150.0 ? 1 : 0;
+		}
+	}
+	AddInfo(FString::Printf(TEXT("%d sides over a void, %d without the line at their middle; %d samples over the corner of a void, %d whose gap reaches no floor, %d cutting into the floor"),
+		Sides, Far, Gapped, Unreached, Deep));
+	TestEqual(TEXT("A wall along every side over a void"), Far, 0);
+	TestTrue(TEXT("The line cuts across corners of voids"), Gapped > 0);
+	TestEqual(TEXT("The floor goes on from the gap"), Unreached, 0);
+	TestEqual(TEXT("The line keeps out of the floor"), Deep, 0);
+
+	// the mesh of every chunk, its triangles of an area and facing out of the wall, and a chunk of no walls empty
+	int64 Triangles = 0;
+	int32 Degenerate = 0;
+	int32 Inward = 0;
+	TArray<int32> InwardByRow;
+	for (int32 Chunk = 0; Chunk < Grid.GetNumChunks(); ++Chunk)
+	{
+		HexPlanetWalls::FMesh Mesh;
+		HexPlanetWalls::BuildChunk(Walls, Chunk, Params, Mesh);
+		TestEqual(TEXT("Empty without samples"), Mesh.Triangles.IsEmpty(), Walls.ChunkSamples[Chunk].IsEmpty());
+		Triangles += Mesh.Triangles.Num() / 3;
+		// the quads of a sample, a strip between two rings, two triangles each
+		const int32 Quads = Walls.ChunkSamples[Chunk].IsEmpty() ? 1 : Mesh.Triangles.Num() / 6 / Walls.ChunkSamples[Chunk].Num();
+		InwardByRow.SetNumZeroed(FMath::Max(InwardByRow.Num(), Quads));
+		for (int32 Index = 0; Index + 2 < Mesh.Triangles.Num(); Index += 3)
+		{
+			const FVector3f& A = Mesh.Positions[Mesh.Triangles[Index]];
+			const FVector3f& B = Mesh.Positions[Mesh.Triangles[Index + 1]];
+			const FVector3f& C = Mesh.Positions[Mesh.Triangles[Index + 2]];
+			const FVector3f Face = FVector3f::CrossProduct(C - A, B - A);
+			Degenerate += Face.Size() < 1e-4f ? 1 : 0;
+			const FVector3f Normal = Mesh.Normals[Mesh.Triangles[Index]] + Mesh.Normals[Mesh.Triangles[Index + 1]] + Mesh.Normals[Mesh.Triangles[Index + 2]];
+			if (FVector3f::DotProduct(Face, Normal) < 0.0f)
+			{
+				++Inward;
+				++InwardByRow[(Index / 6) % Quads];
+			}
+		}
+	}
+	FString ByRow;
+	for (int32 Row = 0; Row < InwardByRow.Num(); ++Row)
+	{
+		ByRow += FString::Printf(TEXT(" %d:%d"), Row, InwardByRow[Row]);
+	}
+	UE_LOG(LogHexHero, Display, TEXT("Walls test: %lld triangles, %d degenerate, %d facing into the wall, by row of the profile%s"), Triangles, Degenerate, Inward, *ByRow);
+	TestTrue(TEXT("Walls have triangles"), Triangles > 0);
+	// a few at the knobs of the crest, whose top twists a quad between two samples (63 of 898,426 when written)
+	TestTrue(TEXT("Nearly every triangle faces out"), Inward * 2000 < Triangles);
+	TestTrue(TEXT("Few degenerate triangles"), Degenerate * 1000 < Triangles);
+
+	// a point at the line is in the wall, and the middle of a passage far from any wall is clear
+	const FIntPoint First(0, 0);
+	const HexPlanetWalls::FSample& Sample = Walls.Get(First);
+	TestTrue(TEXT("At the line"), HexPlanetWalls::GetDistanceToLine(Walls, Sample.Cell, Sample.Position + Sample.Inward * 1.0) < 2.0);
+	TestEqual(TEXT("Beyond the line"), HexPlanetWalls::GetDistanceToLine(Walls, Sample.Cell, Sample.Position - Sample.Inward * 5.0), 0.0);
 	return true;
 }
 
