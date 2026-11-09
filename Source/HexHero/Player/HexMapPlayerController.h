@@ -32,6 +32,9 @@ class AHexMapPlayerController : public APlayerController
 	/** World map, found the first time it is needed */
 	TWeakObjectPtr<AHexWorldMap> WorldMap;
 
+	/** True once the legend has its lines, which waits for the pawn to bind its keys */
+	bool bLegendSet = false;
+
 public:
 
 	/** Constructor */
@@ -68,6 +71,9 @@ private:
 
 	/** Returns the debug text of the hex under the cursor, or nothing if there is none */
 	FString GetHoverInfoText();
+
+	/** Fills the legend with the lines of DA_HexKeyLegend whose actions this controller and its pawn bind, once the pawn has bound them */
+	void UpdateLegend();
 
 	/** Hides the map menu and gives the input back to the game */
 	void CloseMapMenu();

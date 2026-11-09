@@ -1,7 +1,11 @@
 """Creates the biome assets in Content/HexMap/Biomes and resets their values.
 
 Run with UnrealEditor-Cmd.exe <uproject> -run=pythonscript -script=<this file> -unattended -nullrhi
+With the argument underground (-script="<this file> underground") it creates or resets only the biomes of the underground, those with an
+underground letter, and leaves the surface biomes and their hand tuning as they are, as a full run saves every biome again.
 """
+
+import sys
 
 import unreal
 
@@ -14,31 +18,38 @@ GRASS, SAND, GRAY_ROCK, SNOW, SWAMP, RED_ROCK, OCHRE_ROCK, BASALT, TUNDRA, STEPP
 # the seabed of a layer under the water, where it is not its beach: sand everywhere, so the bottom does not change with ice or snow
 SEABEDS = {SNOW: SAND}
 NO_BEACH = -1
+# what the floor of a void of the underground holds, by the names of EHexVoidStyle
+MIST, LAVA, LAKE = 'MIST', 'LAVA', 'LAKE'
 
 # the layers of the cave biomes are found by name in DA_HexTerrainLayers, as import_texture_sources.py appends the scree and gravel of the rocks
 TERRAIN_LAYERS = '/Game/HexMap/Textures/DA_HexTerrainLayers'
-CAVE_FLOOR_LAYER = ('GrayGravel', 11)
+# the floor of the passages is the tan earth with pebbles of the scree of the ochre rock, which M_HexUnderground warms on their tops (CaveFloorTint)
+CAVE_FLOOR_LAYER = ('OchreScree', 14)
 CAVE_ROCK_LAYER = ('Basalt', BASALT)
 CAVE_FLOOR, CAVE_ROCK = 'cave floor', 'cave rock'
 
 # asset name, display name, file color, planet letter, underground letter, allowed levels, default for levels, move cost multiplier, blocks
-# everything, terrain layer, mountain rock, beach of a planet, snow line, water opacity, frozen. A biome of the surface has a planet letter and
+# everything, terrain layer, mountain rock, beach of a planet, snow line, water opacity, frozen, and what the floor of a void of the underground holds
+# (EHexVoidStyle: Mist, Lava or Lake). A biome of the surface has a planet letter and
 # one of the underground an underground letter, as the letters of the two layers are apart; the underground biomes are the default of no level,
 # as the flat map takes one default per level from all biomes, and the underground fits them by their allowed levels
 BIOMES = [
-    ('DA_Biome_Water', 'Water', (20, 80, 170), 'W', '', WATER_LEVELS, WATER_LEVELS, 1.0, False, SAND, GRAY_ROCK, SAND, 120.0, 0.72, False),
-    ('DA_Biome_Shoals', 'Shoals', (90, 190, 220), 'S', '', [-1], [], 1.0, False, SAND, GRAY_ROCK, SAND, 120.0, 0.4, False),
-    ('DA_Biome_Ice', 'Ice', (210, 235, 245), 'I', '', WATER_LEVELS, [], 1.0, True, SAND, GRAY_ROCK, NO_BEACH, 40.0, 0.72, True),
-    ('DA_Biome_Grass', 'Grass', (70, 160, 50), 'G', '', LAND_LEVELS, LAND_LEVELS, 1.0, False, GRASS, GRAY_ROCK, SAND, 110.0, 0.5, False),
-    ('DA_Biome_Sand', 'Sand', (225, 200, 120), 'D', '', LAND_LEVELS, [], 1.5, False, SAND, OCHRE_ROCK, SAND, 140.0, 0.5, False),
-    ('DA_Biome_Rock', 'Rock', (130, 125, 120), 'R', '', LAND_LEVELS, [], 1.25, False, GRAY_ROCK, RED_ROCK, GRAY_ROCK, 125.0, 0.5, False),
-    ('DA_Biome_Snow', 'Snow', (245, 245, 250), 'N', '', LAND_LEVELS, [], 2.0, False, SNOW, GRAY_ROCK, SNOW, 55.0, 0.5, False),
-    ('DA_Biome_Swamp', 'Swamp', (70, 90, 50), 'M', '', [0], [], 2.5, False, SWAMP, BASALT, SAND, 130.0, 0.5, False),
-    ('DA_Biome_Tundra', 'Tundra', (125, 130, 95), 'T', '', LAND_LEVELS, [], 1.5, False, TUNDRA, GRAY_ROCK, SAND, 80.0, 0.5, False),
-    ('DA_Biome_Steppe', 'Steppe', (190, 170, 90), 'P', '', LAND_LEVELS, [], 1.0, False, STEPPE, OCHRE_ROCK, SAND, 130.0, 0.5, False),
-    # the underground: the floor of its passages, of gravel under walls of dark rock, and the abyss of its void, which nothing crosses
-    ('DA_Biome_CaveFloor', 'Cave floor', (105, 100, 92), '', 'F', LAND_LEVELS, [], 1.0, False, CAVE_FLOOR, CAVE_ROCK, NO_BEACH, 310.0, 0.5, False),
-    ('DA_Biome_Abyss', 'Abyss', (25, 45, 50), '', 'A', WATER_LEVELS, [], 1.0, True, CAVE_ROCK, CAVE_ROCK, NO_BEACH, 310.0, 0.5, False),
+    ('DA_Biome_Water', 'Water', (20, 80, 170), 'W', '', WATER_LEVELS, WATER_LEVELS, 1.0, False, SAND, GRAY_ROCK, SAND, 120.0, 0.72, False, MIST),
+    ('DA_Biome_Shoals', 'Shoals', (90, 190, 220), 'S', '', [-1], [], 1.0, False, SAND, GRAY_ROCK, SAND, 120.0, 0.4, False, MIST),
+    ('DA_Biome_Ice', 'Ice', (210, 235, 245), 'I', '', WATER_LEVELS, [], 1.0, True, SAND, GRAY_ROCK, NO_BEACH, 40.0, 0.72, True, MIST),
+    ('DA_Biome_Grass', 'Grass', (70, 160, 50), 'G', '', LAND_LEVELS, LAND_LEVELS, 1.0, False, GRASS, GRAY_ROCK, SAND, 110.0, 0.5, False, MIST),
+    ('DA_Biome_Sand', 'Sand', (225, 200, 120), 'D', '', LAND_LEVELS, [], 1.5, False, SAND, OCHRE_ROCK, SAND, 140.0, 0.5, False, MIST),
+    ('DA_Biome_Rock', 'Rock', (130, 125, 120), 'R', '', LAND_LEVELS, [], 1.25, False, GRAY_ROCK, RED_ROCK, GRAY_ROCK, 125.0, 0.5, False, MIST),
+    ('DA_Biome_Snow', 'Snow', (245, 245, 250), 'N', '', LAND_LEVELS, [], 2.0, False, SNOW, GRAY_ROCK, SNOW, 55.0, 0.5, False, MIST),
+    ('DA_Biome_Swamp', 'Swamp', (70, 90, 50), 'M', '', [0], [], 2.5, False, SWAMP, BASALT, SAND, 130.0, 0.5, False, MIST),
+    ('DA_Biome_Tundra', 'Tundra', (125, 130, 95), 'T', '', LAND_LEVELS, [], 1.5, False, TUNDRA, GRAY_ROCK, SAND, 80.0, 0.5, False, MIST),
+    ('DA_Biome_Steppe', 'Steppe', (190, 170, 90), 'P', '', LAND_LEVELS, [], 1.0, False, STEPPE, OCHRE_ROCK, SAND, 130.0, 0.5, False, MIST),
+    # the underground: the floor of its passages, of warm earth under walls of dark rock, the abyss of its void, which nothing crosses, and voids of
+    # glowing lava and of dark still lakes, as impassable
+    ('DA_Biome_CaveFloor', 'Cave floor', (138, 110, 78), '', 'F', LAND_LEVELS, [], 1.0, False, CAVE_FLOOR, CAVE_ROCK, NO_BEACH, 310.0, 0.5, False, MIST),
+    ('DA_Biome_Abyss', 'Abyss', (25, 45, 50), '', 'A', WATER_LEVELS, [], 1.0, True, CAVE_ROCK, CAVE_ROCK, NO_BEACH, 310.0, 0.5, False, MIST),
+    ('DA_Biome_CaveLake', 'Cave lake', (20, 40, 70), '', 'K', WATER_LEVELS, [], 1.0, True, CAVE_ROCK, CAVE_ROCK, NO_BEACH, 310.0, 0.5, False, LAKE),
+    ('DA_Biome_Lava', 'Lava', (210, 80, 20), '', 'L', WATER_LEVELS, [], 1.0, True, CAVE_ROCK, CAVE_ROCK, NO_BEACH, 310.0, 0.5, False, LAVA),
 ]
 
 
@@ -58,8 +69,11 @@ def main():
     tools = unreal.AssetToolsHelpers.get_asset_tools()
 
     cave_layers = {CAVE_FLOOR: find_layer(*CAVE_FLOOR_LAYER), CAVE_ROCK: find_layer(*CAVE_ROCK_LAYER)}
+    only_underground = 'underground' in sys.argv[1:]
 
-    for name, display_name, color, letter, underground_letter, allowed, defaults, cost, blocks, layer, rock, beach, snow, opacity, frozen in BIOMES:
+    for name, display_name, color, letter, underground_letter, allowed, defaults, cost, blocks, layer, rock, beach, snow, opacity, frozen, void_style in BIOMES:
+        if only_underground and not underground_letter:
+            continue
         layer = cave_layers.get(layer, layer)
         rock = cave_layers.get(rock, rock)
         path = '%s/%s' % (FOLDER, name)
@@ -81,6 +95,7 @@ def main():
         biome.set_editor_property('blocks_ships', blocks)
         biome.set_editor_property('blocks_heroes', blocks)
         biome.set_editor_property('blocks_units', blocks)
+        biome.set_editor_property('void_style', getattr(unreal.HexVoidStyle, void_style))
         assets.save_asset(path, only_if_is_dirty=False)
         unreal.log('BIOME %s' % name)
 

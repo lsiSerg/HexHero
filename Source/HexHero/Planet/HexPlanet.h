@@ -30,6 +30,7 @@ class UHierarchicalInstancedStaticMeshComponent;
 class UHexBiomeConfig;
 class UHexPlanetCloudConfig;
 class UHexPlanetConfig;
+class UHexPlanetMotes;
 class UHexPlanetObjects;
 class UHexPlanetRivers;
 class UHexPlanetWaterConfig;
@@ -79,6 +80,10 @@ class AHexPlanet : public AActor
 	/** The rivers along the sides of the cells and the bridges over them */
 	UPROPERTY(VisibleAnywhere, Category="Planet")
 	TObjectPtr<UHexPlanetRivers> Rivers;
+
+	/** The motes over the passages and the spores of the underground (UHexPlanetConfig::bMotes), made when the layer is built */
+	UPROPERTY(Transient)
+	TObjectPtr<UHexPlanetMotes> Motes;
 
 	/** Floes of sea ice on the frozen sea, one component per mesh of FHexPlanetFloes (UpdateFloes), which M_HexPlanetFloe moves */
 	UPROPERTY(Transient)
@@ -151,6 +156,10 @@ private:
 	/** Material of the cells, whose grid lines can be hidden */
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> SurfaceMaterial;
+
+	/** Material of the tiles of painting (GetPreviewMaterial) */
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> PreviewMaterial;
 
 	/** Masked copy of the material of the cells, which hides the cells around the cursor while only their triangles are drawn */
 	UPROPERTY(Transient)
@@ -394,8 +403,13 @@ public:
 	const HexPlanetUnderground::FReport* GetUndergroundReport() const;
 
 	/** Sets the entrances of the underground, on whichever layer it is called, as the editor changes them: marks them as edited, checks the
-	 *  report again and places the markers of both layers again. Nothing is carved, so the exit of a new entrance may be in the void */
-	void SetEntrances(const TArray<FHexEntrance>& NewEntrances);
+	 *  report again and places the markers of both layers again. Nothing is carved, so the exit of a new entrance may be in the void. bByStep
+	 *  tells that a step of Undo of the brush made the change, which Undo can take back to the saved state (MarkLevelsEdited) */
+	void SetEntrances(const TArray<FHexEntrance>& NewEntrances, bool bByStep = false);
+
+	/** Sets SeedOffset of the underground block of planet.json on both layers and marks the manifest as edited, so the next save writes
+	 *  planet.json; the maze itself is generated again by the caller (UHexPlanetPainter::NewLayout) */
+	void SetUndergroundSeedOffset(int32 SeedOffset);
 
 	/** On the underground, reads or generates its data now if it is not there yet, waiting for the background, as the editor needs it */
 	void EnsureDataLoaded();
@@ -405,11 +419,23 @@ public:
 	void SetLinksShown(bool bShown);
 	bool AreLinksShown() const { return bLinksShown; }
 
-	/** Records that the levels or biomes were painted, so they differ from the files or the generation */
-	void MarkLevelsEdited() { bLevelsEdited = true; }
+	/** Records that the levels or biomes were painted, so they differ from the files or the generation. bByStep tells that a step of Undo of
+	 *  the brush made the change, so undoing back to the step of the last save brings the saved state back (ClearEditedBySteps); any other
+	 *  change, such as hex.PlanetSetLevel, keeps the planet unsaved until it is saved */
+	void MarkLevelsEdited(bool bByStep = false) { bLevelsEdited = true; bEditedOutsideSteps |= !bByStep; }
 
-	/** Sets the relief of cells by hand, an empty override going back to the hash, and rebuilds them and their neighbors */
-	void SetReliefOverrides(const HexPlanetSurface::FReliefOverrides& Changes);
+	/** Returns true if something changed the cells, the entrances or planet.json since the last save that no step of Undo holds */
+	bool HasEditedOutsideSteps() const { return bEditedOutsideSteps; }
+
+	/** Clears the marks of the edits made by steps of Undo, as the brush undid or redid back to the state of the last save */
+	void ClearEditedBySteps() { bLevelsEdited = false; bEntrancesEdited = false; bManifestEdited = false; }
+
+	/** Broadcast after a save wrote the files of this layer, its marks of edits cleared */
+	FSimpleMulticastDelegate OnSaved;
+
+	/** Sets the relief of cells by hand, an empty override going back to the hash, and rebuilds them and their neighbors; bByStep as for
+	 *  MarkLevelsEdited */
+	void SetReliefOverrides(const HexPlanetSurface::FReliefOverrides& Changes, bool bByStep = false);
 
 	/** Returns the relief set by hand of a cell, or an empty one */
 	HexPlanetSurface::FReliefOverride GetReliefOverride(int32 Cell) const;
@@ -433,6 +459,10 @@ public:
 
 	/** Returns the radius of the sea */
 	double GetRadius() const { return Radius; }
+
+	/** Returns the up of this layer at a point, away from the center of the planet; new placement takes its up from here, so a view from inside the
+	 *  underground that turns the layer turns what stands on it too */
+	FVector3d GetUpAt(const FVector3d& Point) const { return Point.GetSafeNormal(); }
 
 	/** Returns the radius of the top of a cell */
 	double GetCellTopRadius(int32 Cell) const;
@@ -493,8 +523,8 @@ public:
 	/** Returns the rivers and bridges */
 	UHexPlanetRivers* GetRivers() const { return Rivers; }
 
-	/** Rebuilds the valleys of the rivers, which UHexPlanetRivers changed, and marks the planet as edited */
-	void OnRiversChanged();
+	/** Rebuilds the valleys of the rivers, which UHexPlanetRivers changed, and marks the planet as edited; bByStep as for MarkLevelsEdited */
+	void OnRiversChanged(bool bByStep = false);
 
 	/** Sets how straight the rivers run for trying it (UHexPlanetRivers::SetShapeOverride), or back to DA_HexPlanet with none, and builds the
 	 *  whole surface again in the background (hex.PlanetRiverShape) */
@@ -530,6 +560,14 @@ public:
 
 	/** Returns the text of the debug panel for a cell */
 	FString GetCellDebugText(int32 Cell) const;
+
+	/** Returns how many cells CellMarks outlines now, in red or green (SetHoveredCell), for hex.PlanetLayerCheck */
+	int32 CountOutlinedCells() const { return MarkedCells.Num(); }
+
+	/** Returns the material of the tiles of painting (UHexPlanetPainter), made the first time: the material of the cells with PreviewTile 1, so it
+	 *  draws their vertex colors, the values of the config and CellMarks, so a tile draws the outlines of its own cell, such as the edge of the
+	 *  brush, in the colors SetHoveredCell gives; null without the material */
+	UMaterialInstanceDynamic* GetPreviewMaterial();
 
 	/** Material of the clouds, from Tools/create_planet_assets.py */
 	UPROPERTY(EditAnywhere, Category="Planet")
@@ -627,6 +665,12 @@ private:
 	/** True if the entrances changed since they were last saved */
 	bool bEntrancesEdited = false;
 
+	/** True if planet.json changed since it was last saved, by a new layout of the underground (SetUndergroundSeedOffset) */
+	bool bManifestEdited = false;
+
+	/** True if the cells, the entrances or planet.json were changed since the last save by something no step of Undo holds (MarkLevelsEdited) */
+	bool bEditedOutsideSteps = false;
+
 	/** True while the Links tab shows the networks of the passages (SetLinksShown) */
 	bool bLinksShown = false;
 
@@ -641,8 +685,12 @@ private:
 	/** Returns the planets of both layers that have their data, this one first */
 	TArray<AHexPlanet*, TInlineAllocator<2>> GetLoadedLayers() const;
 
-	/** Writes the files of this layer into its data folder of the folder of a planet, and the underground also entrances.json */
-	bool SaveLayerFiles(const FString& Folder, FString& OutError) const;
+	/** Writes the files of this layer into its data folder of the folder of a planet, and the underground also entrances.json; the objects on
+	 *  KeptEntranceCells are left out */
+	bool SaveLayerFiles(const FString& Folder, const TSet<int32>& KeptEntranceCells, FString& OutError) const;
+
+	/** Returns the cells of the entrances a save keeps (HexPlanetUnderground::GetSavedEntrances), none while the underground has no data */
+	TSet<int32> GetKeptEntranceCells() const;
 
 	/** After a save, tells on the screen and in the log how many entrances were left out of entrances.json as they cannot be used, so they are
 	 *  gone when the planet opens again although they still show now */

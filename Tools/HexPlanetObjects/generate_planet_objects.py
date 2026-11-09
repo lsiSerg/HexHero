@@ -754,4 +754,6 @@ def main():
     print('Wrote %d meshes to %s' % (len(MESHES), OUTPUT_FOLDER))
 
 
-main()
+# generate_cave_objects.py imports the helpers above without writing these meshes again
+if __name__ == '__main__':
+    main()

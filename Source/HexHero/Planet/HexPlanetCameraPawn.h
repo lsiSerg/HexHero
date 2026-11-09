@@ -325,9 +325,12 @@ private:
 	double TravelStartTime = 0.0;
 	int32 TravelBlackFrames = 0;
 	bool bTravelSwapped = false;
-	float TravelSwapPhaseTime = 0.0f;
 	double TravelSwapMs = 0.0;
 	double TravelReadyMs = 0.0;
+
+	/** Real time when the swap of the layers ended, and the frames drawn black since, by which the hold after the swap counts */
+	double TravelSwapRealTime = 0.0;
+	int32 TravelFramesSinceSwap = 0;
 
 	/** The color and intensity of the sun placed in the level, which the light of the surface keeps */
 	FLinearColor LevelSunColor = FLinearColor::White;

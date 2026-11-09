@@ -2,6 +2,7 @@
 
 #include "HexPlanetObjectSet.h"
 #include "Engine/StaticMesh.h"
+#include "HexPlanetFile.h"
 
 #if WITH_EDITOR
 int32 UHexPlanetObjectSet::SetMeshLods(UStaticMesh* Mesh, const TArray<float>& TriangleShares, const TArray<float>& ScreenSizes)
@@ -31,24 +32,6 @@ int32 UHexPlanetObjectSet::SetMeshLods(UStaticMesh* Mesh, const TArray<float>& T
 
 const FHexObjectVariant* UHexPlanetObjectSet::FindVariant(TCHAR BiomeLetter) const
 {
-	const FHexObjectVariant* Fallback = nullptr;
-	const TCHAR Letter = FChar::ToUpper(BiomeLetter);
-	for (const FHexObjectVariant& Variant : Variants)
-	{
-		if (Variant.Biomes.IsEmpty())
-		{
-			Fallback = Fallback ? Fallback : &Variant;
-		}
-		else
-		{
-			for (const TCHAR Each : Variant.Biomes)
-			{
-				if (FChar::ToUpper(Each) == Letter)
-				{
-					return &Variant;
-				}
-			}
-		}
-	}
-	return Fallback;
+	const int32 Index = FindHexObjectVariant(Variants.Num(), BiomeLetter, [this](int32 Each) -> const FString& { return Variants[Each].Biomes; });
+	return Variants.IsValidIndex(Index) ? &Variants[Index] : nullptr;
 }

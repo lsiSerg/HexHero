@@ -9,6 +9,7 @@
 #include "HexPlanetGenerator.h"
 #include "HexPlanetKit.h"
 #include "HexPlanetKitConfig.h"
+#include "HexPlanetObjects.h"
 #include "HexPlanetRivers.h"
 #include "HexPlanetSeaField.h"
 #include "HexPlanetSurface.h"
@@ -712,6 +713,63 @@ bool FHexPlanetFileBiomesTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Unknown letter"), HexPlanetFile::DecodeBiomes(TEXT("WX"), 2, Letters, Decoded, Error));
 	TestTrue(TEXT("Names the letter"), Error.Contains(TEXT("'X'")));
 	TestFalse(TEXT("Too few cells"), HexPlanetFile::DecodeBiomes(TEXT("WG"), 3, Letters, Decoded, Error));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHexPlanetObjectsSaveLinesTest, "HexHero.Planet.Objects.SaveLines",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FHexPlanetObjectsSaveLinesTest::RunTest(const FString& Parameters)
+{
+	// objects.json keeps what the level of a cell allows, and leaves out what stands on the cell of an entrance the same save keeps, as nothing
+	// is drawn there; an entrance that cannot be used is left out of entrances.json itself, so its cell keeps its objects
+	const TArray<FName> SetIds = {TEXT("Forest"), TEXT("Bushes"), TEXT("Stones")};
+	const TArray<TSet<int32>> AllowedLevels = {{0, 1}, {0, 1}, {0, 1, 2}};
+	const auto MakeCell = [](uint8 Cover, uint8 Density, uint8 Decor)
+	{
+		FHexCellObjects Objects;
+		Objects.Cover = Cover;
+		Objects.Density = Density;
+		Objects.Decor = Decor;
+		return Objects;
+	};
+	const TArray<FHexCellObjects> Cells = {
+		MakeCell(1, 2, 3),	// 0: a forest and stones, kept
+		MakeCell(2, 3, 0),	// 1: bushes on the cell of an entrance the save keeps, left out
+		MakeCell(1, 1, 3),	// 2: on the cell of an entrance that cannot be used, so cleared for drawing but kept
+		MakeCell(1, 3, 3),	// 3: a forest on mountains, which they do not allow, and stones, which they do
+		MakeCell(0, 0, 0),	// 4: nothing
+		MakeCell(2, 3, 0),	// 5: dense bushes, kept
+	};
+	const TArray<int32> Levels = {0, 1, 0, 2, 0, 1};
+	const TSet<int32> KeptEntranceCells = {1};
+	const TSet<int32> ClearCells = {1, 2};
+
+	const TArray<FHexObjectCell> Lines = UHexPlanetObjects::MakeSavedLines(Cells, SetIds, [&](int32 Cell, int32 Set)
+	{
+		return AllowedLevels[Set].Contains(Levels[Cell]) && !KeptEntranceCells.Contains(Cell);
+	});
+
+	TArray<int32> LineCells;
+	for (const FHexObjectCell& Line : Lines)
+	{
+		LineCells.Add(Line.Cell);
+	}
+	AddInfo(FString::Printf(TEXT("Lines on cells %s"), *FString::JoinBy(LineCells, TEXT(" "), [](int32 Cell) { return FString::FromInt(Cell); })));
+	TestTrue(TEXT("Lines in the order of the cells"), LineCells == TArray<int32>({0, 2, 3, 5}));
+	TestTrue(TEXT("The cell of a kept entrance is left out"), !LineCells.Contains(1) && ClearCells.Contains(1));
+	TestTrue(TEXT("The cell of an entrance that cannot be used keeps its objects"), LineCells.Contains(2) && ClearCells.Contains(2));
+	if (Lines.Num() == 4)
+	{
+		TestTrue(TEXT("Cover, density and decor kept"), Lines[0].Cover == FName(TEXT("Forest")) && Lines[0].Density == 2 && Lines[0].Decor == FName(TEXT("Stones")));
+		TestTrue(TEXT("Kept on the unusable entrance"), Lines[1].Cover == FName(TEXT("Forest")) && Lines[1].Density == 1 && Lines[1].Decor == FName(TEXT("Stones")));
+		TestTrue(TEXT("A cover the level does not allow is left out, its decor kept"), Lines[2].Cover.IsNone() && Lines[2].Density == 0 && Lines[2].Decor == FName(TEXT("Stones")));
+		TestTrue(TEXT("Dense bushes"), Lines[3].Cover == FName(TEXT("Bushes")) && Lines[3].Density == 3 && Lines[3].Decor.IsNone());
+	}
+
+	// with no entrance kept, as before the underground has its data, nothing is dropped for them
+	const TArray<FHexObjectCell> NoEntrances = UHexPlanetObjects::MakeSavedLines(Cells, SetIds, [&](int32 Cell, int32 Set) { return AllowedLevels[Set].Contains(Levels[Cell]); });
+	TestEqual(TEXT("Without entrances every allowed cell"), NoEntrances.Num(), 5);
 	return true;
 }
 

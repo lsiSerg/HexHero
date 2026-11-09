@@ -257,25 +257,18 @@ void AHexPlanetPlayerController::ToggleKeyLegend()
 
 void AHexPlanetPlayerController::UpdateLegend()
 {
-	const APawn* ControlledPawn = GetPawn();
-	const UEnhancedInputComponent* PawnInput = ControlledPawn ? Cast<UEnhancedInputComponent>(ControlledPawn->InputComponent) : nullptr;
-
-	if (bLegendSet || !DebugOverlay.IsValid() || !PawnInput || PawnInput->GetActionEventBindings().IsEmpty())
+	// the legend asset lists the keys of both levels, of which each binds only some, once the pawn is possessed
+	TSet<const UInputAction*> BoundActions;
+	if (bLegendSet || !DebugOverlay.IsValid() || !UHexKeyLegendConfig::GetBoundActions(*this, BoundActions))
 	{
 		return;
 	}
 
-	// the legend asset lists the keys of the flat map, of which the planet uses only some
-	TSet<const UInputAction*> BoundActions;
-
-	for (const TUniquePtr<FEnhancedInputActionEventBinding>& Binding : PawnInput->GetActionEventBindings())
-	{
-		BoundActions.Add(Binding->GetAction());
-	}
-
 	const UHexInputConfig* InputConfig = GetDefault<UHexMapSettings>()->LoadInputConfig();
 	const UHexKeyLegendConfig* KeyLegend = GetDefault<UHexMapSettings>()->LoadKeyLegend();
-	DebugOverlay->SetLegend(KeyLegend->GetSections(*InputConfig, &BoundActions), KeyLegend->GetHint(*InputConfig));
+	const TArray<FHexLegendSection> Sections = KeyLegend->GetSections(*InputConfig, &BoundActions);
+	UHexKeyLegendConfig::LogSections(Sections, TEXT("the planet"));
+	DebugOverlay->SetLegend(Sections, KeyLegend->GetHint(*InputConfig));
 	bLegendSet = true;
 }
 
@@ -826,9 +819,31 @@ void AHexPlanetPlayerController::RunPaintCommand(const TArray<FString>& Args)
 		Brush->EndStroke();
 		Brush->SetBackwards(false);
 	}
+	else if (Action == TEXT("press") && Args.IsValidIndex(1))
+	{
+		// a stroke held as the left button holds it, which follows the cell under the mouse each frame until release
+		if (!Brush->IsActive() || !Brush->HasTool() || Brush->GetTarget() != Planet->GetLayer() || !Planet->GetGrid().GetCells().IsValidIndex(GetInt(1, INDEX_NONE)))
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("hex.PlanetPaint press: needs a cell, painting on with a tool, and the layer it paints shown"));
+			return;
+		}
+		Brush->BeginStroke(GetInt(1, INDEX_NONE));
+	}
+	else if (Action == TEXT("release"))
+	{
+		Brush->EndStroke();
+	}
+	else if (Action == TEXT("regenerate") && Args.IsValidIndex(1) && Args[1].Equals(TEXT("objects"), ESearchCase::IgnoreCase))
+	{
+		Brush->RegenerateObjects();
+	}
 	else if (Action == TEXT("regenerate"))
 	{
 		Brush->Regenerate(Args.IsValidIndex(1) && Args[1].Equals(TEXT("all"), ESearchCase::IgnoreCase) ? INDEX_NONE : Brush->GetNetwork());
+	}
+	else if (Action == TEXT("newlayout"))
+	{
+		Brush->NewLayout();
 	}
 	else if (Action == TEXT("undo"))
 	{
@@ -869,8 +884,9 @@ namespace
 	}
 
 	FAutoConsoleCommandWithWorldAndArgs PlanetPaintConsoleCommand(TEXT("hex.PlanetPaint"),
-		TEXT("Drives the brush of the planet as the palette and the mouse would, for tests: on | off | tab <Ground|Relief|Objects|Rivers|Entrances|Maze|Links> | ")
-		TEXT("key <1-5> | biome <Index> | size <1-3> | network <A-H> | entrance | carve | object <Index> | eraser | river | bridge | relief <Version|Turn|Mirror|Higher|Lower|Auto> | none | ")
-		TEXT("stroke <Cell or @Latitude:Longitude> [...] [ctrl] | regenerate [all] | undo | redo | save. A stroke presses on the first cell, passes the others and releases on the last; ctrl makes it take away"),
+		TEXT("Drives the brush of the planet as the palette and the mouse would, for tests: on | off | tab <Ground|Relief|Objects|Rivers|Entrances|Maze|Links> (Objects of the layer shown) | ")
+		TEXT("key <1-5> | biome <Index> | size <1-3> | network <A-H> | entrance | carve | object <Index on the palette of the layer> | eraser | river | bridge | relief <Version|Turn|Mirror|Higher|Lower|Auto> | none | ")
+		TEXT("stroke <Cell or @Latitude:Longitude> [...] [ctrl] | press <Cell> | release | regenerate [all|objects] | newlayout | undo | redo | save. A stroke presses on the first cell, passes the others and releases on the last; ctrl makes it take away; ")
+		TEXT("press holds a stroke, which follows the mouse as the held left button does, until release"),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&PlanetPaintCommand));
 }

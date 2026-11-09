@@ -12,8 +12,14 @@
 #include "HexPlanetConfig.h"
 #include "HexPlanetFile.h"
 #include "HexPlanetObjectSet.h"
+#include "HexPlanetUnderground.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
+#include "StaticMeshResources.h"
+
+#if WITH_EDITOR
+#include "StaticMeshCompiler.h"
+#endif
 
 namespace
 {
@@ -175,33 +181,173 @@ namespace
 	{
 		return FMath::PerlinNoise3D(Point * Scale + Offset) + 0.5 * FMath::PerlinNoise3D(Point * Scale * 2.1 + Offset * 1.7 + FVector3d(31.0));
 	}
+
+	/** Returns how far a mesh reaches from its pivot across its Z, from its vertices where the CPU has them (import_cave_objects.py gives the cave
+	 *  meshes CPU access), else from its bounds, which for a round mesh is up to a third more */
+	float GetFootprintRadius(UStaticMesh* Mesh)
+	{
+#if WITH_EDITOR
+		FStaticMeshCompilingManager::Get().FinishCompilation({Mesh});
+#endif
+		const FStaticMeshRenderData* RenderData = Mesh->GetRenderData();
+		if (RenderData && !RenderData->LODResources.IsEmpty() && (Mesh->bAllowCPUAccess || GIsEditor))
+		{
+			const FPositionVertexBuffer& Positions = RenderData->LODResources[0].VertexBuffers.PositionVertexBuffer;
+			if (Positions.GetNumVertices() > 0 && Positions.GetVertexData())
+			{
+				float Farthest = 0.0f;
+				for (uint32 Index = 0; Index < Positions.GetNumVertices(); ++Index)
+				{
+					const FVector3f Position = Positions.VertexPosition(Index);
+					Farthest = FMath::Max(Farthest, FVector2f(Position.X, Position.Y).Size());
+				}
+				return Farthest;
+			}
+		}
+		const FBoxSphereBounds Bounds = Mesh->GetBounds();
+		return float(FVector2d(Bounds.Origin.X, Bounds.Origin.Y).Size() + FVector2d(Bounds.BoxExtent.X, Bounds.BoxExtent.Y).Size());
+	}
+}
+
+TArray<TObjectPtr<UHexPlanetObjectSet>> UHexPlanetObjects::FindLayerSets(EHexPlanetLayer Layer)
+{
+	TArray<TObjectPtr<UHexPlanetObjectSet>> Found;
+	for (const UHexPlanetObjectSet* Set : GetDefault<UHexMapSettings>()->LoadPlanetObjectSets())
+	{
+		// the sets of one layer alone, so the underground loads no meshes of forests and the surface none of caves
+		if (!Set->IsOnLayer(Layer))
+		{
+			continue;
+		}
+		if (Set->Id.IsNone() || Found.ContainsByPredicate([Set](const UHexPlanetObjectSet* Each) { return Each->Id == Set->Id; }))
+		{
+			UE_LOG(LogHexHero, Error, TEXT("Planet: the object set %s has no Id or one another set has, so it is left out"), *Set->GetName());
+			continue;
+		}
+		Found.Add(const_cast<UHexPlanetObjectSet*>(Set));
+	}
+	// the palette, the generation and FHexCellObjects count by this order, so it is the same in every run
+	Found.StableSort([](const UHexPlanetObjectSet& A, const UHexPlanetObjectSet& B) { return A.SortOrder < B.SortOrder; });
+	if (Found.Num() > 254)
+	{
+		Found.SetNum(254);
+	}
+	return Found;
+}
+
+TArray<int32> UHexPlanetObjects::GetPaintableSets(TConstArrayView<TObjectPtr<UHexPlanetObjectSet>> LayerSets)
+{
+	TArray<int32> Paintable;
+	for (int32 Index = 0; Index < LayerSets.Num(); ++Index)
+	{
+		if (LayerSets[Index] && (LayerSets[Index]->Layer == EHexObjectLayer::Cover || LayerSets[Index]->Layer == EHexObjectLayer::Decor))
+		{
+			Paintable.Add(Index);
+		}
+	}
+	return Paintable;
+}
+
+TArray<HexPlanetUnderground::FObjectKind> UHexPlanetObjects::MakeObjectKinds(TConstArrayView<TObjectPtr<UHexPlanetObjectSet>> LayerSets)
+{
+	TArray<HexPlanetUnderground::FObjectKind> Kinds;
+	for (const int32 Index : GetPaintableSets(LayerSets))
+	{
+		const UHexPlanetObjectSet& Set = *LayerSets[Index];
+		if (Set.bBlocksMovement)
+		{
+			// the corridors are as wide as passages may be, so a cell that blocks would cut one; painting it stays the choice of the designer
+			UE_LOG(LogHexHero, Warning, TEXT("Planet: the object set %s blocks movement, so the generation of the underground leaves it out, as it would cut passages"), *Set.Id.ToString());
+			continue;
+		}
+		HexPlanetUnderground::FObjectKind& Kind = Kinds.AddDefaulted_GetRef();
+		Kind.SetIndex = Index;
+		Kind.Id = Set.Id.ToString();
+		Kind.bDecor = Set.Layer == EHexObjectLayer::Decor;
+		Kind.bBlocks = Set.bBlocksMovement;
+		for (const int32 Level : Set.AllowedLevels)
+		{
+			Kind.Levels.Add(int8(FMath::Clamp(Level, -128, 127)));
+		}
+		for (const FHexObjectVariant& Variant : Set.Variants)
+		{
+			Kind.Variants.Add({Variant.Biomes, Variant.GenerateShare});
+		}
+		Kind.PatchCells = Set.GeneratePatchCells;
+		// to a millionth, so the shares are the decimals of the asset and the rank at a threshold falls as the literals of before gave it
+		const auto Share = [&Set](int32 Index, double Default)
+		{
+			return Set.GenerateDensityShares.IsValidIndex(Index) ? FMath::RoundToDouble(double(Set.GenerateDensityShares[Index]) * 1e6) / 1e6 : Default;
+		};
+		Kind.DenseShare = Share(0, 0.4);
+		Kind.MediumShare = FMath::Max(Share(1, 0.75), Kind.DenseShare);
+		Kind.Group = Set.GenerateGroup;
+		Kind.ClearRings = FMath::Clamp(Set.ExitClearRings, 0, 3);
+	}
+	return Kinds;
+}
+
+void UHexPlanetObjects::GenerateUndergroundObjects(const FHexSphereGrid& Grid, TConstArrayView<int8> Levels, TConstArrayView<TCHAR> CellBiomeLetters,
+	TConstArrayView<FHexEntrance> Entrances, const FHexPlanetManifest& Manifest, TConstArrayView<TObjectPtr<UHexPlanetObjectSet>> LayerSets,
+	TArray<FHexCellObjects>& OutObjects)
+{
+	const double StartTime = FPlatformTime::Seconds();
+	const TArray<HexPlanetUnderground::FObjectKind> Kinds = MakeObjectKinds(LayerSets);
+	HexPlanetUnderground::FObjectReport Report;
+	HexPlanetUnderground::GenerateObjects(Grid, Levels, CellBiomeLetters, Entrances, HexPlanetUnderground::GetSeed(Manifest), Kinds, OutObjects, &Report);
+
+	// the middle of the largest patch of each kind, for hex.PlanetFocus <Cell> underground
+	TArray<FString> Parts;
+	int32 Total = 0;
+	for (int32 Index = 0; Index < Kinds.Num(); ++Index)
+	{
+		Parts.Add(FString::Printf(TEXT("%s %d (patch at %d)"), *Kinds[Index].Id, Report.Cells[Index], Report.PatchCenters[Index]));
+	}
+	for (const FHexCellObjects& Objects : OutObjects)
+	{
+		Total += Objects.IsEmpty() ? 0 : 1;
+	}
+	UE_LOG(LogHexHero, Log, TEXT("Planet: generated the objects of the underground on %d cells in %.1f ms: %s"), Total, (FPlatformTime::Seconds() - StartTime) * 1000.0,
+		*FString::Join(Parts, TEXT(", ")));
+}
+
+bool UHexPlanetObjects::SaveCells(const FString& Folder, TConstArrayView<FHexCellObjects> Cells, TConstArrayView<int8> Levels,
+	TConstArrayView<TObjectPtr<UHexPlanetObjectSet>> LayerSets, FString& OutError)
+{
+	TArray<FName> SetIds;
+	for (const UHexPlanetObjectSet* Set : LayerSets)
+	{
+		SetIds.Add(Set->Id);
+	}
+	const TArray<FHexObjectCell> Lines = MakeSavedLines(Cells, SetIds, [&LayerSets, &Levels](int32 Cell, int32 Set)
+	{
+		return LayerSets.IsValidIndex(Set) && Levels.IsValidIndex(Cell) && LayerSets[Set]->AllowedLevels.Contains(int32(Levels[Cell]));
+	});
+	return HexPlanetFile::SaveObjects(Folder, Lines, OutError);
+}
+
+bool UHexPlanetObjects::GenerateCells(TConstArrayView<int8> Levels, TConstArrayView<uint8> Biomes, TArray<FHexCellObjects>& OutObjects) const
+{
+	if (!Planet || Planet->GetLayer() != EHexPlanetLayer::Underground || Sets.IsEmpty())
+	{
+		return false;
+	}
+	const TArray<TCHAR>& Letters = Planet->GetBiomeLetters();
+	TArray<TCHAR> CellLetters;
+	CellLetters.SetNumUninitialized(Biomes.Num());
+	for (int32 Cell = 0; Cell < Biomes.Num(); ++Cell)
+	{
+		CellLetters[Cell] = Letters.IsValidIndex(Biomes[Cell]) ? Letters[Biomes[Cell]] : TEXT('\0');
+	}
+	GenerateUndergroundObjects(Planet->GetGrid(), Levels, CellLetters, Planet->GetEntrances(), Planet->GetManifest(), Sets, OutObjects);
+	return true;
 }
 
 void UHexPlanetObjects::Init(AHexPlanet* InPlanet, const UHexPlanetConfig* InSettings)
 {
 	Planet = InPlanet;
 	Settings = InSettings;
-
-	for (const UHexPlanetObjectSet* Set : GetDefault<UHexMapSettings>()->LoadPlanetObjectSets())
-	{
-		// the sets of the layer of this planet alone, so the underground loads no meshes of forests
-		if (!Set->IsOnLayer(Planet->GetLayer()))
-		{
-			continue;
-		}
-		if (Set->Id.IsNone() || Sets.ContainsByPredicate([Set](const UHexPlanetObjectSet* Each) { return Each->Id == Set->Id; }))
-		{
-			UE_LOG(LogHexHero, Error, TEXT("Planet: the object set %s has no Id or one another set has, so it is left out"), *Set->GetName());
-			continue;
-		}
-		Sets.Add(const_cast<UHexPlanetObjectSet*>(Set));
-	}
-	// the palette, the generation and FHexCellObjects count by this order, so it is the same in every run
-	Sets.StableSort([](const UHexPlanetObjectSet& A, const UHexPlanetObjectSet& B) { return A.SortOrder < B.SortOrder; });
-	if (Sets.Num() > 254)
-	{
-		Sets.SetNum(254);
-	}
+	Sets = FindLayerSets(Planet->GetLayer());
 
 	VariantSlots.SetNum(Sets.Num());
 	for (int32 SetIndex = 0; SetIndex < Sets.Num(); ++SetIndex)
@@ -220,13 +366,21 @@ void UHexPlanetObjects::Init(AHexPlanet* InPlanet, const UHexPlanetConfig* InSet
 				int32 Slot = Slots.IndexOfByPredicate([SetIndex, Mesh](const FSlot& Each) { return Each.Set == SetIndex && Each.Mesh == Mesh; });
 				if (Slot == INDEX_NONE)
 				{
-					Slot = Slots.Add(FSlot{SetIndex, Mesh});
+					// a rim keeps off the cell of an exit beside its side by its footprint too
+					const bool bFootprint = Sets[SetIndex]->bClipFootprint || Sets[SetIndex]->Layer == EHexObjectLayer::Rim;
+					Slot = Slots.Add(FSlot{SetIndex, Mesh, bFootprint ? GetFootprintRadius(Mesh) : 0.0f});
 					LoadedMeshes.AddUnique(Mesh);
 				}
 				Found.Add(Slot);
 			}
 		}
+		if (Sets[SetIndex]->Layer == EHexObjectLayer::Rim)
+		{
+			RimSets.Add(SetIndex);
+			RimClearRings = FMath::Max(RimClearRings, FMath::Clamp(Sets[SetIndex]->ExitClearRings, 0, 3));
+		}
 	}
+	UpdateClearRings();
 
 	const TArray<FHexSphereCell>& Cells = Planet->GetGrid().GetCells();
 	ChunkCells.SetNum(Planet->GetGrid().GetNumChunks());
@@ -302,6 +456,16 @@ void UHexPlanetObjects::Load()
 
 void UHexPlanetObjects::Generate()
 {
+	// the passages of the underground by their own shares and patches, kept off the exits (HexPlanetUnderground::GenerateObjects)
+	if (Planet->GetLayer() == EHexPlanetLayer::Underground)
+	{
+		if (!GenerateCells(Planet->GetLevels(), Planet->GetCellBiomes(), CellObjects))
+		{
+			CellObjects.Init(FHexCellObjects(), Planet->GetGrid().GetCells().Num());
+		}
+		return;
+	}
+
 	const TArray<FHexSphereCell>& Cells = Planet->GetGrid().GetCells();
 	const FHexPlanetManifest& Manifest = Planet->GetManifest();
 	FRandomStream Random(Manifest.Seed * 7919 + 17);
@@ -312,6 +476,11 @@ void UHexPlanetObjects::Generate()
 	for (int32 SetIndex = 0; SetIndex < Sets.Num(); ++SetIndex)
 	{
 		const UHexPlanetObjectSet& Set = *Sets[SetIndex];
+		// the rims stand along the sides by themselves and are never stored in a cell
+		if (Set.Layer == EHexObjectLayer::Rim)
+		{
+			continue;
+		}
 		const bool bDecor = Set.Layer == EHexObjectLayer::Decor;
 		const FVector3d SetOffset = Offset + FVector3d(SetIndex * 17.3, SetIndex * -9.1, SetIndex * 5.7);
 
@@ -361,26 +530,39 @@ void UHexPlanetObjects::Generate()
 	UE_LOG(LogHexHero, Log, TEXT("Planet: generated objects on %d cells from %d object sets"), Placed, Sets.Num());
 }
 
-bool UHexPlanetObjects::Save(const FString& Folder, FString& OutError) const
+bool UHexPlanetObjects::Save(const FString& Folder, const TSet<int32>& KeptEntranceCells, FString& OutError) const
+{
+	TArray<FName> SetIds;
+	for (const UHexPlanetObjectSet* Set : Sets)
+	{
+		SetIds.Add(Set->Id);
+	}
+	const TArray<FHexObjectCell> Lines = MakeSavedLines(CellObjects, SetIds, [this, &KeptEntranceCells](int32 Cell, int32 Set)
+	{
+		return IsAllowed(Set, Planet->GetCellLevel(Cell)) && !KeptEntranceCells.Contains(Cell);
+	});
+	return HexPlanetFile::SaveObjects(Folder, Lines, OutError);
+}
+
+TArray<FHexObjectCell> UHexPlanetObjects::MakeSavedLines(TConstArrayView<FHexCellObjects> Cells, TConstArrayView<FName> SetIds, TFunctionRef<bool(int32 Cell, int32 Set)> IsKept)
 {
 	TArray<FHexObjectCell> Lines;
-	for (int32 Cell = 0; Cell < CellObjects.Num(); ++Cell)
+	for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
 	{
-		const FHexCellObjects& Objects = CellObjects[Cell];
-		const int32 Level = Planet->GetCellLevel(Cell);
-		const bool bCover = Objects.Cover != 0 && IsAllowed(Objects.Cover - 1, Level);
-		const bool bDecor = Objects.Decor != 0 && IsAllowed(Objects.Decor - 1, Level);
+		const FHexCellObjects& Objects = Cells[Cell];
+		const bool bCover = Objects.Cover != 0 && SetIds.IsValidIndex(Objects.Cover - 1) && IsKept(Cell, Objects.Cover - 1);
+		const bool bDecor = Objects.Decor != 0 && SetIds.IsValidIndex(Objects.Decor - 1) && IsKept(Cell, Objects.Decor - 1);
 		if (!bCover && !bDecor)
 		{
 			continue;
 		}
 		FHexObjectCell& Line = Lines.AddDefaulted_GetRef();
 		Line.Cell = Cell;
-		Line.Cover = bCover ? Sets[Objects.Cover - 1]->Id : NAME_None;
+		Line.Cover = bCover ? SetIds[Objects.Cover - 1] : NAME_None;
 		Line.Density = bCover ? Objects.Density : 0;
-		Line.Decor = bDecor ? Sets[Objects.Decor - 1]->Id : NAME_None;
+		Line.Decor = bDecor ? SetIds[Objects.Decor - 1] : NAME_None;
 	}
-	return HexPlanetFile::SaveObjects(Folder, Lines, OutError);
+	return Lines;
 }
 
 bool UHexPlanetObjects::IsAllowed(int32 Set, int32 Level) const
@@ -412,6 +594,62 @@ bool UHexPlanetObjects::GetCellCanopy(int32 Cell, FLinearColor& OutColor, float&
 	return true;
 }
 
+bool UHexPlanetObjects::GetCellGlow(int32 Cell, FLinearColor& OutColor, float& OutStrength) const
+{
+	OutStrength = 0.0f;
+	if (IsClear(Cell))
+	{
+		return false;
+	}
+	const FHexCellObjects Objects = GetCell(Cell);
+	const int32 Level = Planet->GetCellLevel(Cell);
+	const TCHAR Letter = Planet->GetCellBiomeLetter(Cell);
+	const auto Consider = [&](int32 Stored, float Factor)
+	{
+		const int32 Set = Stored - 1;
+		if (Set < 0 || !IsAllowed(Set, Level))
+		{
+			return;
+		}
+		const UHexPlanetObjectSet& Kind = *Sets[Set];
+		const float Strength = Kind.GlowPool * Factor;
+		if (Kind.GlowStrength > 0.0f && Strength > OutStrength && Kind.FindVariant(Letter))
+		{
+			OutStrength = Strength;
+			OutColor = Kind.GlowColor;
+		}
+	};
+	// a sparse cover lights less of its floor than a dense one (GlowPoolByDensity)
+	const int32 Cover = int32(Objects.Cover) - 1;
+	const TArray<float>* ByDensity = Sets.IsValidIndex(Cover) ? &Sets[Cover]->GlowPoolByDensity : nullptr;
+	const int32 Density = FMath::Clamp(int32(Objects.Density), 1, 3) - 1;
+	Consider(Objects.Cover, ByDensity && ByDensity->IsValidIndex(Density) ? (*ByDensity)[Density] : 1.0f);
+	Consider(Objects.Decor, 1.0f);
+	return OutStrength > 0.0f;
+}
+
+int32 UHexPlanetObjects::GetCellSpores(int32 Cell, FLinearColor& OutColor) const
+{
+	if (IsClear(Cell))
+	{
+		return 0;
+	}
+	const FHexCellObjects Objects = GetCell(Cell);
+	const int32 Level = Planet->GetCellLevel(Cell);
+	const TCHAR Letter = Planet->GetCellBiomeLetter(Cell);
+	int32 Most = 0;
+	for (const int32 Stored : {int32(Objects.Cover), int32(Objects.Decor)})
+	{
+		const int32 Set = Stored - 1;
+		if (Set >= 0 && IsAllowed(Set, Level) && Sets[Set]->Spores > Most && Sets[Set]->FindVariant(Letter))
+		{
+			Most = Sets[Set]->Spores;
+			OutColor = Sets[Set]->GlowColor;
+		}
+	}
+	return Most;
+}
+
 bool UHexPlanetObjects::BlocksMovement(int32 Cell) const
 {
 	const FHexCellObjects Objects = GetCell(Cell);
@@ -438,36 +676,151 @@ FString UHexPlanetObjects::GetCellText(int32 Cell) const
 	{
 		return TEXT("none");
 	}
-	return FString::Join(Parts, TEXT(", ")) + (IsClear(Cell) ? TEXT(", not drawn on the entrance") : BlocksMovement(Cell) ? TEXT(", blocks movement") : TEXT(", passable"));
+	if (IsClear(Cell))
+	{
+		// a save keeps an entrance that can be used, and leaves out what stands on its cell; one that cannot is left out itself
+		const int32 Entrance = Planet->FindEntrance(Cell);
+		const bool bKept = Entrance != INDEX_NONE && Planet->GetEntranceProblem(Entrance) == HexPlanetUnderground::EEntranceProblem::None;
+		return FString::Join(Parts, TEXT(", ")) + (bKept ? TEXT(", not drawn on the entrance, left out of the next save") : TEXT(", not drawn on the entrance"));
+	}
+	return FString::Join(Parts, TEXT(", ")) + (BlocksMovement(Cell) ? TEXT(", blocks movement") : TEXT(", passable"));
 }
 
-void UHexPlanetObjects::SetClearCells(TConstArrayView<int32> Cells)
+bool UHexPlanetObjects::SetClearCells(TConstArrayView<int32> Cells)
 {
 	TSet<int32> NewCells;
 	NewCells.Append(Cells);
+	const bool bSetChanged = NewCells.Num() != ClearCells.Num() || !NewCells.Includes(ClearCells);
 
-	// the cells that hold something and were cleared or given back
+	// the cells that hold something and were cleared or given back, and every cell cleared or given back, whose sides take rims or not
 	TArray<int32> Changed;
+	TArray<int32> Toggled;
 	for (const int32 Cell : NewCells)
 	{
-		if (!ClearCells.Contains(Cell) && !GetCell(Cell).IsEmpty())
+		if (!ClearCells.Contains(Cell))
 		{
-			Changed.Add(Cell);
+			Toggled.Add(Cell);
+			if (!GetCell(Cell).IsEmpty())
+			{
+				Changed.Add(Cell);
+			}
 		}
 	}
 	for (const int32 Cell : ClearCells)
 	{
-		if (!NewCells.Contains(Cell) && !GetCell(Cell).IsEmpty())
+		if (!NewCells.Contains(Cell))
 		{
-			Changed.Add(Cell);
+			Toggled.Add(Cell);
+			if (!GetCell(Cell).IsEmpty())
+			{
+				Changed.Add(Cell);
+			}
 		}
 	}
 	ClearCells = MoveTemp(NewCells);
+	UpdateClearRings();
 
 	// before the planet is built its objects are placed with the surface, which reads them then
-	if (Planet && Planet->IsBuilt() && !Changed.IsEmpty())
+	if (Planet && Planet->IsBuilt())
 	{
-		RebuildCells(Changed);
+		// a rim leaves out the sides of an exit and of the cells near it, and the void beside a passage may be the cleared cell, so the chunks of
+		// every cell that far from a cell that changed place their rims again, though nothing is stored in them
+		if (HasRims() && !Toggled.IsEmpty())
+		{
+			const TArray<int32> Near = HexPlanetUnderground::GetRingDistances(Planet->GetGrid(), Toggled, RimClearRings + 1);
+			for (int32 Cell = 0; Cell < Near.Num(); ++Cell)
+			{
+				if (Near[Cell] != MAX_int32)
+				{
+					Changed.Add(Cell);
+				}
+			}
+		}
+		if (!Changed.IsEmpty())
+		{
+			RebuildCells(Changed);
+		}
+	}
+	return bSetChanged;
+}
+
+void UHexPlanetObjects::UpdateClearRings()
+{
+	if (!Planet || RimSets.IsEmpty())
+	{
+		ClearRings.Reset();
+		return;
+	}
+	ClearRings = HexPlanetUnderground::GetRingDistances(Planet->GetGrid(), ClearCells.Array(), RimClearRings);
+}
+
+FString UHexPlanetObjects::GetRimText(int32 Cell) const
+{
+	if (!Planet)
+	{
+		return FString();
+	}
+	const TArray<int8>& Levels = Planet->GetShownLevels();
+	const TArray<FHexSphereCell>& Cells = Planet->GetGrid().GetCells();
+	if (!Cells.IsValidIndex(Cell) || Levels.Num() != Cells.Num())
+	{
+		return FString();
+	}
+	TArray<FString> Parts;
+	for (const int32 SetIndex : RimSets)
+	{
+		const UHexPlanetObjectSet& Set = *Sets[SetIndex];
+		const int32 Rings = FMath::Clamp(Set.ExitClearRings, 0, 3);
+		const uint32 IdHash = FCrc::StrCrc32(*Set.Id.ToString());
+		const auto IsSkipped = [this, Rings](int32 Each) { return ClearRings.IsValidIndex(Each) ? ClearRings[Each] <= Rings : IsClear(Each); };
+		int32 OverVoid = 0;
+		int32 NearExit = 0;
+		int32 Taken = 0;
+		for (int32 Side = 0; Side < Cells[Cell].Neighbors.Num(); ++Side)
+		{
+			const int32 Neighbor = Cells[Cell].Neighbors[Side];
+			if (int32(Levels[Neighbor]) > int32(Levels[Cell]) - FMath::Max(Set.RimMinDrop, 1))
+			{
+				continue;
+			}
+			++OverVoid;
+			if (IsSkipped(Cell) || IsSkipped(Neighbor))
+			{
+				++NearExit;
+				continue;
+			}
+			// the share of the sides, by the first draw of the stream of the side, as PlaceRims takes it
+			Taken += FRandomStream(int32(HashCombine(GetTypeHash(Cell * 8 + Side), IdHash))).FRand() < Set.RimSideShare ? 1 : 0;
+		}
+		if (OverVoid > 0)
+		{
+			Parts.Add(FString::Printf(TEXT("%s on %d of %d sides over a void%s"), *Set.Id.ToString(), Taken, OverVoid,
+				NearExit > 0 ? *FString::Printf(TEXT(", %d left out at an exit or within %d rings of one"), NearExit, Rings) : TEXT("")));
+		}
+	}
+	return FString::Join(Parts, TEXT("; "));
+}
+
+bool UHexPlanetObjects::IsSlotShown(int32 Slot) const
+{
+	return bObjectsShown && (!Slots.IsValidIndex(Slot) || Sets[Slots[Slot].Set]->Layer != EHexObjectLayer::Rim || bRimsShown);
+}
+
+void UHexPlanetObjects::SetShown(bool bInObjects, bool bInRims)
+{
+	if (bInObjects == bObjectsShown && bInRims == bRimsShown)
+	{
+		return;
+	}
+	bObjectsShown = bInObjects;
+	bRimsShown = bInRims;
+	SetVisibility(bObjectsShown, false);
+	for (const TPair<int64, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>>& Each : Components)
+	{
+		if (Each.Value)
+		{
+			Each.Value->SetVisibility(IsSlotShown(int32(Each.Key % 65536)));
+		}
 	}
 }
 
@@ -510,10 +863,12 @@ void UHexPlanetObjects::RebuildChunks(TConstArrayView<int32> Chunks)
 
 	const double StartTime = FPlatformTime::Seconds();
 	TArray<TArray<FInstance>> Placed;
+	TArray<FPlaceStats> Stats;
 	Placed.SetNum(Chunks.Num());
+	Stats.SetNum(Chunks.Num());
 	ParallelFor(Chunks.Num(), [&](int32 Index)
 	{
-		Placed[Index] = PlaceChunk(Chunks[Index]);
+		Placed[Index] = PlaceChunk(Chunks[Index], Stats[Index]);
 	});
 	const double ApplyTime = FPlatformTime::Seconds();
 
@@ -529,13 +884,62 @@ void UHexPlanetObjects::RebuildChunks(TConstArrayView<int32> Chunks)
 		UE_LOG(LogHexHero, Log, TEXT("Planet: placed %d objects in %d chunks in %.1f ms, shown in %.1f ms"), Total, Chunks.Num(),
 			(ApplyTime - StartTime) * 1000.0, (FPlatformTime::Seconds() - ApplyTime) * 1000.0);
 	}
+	{
+		// underground, where the meshes keep off the voids (bClipFootprint), how many each kind placed and in how many of its cells none fitted,
+		// and the rims apart, by the sides they stand on, after every rebuild, as an edit of the maze or the entrances moves the rims
+		if (Planet->GetLayer() == EHexPlanetLayer::Underground)
+		{
+			TArray<int32> Instances;
+			TArray<int32> Cells;
+			TArray<int32> Sides;
+			int32 HangMissed = 0;
+			Instances.Init(0, Sets.Num());
+			Cells.Init(0, Sets.Num());
+			Sides.Init(0, Sets.Num());
+			for (int32 Index = 0; Index < Chunks.Num(); ++Index)
+			{
+				for (const FInstance& Instance : Placed[Index])
+				{
+					++Instances[Slots[Instance.Slot].Set];
+				}
+				for (int32 Set = 0; Set < Stats[Index].EmptyCells.Num(); ++Set)
+				{
+					Cells[Set] += Stats[Index].EmptyCells[Set];
+					Sides[Set] += Stats[Index].RimSides[Set];
+				}
+				HangMissed += Stats[Index].HangMissed;
+			}
+			TArray<FString> Parts;
+			TArray<FString> RimParts;
+			int32 RimTotal = 0;
+			for (int32 Set = 0; Set < Sets.Num(); ++Set)
+			{
+				if (Sets[Set]->Layer == EHexObjectLayer::Rim)
+				{
+					RimParts.Add(FString::Printf(TEXT("%s %d on %d sides"), *Sets[Set]->Id.ToString(), Instances[Set], Sides[Set]));
+					RimTotal += Instances[Set];
+					continue;
+				}
+				Parts.Add(FString::Printf(TEXT("%s %d (none fitted in %d cells)"), *Sets[Set]->Id.ToString(), Instances[Set], Cells[Set]));
+			}
+			UE_LOG(LogHexHero, Log, TEXT("Planet: objects of the underground by kind in %d chunks: %s"), Chunks.Num(), *FString::Join(Parts, TEXT(", ")));
+			if (!RimParts.IsEmpty())
+			{
+				UE_LOG(LogHexHero, Log, TEXT("Planet: rims of the underground in %d chunks, %d objects: %s; %d tries to hang one found no cliff below the lip"), Chunks.Num(),
+					RimTotal, *FString::Join(RimParts, TEXT(", ")), HangMissed);
+			}
+		}
+	}
 
 	// the ground of the cells shows their covers from far away, which changes with the objects, their biomes and their levels
 	Planet->UpdateCanopy();
 }
 
-TArray<UHexPlanetObjects::FInstance> UHexPlanetObjects::PlaceChunk(int32 Chunk) const
+TArray<UHexPlanetObjects::FInstance> UHexPlanetObjects::PlaceChunk(int32 Chunk, FPlaceStats& OutStats) const
 {
+	TArray<int32>& OutEmptyCells = OutStats.EmptyCells;
+	OutEmptyCells.Init(0, Sets.Num());
+	OutStats.RimSides.Init(0, Sets.Num());
 	// the cells with something to place, whose ground is found in parallel, as the planet may build it again for that, keeping its surface on
 	// the GPU alone (AHexPlanet::GetCellTriangles)
 	TArray<int32> Placed;
@@ -564,14 +968,284 @@ TArray<UHexPlanetObjects::FInstance> UHexPlanetObjects::PlaceChunk(int32 Chunk) 
 		const int32 Level = Planet->GetCellLevel(Cell);
 		if (Objects.Cover != 0 && IsAllowed(Objects.Cover - 1, Level))
 		{
+			const int32 Before = Instances.Num();
 			PlaceInCell(Cell, Objects.Cover - 1, Objects.Density, false, Grounds[Index], Instances);
+			OutEmptyCells[Objects.Cover - 1] += Instances.Num() == Before ? 1 : 0;
 		}
 		if (Objects.Decor != 0 && IsAllowed(Objects.Decor - 1, Level))
 		{
+			const int32 Before = Instances.Num();
 			PlaceInCell(Cell, Objects.Decor - 1, 1, true, Grounds[Index], Instances);
+			OutEmptyCells[Objects.Decor - 1] += Instances.Num() == Before ? 1 : 0;
 		}
 	}
+	PlaceRims(Chunk, Instances, OutStats);
 	return Instances;
+}
+
+void UHexPlanetObjects::PlaceRims(int32 Chunk, TArray<FInstance>& Out, FPlaceStats& Stats) const
+{
+	const TArray<int8>& Levels = Planet->GetShownLevels();
+	const FHexSphereGrid& Grid = Planet->GetGrid();
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+	if (RimSets.IsEmpty() || Levels.Num() != Cells.Num())
+	{
+		return;
+	}
+
+	// the sides of each kind, by the levels of the surface shown, whose ground the rims stand on, without a cleared cell or, for a kind that keeps
+	// clear of exits, a cell near one; a side takes a kind by a hash, of which the stream of the side draws first
+	const auto GetSideStream = [](int32 Cell, int32 Side, uint32 IdHash) { return FRandomStream(int32(HashCombine(GetTypeHash(Cell * 8 + Side), IdHash))); };
+	TArray<TArray<FIntPoint>> SidesBySet;
+	SidesBySet.SetNum(RimSets.Num());
+	TArray<int32> GroundCells;
+	TMap<int32, int32> GroundOf;
+	const auto NeedGround = [&GroundCells, &GroundOf](int32 Cell)
+	{
+		if (!GroundOf.Contains(Cell))
+		{
+			GroundOf.Add(Cell, GroundCells.Add(Cell));
+		}
+	};
+	for (int32 Rim = 0; Rim < RimSets.Num(); ++Rim)
+	{
+		const UHexPlanetObjectSet& Set = *Sets[RimSets[Rim]];
+		const int32 Rings = FMath::Clamp(Set.ExitClearRings, 0, 3);
+		const uint32 IdHash = FCrc::StrCrc32(*Set.Id.ToString());
+		HexPlanetUnderground::FindRimSides(Grid, Levels, FMath::Max(Set.RimMinDrop, 1), [this, Rings](int32 Cell)
+		{
+			return ClearRings.IsValidIndex(Cell) ? ClearRings[Cell] <= Rings : IsClear(Cell);
+		}, ChunkCells[Chunk], SidesBySet[Rim]);
+		SidesBySet[Rim].RemoveAll([&](const FIntPoint& Pair)
+		{
+			return !Set.AllowedLevels.Contains(int32(Levels[Pair.X])) || !Set.FindVariant(Planet->GetCellBiomeLetter(Pair.X))
+				|| GetSideStream(Pair.X, Pair.Y, IdHash).FRand() >= Set.RimSideShare;
+		});
+		for (const FIntPoint& Pair : SidesBySet[Rim])
+		{
+			NeedGround(Pair.X);
+			if (Set.bRimHang)
+			{
+				NeedGround(Cells[Pair.X].Neighbors[Pair.Y]);
+			}
+		}
+		Stats.RimSides[RimSets[Rim]] = SidesBySet[Rim].Num();
+	}
+	if (GroundCells.IsEmpty())
+	{
+		return;
+	}
+
+	// the ground of those cells, found in parallel as the planet may build it again, flattened onto the plane of each
+	TArray<TArray<FVector3f>> Triangles;
+	TArray<FCellGround> Grounds;
+	Triangles.SetNum(GroundCells.Num());
+	Grounds.SetNum(GroundCells.Num());
+	const double Radius = Planet->GetRadius();
+	ParallelFor(GroundCells.Num(), [&](int32 Index)
+	{
+		Planet->GetCellTriangles(GroundCells[Index], Triangles[Index]);
+		Grounds[Index].Build(FVector3f(Cells[GroundCells[Index]].Center), Triangles[Index]);
+	});
+
+	// a side of a cell on its plane: its corners, the way into the cell across it and the apothem there
+	struct FFlatSide
+	{
+		FVector2f From;
+		FVector2f To;
+		FVector2f Inward;
+		float Apothem = 0.0f;
+	};
+	const auto Flatten = [](const FCellGround& Ground, const FVector3f& From, const FVector3f& To, const FVector3f& Center)
+	{
+		FFlatSide Flat;
+		Flat.From = Ground.Flatten(From);
+		Flat.To = Ground.Flatten(To);
+		const FVector2f Middle = Ground.Flatten(Center);
+		const FVector2f Along = (Flat.To - Flat.From).GetSafeNormal();
+		Flat.Inward = FVector2f(-Along.Y, Along.X);
+		Flat.Apothem = FVector2f::DotProduct(Middle - Flat.From, Flat.Inward);
+		if (Flat.Apothem < 0.0f)
+		{
+			Flat.Inward = -Flat.Inward;
+			Flat.Apothem = -Flat.Apothem;
+		}
+		return Flat;
+	};
+	// the lip lies this far onto the passage, where its ground is found, so a point on the side does not fall between its triangles
+	constexpr float LipInset = 0.5f;
+
+	for (int32 Rim = 0; Rim < RimSets.Num(); ++Rim)
+	{
+		const int32 SetIndex = RimSets[Rim];
+		const UHexPlanetObjectSet& Set = *Sets[SetIndex];
+		const uint32 IdHash = FCrc::StrCrc32(*Set.Id.ToString());
+		const float MinUp = FMath::Clamp(Set.MinUp, 0.0f, 1.0f);
+		const float TurnRange = FMath::DegreesToRadians(Set.RimTurn);
+
+		// the rims of the kind on the cell, from side to side, kept Spacing apart by their sizes
+		int32 SpacedCell = INDEX_NONE;
+		TArray<FVector3f, TInlineAllocator<32>> Taken;
+		TArray<float, TInlineAllocator<32>> TakenSizes;
+
+		for (const FIntPoint& Pair : SidesBySet[Rim])
+		{
+			const int32 Cell = Pair.X;
+			const int32 Side = Pair.Y;
+			const FHexSphereCell& Each = Cells[Cell];
+			const int32 Lower = Each.Neighbors[Side];
+			const FHexObjectVariant* Variant = Set.FindVariant(Planet->GetCellBiomeLetter(Cell));
+			const TArray<int32>& Meshes = VariantSlots[SetIndex][int32(Variant - Set.Variants.GetData())];
+			if (Meshes.IsEmpty() || Set.CountByDensity.IsEmpty())
+			{
+				continue;
+			}
+			if (SpacedCell != Cell)
+			{
+				SpacedCell = Cell;
+				Taken.Reset();
+				TakenSizes.Reset();
+			}
+
+			FRandomStream Random = GetSideStream(Cell, Side, IdHash);
+			Random.FRand();
+			const int32 Most = FMath::Max(FMath::RoundToInt32(Set.CountByDensity[0] * Variant->CountFactor), 0);
+			const int32 Least = FMath::Clamp(Set.RimCountMin, 0, Most);
+			const int32 Count = Least + Random.RandHelper(Most - Least + 1);
+			if (Count <= 0)
+			{
+				continue;
+			}
+
+			// the side on the plane of the passage and, for a rim that hangs, on that of the void, the same way along it on both
+			const FVector3f CornerFrom = FVector3f(Grid.GetCorners()[Each.Corners[(Side + Each.Corners.Num() - 1) % Each.Corners.Num()]] * Radius);
+			const FVector3f CornerTo = FVector3f(Grid.GetCorners()[Each.Corners[Side]] * Radius);
+			const FVector3f Inside = FVector3f(Each.Center * Radius);
+			const FCellGround& Upper = Grounds[GroundOf[Cell]];
+			const FCellGround* Below = Set.bRimHang ? &Grounds[GroundOf[Lower]] : nullptr;
+			const FFlatSide UpperSide = Flatten(Upper, CornerFrom, CornerTo, Inside);
+			const FFlatSide LowerSide = Below ? Flatten(*Below, CornerFrom, CornerTo, FVector3f(Cells[Lower].Center * Radius)) : FFlatSide();
+
+			// the sides of the cell towards a cleared cell, which a rim keeps its footprint off, as nothing stands on or along an exit
+			uint8 ClearSides = 0;
+			TArray<FVector2f, TInlineAllocator<6>> FlatCorners;
+			for (int32 Other = 0; Other < Each.Neighbors.Num(); ++Other)
+			{
+				ClearSides |= IsClear(Each.Neighbors[Other]) ? uint8(1u << Other) : uint8(0);
+			}
+			if (ClearSides != 0)
+			{
+				for (const int32 Corner : Each.Corners)
+				{
+					FlatCorners.Add(Upper.Flatten(FVector3f(Grid.GetCorners()[Corner] * Radius)));
+				}
+			}
+
+			for (int32 Index = 0; Index < Count; ++Index)
+			{
+				// spread along the side, one to each stretch of it, with a few tries for the spacing
+				for (int32 Try = 0; Try < 3; ++Try)
+				{
+					const float Gap = FMath::Clamp(Set.RimCornerGap, 0.0f, 0.45f);
+					const float Along = Gap + (1.0f - 2.0f * Gap) * (float(Index) + Random.FRand()) / float(Count);
+					float Scale = Random.FRandRange(Set.ScaleMin, FMath::Max(Set.ScaleMin, Set.ScaleMax)) * Variant->ScaleFactor;
+					if (Random.FRand() < Set.GiantChance)
+					{
+						Scale *= Set.GiantScale;
+					}
+					const int32 Slot = Meshes[Random.RandHelper(Meshes.Num())];
+					const float Turn = Random.FRandRange(-TurnRange, TurnRange);
+					const float TiltAngle = FMath::DegreesToRadians(Random.FRandRange(0.0f, Set.Tilt));
+					const float TiltDirection = Random.FRandRange(0.0f, 2.0f * UE_PI);
+					const float Inset = LipInset + Random.FRand() * Set.RimInset * UpperSide.Apothem;
+					const FVector2f OnSide = FMath::Lerp(UpperSide.From, UpperSide.To, Along);
+
+					FVector3f Position;
+					FQuat4f Rotation;
+					if (!Below)
+					{
+						// on the lip, its -Y over the void, as the carved face of a block of runes, its X along the side
+						const FVector2f Point = OnSide + UpperSide.Inward * Inset;
+						if (ClearSides != 0 && !HexPlanetUnderground::IsFootprintClear(Point, Slots[Slot].FootprintRadius * Scale + Settings->ObjectFootprintMargin, FlatCorners, ClearSides))
+						{
+							continue;
+						}
+						FVector3f Normal;
+						if (!Upper.Find(Point, Position, Normal))
+						{
+							continue;
+						}
+						const FVector3f Up = FVector3f(Planet->GetUpAt(FVector3d(Position)));
+						if (FVector3f::DotProduct(Normal, Up) < MinUp)
+						{
+							continue;
+						}
+						const FVector3f Axis = FMath::Lerp(Up, Normal, Set.SlopeAlign).GetSafeNormal();
+						FVector3f X = (CornerTo - CornerFrom) - Axis * FVector3f::DotProduct(CornerTo - CornerFrom, Axis);
+						X = X.GetSafeNormal();
+						if (FVector3f::DotProduct(FVector3f::CrossProduct(Axis, X), Inside - Position) < 0.0f)
+						{
+							X = -X;
+						}
+						X = FQuat4f(Axis, Turn).RotateVector(X);
+						const FQuat4f Base = FRotationMatrix44f::MakeFromZX(Axis, X).ToQuat();
+						const FVector3f TiltAxis = Base.GetAxisX() * FMath::Cos(TiltDirection) + Base.GetAxisY() * FMath::Sin(TiltDirection);
+						Rotation = FQuat4f(TiltAxis, TiltAngle) * Base;
+						Position -= Axis * Set.Sink * Scale;
+					}
+					else
+					{
+						// down the cliff of the void below the lip: the face a little past the side, and its plane taken up to the height of the
+						// lip, found on the passage, so the top of the mesh lies there whatever the slope of the face
+						const FVector2f Point = FMath::Lerp(LowerSide.From, LowerSide.To, Along) + LowerSide.Inward * Set.RimHangOut;
+						FVector3f Face;
+						FVector3f Normal;
+						if (!Below->Find(Point, Face, Normal))
+						{
+							++Stats.HangMissed;
+							continue;
+						}
+						const FVector3f Up = FVector3f(Planet->GetUpAt(FVector3d(Face)));
+						if (FVector3f::DotProduct(Normal, Up) > Set.RimHangMaxUp)
+						{
+							++Stats.HangMissed;
+							continue;
+						}
+						const FVector3f UpFace = (Up - Normal * FVector3f::DotProduct(Up, Normal)).GetSafeNormal();
+						FVector3f Lip;
+						FVector3f LipNormal;
+						const float Rise = Upper.Find(OnSide + UpperSide.Inward * LipInset, Lip, LipNormal)
+							? (Lip.Length() - Face.Length()) / FMath::Max(FVector3f::DotProduct(UpFace, Up), 0.05f) : 0.0f;
+						Position = Face + UpFace * FMath::Max(Rise, 0.0f);
+						const FQuat4f Base = FRotationMatrix44f::MakeFromZY(UpFace, Normal).ToQuat();
+						const FVector3f TiltAxis = Base.GetAxisX() * FMath::Cos(TiltDirection) + Base.GetAxisZ() * FMath::Sin(TiltDirection);
+						Rotation = FQuat4f(TiltAxis, TiltAngle) * FQuat4f(Normal, Turn) * Base;
+						Position -= Normal * Set.Sink * Scale;
+					}
+
+					bool bFree = true;
+					for (int32 Other = 0; Other < Taken.Num() && bFree; ++Other)
+					{
+						bFree = FVector3f::DistSquared(Taken[Other], Position) >= FMath::Square(Set.Spacing * (Scale + TakenSizes[Other]) * 0.5f);
+					}
+					if (!bFree)
+					{
+						continue;
+					}
+					Taken.Add(Position);
+					TakenSizes.Add(Scale);
+
+					// the rock of the cliff it caps, that of the lower cell
+					FInstance& Instance = Out.AddDefaulted_GetRef();
+					Instance.Slot = Slot;
+					Instance.Transform = FTransform(FQuat(Rotation), FVector(Position), FVector(Scale));
+					Instance.Rock = float(Planet->GetCellRockLayer(Lower));
+					Instance.Snow = Variant->Snow;
+					break;
+				}
+			}
+		}
+	}
 }
 
 void UHexPlanetObjects::PlaceInCell(int32 Cell, int32 SetIndex, int32 Density, bool bDecor, const TArray<FVector3f>& Triangles, TArray<FInstance>& Out) const
@@ -614,6 +1288,27 @@ void UHexPlanetObjects::PlaceInCell(int32 Cell, int32 SetIndex, int32 Density, b
 		High = FVector2f::Max(High, Point);
 	}
 
+	// a kind that keeps its meshes inside the cell clips the sides towards a void, a cell at least two levels lower, whose cliff the ground of
+	// the void carries, so a mesh there would hang over the abyss, and towards a cleared cell, an exit, whose marker it would cover
+	uint8 ClipSides = 0;
+	TArray<FVector2f, TInlineAllocator<6>> FlatCorners;
+	if (Set.bClipFootprint)
+	{
+		const int32 Level = Planet->GetCellLevel(Cell);
+		for (int32 Side = 0; Side < Each.Neighbors.Num(); ++Side)
+		{
+			const int32 Neighbor = Each.Neighbors[Side];
+			if (Planet->GetCellLevel(Neighbor) <= Level - 2 || IsClear(Neighbor))
+			{
+				ClipSides |= uint8(1u << Side);
+			}
+		}
+		for (const int32 Corner : Each.Corners)
+		{
+			FlatCorners.Add(Ground.Flatten(FVector3f(Grid.GetCorners()[Corner] * Radius)));
+		}
+	}
+
 	// the hash of an FName changes between runs, so the name is hashed as text, and a cell keeps its objects where they stood
 	FRandomStream Random(int32(HashCombine(GetTypeHash(Cell), FCrc::StrCrc32(*Set.Id.ToString())) + (bDecor ? 7 : 0)));
 	const float Rock = float(Planet->GetCellRockLayer(Cell));
@@ -638,6 +1333,10 @@ void UHexPlanetObjects::PlaceInCell(int32 Cell, int32 SetIndex, int32 Density, b
 		const float TiltDirection = Random.FRandRange(0.0f, 2.0f * UE_PI);
 
 		if (!IsInside(Point, Polygon))
+		{
+			continue;
+		}
+		if (ClipSides != 0 && !HexPlanetUnderground::IsFootprintClear(Point, Slots[Slot].FootprintRadius * Scale + Settings->ObjectFootprintMargin, FlatCorners, ClipSides))
 		{
 			continue;
 		}
@@ -687,12 +1386,29 @@ void UHexPlanetObjects::PlaceInCell(int32 Cell, int32 SetIndex, int32 Density, b
 	}
 }
 
-UMaterialInterface* UHexPlanetObjects::GetMaterial(UMaterialInterface* Parent)
+UMaterialInterface* UHexPlanetObjects::GetMaterial(UMaterialInterface* Parent, const UHexPlanetObjectSet* Set)
 {
 	if (!Parent)
 	{
 		return nullptr;
 	}
+
+	// a set that glows takes its values of the glow (M_HexPlanetCave), so it has an instance of its own; every other set shares one per parent
+	if (Set && Set->GlowStrength > 0.0f)
+	{
+		const int32 Index = GlowMaterialKeys.IndexOfByKey(TPair<const UMaterialInterface*, const UHexPlanetObjectSet*>(Parent, Set));
+		if (Index != INDEX_NONE)
+		{
+			return GlowMaterials[Index];
+		}
+		UMaterialInstanceDynamic* Material = UMaterialInstanceDynamic::Create(Parent, this);
+		HexMaterialConfig::Apply(Material, Settings);
+		HexMaterialConfig::Apply(Material, Set);
+		GlowMaterialKeys.Add({Parent, Set});
+		GlowMaterials.Add(Material);
+		return Material;
+	}
+
 	if (const TObjectPtr<UMaterialInterface>* Found = Materials.Find(Parent))
 	{
 		return *Found;
@@ -731,14 +1447,14 @@ void UHexPlanetObjects::ApplyChunk(int32 Chunk, const TArray<FInstance>& Instanc
 			{
 				for (int32 Element = 0; Element < Slots[Slot].Mesh->GetStaticMaterials().Num(); ++Element)
 				{
-					Component->SetMaterial(Element, GetMaterial(SetMaterial));
+					Component->SetMaterial(Element, GetMaterial(SetMaterial, &Set));
 				}
 			}
 			else
 			{
 				for (int32 Element = 0; Element < Slots[Slot].Mesh->GetStaticMaterials().Num(); ++Element)
 				{
-					Component->SetMaterial(Element, GetMaterial(Slots[Slot].Mesh->GetMaterial(Element)));
+					Component->SetMaterial(Element, GetMaterial(Slots[Slot].Mesh->GetMaterial(Element), &Set));
 				}
 			}
 			Component->NumCustomDataFloats = 2;
@@ -747,8 +1463,8 @@ void UHexPlanetObjects::ApplyChunk(int32 Chunk, const TArray<FInstance>& Instanc
 			Component->SetCastShadow(Set.bCastShadow);
 			Component->bAffectDistanceFieldLighting = false;
 			Component->SetCullDistances(0, int32(Set.CullDistance));
-			// hidden with the rest while hex.PlanetObjects hides them
-			Component->SetVisibility(IsVisible());
+			// hidden with the rest while hex.PlanetObjects hides them, a rim also while hex.PlanetRims does
+			Component->SetVisibility(IsSlotShown(Slot));
 			Component->RegisterComponent();
 			Components.Add(GetComponentKey(Chunk, Slot), Component);
 		}

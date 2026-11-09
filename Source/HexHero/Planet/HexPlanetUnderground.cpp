@@ -546,14 +546,14 @@ namespace
 	}
 
 	/** Gives the levels of the maze carved, its biomes and how it fits together to a result */
-	void FinishResult(const FMaze& Maze, const FHexSphereGrid& Grid, TConstArrayView<int8> SurfaceLevels, double StartTime, FResult& OutResult)
+	void FinishResult(const FMaze& Maze, const FHexSphereGrid& Grid, TConstArrayView<int8> SurfaceLevels, int32 Seed, double StartTime, FResult& OutResult)
 	{
 		OutResult.Levels.SetNumUninitialized(Maze.Owner.Num());
 		for (int32 Cell = 0; Cell < Maze.Owner.Num(); ++Cell)
 		{
 			OutResult.Levels[Cell] = Maze.Owner[Cell] == NoOwner ? VoidLevel : PassageLevel;
 		}
-		GenerateBiomes(OutResult.Levels, OutResult.Biomes);
+		GenerateBiomes(Grid, OutResult.Levels, OutResult.Entrances, Maze.Generation, Seed, OutResult.Biomes);
 		OutResult.Report = Check(Grid, SurfaceLevels, OutResult.Levels, OutResult.Entrances);
 		OutResult.Seconds = FPlatformTime::Seconds() - StartTime;
 	}
@@ -1016,15 +1016,6 @@ TArray<FHexEntrance> HexPlanetUnderground::PlaceEntrances(const FHexSphereGrid& 
 	return Entrances;
 }
 
-void HexPlanetUnderground::GenerateBiomes(TConstArrayView<int8> Levels, TArray<TCHAR>& OutBiomes)
-{
-	OutBiomes.SetNumUninitialized(Levels.Num());
-	for (int32 Cell = 0; Cell < Levels.Num(); ++Cell)
-	{
-		OutBiomes[Cell] = IsPassage(Levels[Cell]) ? Biome::Floor : Biome::Abyss;
-	}
-}
-
 void HexPlanetUnderground::Generate(const FHexSphereGrid& Grid, TConstArrayView<int8> SurfaceLevels, const FHexPlanetManifest& Manifest,
 	const TArray<FHexEntrance>* Entrances, FResult& OutResult)
 {
@@ -1043,7 +1034,7 @@ void HexPlanetUnderground::Generate(const FHexSphereGrid& Grid, TConstArrayView<
 	TArray<int32> Exits[HexPlanetFile::MaxNetworks];
 	GetUsableExits(Grid, SurfaceLevels, OutResult.Entrances, Exits);
 	CarveNetworks(Maze, Exits, ~0u, Random);
-	FinishResult(Maze, Grid, SurfaceLevels, StartTime, OutResult);
+	FinishResult(Maze, Grid, SurfaceLevels, Seed, StartTime, OutResult);
 }
 
 void HexPlanetUnderground::RegenerateNetwork(const FHexSphereGrid& Grid, TConstArrayView<int8> SurfaceLevels, const FHexPlanetManifest& Manifest,
@@ -1056,7 +1047,7 @@ void HexPlanetUnderground::RegenerateNetwork(const FHexSphereGrid& Grid, TConstA
 	if (Levels.Num() != Cells.Num() || Network < 0 || Network >= HexPlanetFile::MaxNetworks)
 	{
 		OutResult.Levels = TArray<int8>(Levels);
-		GenerateBiomes(OutResult.Levels, OutResult.Biomes);
+		GenerateBiomes(Grid, OutResult.Levels, OutResult.Entrances, Manifest.Underground, GetSeed(Manifest), OutResult.Biomes);
 		OutResult.Report = Check(Grid, SurfaceLevels, OutResult.Levels, OutResult.Entrances);
 		return;
 	}
@@ -1155,7 +1146,7 @@ void HexPlanetUnderground::RegenerateNetwork(const FHexSphereGrid& Grid, TConstA
 	FRandomStream Random(GetSeed(Manifest) ^ 0x2545F491);
 	InitCost(Maze, Grid, Manifest.Underground, Random);
 	CarveNetworks(Maze, Exits, Mask, Random);
-	FinishResult(Maze, Grid, SurfaceLevels, StartTime, OutResult);
+	FinishResult(Maze, Grid, SurfaceLevels, GetSeed(Manifest), StartTime, OutResult);
 }
 
 TArray<int32> HexPlanetUnderground::FindPath(const FHexSphereGrid& Grid, int32 From, int32 To)
@@ -1341,7 +1332,7 @@ void HexPlanetUnderground::Load(const FString& PlanetFolder, const FHexSphereGri
 	else
 	{
 		bool bHaveBiomes = false;
-		if (bBiomesFile && !Out.bGeneratedLevels)
+		if (bBiomesFile && !Out.bGeneratedLevels && !Options.bNewBiomes)
 		{
 			bHaveBiomes = HexPlanetFile::LoadBiomes(DataFolder, CellCount, BiomeLetters, Out.Biomes, Error);
 			if (!bHaveBiomes)
@@ -1351,10 +1342,8 @@ void HexPlanetUnderground::Load(const FString& PlanetFolder, const FHexSphereGri
 		}
 		if (!bHaveBiomes)
 		{
-			if (CellLetters.IsEmpty())
-			{
-				GenerateBiomes(Out.Levels, CellLetters);
-			}
+			// a maze just generated came with the same letters, which are made again here with the report for the log
+			GenerateBiomes(Grid, Out.Levels, Out.Entrances, Manifest.Underground, GetSeed(Manifest), CellLetters, &Out.BiomeReport);
 			TSet<TCHAR> Missing;
 			Out.Biomes.SetNumUninitialized(CellCount);
 			for (int32 Cell = 0; Cell < CellCount; ++Cell)
@@ -1400,7 +1389,7 @@ void HexPlanetUnderground::Load(const FString& PlanetFolder, const FHexSphereGri
 		{
 			Wrote(HexPlanetFile::SaveLevels(DataFolder, Out.Levels, Error, Letters), HexPlanetFile::GetFilePath(DataFolder, HexPlanetFile::LevelsFile));
 		}
-		if (Out.bGeneratedBiomes && (!bBiomesFile || bWriteLevels))
+		if (Out.bGeneratedBiomes && (!bBiomesFile || bWriteLevels || Options.bNewBiomes))
 		{
 			Wrote(HexPlanetFile::SaveBiomes(DataFolder, Out.Biomes, BiomeLetters, Error), HexPlanetFile::GetFilePath(DataFolder, HexPlanetFile::BiomesFile));
 		}
@@ -1410,6 +1399,10 @@ void HexPlanetUnderground::Load(const FString& PlanetFolder, const FHexSphereGri
 		Out.bGeneratedLevels ? TEXT("generated") : TEXT("read"),
 		Out.bGeneratedLevels ? *FString::Printf(TEXT(" in %.0f ms"), Out.GenerateSeconds * 1000.0) : TEXT(""),
 		Out.Entrances.Num(), Out.bPlacedEntrances ? TEXT(" placed") : TEXT(""), *Out.Report.ToString());
+	if (Out.bGeneratedBiomes)
+	{
+		UE_LOG(LogHexHero, Log, TEXT("Underground of %s: biomes generated, %s"), *Name, *Out.BiomeReport.ToString());
+	}
 	for (const FString& Path : Out.Written)
 	{
 		UE_LOG(LogHexHero, Log, TEXT("Underground: wrote %s"), *Path);
@@ -1417,5 +1410,419 @@ void HexPlanetUnderground::Load(const FString& PlanetFolder, const FHexSphereGri
 	if (!Out.Report.IsGood())
 	{
 		UE_LOG(LogHexHero, Warning, TEXT("Underground of %s has problems: %s"), *Name, *Out.Report.ToString());
+	}
+}
+
+namespace
+{
+	/** A noise of patches on the unit sphere, two octaves, as the surface takes for its covers */
+	double GetPatchNoise(const FVector3d& Point, double Scale, const FVector3d& Offset)
+	{
+		return FMath::PerlinNoise3D(Point * Scale + Offset) + 0.5 * FMath::PerlinNoise3D(Point * Scale * 2.1 + Offset * 1.7 + FVector3d(31.0));
+	}
+
+	/** Returns the middle cell of the largest piece of cells marked in a mask, joined over neighbors, the cell nearest their mean direction */
+	int32 FindLargestPatchCenter(const TArray<FHexSphereCell>& Cells, const TArray<uint8>& Marked)
+	{
+		TArray<uint8> Seen;
+		Seen.Init(0, Cells.Num());
+		int32 BestCount = 0;
+		int32 BestCenter = INDEX_NONE;
+		TArray<int32> Piece;
+		for (int32 Start = 0; Start < Cells.Num(); ++Start)
+		{
+			if (!Marked[Start] || Seen[Start])
+			{
+				continue;
+			}
+			Piece.Reset();
+			Piece.Add(Start);
+			Seen[Start] = 1;
+			FVector3d Sum = FVector3d::ZeroVector;
+			for (int32 Index = 0; Index < Piece.Num(); ++Index)
+			{
+				Sum += Cells[Piece[Index]].Center;
+				for (const int32 Neighbor : Cells[Piece[Index]].Neighbors)
+				{
+					if (Marked[Neighbor] && !Seen[Neighbor])
+					{
+						Seen[Neighbor] = 1;
+						Piece.Add(Neighbor);
+					}
+				}
+			}
+			if (Piece.Num() <= BestCount)
+			{
+				continue;
+			}
+			BestCount = Piece.Num();
+			const FVector3d Mean = Sum.GetSafeNormal();
+			double Nearest = -2.0;
+			for (const int32 Cell : Piece)
+			{
+				const double Dot = FVector3d::DotProduct(Cells[Cell].Center, Mean);
+				if (Dot > Nearest)
+				{
+					Nearest = Dot;
+					BestCenter = Cell;
+				}
+			}
+		}
+		return BestCenter;
+	}
+}
+
+void HexPlanetUnderground::GenerateObjects(const FHexSphereGrid& Grid, TConstArrayView<int8> Levels, TConstArrayView<TCHAR> CellBiomeLetters,
+	TConstArrayView<FHexEntrance> Entrances, int32 Seed, TConstArrayView<FObjectKind> Kinds, TArray<FHexCellObjects>& OutObjects, FObjectReport* OutReport)
+{
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+	const int32 NumCells = Cells.Num();
+	OutObjects.Init(FHexCellObjects(), NumCells);
+	if (OutReport)
+	{
+		OutReport->Cells.Init(0, Kinds.Num());
+		OutReport->PatchCenters.Init(INDEX_NONE, Kinds.Num());
+	}
+	if (NumCells == 0 || Levels.Num() != NumCells)
+	{
+		return;
+	}
+
+	// rings from the exits, as far as any kind keeps clear of them, by a search over neighbors whatever the level
+	int32 MaxRings = 0;
+	for (const FObjectKind& Kind : Kinds)
+	{
+		MaxRings = FMath::Max(MaxRings, Kind.ClearRings);
+	}
+	TArray<int32> ExitCells;
+	for (const FHexEntrance& Entrance : Entrances)
+	{
+		ExitCells.Add(Entrance.Cell);
+	}
+	const TArray<int32> ExitRings = GetRingDistances(Grid, ExitCells, MaxRings);
+
+	// the cells of the sphere spread about this far apart on the unit sphere; the noise rises and falls about once over its lattice step, so a
+	// step of twice PatchCells cells gives lobes about PatchCells cells across
+	const double Spacing = FMath::Sqrt(4.0 * UE_DOUBLE_PI / NumCells);
+	TArray<int32> Candidates;
+	TArray<double> Keys;
+	Keys.SetNumZeroed(NumCells);
+	TArray<uint8> Marked;
+
+	for (int32 KindIndex = 0; KindIndex < Kinds.Num(); ++KindIndex)
+	{
+		const FObjectKind& Kind = Kinds[KindIndex];
+		if (Kind.bBlocks || Kind.SetIndex < 0 || Kind.SetIndex > 253)
+		{
+			continue;
+		}
+		const uint8 Stored = uint8(Kind.SetIndex + 1);
+		const uint32 NameHash = FCrc::StrCrc32(*(Kind.Group.IsNone() ? Kind.Id : Kind.Group.ToString()));
+		FRandomStream Random(int32(HashCombine(uint32(Seed), NameHash)));
+		const FVector3d Offset(Random.FRandRange(-100.0, 100.0), Random.FRandRange(-100.0, 100.0), Random.FRandRange(-100.0, 100.0));
+		const double Scale = Kind.PatchCells > 0.0f ? 0.5 / (Kind.PatchCells * Spacing) : 0.0;
+		const uint32 IdHash = FCrc::StrCrc32(*Kind.Id);
+		int32 Given = 0;
+		if (OutReport)
+		{
+			Marked.Init(0, NumCells);
+		}
+
+		for (int32 Variant = 0; Variant < Kind.Variants.Num(); ++Variant)
+		{
+			const float Share = Kind.Variants[Variant].Value;
+			if (Share <= 0.0f)
+			{
+				continue;
+			}
+
+			Candidates.Reset();
+			for (int32 Cell = 0; Cell < NumCells; ++Cell)
+			{
+				const FHexCellObjects& Objects = OutObjects[Cell];
+				if (Cells[Cell].IsPentagon() || ExitRings[Cell] <= Kind.ClearRings || (Kind.bDecor ? Objects.Decor != 0 : Objects.Cover != 0)
+					|| !Kind.Levels.Contains(Levels[Cell]))
+				{
+					continue;
+				}
+				const TCHAR Letter = CellBiomeLetters.IsValidIndex(Cell) ? CellBiomeLetters[Cell] : TEXT('\0');
+				if (FindHexObjectVariant(Kind.Variants.Num(), Letter, [&Kind](int32 Each) -> const FString& { return Kind.Variants[Each].Key; }) != Variant)
+				{
+					continue;
+				}
+				Candidates.Add(Cell);
+				Keys[Cell] = Scale > 0.0 ? GetPatchNoise(Cells[Cell].Center, Scale, Offset) : double(HashCombine(GetTypeHash(Cell), IdHash)) / 4294967296.0;
+			}
+
+			// highest first, ties by cell, so the order never depends on the sort
+			Candidates.Sort([&Keys](int32 A, int32 B) { return Keys[A] != Keys[B] ? Keys[A] > Keys[B] : A < B; });
+			const int32 Count = FMath::RoundToInt32(Share * Candidates.Num());
+			for (int32 Rank = 0; Rank < Count; ++Rank)
+			{
+				FHexCellObjects& Objects = OutObjects[Candidates[Rank]];
+				if (Kind.bDecor)
+				{
+					Objects.Decor = Stored;
+				}
+				else
+				{
+					// dense in the middle of a patch, sparse at its edge
+					Objects.Cover = Stored;
+					Objects.Density = Rank < Count * Kind.DenseShare ? 3 : Rank < Count * Kind.MediumShare ? 2 : 1;
+				}
+				if (OutReport)
+				{
+					Marked[Candidates[Rank]] = 1;
+				}
+			}
+			Given += Count;
+		}
+
+		if (OutReport)
+		{
+			OutReport->Cells[KindIndex] = Given;
+			OutReport->PatchCenters[KindIndex] = Given > 0 ? FindLargestPatchCenter(Cells, Marked) : INDEX_NONE;
+		}
+	}
+}
+
+TArray<int32> HexPlanetUnderground::GetRingDistances(const FHexSphereGrid& Grid, TConstArrayView<int32> Sources, int32 MaxRings)
+{
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+	TArray<int32> Rings;
+	Rings.Init(MAX_int32, Cells.Num());
+	TArray<int32> Frontier;
+	for (const int32 Source : Sources)
+	{
+		if (Cells.IsValidIndex(Source) && Rings[Source] != 0)
+		{
+			Rings[Source] = 0;
+			Frontier.Add(Source);
+		}
+	}
+	for (int32 Index = 0; Index < Frontier.Num(); ++Index)
+	{
+		const int32 Cell = Frontier[Index];
+		if (Rings[Cell] >= MaxRings)
+		{
+			continue;
+		}
+		for (const int32 Neighbor : Cells[Cell].Neighbors)
+		{
+			if (Rings[Neighbor] == MAX_int32)
+			{
+				Rings[Neighbor] = Rings[Cell] + 1;
+				Frontier.Add(Neighbor);
+			}
+		}
+	}
+	return Rings;
+}
+
+void HexPlanetUnderground::FindRimSides(const FHexSphereGrid& Grid, TConstArrayView<int8> Levels, int32 MinDrop, TFunctionRef<bool(int32)> IsSkipped,
+	TConstArrayView<int32> InCells, TArray<FIntPoint>& Out)
+{
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+	if (Levels.Num() != Cells.Num())
+	{
+		return;
+	}
+	for (const int32 Cell : InCells)
+	{
+		if (!Cells.IsValidIndex(Cell) || IsSkipped(Cell))
+		{
+			continue;
+		}
+		// the higher cell owns the side, so a side between a passage and a void is listed once, by the chunk of its passage
+		const FHexSphereCell& Each = Cells[Cell];
+		for (int32 Side = 0; Side < Each.Neighbors.Num(); ++Side)
+		{
+			const int32 Neighbor = Each.Neighbors[Side];
+			if (int32(Levels[Neighbor]) <= int32(Levels[Cell]) - MinDrop && !IsSkipped(Neighbor))
+			{
+				Out.Add(FIntPoint(Cell, Side));
+			}
+		}
+	}
+}
+
+bool HexPlanetUnderground::IsFootprintClear(FVector2f Point, float Radius, TConstArrayView<FVector2f> FlatCorners, uint8 ClipSides)
+{
+	const int32 NumCorners = FlatCorners.Num();
+	if (ClipSides == 0 || NumCorners < 3)
+	{
+		return true;
+	}
+
+	// the middle of the corners lies inside, by which the inside of every line is known whichever way the corners go round
+	FVector2f Middle = FVector2f::ZeroVector;
+	for (const FVector2f& Corner : FlatCorners)
+	{
+		Middle += Corner;
+	}
+	Middle /= float(NumCorners);
+
+	for (int32 Side = 0; Side < NumCorners; ++Side)
+	{
+		if ((ClipSides & (1u << Side)) == 0)
+		{
+			continue;
+		}
+		const FVector2f& From = FlatCorners[(Side + NumCorners - 1) % NumCorners];
+		const FVector2f& To = FlatCorners[Side];
+		const FVector2f Along = To - From;
+		const float Length = Along.Size();
+		if (Length < 1.0e-6f)
+		{
+			continue;
+		}
+		// the distance from the line of the side towards the inside, so a disc that crosses the line anywhere, also past a corner, is rejected
+		const float Inside = FMath::Sign(FVector2f::CrossProduct(Along, Middle - From));
+		const float Distance = FVector2f::CrossProduct(Along, Point - From) / Length * Inside;
+		if (Distance < Radius)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+namespace
+{
+	/** Returns how many pieces the cells marked in a mask make, joined over neighbors */
+	int32 CountPatches(const TArray<FHexSphereCell>& Cells, const TArray<uint8>& Marked)
+	{
+		TArray<uint8> Seen;
+		Seen.Init(0, Cells.Num());
+		int32 Count = 0;
+		TArray<int32> Front;
+		for (int32 Start = 0; Start < Cells.Num(); ++Start)
+		{
+			if (!Marked[Start] || Seen[Start])
+			{
+				continue;
+			}
+			++Count;
+			Front.Reset();
+			Front.Add(Start);
+			Seen[Start] = 1;
+			for (int32 Index = 0; Index < Front.Num(); ++Index)
+			{
+				for (const int32 Neighbor : Cells[Front[Index]].Neighbors)
+				{
+					if (Marked[Neighbor] && !Seen[Neighbor])
+					{
+						Seen[Neighbor] = 1;
+						Front.Add(Neighbor);
+					}
+				}
+			}
+		}
+		return Count;
+	}
+}
+
+FString HexPlanetUnderground::FBiomeReport::ToString() const
+{
+	return FString::Printf(TEXT("%d voids could hold lava or a lake: lava %d cells in %d patches (largest around %d), lakes %d cells in %d patches (largest around %d)"),
+		Candidates, LavaCells, LavaPatches, LavaCenter, LakeCells, LakePatches, LakeCenter);
+}
+
+void HexPlanetUnderground::GenerateBiomes(const FHexSphereGrid& Grid, TConstArrayView<int8> Levels, TConstArrayView<FHexEntrance> Entrances,
+	const FHexUndergroundGeneration& Generation, int32 Seed, TArray<TCHAR>& OutBiomes, FBiomeReport* OutReport)
+{
+	OutBiomes.SetNumUninitialized(Levels.Num());
+	for (int32 Cell = 0; Cell < Levels.Num(); ++Cell)
+	{
+		OutBiomes[Cell] = IsPassage(Levels[Cell]) ? Biome::Floor : Biome::Abyss;
+	}
+	if (OutReport)
+	{
+		*OutReport = FBiomeReport();
+	}
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+	if (Cells.Num() != Levels.Num() || Cells.IsEmpty())
+	{
+		return;
+	}
+
+	// the voids that can be seen, within PoolRings of a passage, and further than PoolExitRings from every exit
+	TArray<int32> Passages;
+	for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+	{
+		if (IsPassage(Levels[Cell]))
+		{
+			Passages.Add(Cell);
+		}
+	}
+	TArray<int32> ExitCells;
+	for (const FHexEntrance& Entrance : Entrances)
+	{
+		ExitCells.Add(Entrance.Cell);
+	}
+	const int32 PoolRings = FMath::Max(Generation.PoolRings, 1);
+	const int32 ExitRingsKept = FMath::Max(Generation.PoolExitRings, 0);
+	const TArray<int32> PassageRings = GetRingDistances(Grid, Passages, PoolRings);
+	const TArray<int32> ExitRings = GetRingDistances(Grid, ExitCells, ExitRingsKept);
+	TArray<int32> Candidates;
+	for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+	{
+		if (!IsPassage(Levels[Cell]) && PassageRings[Cell] <= PoolRings && ExitRings[Cell] > ExitRingsKept)
+		{
+			Candidates.Add(Cell);
+		}
+	}
+	if (OutReport)
+	{
+		OutReport->Candidates = Candidates.Num();
+	}
+	if (Candidates.IsEmpty())
+	{
+		return;
+	}
+
+	// a noise of patches about PoolCells across, as the objects of the underground take theirs, one per style with an offset of its own
+	const double Spacing = FMath::Sqrt(4.0 * UE_DOUBLE_PI / Cells.Num());
+	const double Scale = 0.5 / (FMath::Max(Generation.PoolCells, 0.5) * Spacing);
+	TArray<double> Keys;
+	Keys.SetNumZeroed(Cells.Num());
+	TArray<uint8> Marked;
+	const auto Place = [&](const TCHAR* Name, TCHAR Letter, double Share, int32& OutCells, int32& OutPatches, int32& OutCenter)
+	{
+		FRandomStream Random(int32(HashCombine(uint32(Seed), FCrc::StrCrc32(Name))));
+		const FVector3d Offset(Random.FRandRange(-100.0, 100.0), Random.FRandRange(-100.0, 100.0), Random.FRandRange(-100.0, 100.0));
+		TArray<int32> Free;
+		for (const int32 Cell : Candidates)
+		{
+			if (OutBiomes[Cell] == Biome::Abyss)
+			{
+				Free.Add(Cell);
+				Keys[Cell] = GetPatchNoise(Cells[Cell].Center, Scale, Offset);
+			}
+		}
+		// highest first, ties by cell, so the order never depends on the sort
+		Free.Sort([&Keys](int32 A, int32 B) { return Keys[A] != Keys[B] ? Keys[A] > Keys[B] : A < B; });
+		const int32 Count = FMath::Min(FMath::RoundToInt32(FMath::Clamp(Share, 0.0, 1.0) * Candidates.Num()), Free.Num());
+		Marked.Init(0, Cells.Num());
+		for (int32 Rank = 0; Rank < Count; ++Rank)
+		{
+			OutBiomes[Free[Rank]] = Letter;
+			Marked[Free[Rank]] = 1;
+		}
+		OutCells = Count;
+		if (Count > 0)
+		{
+			OutPatches = CountPatches(Cells, Marked);
+			OutCenter = FindLargestPatchCenter(Cells, Marked);
+		}
+	};
+
+	FBiomeReport Report;
+	Report.Candidates = Candidates.Num();
+	Place(TEXT("Lava"), Biome::Lava, Generation.LavaShare, Report.LavaCells, Report.LavaPatches, Report.LavaCenter);
+	Place(TEXT("Lake"), Biome::Lake, Generation.LakeShare, Report.LakeCells, Report.LakePatches, Report.LakeCenter);
+	if (OutReport)
+	{
+		*OutReport = Report;
 	}
 }

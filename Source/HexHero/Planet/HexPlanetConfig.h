@@ -6,6 +6,7 @@
 #include "Engine/DataAsset.h"
 #include "HexPlanetConfig.generated.h"
 
+class UMaterialInterface;
 class UStaticMesh;
 
 /** Where the corners and the sides of the cells lie between two levels (HexPlanetKit::FindCornerHeights, HexPlanetKit::BuildFrame) */
@@ -105,13 +106,19 @@ public:
 	UPROPERTY(EditAnywhere, Category="Features")
 	bool bRivers = true;
 
-	/** Generates forests and decor from the shares of the variants of the object sets when the layer has no objects.json */
+	/** Generates forests and decor from the shares of the variants of the object sets when the layer has no objects.json; underground the cave
+	 *  kinds in patches on the passages (HexPlanetUnderground::GenerateObjects) */
 	UPROPERTY(EditAnywhere, Category="Features")
 	bool bGenerateObjects = true;
 
 	/** The fog of the underground, a post process (M_HexUndergroundFog) in place of the haze, with the Fog values of the category Underground */
 	UPROPERTY(EditAnywhere, Category="Features")
 	bool bFog = false;
+
+	/** Faint motes drifting over the passages around the point the camera looks at, and spores rising from the kinds of objects with Spores
+	 *  (UHexPlanetMotes, M_HexPlanetMote), with the values of the categories Underground|Motes and Underground|Spores */
+	UPROPERTY(EditAnywhere, Category="Features")
+	bool bMotes = false;
 
 	/** Scale of the largest octave of the noise of levels, on the unit sphere, divided by ContinentSize of a planet; the shares of levels are in planet.json */
 	UPROPERTY(EditAnywhere, Category="Levels", meta=(ClampMin=0.01))
@@ -1134,16 +1141,39 @@ public:
 	float AbyssFadeEnd = 140.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0, ClampMax=1))
-	float AbyssDarkness = 0.05f;
+	float AbyssDarkness = 0.025f;
 
 	/** The mist the floor of a void draws as its light, teal grey, from AbyssMistStart below the passages to all of it at AbyssMistEnd: a noise
-	 *  of AbyssScale world units, AbyssDetail of a finer octave, sharpened by AbyssContrast, taken in AbyssSlices layers AbyssSliceDepth apart under
-	 *  the floor along the view, so it moves against the floor as the camera moves and reads as bottomless; it drifts AbyssSpeed units a second */
+	 *  of AbyssScale world units, AbyssDetail of a finer octave, taken in AbyssSlices layers AbyssSliceDepth apart under the floor along the view
+	 *  and laid front to back, so it moves against the floor as the camera moves and the deeper ones are darker and hidden by those above:
+	 *  each slice is as thick as its noise lies above AbyssMistThreshold, sharpened by AbyssContrast, times AbyssSliceOpacity, and keeps
+	 *  2 to the power of -depth / AbyssDepthHalf of its light, and what no slice covers shows AbyssBottomColor, nearly black; it drifts
+	 *  AbyssSpeed units a second */
 	UPROPERTY(EditAnywhere, Category="Underground|Abyss")
 	FLinearColor AbyssColor = FLinearColor(0.05f, 0.09f, 0.095f, 1.0f);
 
 	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0))
-	float AbyssBrightness = 1.0f;
+	float AbyssBrightness = 0.55f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0, ClampMax=1))
+	float AbyssSliceOpacity = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=1))
+	float AbyssDepthHalf = 160.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss")
+	FLinearColor AbyssBottomColor = FLinearColor(0.001f, 0.0015f, 0.002f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0, ClampMax=1))
+	float AbyssMistThreshold = 0.5f;
+
+	/** Far away, past CoarseDistance - CoarseBand, the coarse mesh draws a void next to passages as a shallow cone, so it is shaded as if it fell
+	 *  the whole LevelHeight + DeepDepth within AbyssCliffBand of the apothem from its sides towards passages, by AbyssFarCliff (0 off) */
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0.01, ClampMax=1))
+	float AbyssCliffBand = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0, ClampMax=1))
+	float AbyssFarCliff = 1.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0))
 	float AbyssMistStart = 60.0f;
@@ -1185,21 +1215,13 @@ public:
 	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0))
 	float AbyssDetailFadeEnd = 0.45f;
 
-	/** Each deeper slice drifts AbyssSliceDrift faster than the one above, so they slide against each other, and weighs 2 to the power of
-	 *  -AbyssSliceFalloff of it, so the upper ones lead */
+	/** Each deeper slice drifts AbyssSliceDrift faster than the one above, so they slide against each other */
 	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0))
 	float AbyssSliceDrift = 0.4f;
 
-	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0))
-	float AbyssSliceFalloff = 0.6f;
-
-	/** Share of its light the mist keeps where its noise is thinnest, growing with the square of the noise to all of it where it is thickest */
-	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0, ClampMax=1))
-	float AbyssMistFloor = 0.2f;
-
 	/** How much of the color of the floor of a void gives way to the mist where it lies, so the floor does not show through it */
 	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0, ClampMax=1))
-	float AbyssFloorHide = 0.9f;
+	float AbyssFloorHide = 1.0f;
 
 	/** The lip of a passage, a faint light along its sides towards a void, AbyssLipWidth of the radius of a cell wide and gone AbyssLipDepth down
 	 *  the cliff, so a passage reads as a ledge */
@@ -1219,7 +1241,7 @@ public:
 	/** The fog of the underground (M_HexUndergroundFog, bFog): the scene fades to FogColor with the length of the view past FogStart, by
 	 *  FogDensity a unit and at most FogMax, and the space past the globe is FogSpaceColor */
 	UPROPERTY(EditAnywhere, Category="Underground|Fog")
-	FLinearColor FogColor = FLinearColor(0.004f, 0.006f, 0.007f, 1.0f);
+	FLinearColor FogColor = FLinearColor(0.002f, 0.003f, 0.0035f, 1.0f);
 
 	UPROPERTY(EditAnywhere, Category="Underground|Fog", meta=(ClampMin=0))
 	float FogStart = 1500.0f;
@@ -1236,7 +1258,7 @@ public:
 	/** And the mist in the voids: below FogMistTop under the passages the air thickens over FogMistDepth to FogMistDensity a unit, at most FogMistMax,
 	 *  in FogMistColor, so a view into a chasm meets more mist the deeper it goes */
 	UPROPERTY(EditAnywhere, Category="Underground|Fog")
-	FLinearColor FogMistColor = FLinearColor(0.03f, 0.05f, 0.055f, 1.0f);
+	FLinearColor FogMistColor = FLinearColor(0.014f, 0.024f, 0.028f, 1.0f);
 
 	UPROPERTY(EditAnywhere, Category="Underground|Fog")
 	float FogMistTop = 50.0f;
@@ -1248,7 +1270,7 @@ public:
 	float FogMistDensity = 0.005f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Fog", meta=(ClampMin=0, ClampMax=1))
-	float FogMistMax = 0.75f;
+	float FogMistMax = 0.15f;
 
 	/** The colors of the networks of entrances A to H, of the chips of the editor and the markers of entrances and exits; the surface's are used
 	 *  for both layers */
@@ -1335,6 +1357,497 @@ public:
 
 	UPROPERTY(EditAnywhere, Category="Underground|Editor", meta=(ClampMin=0))
 	float LinksGlow = 0.2f;
+
+	/** The cave objects of M_HexPlanetCave (stalagmites, mushrooms, crystals, bones, rubble, rune stones): the color of their vertices, lighter or
+	 *  darker by CaveObjectTint by instance, broken by a value noise of the world position CaveObjectNoiseScale across, which multiplies it by
+	 *  CaveObjectNoiseMin to CaveObjectNoiseMin + CaveObjectNoiseSpan, CaveObjectNoise of the way; where a vertex glows (its alpha) its color
+	 *  darkens by CaveObjectGlowDarkening, so the glow of its set (UHexPlanetObjectSet::GlowColor) is not washed out */
+	UPROPERTY(EditAnywhere, Category="Underground|Objects", meta=(ClampMin=0, ClampMax=1))
+	float CaveObjectTint = 0.18f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Objects", meta=(ClampMin=0, ClampMax=1))
+	float CaveObjectNoise = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Objects", meta=(ClampMin=0.1))
+	float CaveObjectNoiseScale = 12.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Objects", meta=(ClampMin=0))
+	float CaveObjectNoiseMin = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Objects", meta=(ClampMin=0))
+	float CaveObjectNoiseSpan = 0.8f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Objects", meta=(ClampMin=0, ClampMax=1))
+	float CaveObjectGlowDarkening = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Objects", meta=(ClampMin=0, ClampMax=1))
+	float CaveObjectRoughness = 0.7f;
+
+	/** World units kept between a mesh and a side it must not cross (UHexPlanetObjectSet::bClipFootprint), besides its own radius */
+	UPROPERTY(EditAnywhere, Category="Underground|Objects", meta=(ClampMin=0))
+	float ObjectFootprintMargin = 2.0f;
+
+	/** The floor of the passages in M_HexUnderground, on their tops (within CaveFloorTopDepth below them): its layer (OchreScree, earth with
+	 *  pebbles) times CaveFloorTint and CaveFloorBrightness, warm, as the placeholder light of the underground is cool (tune both again once the
+	 *  light of the game is decided, UndergroundLighting of DA_HexPlanetCamera), and lighter or darker by CaveFloorPools in pools of tone of a noise
+	 *  CaveFloorPoolScale across */
+	UPROPERTY(EditAnywhere, Category="Underground|Floor")
+	FLinearColor CaveFloorTint = FLinearColor(1.25f, 1.0f, 0.78f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0))
+	float CaveFloorBrightness = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=1))
+	float CaveFloorPools = 0.25f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=1))
+	float CaveFloorPoolScale = 180.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0.01))
+	float CaveFloorTopDepth = 4.0f;
+
+	/** Paths of flagstones on the passages: the texture layer of this name in DA_HexTerrainLayers (AHexPlanet::SetBiomeLayers gives the material
+	 *  its index as CaveFlagLayer, -1 without it, which turns them off), from CaveFlagRimStart to CaveFlagRimEnd of the cell radius from a side
+	 *  towards a void, so in a corridor two cells wide they run down its middle, where a noise CaveFlagNoiseScale across lies above CaveFlagCover
+	 *  (CaveFlagSoftness), so they break into worn stretches; the heights of both decide where dirt fills the joints (CaveFlagHeightBlend,
+	 *  CaveFlagBlendDepth), and the stones take CaveFlagTint */
+	UPROPERTY(EditAnywhere, Category="Underground|Flagstones")
+	FName CaveFlagLayerName = TEXT("CaveFlagstones");
+
+	UPROPERTY(EditAnywhere, Category="Underground|Flagstones", meta=(ClampMin=0, ClampMax=1))
+	float CaveFlagRimStart = 0.45f;
+
+	/** At most 0.85: the distance to the sides towards a void of a cell sees only its own sides, and on the side shared by two passages a void
+	 *  side that does not touch it lies 0.866 or more from it while the other cell may have none (1), so the mask must be full from 0.866 on or it
+	 *  would jump at that side */
+	UPROPERTY(EditAnywhere, Category="Underground|Flagstones", meta=(ClampMin=0, ClampMax=0.85))
+	float CaveFlagRimEnd = 0.75f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Flagstones", meta=(ClampMin=0, ClampMax=1))
+	float CaveFlagCover = 0.55f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Flagstones", meta=(ClampMin=0.001))
+	float CaveFlagSoftness = 0.08f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Flagstones", meta=(ClampMin=1))
+	float CaveFlagNoiseScale = 260.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Flagstones", meta=(ClampMin=0))
+	float CaveFlagHeightBlend = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Flagstones", meta=(ClampMin=0.01))
+	float CaveFlagBlendDepth = 0.15f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Flagstones")
+	FLinearColor CaveFlagTint = FLinearColor(1.2f, 1.02f, 0.82f, 1.0f);
+
+	/** Power of the normal by which the planes of the world blend for the flagstones, much sharper than TriplanarSharpness, as two projections of
+	 *  a pattern of stones laid over each other show it twice */
+	UPROPERTY(EditAnywhere, Category="Underground|Flagstones", meta=(ClampMin=1))
+	float CaveFlagSharpness = 32.0f;
+
+	/** Weight of a plane of the world below which the flagstones leave it out altogether, so a faint second projection draws no ghost of them */
+	UPROPERTY(EditAnywhere, Category="Underground|Flagstones", meta=(ClampMin=0, ClampMax=0.3))
+	float CaveFlagPlaneCut = 0.04f;
+
+	/** Glowing moss: on the floor within CaveMossReach of the cell radius from a side towards a void, and down the top CaveMossWallDepth of the
+	 *  cliffs of a void, in patches where a noise CaveMossPatchScale across lies above CaveMossCover, speckled where a finer one
+	 *  CaveMossSpeckleScale across lies above CaveMossSpeckle; the speckles fade as a pixel grows from CaveMossDetailFadeStart to
+	 *  CaveMossDetailFadeEnd of their size to CaveMossFarGlow of the glow, so they never shimmer far away. The ground there takes
+	 *  CaveMossAlbedoShare of CaveMossAlbedo and glows by CaveMossColor times CaveMossGlow, an accent, not a light */
+	UPROPERTY(EditAnywhere, Category="Underground|Moss", meta=(ClampMin=0.01, ClampMax=1))
+	float CaveMossReach = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Moss", meta=(ClampMin=1))
+	float CaveMossWallDepth = 60.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Moss", meta=(ClampMin=1))
+	float CaveMossPatchScale = 90.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Moss", meta=(ClampMin=0, ClampMax=1))
+	float CaveMossCover = 0.55f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Moss", meta=(ClampMin=0.5))
+	float CaveMossSpeckleScale = 8.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Moss", meta=(ClampMin=0, ClampMax=1))
+	float CaveMossSpeckle = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Moss", meta=(ClampMin=0))
+	float CaveMossDetailFadeStart = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Moss", meta=(ClampMin=0))
+	float CaveMossDetailFadeEnd = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Moss", meta=(ClampMin=0, ClampMax=1))
+	float CaveMossFarGlow = 0.25f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Moss")
+	FLinearColor CaveMossAlbedo = FLinearColor(0.05f, 0.12f, 0.04f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Moss", meta=(ClampMin=0, ClampMax=1))
+	float CaveMossAlbedoShare = 0.7f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Moss")
+	FLinearColor CaveMossColor = FLinearColor(0.2f, 0.9f, 0.35f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Moss", meta=(ClampMin=0))
+	float CaveMossGlow = 0.06f;
+
+	/** How soft the edges of the patches and speckles are, as the share of the way from their threshold (CaveMossCover, CaveMossSpeckle) to 1 */
+	UPROPERTY(EditAnywhere, Category="Underground|Moss", meta=(ClampMin=0.01, ClampMax=1))
+	float CaveMossSoftness = 0.5f;
+
+	/** Share of CaveMossReach and of CaveMossWallDepth over which the moss fades out at their ends */
+	UPROPERTY(EditAnywhere, Category="Underground|Moss", meta=(ClampMin=0.01, ClampMax=1))
+	float CaveMossFade = 0.5f;
+
+	/** Pools of light under the kinds that glow (UHexPlanetObjectSet::GlowPool) and beside lava (LavaPool), from CellCanopy, which the underground
+	 *  fills with the glow of each cell (AHexPlanet::UpdateCanopy): the floor of such a cell is lit by its glow color times GlowPoolStrength,
+	 *  all of it within GlowPoolInner of the cell radius from its middle and GlowPoolEdge of it at its sides, the line moved by a noise
+	 *  (GlowPoolNoise, GlowPoolNoiseScale), and a cell beside it takes GlowPoolEdge of it, fading out GlowPoolSpill of the radius into it; the
+	 *  light fades out GlowPoolDepth down the cliffs. A glowing cell falls off only towards the sides of neighbors that do not glow, and its
+	 *  strength and color are GlowPoolBlend of the way to the mean of it and its glowing neighbors, so a patch is one pool and no hex shows; the
+	 *  pool lights the floor by its albedo and GlowPoolLight of it whatever the albedo, so a tan floor turns the color of the glow */
+	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=0))
+	float GlowPoolStrength = 0.8f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=0, ClampMax=1))
+	float GlowPoolEdge = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=0, ClampMax=1))
+	float GlowPoolInner = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=0))
+	float GlowPoolNoise = 0.12f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=1))
+	float GlowPoolNoiseScale = 70.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=0.01, ClampMax=1))
+	float GlowPoolSpill = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=1))
+	float GlowPoolDepth = 60.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=0, ClampMax=1))
+	float GlowPoolBlend = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=0))
+	float GlowPoolLight = 0.2f;
+
+	/** How strongly a lava void lights the passages beside it, its glow in CellCanopy, in LavaLightColor at its brightest channel 1 */
+	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=0, ClampMax=1))
+	float LavaPool = 1.0f;
+
+	/** Small still pools of water on the passages, drawn by the material: where a noise CavePuddleScale across lies above CavePuddleCover, further
+	 *  than CavePuddleRimGap of the cell radius from a side towards a void and off the flagstones; a rim CavePuddleRim of the noise wide around
+	 *  them is wet earth, darker by CavePuddleWetDarkening, and inside the water shows that earth at its shore and deepens to CavePuddleColor
+	 *  CavePuddleDepth of the noise in, with CavePuddleRoughness, CavePuddleSpecular, the up of the cell and a faint sheen CavePuddleSheen that does
+	 *  not depend on the view, so it reads as shallow dark water and not as a hole; its shore is at least CavePuddleEdge of the noise soft. No
+	 *  grid line and no pool of light lie on it, and none lies in a cell with objects or of an exit. They fade as the moss does */
+	UPROPERTY(EditAnywhere, Category="Underground|Puddles", meta=(ClampMin=1))
+	float CavePuddleScale = 70.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Puddles", meta=(ClampMin=0, ClampMax=1))
+	float CavePuddleCover = 0.9f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Puddles", meta=(ClampMin=0, ClampMax=1))
+	float CavePuddleRimGap = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Puddles", meta=(ClampMin=0.001))
+	float CavePuddleRim = 0.04f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Puddles", meta=(ClampMin=0, ClampMax=1))
+	float CavePuddleWetDarkening = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Puddles")
+	FLinearColor CavePuddleColor = FLinearColor(0.006f, 0.014f, 0.03f, 1.0f);
+
+	/** Rougher than Lumen traces reflections for (0.4), so a pool takes the cheap reflection of the sky and reads as dark water, not chrome */
+	UPROPERTY(EditAnywhere, Category="Underground|Puddles", meta=(ClampMin=0, ClampMax=1))
+	float CavePuddleRoughness = 0.45f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Puddles", meta=(ClampMin=0, ClampMax=1))
+	float CavePuddleSpecular = 0.15f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Puddles", meta=(ClampMin=0.001))
+	float CavePuddleDepth = 0.035f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Puddles", meta=(ClampMin=0))
+	float CavePuddleEdge = 0.01f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Puddles")
+	FLinearColor CavePuddleSheen = FLinearColor(0.004f, 0.009f, 0.018f, 1.0f);
+
+	/** Runes carved into the cliffs of the voids: a side of a void towards a passage whose hash is below CaveRuneShare holds a panel from
+	 *  CaveRuneTop to CaveRuneTop + CaveRuneSize below the passages, CaveRuneSize wide, with a hexagon and two or three strokes of one of eight
+	 *  runes CaveRuneStroke wide, darker by CaveRuneDarkening, with a lighter lip CaveRuneBevel on their upper edge and a faint pale glow
+	 *  CaveRuneColor times CaveRuneGlow; they fade out as a pixel grows from CaveRuneFadeStart to CaveRuneFadeEnd world units */
+	UPROPERTY(EditAnywhere, Category="Underground|Runes", meta=(ClampMin=0, ClampMax=1))
+	float CaveRuneShare = 0.04f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Runes", meta=(ClampMin=0))
+	float CaveRuneTop = 10.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Runes", meta=(ClampMin=1))
+	float CaveRuneSize = 48.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Runes", meta=(ClampMin=0.1))
+	float CaveRuneStroke = 4.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Runes", meta=(ClampMin=0, ClampMax=1))
+	float CaveRuneDarkening = 0.45f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Runes", meta=(ClampMin=0))
+	float CaveRuneBevel = 0.25f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Runes")
+	FLinearColor CaveRuneColor = FLinearColor(0.8f, 0.85f, 0.9f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Runes", meta=(ClampMin=0))
+	float CaveRuneGlow = 0.05f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Runes", meta=(ClampMin=0))
+	float CaveRuneFadeStart = 2.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Runes", meta=(ClampMin=0))
+	float CaveRuneFadeEnd = 4.0f;
+
+	/** A void of the lava style (EHexVoidStyle): its floor is LavaCrustColor, glowing in LavaColor times LavaBrightness in the cracks of the crust,
+	 *  the low parts of a noise LavaCrustScale across below LavaCrustShare that flows LavaFlowSpeed units a second, with a finer octave of
+	 *  LavaCrustDetail, LavaCrustDetailScale times finer and drifting LavaCrustDetailDrift against it, fading out over the last LavaCrackEdge of a
+	 *  crack towards the crust, brighter by LavaCoreBrightness and turning to LavaCoreColor towards its middle (the lowest LavaCoreShare of it), so
+	 *  it runs from red at the crust to yellow far from it, breathing by LavaPulse at LavaPulseSpeed; as a pixel grows from
+	 *  LavaDetailFadeStart to LavaDetailFadeEnd of LavaCrustScale the cracks fade to LavaFarGlow of their light, so far away it glows as a pool and
+	 *  does not speckle. Its cliffs glow up to LavaCliffReach above its floor in LavaLightColor, by their rock times LavaCliffLight and by
+	 *  LavaCliffGlow whatever the rock, keeping LavaCliffDaylight of the light of the sky and the sun there and taking LavaCliffTint of that color
+	 *  into their rock, so they read lit by the lava and not pink, and the passages beside it take a pool of that color (LavaPool). Where it meets
+	 *  a void of another style
+	 *  both fade to plain floor over VoidStyleEdge of the cell radius from a little inside the side, the line moved by up to twice
+	 *  VoidStyleEdgeNoise of a noise VoidStyleEdgeNoiseScale across, so neither ends on the straight side; VoidStyleEdge plus twice
+	 *  VoidStyleEdgeNoise stays within the apothem (0.866) */
+	UPROPERTY(EditAnywhere, Category="Underground|Lava")
+	FLinearColor LavaColor = FLinearColor(1.0f, 0.12f, 0.015f, 1.0f);
+
+	/** Low enough that the red of the cracks does not clip, so their cores show brighter and yellower */
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=0))
+	float LavaBrightness = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava")
+	FLinearColor LavaCoreColor = FLinearColor(1.0f, 0.5f, 0.12f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=0.01, ClampMax=1))
+	float LavaCrackEdge = 0.25f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=0, ClampMax=1))
+	float LavaCliffDaylight = 0.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=0, ClampMax=1))
+	float LavaCliffTint = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava")
+	FLinearColor LavaLightColor = FLinearColor(1.0f, 0.36f, 0.08f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=0, ClampMax=1))
+	float LavaCrustDetail = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=1))
+	float LavaCrustDetailScale = 2.3f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=0))
+	float LavaCrustDetailDrift = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=0))
+	float LavaDetailFadeStart = 0.12f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=0))
+	float LavaDetailFadeEnd = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=0, ClampMax=2))
+	float LavaFarGlow = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=0.01, ClampMax=1))
+	float LavaCoreShare = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=0))
+	float LavaCoreBrightness = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava")
+	FLinearColor LavaCrustColor = FLinearColor(0.02f, 0.015f, 0.012f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=1))
+	float LavaCrustScale = 32.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=0.01, ClampMax=1))
+	float LavaCrustShare = 0.55f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=0))
+	float LavaFlowSpeed = 1.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=0, ClampMax=1))
+	float LavaPulse = 0.15f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=0))
+	float LavaPulseSpeed = 0.8f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=0))
+	float LavaCliffLight = 0.8f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=0))
+	float LavaCliffGlow = 0.04f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=1))
+	float LavaCliffReach = 140.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=0.01, ClampMax=0.85))
+	float VoidStyleEdge = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=0, ClampMax=0.4))
+	float VoidStyleEdgeNoise = 0.2f;
+
+	/** Size of the noise that moves the line where two styles of voids meet, so a pool of lava or a lake does not follow the sides of its cells */
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=1))
+	float VoidStyleEdgeNoiseScale = 55.0f;
+
+	/** Height above the floor of a void up to which its lava or lake lies, fading out over it, so the cliffs above show their rock, lit by the lava */
+	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=1))
+	float VoidFloorHeight = 30.0f;
+
+	/** A void of the lake style: its floor is LakeColor, deep and dark, lighter towards LakeShoreColor within LakeShoreReach of the cell radius of
+	 *  its shore (the sides towards a passage or a void of another style), LakeRoughness, with a sheen LakeSheenColor, LakeSheenBase of it from any
+	 *  view and the rest as the view grazes it (to the power LakeSheenPower), moved by a slow ripple (LakeRipple, LakeRippleScale, LakeRippleSpeed);
+	 *  it keeps LakeMistKeep of the mist. Dark, so a lake sits a little above the void around it and reads as deep water */
+	UPROPERTY(EditAnywhere, Category="Underground|Lake")
+	FLinearColor LakeColor = FLinearColor(0.0015f, 0.0035f, 0.008f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lake")
+	FLinearColor LakeShoreColor = FLinearColor(0.003f, 0.007f, 0.014f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lake", meta=(ClampMin=0.01, ClampMax=1))
+	float LakeShoreReach = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lake")
+	FLinearColor LakeSheenColor = FLinearColor(0.002f, 0.005f, 0.011f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lake", meta=(ClampMin=0, ClampMax=1))
+	float LakeSheenBase = 0.4f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lake", meta=(ClampMin=0.1))
+	float LakeSheenPower = 1.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lake", meta=(ClampMin=0))
+	float LakeRipple = 0.15f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lake", meta=(ClampMin=1))
+	float LakeRippleScale = 40.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lake", meta=(ClampMin=0))
+	float LakeRippleSpeed = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lake", meta=(ClampMin=0, ClampMax=1))
+	float LakeRoughness = 0.45f;
+
+	/** Specular of the water of a lake, as the floor of the other voids reflects nothing (0.5 is that of the engine for the rest) */
+	UPROPERTY(EditAnywhere, Category="Underground|Lake", meta=(ClampMin=0, ClampMax=1))
+	float LakeSpecular = 0.15f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Lake", meta=(ClampMin=0, ClampMax=1))
+	float LakeMistKeep = 0.05f;
+
+	/** Motes (bMotes, UHexPlanetMotes): MoteCount quads of MoteMesh with MoteMaterial (M_HexPlanetMote) in a box MoteBox wide around the point the
+	 *  camera looks at, from MoteHeightBelow below the tops of the passages to MoteHeightAbove above them, fixed in the world as the box follows
+	 *  the camera and drifting MoteDrift units a second, wobbling MoteWobble at MoteWobbleSpeed; each is MoteSize wide and never under
+	 *  MoteMinPixels, MoteColor times MoteBrightness, twinkling by MoteTwinkle, faded within MoteEdgeFade of the box, deeper in a chasm by
+	 *  AbyssDepthHalf, within MoteNearFade of the camera, and gone as the camera is from MoteFadeStart to MoteFadeEnd from the point it looks at */
+	UPROPERTY(EditAnywhere, Category="Underground|Motes", meta=(ClampMin=0, ClampMax=4000))
+	int32 MoteCount = 400;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Motes", meta=(ClampMin=100))
+	float MoteBox = 2400.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Motes", meta=(ClampMin=0))
+	float MoteHeightBelow = 150.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Motes", meta=(ClampMin=0))
+	float MoteHeightAbove = 90.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Motes", meta=(ClampMin=0.1))
+	float MoteSize = 2.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Motes", meta=(ClampMin=0))
+	float MoteMinPixels = 1.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Motes")
+	FLinearColor MoteColor = FLinearColor(0.5f, 0.7f, 0.65f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Motes", meta=(ClampMin=0))
+	float MoteBrightness = 0.4f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Motes")
+	FVector MoteDrift = FVector(6.0, -3.0, 2.0);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Motes", meta=(ClampMin=0))
+	float MoteWobble = 8.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Motes", meta=(ClampMin=0))
+	float MoteWobbleSpeed = 0.4f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Motes", meta=(ClampMin=0, ClampMax=1))
+	float MoteTwinkle = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Motes", meta=(ClampMin=0.01, ClampMax=0.5))
+	float MoteEdgeFade = 0.15f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Motes", meta=(ClampMin=0))
+	float MoteNearFade = 250.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Motes", meta=(ClampMin=0))
+	float MoteFadeStart = 2500.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Motes", meta=(ClampMin=0))
+	float MoteFadeEnd = 4000.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Motes")
+	TSoftObjectPtr<UStaticMesh> MoteMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Engine/BasicShapes/Plane.Plane")));
+
+	UPROPERTY(EditAnywhere, Category="Underground|Motes")
+	TSoftObjectPtr<UMaterialInterface> MoteMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/HexPlanet/M_HexPlanetMote.M_HexPlanetMote")));
+
+	/** Spores of the kinds of objects with Spores (UHexPlanetObjectSet::Spores), at most SporeMax around the point the camera looks at, of the cells
+	 *  within SporeRadius, nearest first, spread SporeSpread of the radius of a cell around its middle: each rises SporeRise over SporeLife
+	 *  seconds in a loop, swirling SporeSwirl around the up of its cell, SporeSize wide and never under SporeMinPixels, in the glow color of its
+	 *  kind times SporeBrightness; at 1.5 pixels, as the motes, their soft disc lit less than a tenth of a pixel and none showed */
+	UPROPERTY(EditAnywhere, Category="Underground|Spores", meta=(ClampMin=0, ClampMax=4000))
+	int32 SporeMax = 240;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Spores", meta=(ClampMin=0))
+	float SporeRadius = 2500.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Spores", meta=(ClampMin=0.1))
+	float SporeSize = 4.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Spores", meta=(ClampMin=0))
+	float SporeMinPixels = 3.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Spores", meta=(ClampMin=0))
+	float SporeBrightness = 3.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Spores", meta=(ClampMin=0))
+	float SporeRise = 35.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Spores", meta=(ClampMin=0.1))
+	float SporeLife = 6.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Spores", meta=(ClampMin=0))
+	float SporeSwirl = 6.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Spores", meta=(ClampMin=0, ClampMax=1))
+	float SporeSpread = 0.6f;
+
+	/** The bound M_HexPlanetMote must give the offsets of its vertices (max_world_position_offset_displacement, which create_planet_assets.py
+	 *  sets from DA_HexUnderground), as a mote may move from where its instance stands anywhere in its box */
+	float GetMoteWpoBound() const { return 1.75f * MoteBox + MoteHeightBelow + MoteHeightAbove + SporeRise + SporeSwirl; }
 
 	/** Returns the color of a network, white for none */
 	FLinearColor GetNetworkColor(int32 Network) const

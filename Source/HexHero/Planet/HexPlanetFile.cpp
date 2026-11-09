@@ -122,6 +122,286 @@ bool HexPlanetFile::SaveManifest(const FString& Folder, const FHexPlanetManifest
 	return true;
 }
 
+namespace
+{
+	/** A member of a JSON object in its text: its key, where its key starts, where the text after its colon starts, and where its value starts
+	 *  and ends */
+	struct FJsonTextMember
+	{
+		FString Key;
+		int32 KeyStart = 0;
+		int32 AfterColon = 0;
+		int32 ValueStart = 0;
+		int32 ValueEnd = 0;
+	};
+
+	/** Returns the index after the JSON string whose opening quote is at Index, or INDEX_NONE */
+	int32 SkipJsonString(const FString& Text, int32 Index)
+	{
+		for (int32 At = Index + 1; At < Text.Len(); ++At)
+		{
+			if (Text[At] == TEXT('\\'))
+			{
+				++At;
+			}
+			else if (Text[At] == TEXT('"'))
+			{
+				return At + 1;
+			}
+		}
+		return INDEX_NONE;
+	}
+
+	/** Returns the index after the JSON value that starts at Index, or INDEX_NONE */
+	int32 SkipJsonValue(const FString& Text, int32 Index)
+	{
+		if (Index >= Text.Len())
+		{
+			return INDEX_NONE;
+		}
+		if (Text[Index] == TEXT('"'))
+		{
+			return SkipJsonString(Text, Index);
+		}
+		if (Text[Index] == TEXT('{') || Text[Index] == TEXT('['))
+		{
+			int32 Depth = 0;
+			for (int32 At = Index; At < Text.Len(); ++At)
+			{
+				const TCHAR Char = Text[At];
+				if (Char == TEXT('"'))
+				{
+					At = SkipJsonString(Text, At);
+					if (At == INDEX_NONE)
+					{
+						return INDEX_NONE;
+					}
+					--At;
+				}
+				else if (Char == TEXT('{') || Char == TEXT('['))
+				{
+					++Depth;
+				}
+				else if ((Char == TEXT('}') || Char == TEXT(']')) && --Depth == 0)
+				{
+					return At + 1;
+				}
+			}
+			return INDEX_NONE;
+		}
+		int32 At = Index;
+		while (At < Text.Len() && !FChar::IsWhitespace(Text[At]) && Text[At] != TEXT(',') && Text[At] != TEXT('}') && Text[At] != TEXT(']'))
+		{
+			++At;
+		}
+		return At > Index ? At : INDEX_NONE;
+	}
+
+	/** Reads the members of the JSON object whose opening brace is at Open, and where its closing brace lies. Returns false if it cannot */
+	bool ReadJsonMembers(const FString& Text, int32 Open, TArray<FJsonTextMember>& OutMembers, int32& OutClose)
+	{
+		int32 At = Open + 1;
+		const auto SkipSpace = [&Text, &At]()
+		{
+			while (At < Text.Len() && FChar::IsWhitespace(Text[At]))
+			{
+				++At;
+			}
+		};
+		SkipSpace();
+		if (At < Text.Len() && Text[At] == TEXT('}'))
+		{
+			OutClose = At;
+			return true;
+		}
+		while (At < Text.Len() && Text[At] == TEXT('"'))
+		{
+			FJsonTextMember& Member = OutMembers.AddDefaulted_GetRef();
+			Member.KeyStart = At;
+			const int32 KeyEnd = SkipJsonString(Text, At);
+			if (KeyEnd == INDEX_NONE)
+			{
+				return false;
+			}
+			Member.Key = Text.Mid(At + 1, KeyEnd - At - 2);
+			At = KeyEnd;
+			SkipSpace();
+			if (At >= Text.Len() || Text[At] != TEXT(':'))
+			{
+				return false;
+			}
+			Member.AfterColon = ++At;
+			SkipSpace();
+			Member.ValueStart = At;
+			Member.ValueEnd = SkipJsonValue(Text, At);
+			if (Member.ValueEnd == INDEX_NONE)
+			{
+				return false;
+			}
+			At = Member.ValueEnd;
+			SkipSpace();
+			if (At < Text.Len() && Text[At] == TEXT('}'))
+			{
+				OutClose = At;
+				return true;
+			}
+			if (At >= Text.Len() || Text[At] != TEXT(','))
+			{
+				return false;
+			}
+			++At;
+			SkipSpace();
+		}
+		return false;
+	}
+
+	/** Returns the whitespace from the start of the line of Index up to it */
+	FString GetLineIndent(const FString& Text, int32 Index)
+	{
+		int32 Start = Index;
+		while (Start > 0 && Text[Start - 1] != TEXT('\n'))
+		{
+			--Start;
+		}
+		const FString Indent = Text.Mid(Start, Index - Start);
+		for (const TCHAR Char : Indent)
+		{
+			if (!FChar::IsWhitespace(Char))
+			{
+				return FString();
+			}
+		}
+		return Indent;
+	}
+
+	/** Returns the member of a key, which FJsonObjectConverter reads whatever its case */
+	const FJsonTextMember* FindJsonMember(const TArray<FJsonTextMember>& Members, const TCHAR* Key)
+	{
+		return Members.FindByPredicate([Key](const FJsonTextMember& Each) { return Each.Key.Equals(Key, ESearchCase::IgnoreCase); });
+	}
+}
+
+bool HexPlanetFile::SetSeedOffsetText(const FString& Json, int32 SeedOffset, FString& OutJson)
+{
+	int32 Open = 0;
+	while (Open < Json.Len() && Json[Open] != TEXT('{'))
+	{
+		if (!FChar::IsWhitespace(Json[Open]) && Json[Open] != TEXT('\xFEFF'))
+		{
+			return false;
+		}
+		++Open;
+	}
+	TArray<FJsonTextMember> Members;
+	int32 Close = 0;
+	if (Open >= Json.Len() || !ReadJsonMembers(Json, Open, Members, Close) || Members.IsEmpty())
+	{
+		return false;
+	}
+
+	const FString NewLine = Json.Contains(TEXT("\r\n")) ? TEXT("\r\n") : TEXT("\n");
+	const FString Unit = GetLineIndent(Json, Members[0].KeyStart);
+	const FString Number = FString::FromInt(SeedOffset);
+	// the separators after the colons of the file, before a number and before an object
+	const FJsonTextMember* Scalar = Members.FindByPredicate([&Json](const FJsonTextMember& Each) { return Json[Each.ValueStart] != TEXT('{') && Json[Each.ValueStart] != TEXT('['); });
+	const FJsonTextMember* Object = Members.FindByPredicate([&Json](const FJsonTextMember& Each) { return Json[Each.ValueStart] == TEXT('{'); });
+	const FString ScalarSeparator = Scalar ? Json.Mid(Scalar->AfterColon, Scalar->ValueStart - Scalar->AfterColon) : FString(TEXT(" "));
+	const FString ObjectSeparator = Object ? Json.Mid(Object->AfterColon, Object->ValueStart - Object->AfterColon) : ScalarSeparator;
+
+	const FJsonTextMember* Underground = FindJsonMember(Members, TEXT("underground"));
+	if (!Underground)
+	{
+		if (SeedOffset == 0)
+		{
+			OutJson = Json;
+			return true;
+		}
+		// the block after the last member, indented as the members of the file are
+		const FString Block = TEXT(",") + NewLine + Unit + TEXT("\"underground\":") + ObjectSeparator + TEXT("{") + NewLine + Unit + Unit
+			+ TEXT("\"seedOffset\":") + ScalarSeparator + Number + NewLine + Unit + TEXT("}");
+		OutJson = Json.Left(Members.Last().ValueEnd) + Block + Json.Mid(Members.Last().ValueEnd);
+		return true;
+	}
+	if (Json[Underground->ValueStart] != TEXT('{'))
+	{
+		return false;
+	}
+
+	TArray<FJsonTextMember> Inner;
+	int32 InnerClose = 0;
+	if (!ReadJsonMembers(Json, Underground->ValueStart, Inner, InnerClose))
+	{
+		return false;
+	}
+	if (const FJsonTextMember* Offset = FindJsonMember(Inner, TEXT("seedOffset")))
+	{
+		OutJson = Json.Left(Offset->ValueStart) + Number + Json.Mid(Offset->ValueEnd);
+		return true;
+	}
+	if (SeedOffset == 0)
+	{
+		OutJson = Json;
+		return true;
+	}
+	const FString OuterIndent = GetLineIndent(Json, Underground->KeyStart);
+	if (Inner.IsEmpty())
+	{
+		OutJson = Json.Left(Underground->ValueStart + 1) + NewLine + OuterIndent + Unit + TEXT("\"seedOffset\":") + ScalarSeparator + Number + NewLine
+			+ OuterIndent + Json.Mid(InnerClose);
+		return true;
+	}
+	const FString Member = TEXT(",") + NewLine + GetLineIndent(Json, Inner.Last().KeyStart) + TEXT("\"seedOffset\":") + ScalarSeparator + Number;
+	OutJson = Json.Left(Inner.Last().ValueEnd) + Member + Json.Mid(Inner.Last().ValueEnd);
+	return true;
+}
+
+bool HexPlanetFile::SaveSeedOffset(const FString& Folder, const FHexPlanetManifest& Manifest, FString& OutError)
+{
+	const FString FilePath = Folder.IsEmpty() ? FString() : GetFilePath(Folder, ManifestFile);
+	FString Old;
+	if (!FilePath.IsEmpty() && FFileHelper::LoadFileToString(Old, *FilePath))
+	{
+		// only when the file is the manifest but for the offset, and the edit changed the offset alone
+		FString New;
+		FString Error;
+		FHexPlanetManifest Before;
+		FHexPlanetManifest After;
+		if (SetSeedOffsetText(Old, Manifest.Underground.SeedOffset, New) && ParseManifest(Old, Before, Error) && ParseManifest(New, After, Error))
+		{
+			Before.Underground.SeedOffset = Manifest.Underground.SeedOffset;
+			FHexPlanetManifest Expected = Manifest;
+			Expected.Version = ManifestVersion;
+			if (Before.Name.IsEmpty())
+			{
+				Before.Name = Expected.Name;
+				After.Name = Expected.Name;
+			}
+			FString BeforeJson;
+			FString AfterJson;
+			FString ExpectedJson;
+			if (FJsonObjectConverter::UStructToJsonObjectString(Before, BeforeJson) && FJsonObjectConverter::UStructToJsonObjectString(After, AfterJson)
+				&& FJsonObjectConverter::UStructToJsonObjectString(Expected, ExpectedJson) && BeforeJson.Equals(AfterJson, ESearchCase::CaseSensitive)
+				&& BeforeJson.Equals(ExpectedJson, ESearchCase::CaseSensitive))
+			{
+				if (New.Equals(Old, ESearchCase::CaseSensitive))
+				{
+					UE_LOG(LogHexHero, Log, TEXT("The seed offset %d of the underground of %s is in %s already"), Manifest.Underground.SeedOffset, *Manifest.Name, *FilePath);
+					return true;
+				}
+				if (!FFileHelper::SaveStringToFile(New, *FilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+				{
+					OutError = FString::Printf(TEXT("could not write %s"), *FilePath);
+					return false;
+				}
+				UE_LOG(LogHexHero, Log, TEXT("Saved the seed offset %d of the underground of %s to %s"), Manifest.Underground.SeedOffset, *Manifest.Name, *FilePath);
+				return true;
+			}
+		}
+		UE_LOG(LogHexHero, Warning, TEXT("Could not change the seed offset alone in %s, so the whole manifest is written"), *FilePath);
+	}
+	return SaveManifest(Folder, Manifest, OutError);
+}
+
 bool HexPlanetFile::DeleteLevels(const FString& Folder)
 {
 	const FString FilePath = GetFilePath(Folder, LevelsFile);

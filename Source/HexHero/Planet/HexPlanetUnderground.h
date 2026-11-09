@@ -36,6 +36,10 @@ namespace HexPlanetUnderground
 		constexpr TCHAR Floor = TEXT('F');
 		/** The abyss, on the void */
 		constexpr TCHAR Abyss = TEXT('A');
+		/** A void of glowing lava, in rare patches near the passages */
+		constexpr TCHAR Lava = TEXT('L');
+		/** A void holding a dark still lake */
+		constexpr TCHAR Lake = TEXT('K');
 	}
 
 	/** What keeps an entrance from being used */
@@ -138,8 +142,31 @@ namespace HexPlanetUnderground
 	/** Returns the seed of the underground of a planet, from its seed and SeedOffset */
 	int32 GetSeed(const FHexPlanetManifest& Manifest);
 
-	/** Fills the UndergroundLetter of a biome for every cell: the floor of a cave on passages, the abyss on the void */
-	void GenerateBiomes(TConstArrayView<int8> Levels, TArray<TCHAR>& OutBiomes);
+	/** What GenerateBiomes placed besides the floor and the abyss, for the log */
+	struct FBiomeReport
+	{
+		/** The voids that could take lava or a lake */
+		int32 Candidates = 0;
+
+		/** Cells, patches joined over neighbors and the middle cell of the largest patch, of lava and of lakes */
+		int32 LavaCells = 0;
+		int32 LavaPatches = 0;
+		int32 LavaCenter = INDEX_NONE;
+		int32 LakeCells = 0;
+		int32 LakePatches = 0;
+		int32 LakeCenter = INDEX_NONE;
+
+		/** Returns a line for the log */
+		FString ToString() const;
+	};
+
+	/**
+	 *  Fills the UndergroundLetter of a biome for every cell: the floor of a cave on passages, the abyss on the void, and on the voids within
+	 *  PoolRings of a passage and further than PoolExitRings from every exit (the candidates) lava, the LavaShare of them highest by a noise of
+	 *  patches PoolCells across, then dark lakes, LakeShare of the candidates from those left, by another noise. Pure and deterministic
+	 */
+	void GenerateBiomes(const FHexSphereGrid& Grid, TConstArrayView<int8> Levels, TConstArrayView<FHexEntrance> Entrances, const FHexUndergroundGeneration& Generation,
+		int32 Seed, TArray<TCHAR>& OutBiomes, FBiomeReport* OutReport = nullptr);
 
 	/** An underground made by Generate */
 	struct FResult
@@ -185,6 +212,74 @@ namespace HexPlanetUnderground
 	 *  wider than 2 grows by, and of each of these cells with void on two opposite sides (IsNeck) the void cell with more passage around it */
 	TArray<int32> WidenPath(const FHexSphereGrid& Grid, TConstArrayView<int8> Levels, TConstArrayView<int32> Path, int32 Width);
 
+	/** A kind of object the generation of the underground places, one per cover and decor set (UHexPlanetObjects::MakeObjectKinds), read from the
+	 *  set so the generation reads no UObject */
+	struct FObjectKind
+	{
+		/** Index of the set among the sets of the layer, of which FHexCellObjects holds SetIndex + 1 */
+		int32 SetIndex = INDEX_NONE;
+
+		/** Id of the set, which seeds its noise or its hash */
+		FString Id;
+
+		bool bDecor = false;
+
+		/** It keeps heroes out; such a kind gets nothing, so the generation never cuts a passage */
+		bool bBlocks = false;
+
+		/** Levels it may stand on */
+		TArray<int8> Levels;
+
+		/** The letters of the biomes of each variant (FindHexObjectVariant) and the share of the candidate cells it takes */
+		TArray<TPair<FString, float>> Variants;
+
+		/** Size of its patches in cells, 0 for a hash of the cell */
+		float PatchCells = 0.0f;
+
+		/** Kinds of one group share one noise of patches */
+		FName Group;
+
+		/** Cells within this many rings of an exit get none of it */
+		int32 ClearRings = 0;
+
+		/** A cover is dense (3) in the first DenseShare of the cells it takes, ranked highest first, medium (2) up to MediumShare, sparse (1) after */
+		double DenseShare = 0.4;
+		double MediumShare = 0.75;
+	};
+
+	/** What GenerateObjects placed, by kind: how many cells it got, and the middle cell of its largest patch, INDEX_NONE for none */
+	struct FObjectReport
+	{
+		TArray<int32> Cells;
+		TArray<int32> PatchCenters;
+	};
+
+	/**
+	 *  Gives the passages of an underground their objects, by kind in the order given (SortOrder): a variant takes Share of its candidate cells,
+	 *  those of a level the kind allows and a biome that draws the variant, no exit nor within ClearRings of one, no pentagon, and no cover yet for
+	 *  a cover or no decor yet for a decor. They are ranked by a noise of patches PatchCells across, shared by the kinds of a Group and offset by
+	 *  the seed and the group, or by a hash, and the highest taken; a cover gets the density 3, 2 or 1 by rank (the first DenseShare, up to
+	 *  MediumShare, the rest). Pure and deterministic, so any thread may call it and a run of the game and hex.PlanetUnderground write the same file
+	 */
+	void GenerateObjects(const FHexSphereGrid& Grid, TConstArrayView<int8> Levels, TConstArrayView<TCHAR> CellBiomeLetters, TConstArrayView<FHexEntrance> Entrances,
+		int32 Seed, TConstArrayView<FObjectKind> Kinds, TArray<FHexCellObjects>& OutObjects, FObjectReport* OutReport = nullptr);
+
+	/** Returns true if a disc of a radius around a point of the flattened plane of a cell stays inside every side of ClipSides, a bit per side: side
+	 *  K runs from corner K - 1 to corner K of FlatCorners (UHexPlanetObjectSet::bClipFootprint) */
+	bool IsFootprintClear(FVector2f Point, float Radius, TConstArrayView<FVector2f> FlatCorners, uint8 ClipSides);
+
+	/** Returns how many rings over neighbors each cell lies from the nearest of Sources, whatever its level, up to MaxRings, and MAX_int32 past
+	 *  them or with no source */
+	TArray<int32> GetRingDistances(const FHexSphereGrid& Grid, TConstArrayView<int32> Sources, int32 MaxRings);
+
+	/**
+	 *  Lists the sides that take a rim (EHexObjectLayer::Rim of UHexPlanetObjectSet) among the sides of Cells, those of a chunk: (cell, side K) where
+	 *  neighbor K lies at least MinDrop levels lower, so the passage comes first and its void second, and neither is skipped, as an exit, which
+	 *  stays clear, or a cell near one. Each side between a passage and a void appears once over all chunks, with its passage
+	 */
+	void FindRimSides(const FHexSphereGrid& Grid, TConstArrayView<int8> Levels, int32 MinDrop, TFunctionRef<bool(int32)> IsSkipped, TConstArrayView<int32> Cells,
+		TArray<FIntPoint>& Out);
+
 	/** What Load does besides reading */
 	struct FLoadOptions
 	{
@@ -197,6 +292,10 @@ namespace HexPlanetUnderground
 
 		/** Places the entrances again too, ignoring entrances.json, and writes it */
 		bool bNewEntrances = false;
+
+		/** Generates the biomes again for the levels read, ignoring underground/biomes.txt, and writes it, leaving levels.txt and entrances.json
+		 *  as they are */
+		bool bNewBiomes = false;
 	};
 
 	/** The underground of a planet, read from its files or generated */
@@ -215,6 +314,9 @@ namespace HexPlanetUnderground
 		bool bGeneratedBiomes = false;
 		bool bPlacedEntrances = false;
 		TArray<FString> Written;
+
+		/** What the generation of the biomes placed, when it ran */
+		FBiomeReport BiomeReport;
 
 		FReport Report;
 

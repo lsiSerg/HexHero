@@ -7,6 +7,7 @@
 #include "SHexDebugOverlay.h"
 #include "HexKeyLegendConfig.generated.h"
 
+class APlayerController;
 class UHexInputConfig;
 class UInputAction;
 
@@ -53,4 +54,11 @@ public:
 
 	/** Returns the hint with the keys of the legend action, or nothing if that action has no keys */
 	FString GetHint(const UHexInputConfig& InputConfig) const;
+
+	/** Gathers the actions that a player controller and its pawn bound on their enhanced input components, so a legend shows only the keys
+	 *  that do something there. Returns false while the pawn has bound none yet, as it binds them once it is possessed */
+	static bool GetBoundActions(const APlayerController& Controller, TSet<const UInputAction*>& OutActions);
+
+	/** Logs each line of a legend, Verbose, so the legends of the levels can be compared */
+	static void LogSections(const TArray<FHexLegendSection>& Sections, const TCHAR* Owner);
 };

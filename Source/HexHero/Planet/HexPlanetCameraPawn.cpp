@@ -226,12 +226,19 @@ namespace
 				}
 			}
 			const bool bShown = Planet->IsPresented();
-			UE_LOG(LogHexHero, Log, TEXT("Layer check: the %s is %s, %s, %d of its %d primitives are in the scene%s%s"), GetPlanetLayerName(Layer),
+			const int32 Outlined = Planet->CountOutlinedCells();
+			UE_LOG(LogHexHero, Log, TEXT("Layer check: the %s is %s, %s, %d of its %d primitives are in the scene%s%s, %d cells outlined in CellMarks"), GetPlanetLayerName(Layer),
 				bShown ? TEXT("shown") : TEXT("hidden"), Planet->IsBuilt() ? TEXT("built") : Planet->IsDataLoaded() ? TEXT("with its data, its meshes not built") : TEXT("without its data yet"),
-				InScene, Primitives.Num(), Names.IsEmpty() ? TEXT("") : TEXT(": "), *FString::Join(Names, TEXT(", ")));
+				InScene, Primitives.Num(), Names.IsEmpty() ? TEXT("") : TEXT(": "), *FString::Join(Names, TEXT(", ")), Outlined);
 			if (!bShown && InScene > 0)
 			{
 				UE_LOG(LogHexHero, Error, TEXT("Layer check: the hidden %s has %d primitives in the scene"), GetPlanetLayerName(Layer), InScene);
+				++Problems;
+			}
+			// a hidden layer keeps no outline of the cursor, which it would show when it comes back
+			if (!bShown && Outlined > 0)
+			{
+				UE_LOG(LogHexHero, Error, TEXT("Layer check: the hidden %s keeps the outline of %d cells"), GetPlanetLayerName(Layer), Outlined);
 				++Problems;
 			}
 
@@ -604,7 +611,8 @@ void AHexPlanetCameraPawn::UpdateTravel(float DeltaTime)
 			ApplyLighting(TravelLayer);
 			SetPlacement(TravelPlacement);
 			TravelSwapMs = (FPlatformTime::Seconds() - SwapStart) * 1000.0;
-			TravelSwapPhaseTime = TravelPhaseTime;
+			TravelSwapRealTime = FPlatformTime::Seconds();
+			TravelFramesSinceSwap = 0;
 			bTravelSwapped = true;
 			if (!bReady)
 			{
@@ -613,9 +621,12 @@ void AHexPlanetCameraPawn::UpdateTravel(float DeltaTime)
 			break;
 		}
 
-		// the layer shown holds black at least TravelHoldMin, and until its pieces around the camera are there
-		const bool bReady = Target->ArePiecesReadyAt(CameraLocation) || TravelPhaseTime - TravelSwapPhaseTime >= Config->JumpWaitMax;
-		if (TravelPhaseTime < Config->TravelHoldMin || !bReady)
+		// the layer shown holds black at least TravelHoldMin of real time and TravelHoldFrames frames after the swap, whose own long frame
+		// counts for nothing, and until its pieces around the camera are there, at most JumpWaitMax
+		++TravelFramesSinceSwap;
+		const double SinceSwap = FPlatformTime::Seconds() - TravelSwapRealTime;
+		const bool bReady = Target->ArePiecesReadyAt(CameraLocation) || SinceSwap >= Config->JumpWaitMax;
+		if (SinceSwap < Config->TravelHoldMin || TravelFramesSinceSwap < Config->TravelHoldFrames || !bReady)
 		{
 			break;
 		}
@@ -629,8 +640,8 @@ void AHexPlanetCameraPawn::UpdateTravel(float DeltaTime)
 				PlayerController->PlayerCameraManager->StartCameraFade(1.0f, 0.0f, Config->TravelFadeInTime, FLinearColor::Black, false, false);
 			}
 		}
-		UE_LOG(LogHexHero, Log, TEXT("Travel: the %s is shown after %.0f ms, the old layer had faded and the new one had its pieces at %.0f ms, the swap took %.0f ms"),
-			GetPlanetLayerName(TravelLayer), (FPlatformTime::Seconds() - TravelStartTime) * 1000.0, TravelReadyMs, TravelSwapMs);
+		UE_LOG(LogHexHero, Log, TEXT("Travel: the %s is shown after %.0f ms, the old layer had faded and the new one had its pieces at %.0f ms, the swap took %.0f ms, held black %.0f ms and %d frames after it"),
+			GetPlanetLayerName(TravelLayer), (FPlatformTime::Seconds() - TravelStartTime) * 1000.0, TravelReadyMs, TravelSwapMs, SinceSwap * 1000.0, TravelFramesSinceSwap);
 		break;
 	}
 

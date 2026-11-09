@@ -6,6 +6,16 @@
 #include "Engine/DataAsset.h"
 #include "HexBiomeConfig.generated.h"
 
+/** What the floor of a void of the underground holds (M_HexUnderground, VOID_STYLE_CODE): the teal grey mist of the abyss, glowing lava under a
+ *  dark crust, or a dark still lake; a void stays impassable whatever its style */
+UENUM()
+enum class EHexVoidStyle : uint8
+{
+	Mist,
+	Lava,
+	Lake,
+};
+
 /**
  *  One biome: the surface of a hex, while its level gives the shape. A hex is a pair of a level and a biome.
  *  Every biome is its own asset, as binary assets cannot be merged. The game finds them in BiomesFolder of the project settings.
@@ -72,6 +82,11 @@ public:
 	/** If true, water of this biome is frozen */
 	UPROPERTY(EditAnywhere, Category="Surface")
 	bool bFrozen = false;
+
+	/** On a void of the underground, what its floor holds: the mist of the abyss, lava or a lake (AHexPlanet::WriteBiomePixels gives it to
+	 *  M_HexUnderground); a lava void also lights the passages beside it (AHexPlanet::UpdateCanopy, LavaPool of the config) */
+	UPROPERTY(EditAnywhere, Category="Underground")
+	EHexVoidStyle VoidStyle = EHexVoidStyle::Mist;
 
 	/** Multiplies the movement cost of the level */
 	UPROPERTY(EditAnywhere, Category="Movement", meta=(ClampMin=0))

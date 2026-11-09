@@ -1,9 +1,12 @@
 """Imports what build_biome_textures.py made and collects it into the two texture arrays that the hex materials sample.
 
 Run with UnrealEditor-Cmd.exe <uproject> -run=pythonscript -script=<this file> -unattended -nullrhi
+With the argument appended (-script="<this file> appended") it imports only the layers of APPENDED_LAYERS, adds to DA_HexTerrainLayers those it
+lacks, by name, past the photo-scanned ones, and builds the arrays, leaving the other layers and T_HexNoise as they are.
 """
 
 import os
+import sys
 
 import unreal
 
@@ -11,6 +14,8 @@ SOURCE_FOLDER = os.path.join(unreal.Paths.convert_relative_path_to_full(unreal.P
 FOLDER = '/Game/HexMap/Textures/Biomes'
 # the order is the layer number in the biome assets
 LAYERS = ['Grass', 'Sand', 'GrayRock', 'Snow', 'Swamp', 'RedRock', 'OchreRock', 'Basalt', 'Tundra', 'Steppe']
+# the layers past the photo-scanned ones, found by name (APPENDED_LAYERS of build_biome_textures.py), with the values a layer added for them takes
+APPENDED_LAYERS = [('CaveFlagstones', {'tile_size': 140.0, 'normal_strength': 1.0, 'height_contrast': 1.0})]
 
 
 CONFIG = '/Game/HexMap/Textures/DA_HexTerrainLayers'
@@ -86,7 +91,48 @@ def make_array(name, textures, srgb, compression):
     unreal.log('BIOMETEX %s sources=%d bytes=%s' % (name, len(check.get_editor_property('source_textures')), check.blueprint_get_texture_source_disk_and_memory_size()[1]))
 
 
+def import_appended():
+    """The appended layers alone: their textures are imported, a layer DA_HexTerrainLayers lacks is added at its end with its values, a layer that
+    is there takes the new textures only while it still holds the generated ones, so what an artist set stays, and the arrays are built"""
+    assets = unreal.EditorAssetLibrary
+    if not assets.does_asset_exist(CONFIG):
+        unreal.log_error('BIOMETEX %s is missing, run import_texture_sources.py first' % CONFIG)
+        return
+    names = [name for name, _ in APPENDED_LAYERS]
+    colors = import_layers('Color', names)
+    normals = import_layers('Normal', names)
+    config = unreal.load_asset(CONFIG)
+    layers = list(config.get_editor_property('layers'))
+    for (name, values), color, normal in zip(APPENDED_LAYERS, colors, normals):
+        found = [index for index, layer in enumerate(layers) if str(layer.get_editor_property('name')) == name]
+        if found:
+            layer = layers[found[0]]
+            current = layer.get_editor_property('color')
+            if current is not None and not current.get_path_name().startswith(FOLDER + '/'):
+                unreal.log('BIOMETEX %s keeps its textures' % name)
+                continue
+        else:
+            layer = unreal.HexTerrainLayer()
+            layer.set_editor_property('name', name)
+            for key, value in values.items():
+                layer.set_editor_property(key, value)
+            layers.append(layer)
+            found = [len(layers) - 1]
+        layer.set_editor_property('color', color)
+        layer.set_editor_property('normal', normal)
+        layers[found[0]] = layer
+        unreal.log('BIOMETEX appended layer %s is layer %d' % (name, found[0]))
+    config.set_editor_property('layers', layers)
+    config.build_texture_arrays()
+    assets.save_asset(CONFIG, only_if_is_dirty=False)
+    unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
+    unreal.log('BIOMETEX appended done')
+
+
 def main():
+    if 'appended' in sys.argv[1:]:
+        import_appended()
+        return
     names = generated_layers()
     colors = import_layers('Color', names)
     normals = import_layers('Normal', names)

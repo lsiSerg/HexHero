@@ -2,7 +2,47 @@
 
 
 #include "HexKeyLegendConfig.h"
+#include "EnhancedInputComponent.h"
+#include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerController.h"
+#include "HexHero.h"
 #include "HexInputConfig.h"
+
+bool UHexKeyLegendConfig::GetBoundActions(const APlayerController& Controller, TSet<const UInputAction*>& OutActions)
+{
+	OutActions.Reset();
+	const APawn* Pawn = Controller.GetPawn();
+	const UEnhancedInputComponent* PawnInput = Pawn ? Cast<UEnhancedInputComponent>(Pawn->InputComponent) : nullptr;
+	if (!PawnInput || PawnInput->GetActionEventBindings().IsEmpty())
+	{
+		return false;
+	}
+
+	const UEnhancedInputComponent* ControllerInput = Cast<UEnhancedInputComponent>(Controller.InputComponent);
+	for (const UEnhancedInputComponent* Input : {PawnInput, ControllerInput})
+	{
+		if (!Input)
+		{
+			continue;
+		}
+		for (const TUniquePtr<FEnhancedInputActionEventBinding>& Binding : Input->GetActionEventBindings())
+		{
+			OutActions.Add(Binding->GetAction());
+		}
+	}
+	return true;
+}
+
+void UHexKeyLegendConfig::LogSections(const TArray<FHexLegendSection>& Sections, const TCHAR* Owner)
+{
+	for (const FHexLegendSection& Section : Sections)
+	{
+		for (const TPair<FString, FString>& Line : Section.Lines)
+		{
+			UE_LOG(LogHexHero, Verbose, TEXT("Legend of %s: %s | %s | %s"), Owner, *Section.Title, *Line.Key, *Line.Value);
+		}
+	}
+}
 
 TArray<FHexLegendSection> UHexKeyLegendConfig::GetSections(const UHexInputConfig& InputConfig, const TSet<const UInputAction*>* OnlyActions) const
 {

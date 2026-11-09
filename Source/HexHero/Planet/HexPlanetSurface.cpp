@@ -987,6 +987,7 @@ HexPlanetSurface::FBuild HexPlanetSurface::Build(const FHexSphereGrid& Grid, con
 						FBoulder Boulder;
 						Boulder.Mesh = Random.RandRange(0, Kit.BoulderMeshes - 1);
 						Boulder.Cell = Cell;
+						Boulder.Ground = Neighbor;
 						// the small ones come more often
 						Boulder.Scale = float(FMath::Lerp(double(Kit.BoulderSizeMin), double(Kit.BoulderSizeMax), FMath::Square(Random.FRand())));
 						const FVector3d Up = Position.GetSafeNormal();

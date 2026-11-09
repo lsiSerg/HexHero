@@ -8,7 +8,9 @@
 #include "Engine/GameViewportClient.h"
 #include "Components/PostProcessComponent.h"
 #include "Components/SkyLightComponent.h"
+#include "Framework/Application/SlateApplication.h"
 #include "Styling/CoreStyle.h"
+#include "Widgets/SWindow.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
@@ -25,7 +27,9 @@
 #include "HexPlanetCloudConfig.h"
 #include "HexPlanetConfig.h"
 #include "HexPlanetKitConfig.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "HexPlanetObjects.h"
+#include "HexPlanetObjectSet.h"
 #include "HexPlanetRivers.h"
 #include "HexPlanetSeaField.h"
 #include "HexPlanetUnderground.h"
@@ -49,6 +53,7 @@
 #include "Algo/BinarySearch.h"
 #include "Async/ParallelFor.h"
 #include "HexPlanetMeshComponent.h"
+#include "HexPlanetMotes.h"
 
 namespace
 {
@@ -60,6 +65,12 @@ namespace
 
 	TAutoConsoleVariable<bool> CVarHexPlanetObjects(TEXT("hex.PlanetObjects"), true,
 		TEXT("Draws the forests, bushes, stones and decor of the planet (1) or hides them (0), to see what they cost."));
+
+	TAutoConsoleVariable<bool> CVarHexPlanetRims(TEXT("hex.PlanetRims"), true,
+		TEXT("Draws the rims of the chasms of the underground, the rocks, spires and runes on the lips of the passages and the stalactites below them (1), or hides them (0), to see what they cost."));
+
+	TAutoConsoleVariable<bool> CVarHexPlanetMotes(TEXT("hex.PlanetMotes"), true,
+		TEXT("Draws the motes drifting over the passages of the underground and the spores rising from its mushrooms (1), or hides them (0), to see what they cost."));
 
 	TAutoConsoleVariable<bool> CVarHexPlanetStreamPieces(TEXT("hex.PlanetStreamPieces"), true,
 		TEXT("Keeps the pieces of only the chunks of the planet near the camera on the GPU (1), building them again as it comes near, or of every chunk (0), to compare."));
@@ -545,30 +556,48 @@ namespace
 	{
 		HexPlanetUnderground::FLoadOptions Options;
 		bool bImage = false;
+		bool bObjects = false;
 		bool bKnown = !Args.IsEmpty();
 		for (int32 Index = 1; Index < Args.Num(); ++Index)
 		{
 			const bool bMaze = Args[Index].Equals(TEXT("maze"), ESearchCase::IgnoreCase);
 			const bool bEntrances = Args[Index].Equals(TEXT("entrances"), ESearchCase::IgnoreCase);
+			const bool bThisObjects = Args[Index].Equals(TEXT("objects"), ESearchCase::IgnoreCase);
 			const bool bThisImage = Args[Index].Equals(TEXT("image"), ESearchCase::IgnoreCase);
+			const bool bBiomes = Args[Index].Equals(TEXT("biomes"), ESearchCase::IgnoreCase);
 			Options.bNewMaze |= bMaze;
 			Options.bNewEntrances |= bEntrances;
+			Options.bNewBiomes |= bBiomes;
+			bObjects |= bThisObjects;
 			bImage |= bThisImage;
-			bKnown &= bMaze || bEntrances || bThisImage;
+			bKnown &= bMaze || bEntrances || bThisObjects || bThisImage || bBiomes;
 		}
 		const bool bAll = !Args.IsEmpty() && Args[0].Equals(TEXT("all"), ESearchCase::IgnoreCase);
 
 		if (!bKnown || (!bAll && !HexPlanetFile::PlanetExists(Args[0])))
 		{
-			UE_LOG(LogHexHero, Warning, TEXT("Usage: hex.PlanetUnderground <Folder|all> [maze|entrances] [image], with the folder of a planet in %s"), HexPlanetFile::RootFolder);
+			UE_LOG(LogHexHero, Warning, TEXT("Usage: hex.PlanetUnderground <Folder|all> [maze|entrances|objects|biomes] [image], with the folder of a planet in %s"), HexPlanetFile::RootFolder);
 			return;
 		}
+
+		// a new maze leaves the old objects on cells that are void now and the new passages bare, so it takes new objects too
+		bObjects |= Options.bNewMaze || Options.bNewEntrances;
+		// the cave kinds as a planet of the game finds them, once the registry has scanned, as -ExecCmds may run before it did
+		FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get().WaitForCompletion();
+		const TArray<TObjectPtr<UHexPlanetObjectSet>> CaveSets = UHexPlanetObjects::FindLayerSets(EHexPlanetLayer::Underground);
+		const UHexPlanetConfig* UndergroundSettings = GetDefault<AHexPlanet>()->UndergroundConfig.LoadSynchronous();
 
 		TArray<FString> Folders;
 		if (bAll)
 		{
+			// a folder of only planet.json is a planet the game generates whole when it opens; all writes into it nothing, so it stays as it is
 			for (const FHexPlanetEntry& Planet : HexPlanetFile::FindPlanets())
 			{
+				if (!HexPlanetFile::HasLevels(Planet.Folder))
+				{
+					UE_LOG(LogHexHero, Log, TEXT("Underground: skipped %s: no levels.txt, name it to generate one"), *Planet.Folder);
+					continue;
+				}
 				Folders.Add(Planet.Folder);
 			}
 		}
@@ -611,6 +640,29 @@ namespace
 			HexPlanetUnderground::Load(Folder, Grid, Surface, Manifest, Letters, Options, Loaded);
 			UE_LOG(LogHexHero, Log, TEXT("Underground of %s: %d cells, %s in %.0f ms with the grid and the files"), *Folder, Cells.Num(),
 				Loaded.Report.IsGood() ? TEXT("good") : TEXT("with problems"), (FPlatformTime::Seconds() - StartTime) * 1000.0);
+
+			// the objects as the first show of the underground generates them, written when asked or missing, as a planet does
+			const FString DataFolder = HexPlanetFile::GetDataFolder(Folder, EHexPlanetLayer::Underground);
+			const bool bMissing = !HexPlanetFile::HasObjects(DataFolder) && (!UndergroundSettings || UndergroundSettings->bGenerateObjects);
+			if (!CaveSets.IsEmpty() && (bObjects || bMissing))
+			{
+				TArray<TCHAR> CellLetters;
+				CellLetters.SetNumUninitialized(Cells.Num());
+				for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+				{
+					CellLetters[Cell] = Loaded.Biomes.IsValidIndex(Cell) && Letters.IsValidIndex(Loaded.Biomes[Cell]) ? Letters[Loaded.Biomes[Cell]] : TEXT('\0');
+				}
+				TArray<FHexCellObjects> Objects;
+				UHexPlanetObjects::GenerateUndergroundObjects(Grid, Loaded.Levels, CellLetters, Loaded.Entrances, Manifest, CaveSets, Objects);
+				if (UHexPlanetObjects::SaveCells(DataFolder, Objects, Loaded.Levels, CaveSets, Error))
+				{
+					UE_LOG(LogHexHero, Log, TEXT("Underground: wrote %s"), *HexPlanetFile::GetFilePath(DataFolder, HexPlanetFile::ObjectsFile));
+				}
+				else
+				{
+					UE_LOG(LogHexHero, Warning, TEXT("Underground of %s: %s"), *Folder, *Error);
+				}
+			}
 			if (bImage)
 			{
 				WriteUndergroundImage(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Underground"), Folder + TEXT(".png")), Grid, Surface, Loaded);
@@ -619,7 +671,7 @@ namespace
 	}
 
 	FAutoConsoleCommand UndergroundConsoleCommand(TEXT("hex.PlanetUnderground"),
-		TEXT("hex.PlanetUnderground <Folder|all> [maze|entrances] [image]: reads the underground of a planet folder and writes what it lacks, generated, as a planet does at its start; maze generates the maze again for its entrances, entrances places them again too, image writes a map of it to Saved/Underground, and the log tells how the networks fit together"),
+		TEXT("hex.PlanetUnderground <Folder|all> [maze|entrances|objects|biomes] [image]: reads the underground of a planet folder and writes what it lacks, generated, as a planet does at its start; maze generates the maze again for its entrances, entrances places them again too, objects generates underground/objects.json again (maze and entrances do too, as a new maze needs new objects), biomes generates underground/biomes.txt again (the floor, the abyss, lava and lakes) and leaves levels.txt and entrances.json as they are, image writes a map of it to Saved/Underground, and the log tells how the networks fit together"),
 		FConsoleCommandWithArgsDelegate::CreateStatic(&UndergroundCommand));
 
 	FAutoConsoleCommandWithWorldAndArgs RiverShapeConsoleCommand(TEXT("hex.PlanetRiverShape"),
@@ -642,6 +694,26 @@ namespace
 		TEXT("hex.PlanetSetLevel <Cell> <Level> [Rings] [ToCell]: sets the level of a cell of the planet, -2 deep sea to 2 mountains, and of the cells up to Rings around it, or of a line of cells to ToCell and Rings around it"),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&SetLevelCommand));
 
+	/** Returns how many windows Slate draws now, its own windows such as a toast of a screenshot among them, each presented apart */
+	int32 CountShownWindows()
+	{
+		if (!FSlateApplication::IsInitialized())
+		{
+			return 0;
+		}
+		int32 Count = 0;
+		TArray<TSharedRef<SWindow>> Windows = FSlateApplication::Get().GetTopLevelWindows();
+		for (int32 Index = 0; Index < Windows.Num(); ++Index)
+		{
+			if (Windows[Index]->IsVisible())
+			{
+				++Count;
+				Windows.Append(Windows[Index]->GetChildWindows());
+			}
+		}
+		return Count;
+	}
+
 	/** A measurement of hex.PlanetMemory: it waits until the planet is built and Delay seconds more, times the frames of MemoryProbeSeconds,
 	 *  logs them with the memory, and quits QuitAfter seconds later if asked, so a script can read the counters of the process meanwhile */
 	struct FMemoryProbe
@@ -657,8 +729,13 @@ namespace
 		double RenderMs = 0.0;
 		double GameMs = 0.0;
 		double WorstGpuMs = 0.0;
+		/** Frames whose time of the render thread the engine gave as about 0, and the most windows Slate drew in a frame */
+		int32 RenderZeroFrames = 0;
+		int32 MostWindows = 0;
 	};
 	constexpr double MemoryProbeSeconds = 5.0;
+	/** Below this the time of the render thread is no measurement but the slice between the presents of two windows in one frame */
+	constexpr double MemoryProbeMinRenderMs = 0.05;
 	constexpr double MemoryProbeQuitAfter = 15.0;
 	TOptional<FMemoryProbe> MemoryProbe;
 
@@ -711,7 +788,12 @@ namespace
 		const double GpuMs = FPlatformTime::ToMilliseconds(RHIGetGPUFrameCycles(0));
 		Probe.GpuMs += GpuMs;
 		Probe.WorstGpuMs = FMath::Max(Probe.WorstGpuMs, GpuMs);
-		Probe.RenderMs += FPlatformTime::ToMilliseconds(GRenderThreadTime);
+		// a frame that presented more than one window, such as the toast of a screenshot, keeps only the slice of the last of them, about 0
+		const double RenderMs = FPlatformTime::ToMilliseconds(GRenderThreadTime);
+		const bool bRenderZero = RenderMs < MemoryProbeMinRenderMs;
+		Probe.RenderMs += bRenderZero ? 0.0 : RenderMs;
+		Probe.RenderZeroFrames += bRenderZero ? 1 : 0;
+		Probe.MostWindows = FMath::Max(Probe.MostWindows, CountShownWindows());
 		Probe.GameMs += FPlatformTime::ToMilliseconds(GGameThreadTime);
 		++Probe.Frames;
 		if (Now - Probe.TimingStart < MemoryProbeSeconds)
@@ -719,9 +801,16 @@ namespace
 			return true;
 		}
 
+		// the engine sets the time of the render thread when Slate presents the window (FSlateRHIRenderer::PresentWindow_RenderThread), so a
+		// run that presented nothing gives 0, which is no measurement
 		const double Frames = FMath::Max(Probe.Frames, 1);
-		Planet->LogMemory(FString::Printf(TEXT("%d frames over %.0f s: GPU %.2f ms (worst %.2f), render thread %.2f ms, game thread %.2f ms, %.1f fps"),
-			Probe.Frames, Now - Probe.TimingStart, Probe.GpuMs / Frames, Probe.WorstGpuMs, Probe.RenderMs / Frames, Probe.GameMs / Frames,
+		const FString Windows = Probe.MostWindows > 1 ? FString::Printf(TEXT(", up to %d windows shown"), Probe.MostWindows) : FString();
+		const FString RenderText = Probe.RenderZeroFrames * 2 > Probe.Frames
+			? FString::Printf(TEXT("render thread n/a (engine stat 0 in %d of the frames%s)"), Probe.RenderZeroFrames, *Windows)
+			: FString::Printf(TEXT("render thread %.2f ms%s"), Probe.RenderMs / FMath::Max(Probe.Frames - Probe.RenderZeroFrames, 1),
+				Probe.RenderZeroFrames > 0 ? *FString::Printf(TEXT(" (%d frames of about 0 left out%s)"), Probe.RenderZeroFrames, *Windows) : TEXT(""));
+		Planet->LogMemory(FString::Printf(TEXT("%d frames over %.0f s: GPU %.2f ms (worst %.2f), %s, game thread %.2f ms, %.1f fps"),
+			Probe.Frames, Now - Probe.TimingStart, Probe.GpuMs / Frames, Probe.WorstGpuMs, *RenderText, Probe.GameMs / Frames,
 			Probe.Frames / FMath::Max(Now - Probe.TimingStart, 0.001)));
 		// and what the hidden layer keeps, once it was built
 		const EHexPlanetLayer Hidden = Planet->GetLayer() == EHexPlanetLayer::Surface ? EHexPlanetLayer::Underground : EHexPlanetLayer::Surface;
@@ -792,6 +881,65 @@ namespace
 	FAutoConsoleCommandWithWorldAndArgs LaterConsoleCommand(TEXT("hex.Later"),
 		TEXT("hex.Later <Seconds> <Command>: runs a console command after a delay, for scripted tests while the game runs"),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&LaterCommand));
+
+	/** Logs the times of the render thread the engine gives (RenderTimer.h) each frame for a number of frames, for a look at a trip */
+	void RenderTimesCommand(const TArray<FString>& Args)
+	{
+		int32 Frames = 120;
+		if (!Args.IsEmpty() && !LexTryParseString(Frames, *Args[0]))
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("Usage: hex.PlanetRenderTimes [Frames]: logs the times of the render thread of the next frames"));
+			return;
+		}
+		TSharedRef<int32> Left = MakeShared<int32>(FMath::Clamp(Frames, 1, 100000));
+		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([Left, Frame = 0](float) mutable
+		{
+			UE_LOG(LogHexHero, Log, TEXT("Render times, frame %d (%llu): render thread %.3f ms, critical path %.3f ms, waits %.3f ms, swap %.3f ms, game thread %.2f ms, %d windows shown"),
+				Frame++, uint64(GFrameCounter), FPlatformTime::ToMilliseconds(GRenderThreadTime), FPlatformTime::ToMilliseconds(GRenderThreadTimeCriticalPath),
+				FPlatformTime::ToMilliseconds(GRenderThreadWaitTime), FPlatformTime::ToMilliseconds(GSwapBufferTime), FPlatformTime::ToMilliseconds(GGameThreadTime), CountShownWindows());
+			return --(*Left) > 0;
+		}), 0.0f);
+	}
+
+	FAutoConsoleCommand RenderTimesConsoleCommand(TEXT("hex.PlanetRenderTimes"),
+		TEXT("hex.PlanetRenderTimes [Frames]: logs the times of the render thread, its critical path, its waits and the swap of buffers that the engine gives, each frame for the next Frames (120)"),
+		FConsoleCommandWithArgsDelegate::CreateStatic(&RenderTimesCommand));
+
+	/** Logs the sides of the cells around a cell that take the rims of the chasms, by kind, on the layer shown */
+	void RimSidesCommand(const TArray<FString>& Args, UWorld* World)
+	{
+		AHexPlanet* Planet = GetShownPlanet(World);
+		int32 Cell = INDEX_NONE;
+		int32 Rings = 0;
+		if (!Planet || Args.IsEmpty() || !LexTryParseString(Cell, *Args[0]) || !Planet->GetGrid().GetCells().IsValidIndex(Cell)
+			|| (Args.Num() >= 2 && !LexTryParseString(Rings, *Args[1])))
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("Usage: hex.PlanetRimSides <Cell> [Rings]: logs the sides of the cells within Rings of a cell that take rims, on the layer shown once it is built"));
+			return;
+		}
+		const TArray<int32> Distances = HexPlanetUnderground::GetRingDistances(Planet->GetGrid(), {Cell}, FMath::Clamp(Rings, 0, 40));
+		int32 Listed = 0;
+		for (int32 Each = 0; Each < Distances.Num(); ++Each)
+		{
+			if (Distances[Each] == MAX_int32)
+			{
+				continue;
+			}
+			const FString Text = Planet->GetObjects()->GetRimText(Each);
+			if (!Text.IsEmpty() || Each == Cell)
+			{
+				const FVector3d Center = Planet->GetGrid().GetCells()[Each].Center;
+				UE_LOG(LogHexHero, Log, TEXT("Rims: cell %d, %d rings from %d, at %.4f %.4f: %s"), Each, Distances[Each], Cell, FMath::RadiansToDegrees(FMath::Asin(Center.Z)),
+					FMath::RadiansToDegrees(FMath::Atan2(Center.Y, Center.X)), Text.IsEmpty() ? TEXT("no side over a void") : *Text);
+				++Listed;
+			}
+		}
+		UE_LOG(LogHexHero, Log, TEXT("Rims: %d cells within %d rings of %d listed on the %s"), Listed, Rings, Cell, GetPlanetLayerName(Planet->GetLayer()));
+	}
+
+	FAutoConsoleCommandWithWorldAndArgs RimSidesConsoleCommand(TEXT("hex.PlanetRimSides"),
+		TEXT("hex.PlanetRimSides <Cell> [Rings]: logs, for the cells within Rings of a cell, the sides that take each kind of rim of the chasms and why a side takes none"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&RimSidesCommand));
 
 	FAutoConsoleCommandWithWorldAndArgs MemoryConsoleCommand(TEXT("hex.PlanetMemory"),
 		TEXT("hex.PlanetMemory [Delay] [quit]: logs the memory of the surface of the planet, its triangles, its copies on the CPU and the GPU and its ray tracing geometry, with the times of five seconds of frames, Delay seconds after the planet is built; with quit it quits 15 s later"),
@@ -1208,7 +1356,14 @@ void AHexPlanet::BuildPlanet()
 	Objects->Init(this, Settings);
 	// nothing stands on an entrance, once the underground has its data, which is after the surface is built
 	UpdateClearCells();
-	WriteGeneratedFiles(!bHadLevels, !bHadBiomes && !BiomeConfigs.IsEmpty(), Objects->WasGenerated() && !Objects->GetSets().IsEmpty(), Rivers->WasGenerated());
+	// the objects of an underground keep off its exits, generated from the entrances in memory, so while those differ from entrances.json they wait
+	// for the save, which writes both; leaving without it generates them again from the saved entrances
+	const bool bObjectsWait = PlanetLayer == EHexPlanetLayer::Underground && bEntrancesEdited && Objects->WasGenerated();
+	if (bObjectsWait)
+	{
+		UE_LOG(LogHexHero, Log, TEXT("Planet: the generated objects of the underground are written with the next save, as its entrances are not saved"));
+	}
+	WriteGeneratedFiles(!bHadLevels, !bHadBiomes && !BiomeConfigs.IsEmpty(), Objects->WasGenerated() && !Objects->GetSets().IsEmpty() && !bObjectsWait, Rivers->WasGenerated());
 	CreateCellMarks();
 	CreateBiomeTexture();
 	// before the materials of the surface are made, which take the texture
@@ -1294,6 +1449,13 @@ void AHexPlanet::BuildPlanet()
 	else if (Settings->bFog)
 	{
 		CreateFog();
+	}
+	if (Settings->bMotes && !Motes)
+	{
+		Motes = NewObject<UHexPlanetMotes>(this, TEXT("Motes"));
+		Motes->SetupAttachment(Surface);
+		Motes->RegisterComponent();
+		Motes->Init(this, Settings);
 	}
 
 	const FString Name = (PlanetFolder.IsEmpty() ? FString(TEXT("(not saved)")) : PlanetFolder) + (bSurface ? TEXT("") : TEXT(" underground"));
@@ -1415,7 +1577,11 @@ void AHexPlanet::UpdateClearCells()
 	{
 		if (AHexPlanet* Planet = GetLayerPlanet(Layer); Planet && Planet->Objects)
 		{
-			Planet->Objects->SetClearCells(Cells);
+			// and the boulders at the foot of mountains on those cells, placed again only when the cleared cells changed
+			if (Planet->Objects->SetClearCells(Cells) && Planet->bBuilt)
+			{
+				Planet->UpdateBoulders();
+			}
 		}
 	}
 }
@@ -1484,6 +1650,8 @@ void AHexPlanet::SetPresented(bool bInPresented)
 		}
 		if (bBuilt)
 		{
+			// the outline of the cursor or the brush goes, so the layer does not show it when it comes back; the links and the water keep theirs
+			SetHoveredCell(INDEX_NONE, 0);
 			UE_LOG(LogHexHero, Log, TEXT("Planet: hid the %s and freed the pieces of %d chunks"), GetPlanetLayerName(PlanetLayer), Dropped);
 		}
 	}
@@ -1561,7 +1729,19 @@ void AHexPlanet::MarkUndergroundReportDirty()
 	}
 }
 
-void AHexPlanet::SetEntrances(const TArray<FHexEntrance>& NewEntrances)
+void AHexPlanet::SetUndergroundSeedOffset(int32 SeedOffset)
+{
+	for (const EHexPlanetLayer Layer : {EHexPlanetLayer::Surface, EHexPlanetLayer::Underground})
+	{
+		if (AHexPlanet* Planet = GetLayerPlanet(Layer); Planet && Planet->Manifest.Underground.SeedOffset != SeedOffset)
+		{
+			Planet->Manifest.Underground.SeedOffset = SeedOffset;
+			Planet->bManifestEdited = true;
+		}
+	}
+}
+
+void AHexPlanet::SetEntrances(const TArray<FHexEntrance>& NewEntrances, bool bByStep)
 {
 	AHexPlanet* Underground = GetLayerPlanet(EHexPlanetLayer::Underground);
 	if (!Underground || !Underground->bDataLoaded || Underground->Entrances == NewEntrances)
@@ -1570,6 +1750,7 @@ void AHexPlanet::SetEntrances(const TArray<FHexEntrance>& NewEntrances)
 	}
 	Underground->Entrances = NewEntrances;
 	Underground->bEntrancesEdited = true;
+	Underground->bEditedOutsideSteps |= !bByStep;
 	MarkUndergroundReportDirty();
 
 	// an entrance stands on both layers, as its exit is the same cell below
@@ -1720,7 +1901,7 @@ bool AHexPlanet::HasUnsavedLevels() const
 {
 	for (const AHexPlanet* Planet : GetLoadedLayers())
 	{
-		if (Planet->bLevelsEdited || Planet->bEntrancesEdited)
+		if (Planet->bLevelsEdited || Planet->bEntrancesEdited || Planet->bManifestEdited)
 		{
 			return true;
 		}
@@ -2121,12 +2302,15 @@ void AHexPlanet::Tick(float DeltaTime)
 		return;
 	}
 
-	if (Objects->IsVisible() != CVarHexPlanetObjects.GetValueOnGameThread())
-	{
-		Objects->SetVisibility(CVarHexPlanetObjects.GetValueOnGameThread(), true);
-	}
+	Objects->SetShown(CVarHexPlanetObjects.GetValueOnGameThread(), CVarHexPlanetRims.GetValueOnGameThread());
 
 	const APlayerController* PlayerController = GetWorld()->GetFirstPlayerController();
+
+	if (Motes)
+	{
+		Motes->SetShown(CVarHexPlanetMotes.GetValueOnGameThread());
+		Motes->Update(PlayerController, DeltaTime);
+	}
 
 	// the dense middle of the cap lies under the camera, where the water is seen closest
 	if (const AActor* ViewTarget = PlayerController && Settings->bSea ? PlayerController->GetViewTarget() : nullptr)
@@ -2232,6 +2416,19 @@ void AHexPlanet::UpdateChunkLod(const FVector& CameraLocation)
 			Instance->SetVectorParameterValue(TEXT("LodCamera"), FLinearColor(CameraLocation));
 			Instance->SetScalarParameterValue(TEXT("CoarseDistance"), float((Near + Far) * 0.5));
 			Instance->SetScalarParameterValue(TEXT("CoarseBand"), float((Far - Near) * 0.5));
+		}
+	}
+	// the underground shades a void as deep as its cliff where its coarse mesh draws a shallow cone (M_HexUnderground, AbyssFarCliff), by the
+	// same band, so its other materials take the band of the console too
+	if (PlanetLayer == EHexPlanetLayer::Underground)
+	{
+		for (UMaterialInstanceDynamic* Instance : { SurfaceMaterial.Get(), SurfaceCutMaterial.Get() })
+		{
+			if (Instance)
+			{
+				Instance->SetScalarParameterValue(TEXT("CoarseDistance"), float((Near + Far) * 0.5));
+				Instance->SetScalarParameterValue(TEXT("CoarseBand"), float((Far - Near) * 0.5));
+			}
 		}
 	}
 
@@ -2994,6 +3191,15 @@ void AHexPlanet::SetBiomeLayers(UMaterialInstanceDynamic* Target) const
 		Target->SetVectorParameterValue(*FString::Printf(TEXT("SeabedLayers%d"), Group),
 			FLinearColor(Seabeds[Group * 4], Seabeds[Group * 4 + 1], Seabeds[Group * 4 + 2], Seabeds[Group * 4 + 3]));
 	}
+
+	// the flagstones of the passages underground are a layer found by name, as the four bits of a layer in CellBiomes cannot name one past 15;
+	// -1 turns them off
+	if (PlanetLayer == EHexPlanetLayer::Underground)
+	{
+		const UHexTerrainLayersConfig* TerrainLayers = GetDefault<UHexMapSettings>()->LoadTerrainLayers();
+		const int32 FlagLayer = TerrainLayers ? TerrainLayers->FindLayer(Settings->CaveFlagLayerName) : INDEX_NONE;
+		Target->SetScalarParameterValue(TEXT("CaveFlagLayer"), float(FlagLayer));
+	}
 }
 
 void AHexPlanet::BuildWater()
@@ -3274,9 +3480,10 @@ bool AHexPlanet::SaveAs(const FString& Name, FString& OutError)
 
 	// the levels and biomes of both layers are always written, painted or generated, so the planet does not change when the generation does
 	const TArray<AHexPlanet*, TInlineAllocator<2>> Planets = GetLoadedLayers();
+	const TSet<int32> KeptEntranceCells = GetKeptEntranceCells();
 	for (const AHexPlanet* Planet : Planets)
 	{
-		if (!Planet->SaveLayerFiles(Folder, OutError))
+		if (!Planet->SaveLayerFiles(Folder, KeptEntranceCells, OutError))
 		{
 			return false;
 		}
@@ -3289,6 +3496,12 @@ bool AHexPlanet::SaveAs(const FString& Name, FString& OutError)
 		Planet->PlanetFolder = SavedFolder;
 		Planet->bLevelsEdited = false;
 		Planet->bEntrancesEdited = false;
+		Planet->bManifestEdited = false;
+		Planet->bEditedOutsideSteps = false;
+	}
+	for (AHexPlanet* Planet : Planets)
+	{
+		Planet->OnSaved.Broadcast();
 	}
 	ReportLeftOutEntrances();
 	return true;
@@ -3328,7 +3541,25 @@ void AHexPlanet::ReportLeftOutEntrances() const
 	}
 }
 
-bool AHexPlanet::SaveLayerFiles(const FString& Folder, FString& OutError) const
+TSet<int32> AHexPlanet::GetKeptEntranceCells() const
+{
+	// the entrances a save writes, as one that cannot be used is left out of entrances.json and its cell keeps what stands on it; none while the
+	// underground has no levels, so nothing is dropped then
+	TSet<int32> Cells;
+	const AHexPlanet* SurfacePlanet = GetLayerPlanet(EHexPlanetLayer::Surface);
+	const AHexPlanet* Underground = GetLayerPlanet(EHexPlanetLayer::Underground);
+	if (!SurfacePlanet || !Underground || !Underground->bDataLoaded || !SurfacePlanet->IsDataLoaded())
+	{
+		return Cells;
+	}
+	for (const FHexEntrance& Entrance : HexPlanetUnderground::GetSavedEntrances(Underground->Grid, SurfacePlanet->Levels, Underground->Levels, Underground->Entrances))
+	{
+		Cells.Add(Entrance.Cell);
+	}
+	return Cells;
+}
+
+bool AHexPlanet::SaveLayerFiles(const FString& Folder, const TSet<int32>& KeptEntranceCells, FString& OutError) const
 {
 	const FString DataFolder = HexPlanetFile::GetDataFolder(Folder, PlanetLayer);
 	if (!HexPlanetFile::SaveLevels(DataFolder, Levels, OutError, HexPlanetFile::GetLevelLetters(PlanetLayer))
@@ -3338,7 +3569,7 @@ bool AHexPlanet::SaveLayerFiles(const FString& Folder, FString& OutError) const
 	}
 
 	// a layer without object sets or rivers, the underground, writes no empty files of them
-	if ((PlanetLayer == EHexPlanetLayer::Surface || !Objects->GetSets().IsEmpty()) && !Objects->Save(DataFolder, OutError))
+	if ((PlanetLayer == EHexPlanetLayer::Surface || !Objects->GetSets().IsEmpty()) && !Objects->Save(DataFolder, KeptEntranceCells, OutError))
 	{
 		return false;
 	}
@@ -3396,7 +3627,8 @@ void AHexPlanet::WriteGeneratedFiles(bool bLevels, bool bBiomes, bool bObjects, 
 
 	if (bObjects)
 	{
-		if (Objects->Save(DataFolder, Error))
+		// generated before the entrances are known, so nothing is left out for them
+		if (Objects->Save(DataFolder, {}, Error))
 		{
 			UE_LOG(LogHexHero, Log, TEXT("Planet: wrote the generated objects to %s"), *HexPlanetFile::GetFilePath(DataFolder, HexPlanetFile::ObjectsFile));
 		}
@@ -3532,7 +3764,7 @@ bool AHexPlanet::SaveRelief(const FString& Folder, FString& OutError) const
 	return HexPlanetFile::SaveRelief(Folder, Lines, OutError);
 }
 
-void AHexPlanet::SetReliefOverrides(const HexPlanetSurface::FReliefOverrides& Changes)
+void AHexPlanet::SetReliefOverrides(const HexPlanetSurface::FReliefOverrides& Changes, bool bByStep)
 {
 	bool bChanged = false;
 	for (const TPair<int32, HexPlanetSurface::FReliefOverride>& Each : Changes)
@@ -3554,15 +3786,15 @@ void AHexPlanet::SetReliefOverrides(const HexPlanetSurface::FReliefOverrides& Ch
 
 	if (bChanged)
 	{
-		MarkLevelsEdited();
+		MarkLevelsEdited(bByStep);
 		bLevelsPending = true;
 		StartRebuild();
 	}
 }
 
-void AHexPlanet::OnRiversChanged()
+void AHexPlanet::OnRiversChanged(bool bByStep)
 {
-	MarkLevelsEdited();
+	MarkLevelsEdited(bByStep);
 	bLevelsPending = true;
 	StartRebuild();
 }
@@ -3583,9 +3815,16 @@ bool AHexPlanet::SaveLevels(FString& OutError)
 
 	// both layers, whichever is shown; an underground whose data is not read yet has not changed its files
 	const TArray<AHexPlanet*, TInlineAllocator<2>> Planets = GetLoadedLayers();
+	const TSet<int32> KeptEntranceCells = GetKeptEntranceCells();
+
+	// a new layout of the underground changed the seed offset in planet.json, which only then is written again, that number alone
+	if (Planets.ContainsByPredicate([](const AHexPlanet* Planet) { return Planet->bManifestEdited; }) && !HexPlanetFile::SaveSeedOffset(PlanetFolder, Manifest, OutError))
+	{
+		return false;
+	}
 	for (const AHexPlanet* Planet : Planets)
 	{
-		if (!Planet->SaveLayerFiles(PlanetFolder, OutError))
+		if (!Planet->SaveLayerFiles(PlanetFolder, KeptEntranceCells, OutError))
 		{
 			return false;
 		}
@@ -3594,6 +3833,12 @@ bool AHexPlanet::SaveLevels(FString& OutError)
 	{
 		Planet->bLevelsEdited = false;
 		Planet->bEntrancesEdited = false;
+		Planet->bManifestEdited = false;
+		Planet->bEditedOutsideSteps = false;
+	}
+	for (AHexPlanet* Planet : Planets)
+	{
+		Planet->OnSaved.Broadcast();
 	}
 	ReportLeftOutEntrances();
 	return true;
@@ -3739,6 +3984,27 @@ void AHexPlanet::CreateBiomeTexture()
 		WriteBiomePixels(Cell);
 	}
 
+	// underground, how many voids hold each style and how many sides lie between two styles, where M_HexUnderground fades both to plain floor
+	if (PlanetLayer == EHexPlanetLayer::Underground)
+	{
+		int32 Styles[4] = {};
+		int32 StyleSides = 0;
+		for (int32 Cell = 0; Cell < Grid.GetCells().Num(); ++Cell)
+		{
+			const FColor& Pixel = BiomePixels[(Cell / HexPlanetSurface::MarkColumns) * HexPlanetSurface::MarkColumns * 2 + (Cell % HexPlanetSurface::MarkColumns) * 2];
+			if (!HexPlanetUnderground::IsPassage(Levels[Cell]))
+			{
+				++Styles[(Pixel.B >> 6) & 3];
+				for (int32 Side = 0; Side < 6; ++Side)
+				{
+					StyleSides += (Pixel.B >> Side) & 1;
+				}
+			}
+		}
+		UE_LOG(LogHexHero, Log, TEXT("Planet: the voids of the underground hold mist in %d cells, lava in %d and lakes in %d, with %d sides of a void towards another style"),
+			Styles[0], Styles[1], Styles[2], StyleSides);
+	}
+
 	const FName Name = MakeUniqueObjectName(GetTransientPackage(), UTexture2D::StaticClass(), TEXT("PlanetCellBiomes"));
 	CellBiomeTexture = UTexture2D::CreateTransient(HexPlanetSurface::MarkColumns * 2, Rows, PF_B8G8R8A8, Name);
 	CellBiomeTexture->SRGB = false;
@@ -3799,6 +4065,31 @@ void AHexPlanet::WriteBiomePixels(int32 Cell)
 	{
 		Seas |= IsSea(Each.Neighbors[Index]) ? uint8(1 << Index) : uint8(0);
 	}
+	// underground, which has no mountains, blue holds the style of a void instead (EHexVoidStyle, bits 6 and 7) and in bit K whether neighbor K is
+	// a void of another style, where M_HexUnderground fades both to plain floor (VOID_STYLE_CODE); a passage keeps 0
+	if (PlanetLayer == EHexPlanetLayer::Underground)
+	{
+		const auto GetVoidStyle = [this, &GetLayers](int32 Other) -> int32
+		{
+			if (!Levels.IsValidIndex(Other) || HexPlanetUnderground::IsPassage(Levels[Other]))
+			{
+				return INDEX_NONE;
+			}
+			const UHexBiomeConfig* Layers = GetLayers(Other);
+			return Layers ? FMath::Clamp(int32(Layers->VoidStyle), 0, 3) : 0;
+		};
+		Mountains = 0;
+		const int32 Own = GetVoidStyle(Cell);
+		if (Own != INDEX_NONE)
+		{
+			Mountains = uint8(Own << 6);
+			for (int32 Index = 0; Index < Each.Neighbors.Num() && Index < 6; ++Index)
+			{
+				const int32 Other = GetVoidStyle(Each.Neighbors[Index]);
+				Mountains |= Other != INDEX_NONE && Other != Own ? uint8(1 << Index) : uint8(0);
+			}
+		}
+	}
 	BiomePixels[Pixel] = FColor(uint8(Terrain), uint8(Rock), Mountains, Seas);
 	BiomePixels[Pixel + 1] = FColor(Near[0], Near[1], Near[2], BiomePixels[Pixel + 1].A);
 }
@@ -3839,28 +4130,122 @@ void AHexPlanet::UpdateCanopy()
 
 	const int32 Rows = FMath::DivideAndRoundUp(Cells.Num(), HexPlanetSurface::MarkColumns);
 	CanopyPixels.Init(FColor(0, 0, 0, 0), HexPlanetSurface::MarkColumns * Rows);
+	// the root of the linear color, as eight bits of it are too coarse for dark greens
+	const auto Encode = [](float Value) { return uint8(FMath::RoundToInt32(FMath::Sqrt(FMath::Clamp(Value, 0.0f, 1.0f)) * 255.0f)); };
 
-	for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+	if (PlanetLayer == EHexPlanetLayer::Underground)
 	{
-		FLinearColor Color;
-		float Cover = 0.0f;
-		if (Objects->GetCellCanopy(Cell, Color, Cover))
+		// the underground has no canopy, so the texture holds the pool of light of each cell (GLOW_POOL_CODE of M_HexUnderground): the glow color of
+		// what stands on it and its strength (UHexPlanetObjects::GetCellGlow), or of a lava void in the color of its light, and a cell that does not
+		// glow takes the mean of its glowing neighbors times their strength, which spills over its sides towards them
+		const FLinearColor Lava = Settings->LavaLightColor / FMath::Max(Settings->LavaLightColor.GetMax(), 1e-3f);
+		TArray<FLinearColor> Glow;
+		Glow.Init(FLinearColor::Transparent, Cells.Num());
+		for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
 		{
-			// the root of the linear color, as eight bits of it are too coarse for dark greens
-			const auto Encode = [](float Value) { return uint8(FMath::RoundToInt32(FMath::Sqrt(FMath::Clamp(Value, 0.0f, 1.0f)) * 255.0f)); };
-			CanopyPixels[Cell] = FColor(Encode(Color.R), Encode(Color.G), Encode(Color.B), uint8(FMath::RoundToInt32(FMath::Clamp(Cover, 0.0f, 1.0f) * 255.0f)));
+			FLinearColor Color;
+			float Strength = 0.0f;
+			if (!Objects->GetCellGlow(Cell, Color, Strength) && Levels.IsValidIndex(Cell) && !HexPlanetUnderground::IsPassage(Levels[Cell])
+				&& BiomeConfigs.IsValidIndex(CellBiomes[Cell]) && BiomeConfigs[CellBiomes[Cell]]->VoidStyle == EHexVoidStyle::Lava)
+			{
+				Color = Lava;
+				Strength = Settings->LavaPool;
+			}
+			if (Strength > 0.0f)
+			{
+				Glow[Cell] = FLinearColor(Color.R, Color.G, Color.B, FMath::Clamp(Strength, 1.0f / 255.0f, 1.0f));
+			}
+		}
+		// the pool of a glowing cell runs on into its glowing neighbors without falling off (GLOW_POOL_CODE), so its strength and color are blended
+		// with theirs by GlowPoolBlend, and a patch of covers of several densities or kinds is one pool without a step at each side
+		TArray<FLinearColor> Pools = Glow;
+		const float Blend = FMath::Clamp(Settings->GlowPoolBlend, 0.0f, 1.0f);
+		for (int32 Cell = 0; Cell < Cells.Num() && Blend > 0.0f; ++Cell)
+		{
+			const FLinearColor& Own = Glow[Cell];
+			FLinearColor Sum = FLinearColor::Transparent;
+			float Weight = 0.0f;
+			int32 Count = 0;
+			for (const int32 Neighbor : Cells[Cell].Neighbors)
+			{
+				if (Own.A > 0.0f && Glow[Neighbor].A > 0.0f)
+				{
+					Sum += Glow[Neighbor] * Glow[Neighbor].A;
+					Weight += Glow[Neighbor].A;
+					++Count;
+				}
+			}
+			if (Count > 0)
+			{
+				// the mean strength of the cell and those neighbors, in the mean of their colors by strength
+				const float Total = Own.A + Weight;
+				Pools[Cell] = FLinearColor(FMath::Lerp(Own.R, (Own.R * Own.A + Sum.R) / Total, Blend), FMath::Lerp(Own.G, (Own.G * Own.A + Sum.G) / Total, Blend),
+					FMath::Lerp(Own.B, (Own.B * Own.A + Sum.B) / Total, Blend), FMath::Lerp(Own.A, Total / float(1 + Count), Blend));
+			}
+		}
+		for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+		{
+			const FLinearColor& Own = Pools[Cell];
+			if (Own.A > 0.0f)
+			{
+				CanopyPixels[Cell] = FColor(Encode(Own.R), Encode(Own.G), Encode(Own.B), uint8(FMath::Clamp(FMath::RoundToInt32(Own.A * 255.0f), 1, 255)));
+				continue;
+			}
+			FLinearColor Sum = FLinearColor::Transparent;
+			int32 Count = 0;
+			for (const int32 Neighbor : Cells[Cell].Neighbors)
+			{
+				if (Pools[Neighbor].A > 0.0f)
+				{
+					Sum += Pools[Neighbor] * Pools[Neighbor].A;
+					++Count;
+				}
+			}
+			if (Count > 0)
+			{
+				CanopyPixels[Cell] = FColor(Encode(Sum.R / Count), Encode(Sum.G / Count), Encode(Sum.B / Count), 0);
+			}
+		}
+		// in bits 0 to 5 which neighbors glow, and in bit 6 whether the cell holds objects or is an exit, where the material lays no puddle
+		// (CavePuddle*), so none lies under a stone or a mushroom nor in the middle of the hall of an exit
+		for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+		{
+			uint8 Bits = 0;
+			for (int32 Index = 0; Index < Cells[Cell].Neighbors.Num() && Index < 6; ++Index)
+			{
+				Bits |= Glow[Cells[Cell].Neighbors[Index]].A > 0.0f ? uint8(1 << Index) : uint8(0);
+			}
+			const FHexCellObjects Held = Objects->GetCell(Cell);
+			if (Held.Cover != 0 || Held.Decor != 0 || Objects->IsClear(Cell))
+			{
+				Bits |= uint8(1 << 6);
+			}
+			const int32 Pixel = (Cell / HexPlanetSurface::MarkColumns) * HexPlanetSurface::MarkColumns * 2 + (Cell % HexPlanetSurface::MarkColumns) * 2;
+			BiomePixels[Pixel + 1].A = Bits;
 		}
 	}
-
-	for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+	else
 	{
-		uint8 Bits = 0;
-		for (int32 Index = 0; Index < Cells[Cell].Neighbors.Num() && Index < 6; ++Index)
+		for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
 		{
-			Bits |= CanopyPixels[Cells[Cell].Neighbors[Index]].A > 0 ? uint8(1 << Index) : uint8(0);
+			FLinearColor Color;
+			float Cover = 0.0f;
+			if (Objects->GetCellCanopy(Cell, Color, Cover))
+			{
+				CanopyPixels[Cell] = FColor(Encode(Color.R), Encode(Color.G), Encode(Color.B), uint8(FMath::RoundToInt32(FMath::Clamp(Cover, 0.0f, 1.0f) * 255.0f)));
+			}
 		}
-		const int32 Pixel = (Cell / HexPlanetSurface::MarkColumns) * HexPlanetSurface::MarkColumns * 2 + (Cell % HexPlanetSurface::MarkColumns) * 2;
-		BiomePixels[Pixel + 1].A = Bits;
+
+		for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+		{
+			uint8 Bits = 0;
+			for (int32 Index = 0; Index < Cells[Cell].Neighbors.Num() && Index < 6; ++Index)
+			{
+				Bits |= CanopyPixels[Cells[Cell].Neighbors[Index]].A > 0 ? uint8(1 << Index) : uint8(0);
+			}
+			const int32 Pixel = (Cell / HexPlanetSurface::MarkColumns) * HexPlanetSurface::MarkColumns * 2 + (Cell % HexPlanetSurface::MarkColumns) * 2;
+			BiomePixels[Pixel + 1].A = Bits;
+		}
 	}
 
 	if (!CellCanopyTexture)
@@ -4521,6 +4906,8 @@ void AHexPlanet::UpdateBoulders()
 	};
 
 	int32 Total = 0;
+	int32 Skipped = 0;
+	TSet<int32> SkippedCells;
 	for (int32 Mesh = 0; Mesh < BoulderComponents.Num(); ++Mesh)
 	{
 		TArray<FTransform> Transforms;
@@ -4529,11 +4916,19 @@ void AHexPlanet::UpdateBoulders()
 		{
 			for (const HexPlanetSurface::FBoulder& Boulder : Chunk)
 			{
-				if (Boulder.Mesh == Mesh)
+				if (Boulder.Mesh != Mesh)
 				{
-					Transforms.Add(FTransform(FQuat(Boulder.Rotation), FVector(Boulder.Position), FVector(Boulder.Scale)));
-					Rocks.Add(GetRock(Boulder.Cell));
+					continue;
 				}
+				// the cell of an entrance stays clear, as its objects do, so the marker shows
+				if (Objects && Objects->IsClear(Boulder.Ground))
+				{
+					++Skipped;
+					SkippedCells.Add(Boulder.Ground);
+					continue;
+				}
+				Transforms.Add(FTransform(FQuat(Boulder.Rotation), FVector(Boulder.Position), FVector(Boulder.Scale)));
+				Rocks.Add(GetRock(Boulder.Cell));
 			}
 		}
 
@@ -4547,7 +4942,10 @@ void AHexPlanet::UpdateBoulders()
 		Component->MarkRenderStateDirty();
 		Total += Transforms.Num();
 	}
-	UE_LOG(LogHexHero, Log, TEXT("Planet: %d boulders"), Total);
+	TArray<int32> Cleared = SkippedCells.Array();
+	Cleared.Sort();
+	UE_LOG(LogHexHero, Log, TEXT("Planet: %d boulders%s"), Total, Skipped > 0 ? *FString::Printf(TEXT(", %d left off the cells of entrances %s"), Skipped,
+		*FString::JoinBy(Cleared, TEXT(" "), [](int32 Cell) { return FString::FromInt(Cell); })) : TEXT(""));
 }
 
 void AHexPlanet::UpdateMarkers()
@@ -5272,7 +5670,7 @@ void AHexPlanet::SetHoveredCell(int32 Cell, int32 BrushSize)
 
 	// the first layer is the brush or the cell under the cursor
 	const FLinearColor PrimaryColor = BrushSize > 0 ? Settings->BrushOutlineColor : Settings->OutlineColor;
-	for (UMaterialInstanceDynamic* Instance : { SurfaceMaterial.Get(), SurfaceCutMaterial.Get(), LodNearMaterial.Get(), LodFarMaterial.Get(), WaterGridMaterial.Get() })
+	for (UMaterialInstanceDynamic* Instance : { SurfaceMaterial.Get(), SurfaceCutMaterial.Get(), LodNearMaterial.Get(), LodFarMaterial.Get(), WaterGridMaterial.Get(), PreviewMaterial.Get() })
 	{
 		if (Instance)
 		{
@@ -5280,6 +5678,30 @@ void AHexPlanet::SetHoveredCell(int32 Cell, int32 BrushSize)
 		}
 	}
 	SetCellMarks(Marks);
+}
+
+UMaterialInstanceDynamic* AHexPlanet::GetPreviewMaterial()
+{
+	if (PreviewMaterial || !Settings)
+	{
+		return PreviewMaterial;
+	}
+	UMaterialInterface* Base = Material.LoadSynchronous();
+	if (!Base)
+	{
+		return nullptr;
+	}
+
+	// the tiles draw their vertex colors in place of the biomes, and the marks of their cells from their third and fourth UVs, as the surface does
+	PreviewMaterial = UMaterialInstanceDynamic::Create(Base, this);
+	HexMaterialConfig::Apply(PreviewMaterial, Settings);
+	PreviewMaterial->SetScalarParameterValue(TEXT("PreviewTile"), 1.0f);
+	if (CellMarks)
+	{
+		PreviewMaterial->SetTextureParameterValue(TEXT("CellMarks"), CellMarks);
+	}
+	PreviewMaterial->SetVectorParameterValue(TEXT("MarkPrimaryColor"), HighlightBrushSize > 0 ? Settings->BrushOutlineColor : Settings->OutlineColor);
+	return PreviewMaterial;
 }
 
 FString AHexPlanet::GetCellDebugText(int32 Cell) const

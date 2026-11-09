@@ -1,13 +1,15 @@
 """Creates the planet prototype: M_HexPlanet with its masked instance M_HexPlanet_Cut, M_HexPlanetWater, M_HexPlanetClouds, M_HexPlanetAurora and M_HexPlanetAuroraSpark with MPC_HexPlanet, M_HexPlanetWireframe and Lvl_HexPlanet,
 and DA_HexPlanet, DA_HexPlanetWater, DA_HexPlanetClouds and DA_HexPlanetCamera when they are missing, and DA_HexUnderground as a copy of
 DA_HexPlanet with the features of the surface off (UNDERGROUND_VALUES), with M_HexUnderground and its masked M_HexUnderground_Cut, the fog
-M_HexUndergroundFog and the materials of the markers of entrances, M_HexPlanetMarker and M_HexPlanetShaft.
+M_HexUndergroundFog, the materials of the markers of entrances, M_HexPlanetMarker and M_HexPlanetShaft, and M_HexPlanetCave of the cave objects.
+An existing DA_HexUnderground takes the values of UNDERGROUND_MIGRATIONS only while it holds their old values.
 Every value a material takes from a config is a parameter named as it, whose default here comes from the class, and AHexPlanet sets it from the asset
 with the planet, a movable sun and the planet game mode.
 
 Run with UnrealEditor-Cmd.exe <uproject> -run=pythonscript -script=<this file> -unattended -nullrhi
 Running it again rebuilds the material and the level; -script="<this file> configs" only makes the data assets that are missing, and
--script="<this file> underground" only those and the materials of the underground and of the markers.
+-script="<this file> underground" only those and the materials of the underground, of the cave objects and of the motes, and
+-script="<this file> underground markers" also those of the markers.
 """
 
 import re
@@ -1488,13 +1490,17 @@ CONFIGS = [(FOLDER + '/DA_HexPlanet', unreal.HexPlanetConfig), (FOLDER + '/DA_He
 # large and its surface is drawn alike, with these values, and then tuned by hand. Its features are off, as it has no sea and no sky
 UNDERGROUND_CONFIG = FOLDER + '/DA_HexUnderground'
 UNDERGROUND_VALUES = {
-    'sea': False, 'clouds': False, 'haze': False, 'auroras': False, 'rivers': False, 'generate_objects': False, 'fog': True,
+    'sea': False, 'clouds': False, 'haze': False, 'auroras': False, 'rivers': False, 'generate_objects': True, 'fog': True,
     # a passage holds its sides and a void carries its whole cliff, so passages stay flat ledges over the voids
     'edge_rule': unreal.HexEdgeRule.HIGHER_HOLDS,
     'deep_depth': 200.0,
     # a dim, cool light of the sky, a placeholder until the light of the game is designed
     'sky_light_color': unreal.LinearColor(0.32, 0.42, 0.48, 1.0), 'sky_light_intensity': 0.3,
 }
+# values of an existing DA_HexUnderground that a later stage changed, as (property, old value, new value): each is set only while the asset still
+# holds the old value, so tuning by hand is never overwritten. The cave objects are generated on the passages since 2026-11-09, and the motes drift
+# over them since then too
+UNDERGROUND_MIGRATIONS = [('generate_objects', False, True), ('motes', False, True)]
 
 
 def clear_expressions(material):
@@ -1574,6 +1580,19 @@ def build_configs():
 
 def build_underground_config():
     if unreal.EditorAssetLibrary.does_asset_exist(UNDERGROUND_CONFIG):
+        config = unreal.load_asset(UNDERGROUND_CONFIG)
+        changed = False
+        for name, old, new in UNDERGROUND_MIGRATIONS:
+            if config.get_editor_property(name) == old:
+                config.set_editor_property(name, new)
+                changed = True
+                unreal.log('PLANET %s: %s from %s to %s' % (UNDERGROUND_CONFIG, name, old, new))
+        if changed:
+            unreal.EditorAssetLibrary.save_asset(UNDERGROUND_CONFIG, only_if_is_dirty=False)
+        # the values of the abyss and the fog it draws with, which follow the defaults of the class unless they were tuned by hand
+        unreal.log('PLANET %s: %s' % (UNDERGROUND_CONFIG, ', '.join('%s %s' % (name, config.get_editor_property(name)) for name in (
+            'abyss_brightness', 'abyss_darkness', 'abyss_floor_hide', 'abyss_slices', 'abyss_depth_half', 'fog_mist_max', 'fog_mist_color', 'motes',
+            'lava_brightness', 'void_style_edge', 'lake_color', 'lake_mist_keep', 'cave_puddle_roughness', 'glow_pool_strength', 'glow_pool_light'))))
         return
     config = unreal.EditorAssetLibrary.duplicate_asset(CONFIGS[0][0], UNDERGROUND_CONFIG)
     if not config:
@@ -2389,12 +2408,19 @@ def build_auroras():
 
 # The underground (DA_HexUnderground, EdgeRule HigherHolds): M_HexUnderground draws its surface as M_HexPlanet does, from the layers of its cave
 # biomes with the grid lines and the outlines, but without the sea, the beach, rivers, the run-up, the canopy and the shadows of clouds. Every
-# height is measured below the top of the passages, the level 0 that lies LevelHeight above the sea: the rock of a cliff darkens down into the
-# abyss (AbyssFadeStart, AbyssFadeEnd), and the floor of a void draws a teal grey mist as its light, a noise taken in AbyssSlices layers under the
-# floor along the view, so they slide against the floor and each other as the camera moves and the floor reads as bottomless. Along the sides
-# of a passage towards a void a faint lip lights the edge of the ledge (AbyssLip*), found from the bits of CellBiomes that say which neighbors
-# lie below the sea, the voids here. The grid lines fade out below the passages (AbyssGridFade), and the outlines show on the voids too. In the
-# Links tab of the editor the blue of CellMarks tints each passage by the color of its network (NetworkColor0..7) and what is wrong in ProblemColor
+# height is measured below the top of the passages, the level 0 that lies LevelHeight above the sea. On the tops of the passages the floor is
+# warm earth (CaveFloor*, a tint of its layer, as the placeholder light is cool) in pools of tone, with paths of flagstones down the middle of
+# the corridors (CaveFlag*, a layer found by name), small dark pools of water (CavePuddle*), green glowing moss along the rims and down the upper
+# walls (CaveMoss*) and pools of light under what glows and beside lava (GLOW_POOL_CODE, CellCanopy, AHexPlanet::UpdateCanopy). The rock of a
+# cliff darkens down into the abyss (AbyssFadeStart, AbyssFadeEnd), a few walls carry carved runes (CaveRune*), and the floor of a void draws a
+# teal grey mist as its light, a noise taken in AbyssSlices slices under the floor along the view and laid front to back, so deeper ones are
+# darker and hidden by those above and what none covers is nearly black (AbyssBottomColor); far away, where the coarse mesh draws a void next to
+# passages as a shallow cone, the void is shaded as deep as its cliff (AbyssFarCliff). A void of lava (EHexVoidStyle, blue of CellBiomes) glows
+# in the cracks of a dark crust and lights its cliffs (Lava*), a lake is dark water with a sheen (Lake*), and both fade to plain floor where they
+# meet a void of another style (VoidStyleEdge). Along the sides of a passage towards a void a faint lip lights the edge of the ledge (AbyssLip*),
+# found from the bits of CellBiomes that say which neighbors lie below the sea, the voids here. The grid lines fade out below the passages
+# (AbyssGridFade), and the outlines show on the voids too. In the Links tab of the editor the blue of CellMarks tints each passage by the color
+# of its network (NetworkColor0..7) and what is wrong in ProblemColor
 UNDERGROUND_MATERIAL = FOLDER + '/M_HexUnderground'
 UNDERGROUND_FOG_MATERIAL = FOLDER + '/M_HexUndergroundFog'
 _BEACH_START = BIOME_CODE.index('// the beach of each layer (BeachLayers0..2')
@@ -2405,49 +2431,99 @@ float shoreSlope = 0.0;
 _SEABED_DARKENING = 'albedo *= lerp(1.0, SeabedDarkening, saturate(-height / max(DeepDepth, 1.0)));\n'
 assert _SEABED_DARKENING in UNDERGROUND_BIOME_CODE
 UNDERGROUND_BIOME_CODE = UNDERGROUND_BIOME_CODE.replace(_SEABED_DARKENING, '')
+# underground the blue of CellBiomes holds the style of a void and not the mountains (AHexPlanet::WriteBiomePixels), so the shift of the blend of
+# mountains never reads it
+_MOUNTAIN_BITS = 'uint mountainBits = biomeOwn.b;'
+assert _MOUNTAIN_BITS in UNDERGROUND_BIOME_CODE
+UNDERGROUND_BIOME_CODE = UNDERGROUND_BIOME_CODE.replace(_MOUNTAIN_BITS, 'uint mountainBits = 0u;')
 # the value noise of the clouds without the clouds, which BIOME_CODE and the mist take
 NOISE_CODE = CLOUD_CODE[:CLOUD_CODE.index('float cloudAngle')]
-UNDERGROUND_CODE = NOISE_CODE + GRID_LINE_CODE + MARK_CODE.replace('MARK_HOLE_BITS', '0u') + UNDERGROUND_BIOME_CODE + r'''
+# the runes of the walls: a hexagon and three strokes of one of eight runes in a panel from -0.5 to 0.5, as distances
+CAVE_RUNES_CODE = r'''
+struct FCaveRunes
+{
+    float Segment(float2 p, float2 a, float2 b)
+    {
+        float2 pa = p - a;
+        float2 ba = b - a;
+        float h = saturate(dot(pa, ba) / max(dot(ba, ba), 1e-6));
+        return length(pa - ba * h);
+    }
+    // the distance to the outline of a regular hexagon whose sides lie a distance from its middle
+    float Hexagon(float2 p, float apothemSize)
+    {
+        const float3 k = float3(-0.866025404, 0.5, 0.577350269);
+        p = abs(p);
+        p -= 2.0 * min(dot(k.xy, p), 0.0) * k.xy;
+        p -= float2(clamp(p.x, -k.z * apothemSize, k.z * apothemSize), apothemSize);
+        return abs(length(p) * sign(p.y));
+    }
+    float Glyph(float2 p, int shape, int count)
+    {
+        float4 s[3];
+        if (shape == 0) { s[0] = float4(0.0, -0.26, 0.0, 0.26); s[1] = float4(0.0, -0.1, 0.18, -0.24); s[2] = float4(0.0, 0.04, 0.18, -0.1); }
+        else if (shape == 1) { s[0] = float4(-0.12, -0.26, -0.12, 0.26); s[1] = float4(-0.12, -0.26, 0.14, -0.06); s[2] = float4(0.14, -0.06, -0.12, 0.1); }
+        else if (shape == 2) { s[0] = float4(-0.18, -0.22, 0.18, 0.22); s[1] = float4(0.18, -0.22, -0.18, 0.22); s[2] = float4(0.0, -0.26, 0.0, 0.26); }
+        else if (shape == 3) { s[0] = float4(0.0, -0.26, 0.0, 0.26); s[1] = float4(0.0, -0.26, -0.17, -0.06); s[2] = float4(0.0, -0.26, 0.17, -0.06); }
+        else if (shape == 4) { s[0] = float4(0.0, -0.24, 0.17, 0.0); s[1] = float4(0.17, 0.0, 0.0, 0.24); s[2] = float4(0.0, 0.24, -0.17, 0.0); }
+        else if (shape == 5) { s[0] = float4(0.0, -0.26, 0.0, 0.26); s[1] = float4(0.0, -0.04, -0.18, -0.24); s[2] = float4(0.0, -0.04, 0.18, -0.24); }
+        else if (shape == 6) { s[0] = float4(-0.14, -0.24, 0.1, -0.08); s[1] = float4(0.1, -0.08, -0.1, 0.08); s[2] = float4(-0.1, 0.08, 0.14, 0.24); }
+        else { s[0] = float4(-0.14, -0.26, -0.14, 0.26); s[1] = float4(0.14, -0.26, 0.14, 0.26); s[2] = float4(-0.14, -0.08, 0.14, 0.08); }
+        float d = 1e3;
+        [unroll] for (int k = 0; k < 3; ++k)
+        {
+            if (k < count)
+            {
+                d = min(d, Segment(p, s[k].xy, s[k].zw));
+            }
+        }
+        return min(d, Hexagon(p, 0.4));
+    }
+};
+FCaveRunes caveRunes;
+// a value noise whose lattice is hashed in integers: the noise of NOISE_CODE hashes the corners of its lattice in floats, which the compiler may round
+// differently for the two cells that share a corner, so it jumps a little on some planes of the lattice, which the sharp edges of the cracks of lava
+// showed as short straight seams
+struct FCaveNoise
+{
+    float Hash(int3 c)
+    {
+        uint h = ((uint)c.x * 73856093u) ^ ((uint)c.y * 19349663u) ^ ((uint)c.z * 83492791u);
+        h ^= h >> 16;
+        h *= 0x7feb352du;
+        h ^= h >> 15;
+        h *= 0x846ca68bu;
+        h ^= h >> 16;
+        return (float)(h >> 8) * (1.0 / 16777216.0);
+    }
+    float Value(float3 p)
+    {
+        float3 corner = floor(p);
+        int3 i = (int3)corner;
+        float3 f = p - corner;
+        f = f * f * (3.0 - 2.0 * f);
+        return lerp(lerp(lerp(Hash(i), Hash(i + int3(1, 0, 0)), f.x), lerp(Hash(i + int3(0, 1, 0)), Hash(i + int3(1, 1, 0)), f.x), f.y),
+            lerp(lerp(Hash(i + int3(0, 0, 1)), Hash(i + int3(1, 0, 1)), f.x), lerp(Hash(i + int3(0, 1, 1)), Hash(i + int3(1, 1, 1)), f.x), f.y), f.z);
+    }
+};
+FCaveNoise caveNoise;
+'''
+UNDERGROUND_CODE = NOISE_CODE + GRID_LINE_CODE + MARK_CODE.replace('MARK_HOLE_BITS', '0u') + UNDERGROUND_BIOME_CODE + CAVE_RUNES_CODE + r'''
 float depthBelow = LevelHeight - height;
 float3 viewRay = normalize(WorldPos - CameraPos);
+// world units a pixel covers here, by which the fine detail fades out
+float pixelWorld = (length(PosDdx) + length(PosDdy)) * 0.5;
+float notPreview = PreviewTile < 0.5 ? 1.0 : 0.0;
+float roughness = Roughness;
+float3 extraEmissive = 0.0;
+// where a lake lies, which takes the specular of water (LakeSpecular) while the rest of the floor of a void loses it
+float lakeFloor = 0.0;
 
-// the rock darkens down the cliffs, into the dark of the abyss
-albedo *= lerp(1.0, AbyssDarkness, smoothstep(AbyssFadeStart, max(AbyssFadeEnd, AbyssFadeStart + 1.0), depthBelow));
-
-// the mist of the floor of a void: a noise in slices under the floor along the view, deeper ones fainter, drifting each at its own pace
-float mistShare = smoothstep(AbyssMistStart, max(AbyssMistEnd, AbyssMistStart + 1.0), depthBelow);
-float mist = 0.0;
-[branch] if (mistShare > 0.001)
-{
-    float cosView = max(dot(-viewRay, surfaceUp), AbyssViewFloor);
-    float3 drift = float3(0.37, -0.21, 0.13) * Time * AbyssSpeed / max(AbyssScale, 1.0);
-    // the finer octave fades where a pixel covers much of its cells, as from far away it only speckles
-    float mistDetail = AbyssDetail * (1.0 - smoothstep(AbyssDetailFadeStart, max(AbyssDetailFadeEnd, AbyssDetailFadeStart + 1e-3),
-        (length(PosDdx) + length(PosDdy)) * AbyssDetailScale / max(AbyssScale, 1.0)));
-    float sliceSum = 0.0;
-    int slices = (int)clamp(round(AbyssSlices), 1.0, 6.0);
-    [loop] for (int slice = 0; slice < 6; ++slice)
-    {
-        if (slice >= slices)
-        {
-            break;
-        }
-        float3 at = WorldPos + viewRay * ((slice + 0.5) * AbyssSliceDepth / cosView);
-        float3 p = at / max(AbyssScale, 1.0) + drift * (1.0 + slice * AbyssSliceDrift) + slice * 7.31;
-        float n = lerp(cloudNoise.Value(p), cloudNoise.Value(p * AbyssDetailScale + 3.3), mistDetail * 0.5);
-        float weight = exp2(-slice * AbyssSliceFalloff);
-        mist += saturate((n - 0.5) * AbyssContrast + 0.5) * weight;
-        sliceSum += weight;
-    }
-    mist = mist / max(sliceSum, 1e-3);
-}
-float3 mistLight = AbyssColor.rgb * AbyssBrightness * mistShare * lerp(AbyssMistFloor, 1.0, mist * mist);
-// the floor itself gives way to the mist, so nothing of it shows through
-albedo *= 1.0 - mistShare * AbyssFloorHide;
-
-// the lip of a passage: the sides between a passage and a void, seen from either cell, near the top of the passages
+// the lip of a passage: the sides between a passage and a void, seen from either cell, and how far a point lies from the nearest of them in units
+// of the radius of the cell, at most 1, as it sees only the sides of its own cell
 uint lipBits = biomeOwn.a;
 uint lipOwn = (lipBits >> 6) & 1u;
+float ownVoid = (float)lipOwn;
 float lipDistance = 1.0;
 [unroll] for (int lipSide = 0; lipSide < 6; ++lipSide)
 {
@@ -2456,7 +2532,280 @@ float lipDistance = 1.0;
         lipDistance = min(lipDistance, apothem - dot(LocalUV, float2(cos(lipSide * biomeTurn), sin(lipSide * biomeTurn))));
     }
 }
+
+// the style of a void, bits 6 and 7 of blue (0 mist, 1 lava, 2 lake), and in bit K whether neighbor K is a void of another style
+uint styleBits = biomeOwn.b;
+uint voidStyle = (styleBits >> 6) & 3u;
+float lavaOwn = voidStyle == 1u ? ownVoid : 0.0;
+float lakeOwn = voidStyle == 2u ? ownVoid : 0.0;
+
+// far away the coarse mesh draws a void next to passages as a shallow cone, so it is shaded as if it fell its whole depth near its sides
+float coarseShare = saturate(smoothstep(CoarseDistance - CoarseBand, CoarseDistance + max(CoarseBand, 1.0), distance(CameraPos, WorldPos)) * AbyssFarCliff) * ownVoid;
+[branch] if (coarseShare > 0.001)
+{
+    float virtualDepth = (LevelHeight + DeepDepth) * smoothstep(0.0, max(AbyssCliffBand * apothem, 1e-3), lipDistance);
+    depthBelow = lerp(depthBelow, max(depthBelow, virtualDepth), coarseShare);
+}
+
+// the floor of the passages, on their tops: warm earth in pools of tone
+float topShare = (1.0 - smoothstep(0.0, max(CaveFloorTopDepth, 0.01), depthBelow)) * notPreview;
+albedo = lerp(albedo, albedo * CaveFloorTint.rgb * CaveFloorBrightness, topShare);
+albedo *= 1.0 + (cloudNoise.Value(WorldPos / max(CaveFloorPoolScale, 1.0) + 2.9) - 0.5) * 2.0 * CaveFloorPools * topShare;
+
+// paths of flagstones down the middle of the corridors and over the middle of halls, broken into worn stretches, dirt in their joints
+float flagMask = 0.0;
+[branch] if (topShare > 0.01 && CaveFlagLayer >= 0.0)
+{
+    flagMask = smoothstep(CaveFlagRimStart, max(CaveFlagRimEnd, CaveFlagRimStart + 1e-3), lipDistance)
+        * smoothstep(CaveFlagCover - CaveFlagSoftness, CaveFlagCover + CaveFlagSoftness, cloudNoise.Value(WorldPos / max(CaveFlagNoiseScale, 1.0) + 4.4)) * topShare;
+    [branch] if (flagMask > 0.01)
+    {
+        // the slabs are drawn from the planes of the world sharper than the other layers blend them, as two projections of a pattern of stones
+        // laid over each other show it twice
+        float3 flagPlanes = pow(abs(vertexNormal), max(CaveFlagSharpness, 1.0));
+        flagPlanes /= flagPlanes.x + flagPlanes.y + flagPlanes.z;
+        flagPlanes = saturate((flagPlanes - CaveFlagPlaneCut) / max(1.0 - CaveFlagPlaneCut, 1e-3));
+        flagPlanes /= flagPlanes.x + flagPlanes.y + flagPlanes.z;
+        FBiomeLayers flagLayers = layers;
+        flagLayers.Planes = flagPlanes;
+        float3 flagBend;
+        float4 flag = flagLayers.Sample(Colors, ColorsSampler, Normals, NormalsSampler, LayerParams, round(CaveFlagLayer), flagBend);
+        float floorHeight = dot(covers, float4(layerColors[0].a, layerColors[1].a, layerColors[2].a, layerColors[3].a));
+        float flagCover = saturate(((flagMask + flag.a * CaveFlagHeightBlend) - (1.0 - flagMask + floorHeight * CaveFlagHeightBlend)) / (2.0 * max(CaveFlagBlendDepth, 0.01)) + 0.5);
+        albedo = lerp(albedo, flag.rgb * CaveFlagTint.rgb, flagCover);
+        bend = lerp(bend, flagBend, flagCover);
+        flagMask = flagCover;
+    }
+}
+
+// small still pools of water, away from the rims, off the flagstones and out of the cells with objects (bit 6 of the alpha of the second biome
+// pixel), with a rim of wet earth; the water shows that earth at its shore and deepens to CavePuddleColor, and they fade out as the moss does
+float puddle = 0.0;
+[branch] if (topShare > 0.01 && ((biomeNear.a >> 6) & 1u) == 0u)
+{
+    float puddleDetail = 1.0 - smoothstep(CaveMossDetailFadeStart, max(CaveMossDetailFadeEnd, CaveMossDetailFadeStart + 1e-3), pixelWorld / max(CavePuddleScale, 1.0));
+    float puddleLevel = cloudNoise.Value(WorldPos / max(CavePuddleScale, 1.0) + 6.6) - CavePuddleCover
+        - (1.0 - smoothstep(0.0, max(CavePuddleRimGap, 1e-3), lipDistance)) - flagMask;
+    float puddleSoft = max(pixelWorld / max(CavePuddleScale, 1.0), CavePuddleEdge);
+    puddle = saturate(puddleLevel / max(puddleSoft, 1e-4) + 0.5) * puddleDetail * topShare;
+    float puddleWet = saturate((puddleLevel + CavePuddleRim) / max(CavePuddleRim, 1e-4)) * puddleDetail * topShare;
+    albedo *= 1.0 - CavePuddleWetDarkening * puddleWet;
+    float puddleDeep = saturate(puddleLevel / max(CavePuddleDepth, 1e-4));
+    albedo = lerp(albedo, CavePuddleColor.rgb, puddle * puddleDeep);
+    roughness = lerp(roughness, CavePuddleRoughness, puddle);
+    bend = lerp(bend, 0.0, puddle);
+    extraEmissive += CavePuddleSheen.rgb * puddle;
+}
+
+// glowing moss along the rims of the passages and down the upper walls of the voids, in patches, speckled, a smooth glow from far away
+[branch] if (notPreview > 0.5)
+{
+    float mossFloor = (1.0 - smoothstep((1.0 - CaveMossFade) * CaveMossReach, max(CaveMossReach, 1e-3), lipDistance)) * topShare * (1.0 - ownVoid);
+    float mossWall = ownVoid * (1.0 - smoothstep((1.0 - CaveMossFade) * CaveMossWallDepth, max(CaveMossWallDepth, 1.0), depthBelow));
+    float mossWhere = max(mossFloor, mossWall);
+    [branch] if (mossWhere > 0.001)
+    {
+        float mossPatch = smoothstep(CaveMossCover, lerp(CaveMossCover, 1.0, CaveMossSoftness), cloudNoise.Value(WorldPos / max(CaveMossPatchScale, 1.0) + 13.1));
+        float moss = mossWhere * mossPatch;
+        float speckleDetail = 1.0 - smoothstep(CaveMossDetailFadeStart, max(CaveMossDetailFadeEnd, CaveMossDetailFadeStart + 1e-3), pixelWorld / max(CaveMossSpeckleScale, 0.5));
+        float speckle = CaveMossFarGlow;
+        [branch] if (speckleDetail > 0.001)
+        {
+            float speck = smoothstep(CaveMossSpeckle, lerp(CaveMossSpeckle, 1.0, CaveMossSoftness), cloudNoise.Value(WorldPos / max(CaveMossSpeckleScale, 0.5) + 21.7));
+            speckle = lerp(CaveMossFarGlow, speck, speckleDetail);
+        }
+        albedo = lerp(albedo, CaveMossAlbedo.rgb, moss * CaveMossAlbedoShare);
+        extraEmissive += CaveMossColor.rgb * CaveMossGlow * moss * speckle;
+    }
+}
+
+// the normal again, with the flagstones, and flat on the water of a pool
+OutNormal = normalize(shadedNormal + (bend - shadedNormal * dot(bend, shadedNormal)) * BiomeNormalStrength);
+OutNormal = normalize(lerp(OutNormal, surfaceUp, puddle));
+
+// runes carved into a few walls of the voids, on the upper cliff below a passage, close up only
+[branch] if (ownVoid > 0.5 && notPreview > 0.5 && depthBelow > CaveRuneTop && depthBelow < CaveRuneTop + CaveRuneSize)
+{
+    float runeFade = 1.0 - smoothstep(CaveRuneFadeStart, max(CaveRuneFadeEnd, CaveRuneFadeStart + 1e-3), pixelWorld);
+    float runeAngle = atan2(LocalUV.y, LocalUV.x);
+    int runeSide = ((int)round(runeAngle / biomeTurn) + biomeSides) % biomeSides;
+    float runeHash = cloudNoise.Hash(float3(biomeCell, (float)runeSide) + 0.37);
+    [branch] if (runeFade > 0.001 && ((lipBits >> runeSide) & 1u) == 0u && runeHash < CaveRuneShare)
+    {
+        float2 sideDir = float2(cos(runeSide * biomeTurn), sin(runeSide * biomeTurn));
+        float along = dot(LocalUV, float2(-sideDir.y, sideDir.x)) * HexRadius;
+        float2 runePos = float2(along, depthBelow - CaveRuneTop - CaveRuneSize * 0.5) / max(CaveRuneSize, 1.0);
+        [branch] if (abs(runePos.x) < 0.5)
+        {
+            float runePick = frac(runeHash / max(CaveRuneShare, 1e-4) * 7.13);
+            int runeShape = min((int)(runePick * 8.0), 7);
+            int runeStrokes = frac(runePick * 13.7) < 0.5 ? 2 : 3;
+            float halfStroke = 0.5 * CaveRuneStroke / max(CaveRuneSize, 1.0);
+            float runeSoft = max(pixelWorld / max(CaveRuneSize, 1.0), 1e-4);
+            float groove = 1.0 - smoothstep(halfStroke - runeSoft, halfStroke + runeSoft, caveRunes.Glyph(runePos, runeShape, runeStrokes));
+            // the lip on the upper edge of a groove, where the point below it lies in the groove
+            float below = 1.0 - smoothstep(halfStroke - runeSoft, halfStroke + runeSoft, caveRunes.Glyph(runePos + float2(0.0, 2.0 * halfStroke), runeShape, runeStrokes));
+            float bevel = saturate(below - groove);
+            albedo *= (1.0 - CaveRuneDarkening * groove * runeFade) * (1.0 + CaveRuneBevel * bevel * runeFade);
+            extraEmissive += CaveRuneColor.rgb * CaveRuneGlow * groove * runeFade;
+        }
+    }
+}
+
+// the rock darkens down the cliffs, into the dark of the abyss, also above lava, which lights it in its own color (LavaCliffDaylight of the light
+// of the sky and the sun kept there, as the lit rock under the glow read pink)
+float3 rockAlbedo = albedo;
+float heightAboveVoidFloor = LevelHeight + DeepDepth - depthBelow;
+float lavaBand = (1.0 - smoothstep(0.0, max(LavaCliffReach, 1.0), heightAboveVoidFloor)) * lavaOwn;
+float abyssFade = smoothstep(AbyssFadeStart, max(AbyssFadeEnd, AbyssFadeStart + 1.0), depthBelow);
+albedo *= lerp(1.0, AbyssDarkness, abyssFade * (1.0 - lavaBand * LavaCliffDaylight));
+albedo *= lerp((float3)1.0, LavaLightColor.rgb, lavaBand * LavaCliffTint);
+
+// the mist of the floor of a void: a noise in slices under the floor along the view, laid front to back, so the deeper ones are darker and
+// hidden by those above, and what no slice covers shows the nearly black bottom; each drifts at its own pace
+float mistShare = smoothstep(AbyssMistStart, max(AbyssMistEnd, AbyssMistStart + 1.0), depthBelow);
+float3 mistLight = 0.0;
+[branch] if (mistShare > 0.001)
+{
+    float cosView = max(dot(-viewRay, surfaceUp), AbyssViewFloor);
+    float3 drift = float3(0.37, -0.21, 0.13) * Time * AbyssSpeed / max(AbyssScale, 1.0);
+    // the finer octave fades where a pixel covers much of its cells, as from far away it only speckles
+    float mistDetail = AbyssDetail * (1.0 - smoothstep(AbyssDetailFadeStart, max(AbyssDetailFadeEnd, AbyssDetailFadeStart + 1e-3),
+        (length(PosDdx) + length(PosDdy)) * AbyssDetailScale / max(AbyssScale, 1.0)));
+    float mistSum = 0.0;
+    float transmit = 1.0;
+    int slices = (int)clamp(round(AbyssSlices), 1.0, 6.0);
+    [loop] for (int slice = 0; slice < 6; ++slice)
+    {
+        if (slice >= slices)
+        {
+            break;
+        }
+        float sliceDepth = (slice + 0.5) * AbyssSliceDepth;
+        float3 at = WorldPos + viewRay * (sliceDepth / cosView);
+        float3 p = at / max(AbyssScale, 1.0) + drift * (1.0 + slice * AbyssSliceDrift) + slice * 7.31;
+        float n = lerp(cloudNoise.Value(p), cloudNoise.Value(p * AbyssDetailScale + 3.3), mistDetail * 0.5);
+        float density = saturate((n - AbyssMistThreshold) * AbyssContrast) * AbyssSliceOpacity;
+        mistSum += transmit * density * exp2(-sliceDepth / max(AbyssDepthHalf, 1.0));
+        transmit *= 1.0 - density;
+    }
+    mistLight = (AbyssColor.rgb * AbyssBrightness * mistSum + AbyssBottomColor.rgb * transmit) * mistShare;
+}
+// the floor itself gives way to the mist, so nothing of it shows through
+albedo *= 1.0 - mistShare * AbyssFloorHide;
+
+// lava and lakes on the floors of their voids, both fading to plain floor where they meet a void of another style
+[branch] if (lavaOwn + lakeOwn > 0.5)
+{
+    float styleEdge = 1.0;
+    uint otherStyles = styleBits & 63u;
+    [branch] if (otherStyles != 0u)
+    {
+        float edgeNoise = (cloudNoise.Value(WorldPos / max(VoidStyleEdgeNoiseScale, 1.0) + 12.5) - 0.5) * 2.0 * VoidStyleEdgeNoise;
+        [unroll] for (int styleSide = 0; styleSide < 6; ++styleSide)
+        {
+            if (styleSide < biomeSides && ((otherStyles >> styleSide) & 1u) != 0u)
+            {
+                float toSide = apothem - dot(LocalUV, float2(cos(styleSide * biomeTurn), sin(styleSide * biomeTurn)));
+                // nothing of it on the side itself, which the void beside it draws in its own style, so it never ends on a straight line
+                styleEdge = min(styleEdge, smoothstep(0.0, max(VoidStyleEdge, 1e-3), toSide + edgeNoise - VoidStyleEdgeNoise));
+            }
+        }
+    }
+    mistLight *= 1.0 - mistShare * styleEdge * (lavaOwn + lakeOwn * (1.0 - LakeMistKeep));
+    // the lava or the lake lies on the floor alone, the cliffs above it keep their rock
+    float styleFloor = mistShare * styleEdge * (1.0 - smoothstep(0.0, max(VoidFloorHeight, 1.0), heightAboveVoidFloor));
+    // a lake is darkest away from its shore, the sides towards a passage or a void of another style
+    float lakeDeep = smoothstep(0.0, max(LakeShoreReach, 1e-3), lipDistance) * styleEdge;
+    albedo = lerp(albedo, lavaOwn > 0.5 ? LavaCrustColor.rgb : lerp(LakeShoreColor.rgb, LakeColor.rgb, lakeDeep), styleFloor);
+    [branch] if (lavaOwn > 0.5)
+    {
+        // the cracks of the crust are the low parts of a noise that flows, their thin middle the brightest and yellower, and the whole breathes;
+        // far away, where a pixel covers much of a plate, they fade to the mean of their light, so the lava glows as a pool and does not speckle
+        float lavaDetail = 1.0 - smoothstep(LavaDetailFadeStart, max(LavaDetailFadeEnd, LavaDetailFadeStart + 1e-3), pixelWorld / max(LavaCrustScale, 1.0));
+        float3 lavaLight = LavaColor.rgb * LavaFarGlow;
+        float pulse = 1.0 + LavaPulse * sin(Time * LavaPulseSpeed);
+        [branch] if (lavaDetail > 0.001)
+        {
+            float3 flow = float3(0.21, 0.13, -0.17) * Time * LavaFlowSpeed / max(LavaCrustScale, 1.0);
+            // a finer octave breaks the plates of the crust into cracked edges
+            float3 crustPos = WorldPos / max(LavaCrustScale, 1.0) + flow + 17.3;
+            float crust = lerp(caveNoise.Value(crustPos), caveNoise.Value(crustPos * LavaCrustDetailScale - flow * LavaCrustDetailDrift + 5.1), LavaCrustDetail);
+            float inCrack = saturate(crust / max(LavaCrustShare, 1e-3));
+            float cracks = 1.0 - smoothstep(1.0 - LavaCrackEdge, 1.0, inCrack);
+            float core = 1.0 - smoothstep(0.0, LavaCoreShare, inCrack);
+            float3 crackLight = lerp(LavaColor.rgb, LavaCoreColor.rgb, core) * cracks * (1.0 + LavaCoreBrightness * core);
+            lavaLight = lerp(lavaLight, crackLight, lavaDetail);
+            pulse = 1.0 + LavaPulse * sin(Time * LavaPulseSpeed + crust * 6.2831853 * lavaDetail);
+        }
+        extraEmissive += lavaLight * LavaBrightness * pulse * styleFloor;
+        // the cliffs over it glow in the color of its light, by their rock and a little whatever the rock
+        extraEmissive += LavaLightColor.rgb * (rockAlbedo * LavaCliffLight + LavaCliffGlow) * lavaBand * styleEdge;
+    }
+    else
+    {
+        // a still lake: a sheen that does not hang on a grazing view alone, moved by a slow ripple
+        float cosUp = saturate(dot(-viewRay, surfaceUp));
+        float sheen = LakeSheenBase + (1.0 - LakeSheenBase) * pow(1.0 - cosUp, LakeSheenPower);
+        float ripple = (cloudNoise.Value(WorldPos / max(LakeRippleScale, 1.0) + float3(0.31, -0.17, 0.23) * Time * LakeRippleSpeed) - 0.5) * 2.0;
+        extraEmissive += LakeSheenColor.rgb * sheen * (1.0 + ripple * LakeRipple) * styleFloor;
+        roughness = lerp(roughness, LakeRoughness, styleFloor);
+        // still water lies flat
+        OutNormal = normalize(lerp(OutNormal, surfaceUp, styleFloor));
+        lakeFloor = styleFloor;
+    }
+}
+
 float lip = (1.0 - smoothstep(0.0, AbyssLipWidth, lipDistance)) * (1.0 - smoothstep(0.0, AbyssLipDepth, depthBelow));
+
+// pools of light under what glows and beside lava (CellCanopy, AHexPlanet::UpdateCanopy): a glowing cell is lit by its color times its strength,
+// all of it in its middle and falling to GlowPoolEdge only at its sides towards cells that do not glow, so a patch is one pool, and a cell beside it
+// takes the mean of its glowing neighbors over the sides towards them; the noise moves the line inside the cells and not on a side, where both
+// cells take GlowPoolEdge, and the light fades out down the cliffs and off the water of a pool. It lights the floor by its albedo and GlowPoolLight
+// of it whatever the albedo, so a tan floor turns the color of the glow
+float3 glowLight = 0.0;
+float3 glowAdd = 0.0;
+[branch] if (notPreview > 0.5)
+{
+    float4 glowPixel = CellCanopy.Load(int3(biomeCell, 0));
+    uint glowNear = biomeNear.a & 63u;
+    [branch] if (glowPixel.a > 0.0 || glowNear != 0u)
+    {
+        float glowJitter = (cloudNoise.Value(WorldPos / max(GlowPoolNoiseScale, 1.0) + 8.2) - 0.5) * 2.0 * GlowPoolNoise;
+        float glowNoiseReach = max(GlowPoolNoise, 1e-3);
+        float3 glowColor = glowPixel.rgb * glowPixel.rgb;
+        float glowShape = 0.0;
+        if (glowPixel.a > 0.0)
+        {
+            float glowFall = 0.0;
+            [unroll] for (int glowSide = 0; glowSide < 6; ++glowSide)
+            {
+                if (glowSide < biomeSides && ((glowNear >> glowSide) & 1u) == 0u)
+                {
+                    float toSide = apothem - dot(LocalUV, float2(cos(glowSide * biomeTurn), sin(glowSide * biomeTurn)));
+                    float moved = toSide + glowJitter * saturate(toSide / glowNoiseReach);
+                    glowFall = max(glowFall, 1.0 - smoothstep(0.0, max(apothem - GlowPoolInner, 1e-3), moved));
+                }
+            }
+            glowShape = glowPixel.a * lerp(1.0, GlowPoolEdge, glowFall);
+        }
+        else
+        {
+            [unroll] for (int glowSide = 0; glowSide < 6; ++glowSide)
+            {
+                if (glowSide < biomeSides && ((glowNear >> glowSide) & 1u) != 0u)
+                {
+                    float toSide = apothem - dot(LocalUV, float2(cos(glowSide * biomeTurn), sin(glowSide * biomeTurn)));
+                    float moved = toSide + glowJitter * saturate(toSide / glowNoiseReach);
+                    glowShape = max(glowShape, (1.0 - smoothstep(0.0, max(GlowPoolSpill, 1e-3), moved)) * GlowPoolEdge);
+                }
+            }
+        }
+        float3 glowPool = glowColor * glowShape * (1.0 - smoothstep(0.0, max(GlowPoolDepth, 1.0), max(depthBelow, 0.0))) * (1.0 - puddle);
+        glowLight = glowPool * GlowPoolStrength;
+        glowAdd = glowPool * GlowPoolLight;
+    }
+}
 
 // the Links tab of the editor (AHexPlanet::UpdateLinkMarks): the blue of CellMarks is 1 + the network of a passage, 9 where something is wrong and
 // 10 for a passage no exit reaches; the cell takes LinksTint of that color and glows by LinksGlow of it, also on the mist of a void
@@ -2472,15 +2821,37 @@ float3 linkGlow = 0.0;
 
 // the grid lines show on the passages and fade out down the cliffs; the outlines show everywhere, for painting the voids
 float opacity = GridOpacity * (1.0 - smoothstep(0.0, AbyssGridFade, depthBelow - 0.5));
-float3 color = lerp(albedo, albedo * GridDarkness, gridLine * opacity);
-OutRoughness = Roughness;
-OutEmissive = lerp(color * (Ambient + Glow * Alpha * PreviewTile) + mistLight + AbyssLipColor.rgb * lip + linkGlow, markColor * MarkGlow, markLine);
+// no grid line on the water of a pool
+float3 color = lerp(albedo, albedo * GridDarkness, gridLine * opacity * (1.0 - puddle));
+OutRoughness = roughness;
+// the floor of a void gives way to the mist and reflects nothing, as the uniform light of the sky would lay a grey sheen over the dark, but a lake
+// and a pool reflect as water does, a little; 0.5 is the specular of the engine for everything else
+OutSpecular = lerp(lerp(0.5 * (1.0 - mistShare * AbyssFloorHide), CavePuddleSpecular, puddle), LakeSpecular, lakeFloor);
+OutEmissive = lerp(color * (Ambient + Glow * Alpha * PreviewTile + glowLight) + glowAdd + mistLight + AbyssLipColor.rgb * lip + linkGlow + extraEmissive, markColor * MarkGlow, markLine);
 return lerp(color, markColor, markLine);
 '''
-UNDERGROUND_PARAMETERS = ['LevelHeight', 'AbyssFadeStart', 'AbyssFadeEnd', 'AbyssDarkness', 'AbyssColor', 'AbyssBrightness', 'AbyssMistStart', 'AbyssMistEnd',
-    'AbyssScale', 'AbyssDetail', 'AbyssContrast', 'AbyssSlices', 'AbyssSliceDepth', 'AbyssSpeed', 'AbyssViewFloor', 'AbyssDetailScale', 'AbyssDetailFadeStart',
-    'AbyssDetailFadeEnd', 'AbyssSliceDrift', 'AbyssSliceFalloff', 'AbyssMistFloor', 'AbyssFloorHide', 'AbyssLipColor', 'AbyssLipWidth', 'AbyssLipDepth', 'AbyssGridFade', 'Roughness',
-    'ProblemColor', 'LinksOrphanColor', 'LinksTint', 'LinksGlow']
+UNDERGROUND_PARAMETERS = ['LevelHeight', 'HexRadius', 'CoarseDistance', 'CoarseBand', 'AbyssFadeStart', 'AbyssFadeEnd', 'AbyssDarkness', 'AbyssColor', 'AbyssBrightness',
+    'AbyssMistStart', 'AbyssMistEnd', 'AbyssScale', 'AbyssDetail', 'AbyssContrast', 'AbyssSlices', 'AbyssSliceDepth', 'AbyssSpeed', 'AbyssViewFloor', 'AbyssDetailScale',
+    'AbyssDetailFadeStart', 'AbyssDetailFadeEnd', 'AbyssSliceDrift', 'AbyssSliceOpacity', 'AbyssDepthHalf', 'AbyssBottomColor', 'AbyssMistThreshold', 'AbyssCliffBand',
+    'AbyssFarCliff', 'AbyssFloorHide', 'AbyssLipColor', 'AbyssLipWidth', 'AbyssLipDepth', 'AbyssGridFade', 'Roughness',
+    'ProblemColor', 'LinksOrphanColor', 'LinksTint', 'LinksGlow',
+    'CaveFloorTint', 'CaveFloorBrightness', 'CaveFloorPools', 'CaveFloorPoolScale', 'CaveFloorTopDepth',
+    'CaveFlagRimStart', 'CaveFlagRimEnd', 'CaveFlagCover', 'CaveFlagSoftness', 'CaveFlagNoiseScale', 'CaveFlagHeightBlend', 'CaveFlagBlendDepth', 'CaveFlagTint',
+    'CaveFlagSharpness', 'CaveFlagPlaneCut',
+    'CaveMossReach', 'CaveMossWallDepth', 'CaveMossPatchScale', 'CaveMossCover', 'CaveMossSpeckleScale', 'CaveMossSpeckle', 'CaveMossDetailFadeStart',
+    'CaveMossDetailFadeEnd', 'CaveMossFarGlow', 'CaveMossAlbedo', 'CaveMossAlbedoShare', 'CaveMossColor', 'CaveMossGlow', 'CaveMossSoftness', 'CaveMossFade',
+    'GlowPoolStrength', 'GlowPoolEdge', 'GlowPoolInner', 'GlowPoolNoise', 'GlowPoolNoiseScale', 'GlowPoolSpill', 'GlowPoolDepth', 'GlowPoolLight',
+    'CavePuddleScale', 'CavePuddleCover', 'CavePuddleRimGap', 'CavePuddleRim', 'CavePuddleWetDarkening', 'CavePuddleColor', 'CavePuddleRoughness', 'CavePuddleSheen',
+    'CavePuddleSpecular', 'CavePuddleDepth', 'CavePuddleEdge',
+    'CaveRuneShare', 'CaveRuneTop', 'CaveRuneSize', 'CaveRuneStroke', 'CaveRuneDarkening', 'CaveRuneBevel', 'CaveRuneColor', 'CaveRuneGlow', 'CaveRuneFadeStart',
+    'CaveRuneFadeEnd',
+    'LavaColor', 'LavaBrightness', 'LavaCoreShare', 'LavaCoreBrightness', 'LavaCrustColor', 'LavaCrustScale', 'LavaCrustShare', 'LavaFlowSpeed', 'LavaPulse',
+    'LavaPulseSpeed', 'LavaCliffLight', 'LavaCliffGlow', 'LavaCliffReach', 'VoidStyleEdge', 'VoidStyleEdgeNoise', 'VoidStyleEdgeNoiseScale', 'VoidFloorHeight',
+    'LavaCoreColor', 'LavaLightColor', 'LavaCrackEdge', 'LavaCliffDaylight', 'LavaCliffTint', 'LavaCrustDetail', 'LavaCrustDetailScale', 'LavaCrustDetailDrift', 'LavaDetailFadeStart', 'LavaDetailFadeEnd', 'LavaFarGlow',
+    'LakeColor', 'LakeShoreColor', 'LakeShoreReach', 'LakeSheenColor', 'LakeSheenBase', 'LakeSheenPower', 'LakeRipple', 'LakeRippleScale', 'LakeRippleSpeed', 'LakeRoughness', 'LakeSpecular', 'LakeMistKeep']
+# a literal of a value the config tunes must not creep into the code: every parameter of the list has to be read by it
+for _name in UNDERGROUND_PARAMETERS:
+    assert _name in UNDERGROUND_CODE, _name
 # the colors of the networks, NetworkColors of the surface, which AHexPlanet::SetLinksShown gives the material, as a config gives no arrays
 LINK_NETWORK_COLORS = [(1.0, 0.55, 0.1), (0.1, 0.7, 1.0), (0.95, 0.25, 0.8), (0.45, 0.95, 0.15), (0.6, 0.4, 1.0), (1.0, 0.22, 0.18), (0.15, 0.95, 0.75), (1.0, 0.9, 0.25)]
 
@@ -2498,7 +2869,7 @@ def build_underground_material():
     custom.set_editor_property('output_type', unreal.CustomMaterialOutputType.CMOT_FLOAT3)
     outputs = []
     for output_name, output_type in (('OutEmissive', unreal.CustomMaterialOutputType.CMOT_FLOAT3), ('OutNormal', unreal.CustomMaterialOutputType.CMOT_FLOAT3),
-                                     ('OutRoughness', unreal.CustomMaterialOutputType.CMOT_FLOAT1)):
+                                     ('OutRoughness', unreal.CustomMaterialOutputType.CMOT_FLOAT1), ('OutSpecular', unreal.CustomMaterialOutputType.CMOT_FLOAT1)):
         output = unreal.CustomOutput()
         output.set_editor_property('output_name', output_name)
         output.set_editor_property('output_type', output_type)
@@ -2531,12 +2902,15 @@ def build_underground_material():
         ('Colors', add_texture(library, material, COLORS, 'Colors', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 3400), ''),
         ('Normals', add_texture(library, material, NORMALS, 'Normals', unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL, 3450), ''),
         ('LayerParams', add_texture(library, material, DEFAULT_MARKS, 'LayerParams', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 3460), ''),
+        # the pool of light of each cell (GLOW_POOL_CODE), read with Load, and the layer of the flagstones, found by name (AHexPlanet::SetBiomeLayers)
+        ('CellCanopy', add_texture(library, material, DEFAULT_MARKS, 'CellCanopy', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 3470), ''),
+        ('CaveFlagLayer', add_scalar(library, material, 'CaveFlagLayer', -1.0, 3480), ''),
         ('PreviewTile', add_scalar(library, material, 'PreviewTile', 0.0, 3500), ''),
         ('FacetShare', add_uv_channel(library, material, 1, 'r', 3525), ''),
         ('CreviceShare', add_uv_channel(library, material, 1, 'g', 3540), ''),
         ] + [('%sLayers%d' % (kind, group), add_vector4(library, material, '%sLayers%d' % (kind, group), unreal.LinearColor(*table[group * 4:group * 4 + 4]),
             3545 + group * 5), '') for kind, table in (('Beach', BEACH_LAYERS), ('Rock', ROCK_LAYERS), ('Seabed', SEABED_LAYERS)) for group in range(3)
-        ] + add_config_parameters(library, material, unreal.HexPlanetConfig, BIOME_PARAMETERS + UNDERGROUND_PARAMETERS, 3600) + [
+        ] + add_config_parameters(library, material, unreal.HexPlanetConfig, BIOME_PARAMETERS + [name for name in UNDERGROUND_PARAMETERS if name not in BIOME_PARAMETERS], 3600) + [
         ('NetworkColor%d' % index, add_vector(library, material, 'NetworkColor%d' % index, unreal.LinearColor(*color, 1.0), 5600 + index * 50), '')
         for index, color in enumerate(LINK_NETWORK_COLORS)]
 
@@ -2553,6 +2927,7 @@ def build_underground_material():
     library.connect_material_property(custom, 'OutEmissive', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
     library.connect_material_property(custom, 'OutNormal', unreal.MaterialProperty.MP_NORMAL)
     library.connect_material_property(custom, 'OutRoughness', unreal.MaterialProperty.MP_ROUGHNESS)
+    library.connect_material_property(custom, 'OutSpecular', unreal.MaterialProperty.MP_SPECULAR)
 
     # the same mask as M_HexPlanet, for the debug view and the band where the pieces dissolve into the coarse mesh, which the masked copy
     # M_HexUnderground_Cut draws (AHexPlanet finds it by name)
@@ -2749,10 +3124,214 @@ def build_marker_materials():
     assets.save_asset(SHAFT_MATERIAL)
 
 
-def build_underground():
+# the cave objects of the underground (UHexPlanetObjects, Tools/HexPlanetObjects/generate_cave_objects.py): the color of their vertices, linear as
+# the generator wrote it (the glTF import undoes the sRGB encoding the engine gives vertex colors), lighter or darker by instance (CaveObjectTint)
+# and broken by the value noise of NOISE_CODE, without a texture; where a vertex glows (its alpha) its color darkens and it glows in the GlowColor
+# of its set, which breathes by GlowPulse at its own phase, and the rest gives Ambient as the ground does, so it does not stand black in the dim
+# light. No light of its own: Lumen carries the glow onto the rock around
+CAVE_OBJECT_MATERIAL = FOLDER + '/M_HexPlanetCave'
+CAVE_OBJECT_CODE = NOISE_CODE + r'''
+float glowMask = saturate(VertexAlpha);
+float3 albedo = VertexRGB.rgb * (1.0 + (InstanceRandom * 2.0 - 1.0) * CaveObjectTint);
+float noise = cloudNoise.Value(WorldPos / max(CaveObjectNoiseScale, 0.01));
+albedo *= lerp(1.0, CaveObjectNoiseMin + CaveObjectNoiseSpan * noise, CaveObjectNoise);
+albedo *= 1.0 - CaveObjectGlowDarkening * glowMask;
+float breathe = 1.0 - GlowPulse + GlowPulse * (0.5 + 0.5 * sin(Time * GlowPulseSpeed + InstanceRandom * 6.2831853));
+OutEmissive = GlowColor.rgb * GlowStrength * glowMask * breathe + albedo * Ambient;
+return albedo;
+'''
+CAVE_OBJECT_PARAMETERS = ['CaveObjectTint', 'CaveObjectNoise', 'CaveObjectNoiseScale', 'CaveObjectNoiseMin', 'CaveObjectNoiseSpan', 'CaveObjectGlowDarkening',
+                          'Ambient']
+CAVE_OBJECT_GLOW_PARAMETERS = ['GlowColor', 'GlowStrength', 'GlowPulse', 'GlowPulseSpeed']
+
+
+def build_cave_object_material():
+    library = unreal.MaterialEditingLibrary
+    assets = unreal.EditorAssetLibrary
+    material = unreal.load_asset(CAVE_OBJECT_MATERIAL) if assets.does_asset_exist(CAVE_OBJECT_MATERIAL) else unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+        CAVE_OBJECT_MATERIAL.split('/')[-1], FOLDER, unreal.Material, unreal.MaterialFactoryNew())
+    clear_expressions(material)
+    material.set_editor_property('used_with_instanced_static_meshes', True)
+    vertex_color = library.create_material_expression(material, unreal.MaterialExpressionVertexColor, -1000, 100)
+    connections = [('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1100, 0), ''),
+        ('VertexRGB', vertex_color, ''), ('VertexAlpha', vertex_color, 'A'),
+        ('Time', library.create_material_expression(material, unreal.MaterialExpressionTime, -900, 200), ''),
+        ('InstanceRandom', library.create_material_expression(material, unreal.MaterialExpressionPerInstanceRandom, -900, 225), '')
+        ] + add_config_parameters(library, material, unreal.HexPlanetConfig, CAVE_OBJECT_PARAMETERS, 300) + add_config_parameters(
+        library, material, unreal.HexPlanetObjectSet, CAVE_OBJECT_GLOW_PARAMETERS, 800)
+    custom = add_custom(library, material, CAVE_OBJECT_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, connections, 0,
+        ('OutEmissive', unreal.CustomMaterialOutputType.CMOT_FLOAT3))
+    library.connect_material_property(custom, '', unreal.MaterialProperty.MP_BASE_COLOR)
+    library.connect_material_property(custom, 'OutEmissive', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    roughness = add_config_parameters(library, material, unreal.HexPlanetConfig, ['CaveObjectRoughness'], 1100)[0][1]
+    library.connect_material_property(roughness, '', unreal.MaterialProperty.MP_ROUGHNESS)
+    library.recompile_material(material)
+    assets.save_asset(CAVE_OBJECT_MATERIAL)
+    return material
+
+
+# The motes and spores of the underground (UHexPlanetMotes, bMotes of DA_HexUnderground), quads of a plane, additive and unlit. Each vertex is moved
+# in its world position offset, so the CPU sends only MoteOrigin, the point the camera looks at, and MotePixelScale. A mote (MoteAnchored 0, custom
+# data its seed) wraps in a box of the world MoteBox wide around MoteOrigin, so it stays where it is in the world while the box follows the camera
+# and drifts by MoteDrift, and is laid along the direction from the center on the shell over the passages, from MoteHeightBelow below their tops to
+# MoteHeightAbove above them, so every mote lies in that band; a spore (MoteAnchored 1, custom data its color and seed) rises SporeRise from its
+# instance over SporeLife, swirling SporeSwirl around the up of its cell. The quad faces the camera and is never under Mote/SporeMinPixels. The
+# light fades at the faces of the box and the ends of the band, deeper below the passages as the slices of the mist do (AbyssDepthHalf), next to
+# the camera and as the camera is far from MoteOrigin; MOTE_COMMON_CODE is shared by the offset and the emissive, which finds the same mote. A
+# spore stands at its instance, whose position only the vertex shader has (in a pixel shader Object Position is that of the component, the root of
+# the planet, so the spores drew nothing), so the emissive takes it from the vertices through an interpolator
+MOTE_MATERIAL = FOLDER + '/M_HexPlanetMote'
+MOTE_COMMON_CODE = r'''
+float3 moteCenter;
+float3 moteColor;
+float moteSeed;
+float moteFade = 1.0;
+float moteSize;
+if (MoteAnchored > 0.5)
+{
+    moteColor = CustomData.rgb * SporeBrightness;
+    moteSeed = CustomData.a;
+    float3 moteUp = normalize(ObjectPos);
+    float3 moteSide = normalize(cross(moteUp, abs(moteUp.z) < 0.99 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0)));
+    float3 moteOther = cross(moteUp, moteSide);
+    float life = frac(Time / max(SporeLife, 0.1) + moteSeed);
+    float swirl = (moteSeed + life) * 6.2831853;
+    moteCenter = ObjectPos + moteUp * (life * SporeRise) + (moteSide * cos(swirl) + moteOther * sin(swirl)) * SporeSwirl * life;
+    moteFade = sin(life * 3.14159265);
+    moteSize = max(SporeSize, SporeMinPixels * distance(CameraPos, moteCenter) * MotePixelScale);
+}
+else
+{
+    moteColor = MoteColor.rgb * MoteBrightness;
+    moteSeed = CustomData.a;
+    float3 phase = CustomData.rgb * 6.2831853 + Time * MoteWobbleSpeed * float3(1.0, 1.31, 0.77);
+    float3 wobble = float3(sin(phase.x), sin(phase.y), sin(phase.z)) * MoteWobble;
+    float box = max(MoteBox, 1.0);
+    float3 boxShare = frac(CustomData.rgb + (MoteDrift.xyz * Time + wobble - MoteOrigin.xyz) / box);
+    float3 inBox = MoteOrigin.xyz + (boxShare - 0.5) * box;
+    float span = max(MoteHeightBelow + MoteHeightAbove, 1.0);
+    float heightShare = frac(moteSeed + MoteDrift.z * Time / span);
+    float moteHeight = lerp(-MoteHeightBelow, MoteHeightAbove, heightShare) + wobble.z;
+    moteCenter = normalize(inBox) * (PlanetRadius + LevelHeight + moteHeight);
+    float3 toFace = min(boxShare, 1.0 - boxShare);
+    float edge = max(MoteEdgeFade, 1e-3);
+    moteFade = smoothstep(0.0, edge, toFace.x) * smoothstep(0.0, edge, toFace.y) * smoothstep(0.0, edge, toFace.z)
+        * smoothstep(0.0, edge, heightShare) * smoothstep(0.0, edge, 1.0 - heightShare);
+    moteSize = max(MoteSize, MoteMinPixels * distance(CameraPos, moteCenter) * MotePixelScale);
+}
+'''
+MOTE_OFFSET_CODE = MOTE_COMMON_CODE + r'''
+// a quad facing the camera, from the corners of the plane by its UV
+float3 offset = moteCenter + (ViewRight * (UV.x - 0.5) + ViewUp * (0.5 - UV.y)) * moteSize - WorldPos;
+// never past the bound the bounds of the instances are padded by, so no mote is culled while it is on the screen
+return offset * min(1.0, MoteWpoBound / max(length(offset), 1e-3));
+'''
+MOTE_CODE = MOTE_COMMON_CODE + r'''
+float disc = saturate(1.0 - length(UV - 0.5) * 2.0);
+float twinkle = 1.0 - MoteTwinkle + MoteTwinkle * (0.5 + 0.5 * sin(Time * MoteWobbleSpeed * 6.2831853 * (1.0 + moteSeed) + moteSeed * 17.0));
+float depth = max(LevelHeight - (length(moteCenter) - PlanetRadius), 0.0);
+float deep = exp2(-depth / max(AbyssDepthHalf, 1.0));
+float moteNear = smoothstep(0.0, max(MoteNearFade, 1.0), distance(CameraPos, moteCenter));
+float moteFar = 1.0 - smoothstep(MoteFadeStart, max(MoteFadeEnd, MoteFadeStart + 1.0), distance(CameraPos, MoteOrigin.xyz));
+return moteColor * disc * disc * twinkle * moteFade * deep * moteNear * moteFar;
+'''
+MOTE_PARAMETERS = ['LevelHeight', 'MoteBox', 'MoteHeightBelow', 'MoteHeightAbove', 'MoteSize', 'MoteMinPixels', 'MoteColor', 'MoteBrightness', 'MoteDrift',
+    'MoteWobble', 'MoteWobbleSpeed', 'MoteTwinkle', 'MoteEdgeFade', 'MoteNearFade', 'MoteFadeStart', 'MoteFadeEnd', 'AbyssDepthHalf', 'SporeSize',
+    'SporeMinPixels', 'SporeBrightness', 'SporeRise', 'SporeLife', 'SporeSwirl']
+for _name in MOTE_PARAMETERS:
+    assert _name in MOTE_CODE or _name in MOTE_OFFSET_CODE, _name
+
+
+def get_mote_bound():
+    """How far M_HexPlanetMote may move a vertex from its instance, from the values of DA_HexUnderground (UHexPlanetConfig::GetMoteWpoBound)"""
+    config = unreal.load_asset(UNDERGROUND_CONFIG) if unreal.EditorAssetLibrary.does_asset_exist(UNDERGROUND_CONFIG) else unreal.get_default_object(unreal.HexPlanetConfig)
+    values = [config.get_editor_property(name) for name in ('mote_box', 'mote_height_below', 'mote_height_above', 'spore_rise', 'spore_swirl')]
+    return 1.75 * values[0] + sum(values[1:])
+
+
+def add_custom_data4(library, material, y):
+    """The four custom data of an instance as one float4"""
+    channels = []
+    for index in range(4):
+        data = library.create_material_expression(material, unreal.MaterialExpressionPerInstanceCustomData, -1200, y + index * 50)
+        data.set_editor_property('data_index', index)
+        channels.append(data)
+    first = library.create_material_expression(material, unreal.MaterialExpressionAppendVector, -1000, y)
+    library.connect_material_expressions(channels[0], '', first, 'A')
+    library.connect_material_expressions(channels[1], '', first, 'B')
+    second = library.create_material_expression(material, unreal.MaterialExpressionAppendVector, -900, y)
+    library.connect_material_expressions(first, '', second, 'A')
+    library.connect_material_expressions(channels[2], '', second, 'B')
+    third = library.create_material_expression(material, unreal.MaterialExpressionAppendVector, -800, y)
+    library.connect_material_expressions(second, '', third, 'A')
+    library.connect_material_expressions(channels[3], '', third, 'B')
+    return third
+
+
+def add_view_axis(library, material, axis, y):
+    """An axis of the view (1, 0, 0 right, 0, 1, 0 up) in world space"""
+    constant = library.create_material_expression(material, unreal.MaterialExpressionConstant3Vector, -1100, y)
+    constant.set_editor_property('constant', unreal.LinearColor(axis[0], axis[1], axis[2], 0.0))
+    transform = library.create_material_expression(material, unreal.MaterialExpressionTransform, -900, y)
+    transform.set_editor_property('transform_source_type', unreal.MaterialVectorCoordTransformSource.TRANSFORMSOURCE_VIEW)
+    transform.set_editor_property('transform_type', unreal.MaterialVectorCoordTransform.TRANSFORM_WORLD)
+    library.connect_material_expressions(constant, '', transform, '')
+    return transform
+
+
+def build_mote_material():
+    library = unreal.MaterialEditingLibrary
+    assets = unreal.EditorAssetLibrary
+    material = unreal.load_asset(MOTE_MATERIAL) if assets.does_asset_exist(MOTE_MATERIAL) else unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+        MOTE_MATERIAL.split('/')[-1], FOLDER, unreal.Material, unreal.MaterialFactoryNew())
+    clear_expressions(material)
+    material.set_editor_property('used_with_instanced_static_meshes', True)
+    material.set_editor_property('blend_mode', unreal.BlendMode.BLEND_ADDITIVE)
+    material.set_editor_property('shading_model', unreal.MaterialShadingModel.MSM_UNLIT)
+    material.set_editor_property('two_sided', True)
+    bound = get_mote_bound()
+    # pads the bounds of each instance for the culling of instances on the GPU, as the offset may take a mote anywhere in its box
+    material.set_editor_property('max_world_position_offset_displacement', bound)
+
+    def inputs(y, pixel):
+        object_position = library.create_material_expression(material, unreal.MaterialExpressionObjectPositionWS, -1300, y + 100)
+        if pixel:
+            # the position of the instance, from the vertex shader, the same at every vertex of its quad
+            interpolator = library.create_material_expression(material, unreal.MaterialExpressionVertexInterpolator, -1100, y + 100)
+            library.connect_material_expressions(object_position, '', interpolator, '')
+            object_position = interpolator
+        return [('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1100, y), ''),
+            ('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1100, y + 50), ''),
+            ('ObjectPos', object_position, ''),
+            ('Time', library.create_material_expression(material, unreal.MaterialExpressionTime, -1100, y + 150), ''),
+            ('UV', library.create_material_expression(material, unreal.MaterialExpressionTextureCoordinate, -1100, y + 200), ''),
+            ('CustomData', add_custom_data4(library, material, y + 250), ''),
+            ('ViewRight', add_view_axis(library, material, (1.0, 0.0, 0.0), y + 500), ''),
+            ('ViewUp', add_view_axis(library, material, (0.0, 1.0, 0.0), y + 550), ''),
+            ('MoteOrigin', add_vector(library, material, 'MoteOrigin', unreal.LinearColor(0.0, 0.0, 0.0, 0.0), y + 600), ''),
+            ('MotePixelScale', add_scalar(library, material, 'MotePixelScale', 2.0 / 1280.0, y + 650), ''),
+            ('MoteAnchored', add_scalar(library, material, 'MoteAnchored', 0.0, y + 700), ''),
+            ('MoteWpoBound', add_scalar(library, material, 'MoteWpoBound', bound, y + 750), ''),
+            ('PlanetRadius', add_scalar(library, material, 'PlanetRadius', 11503.0, y + 800), ''),
+            ] + add_config_parameters(library, material, unreal.HexPlanetConfig, MOTE_PARAMETERS, y + 850)
+
+    custom = add_custom(library, material, MOTE_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, inputs(0, True), 0)
+    library.connect_material_property(custom, '', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    offset = add_custom(library, material, MOTE_OFFSET_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, inputs(3000, False), 3000)
+    library.connect_material_property(offset, '', unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
+    library.recompile_material(material)
+    assets.save_asset(MOTE_MATERIAL)
+    unreal.log('PLANET %s: offsets bound to %.0f' % (MOTE_MATERIAL, bound))
+    return material
+
+
+def build_underground(markers=True):
     build_underground_material()
     build_underground_fog()
-    build_marker_materials()
+    if markers:
+        build_marker_materials()
+    build_cave_object_material()
+    build_mote_material()
 
 
 def main():
@@ -2761,9 +3340,10 @@ def main():
     if 'configs' in sys.argv[1:]:
         unreal.log('PLANET configs created')
         return
-    # with underground only the materials of the underground and the markers of the entrances
+    # with underground only the materials of the underground, the cave objects and the motes, and with markers too those of the markers of the
+    # entrances, which otherwise are saved again with the same graphs, as binary churn in LFS
     if 'underground' in sys.argv[1:]:
-        build_underground()
+        build_underground('markers' in sys.argv[1:])
         unreal.log('PLANET underground assets created')
         return
     material = build_material()

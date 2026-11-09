@@ -1,11 +1,14 @@
 """Makes the seamless surface textures of the biomes: one color with height in alpha and one normal per layer.
 
-Run with: blender --background --factory-startup --python build_biome_textures.py
+Run with: blender --background --factory-startup --python build_biome_textures.py [-- <Layer> ...]
 Any Python with numpy works too. Writes PNG files to Saved/HexTextures. Then run import_biome_textures.py with the commandlet.
-The order of LAYERS is the TerrainLayer and MountainRockLayer numbers in the biome assets.
+The order of LAYERS is the TerrainLayer and MountainRockLayer numbers in the biome assets. APPENDED_LAYERS are layers that DA_HexTerrainLayers
+finds by name, past the photo-scanned ones, such as the flagstones of the underground. Names after -- write only those layers, so the others
+and T_HexNoise stay byte for byte as they are (import_biome_textures.py appended then imports only the appended ones).
 """
 
 import os
+import sys
 import struct
 import zlib
 
@@ -134,6 +137,64 @@ def make_steppe(rng):
     return color, unit(blades) * 0.5 + unit(large) * 0.3 + (1.0 - bare) * 0.2, 0.55
 
 
+def make_flagstones(rng):
+    """Worn flagstones of the paths of the underground, seen from above: irregular slabs of a periodic Voronoi of 7 x 7 jittered seeds, in a low
+    region of about a third of the tile hexagonal tiles of a regular hex lattice instead, each slab of its own tone with a fine grain, bevelled,
+    a few cracked and about one in eight missing, filled with the dark earth of the joints"""
+    coords = (np.arange(SIZE) + 0.5) / SIZE
+    x, y = np.meshgrid(coords, coords, indexing='ij')
+    # where the hex tiles lie, a low noise of the whole tile
+    region = unit(spectrum_noise(rng, 1.6, 1.0, 3.0))
+    hex_mask = region > np.quantile(region, 0.7)
+
+    # the seeds: a jittered grid of 7 x 7 outside the hex region, and a hex lattice of 7 x 8 inside it, both periodic in the tile
+    seeds = []
+    for i in range(7):
+        for j in range(7):
+            seeds.append(((i + 0.5 + rng.uniform(-0.38, 0.38)) / 7.0, (j + 0.5 + rng.uniform(-0.38, 0.38)) / 7.0, False))
+    for j in range(8):
+        for i in range(7):
+            seeds.append(((i + 0.25 + 0.5 * (j % 2)) / 7.0, (j + 0.5) / 8.0, True))
+    mask_at = lambda sx, sy: hex_mask[int(sx * SIZE) % SIZE, int(sy * SIZE) % SIZE]
+    seeds = [(sx % 1.0, sy % 1.0) for sx, sy, hexagonal in seeds if mask_at(sx, sy) == hexagonal]
+
+    # the nearest and second nearest seed of every pixel, the edges wrapping around, so the tile repeats
+    first = np.full((SIZE, SIZE), 9.0)
+    second = np.full((SIZE, SIZE), 9.0)
+    nearest = np.zeros((SIZE, SIZE), np.int32)
+    for index, (sx, sy) in enumerate(seeds):
+        dx = np.abs(x - sx)
+        dx = np.minimum(dx, 1.0 - dx)
+        dy = np.abs(y - sy)
+        dy = np.minimum(dy, 1.0 - dy)
+        distance = np.sqrt(dx * dx + dy * dy)
+        closer = distance < first
+        second = np.where(closer, first, np.minimum(second, distance))
+        nearest = np.where(closer, index, nearest)
+        first = np.where(closer, distance, first)
+    edge = second - first
+
+    # joints of dark earth, their width wobbled by noise, and bevelled slabs inside them
+    wobble = spectrum_noise(rng, 1.0, 6.0, 40.0)
+    joint_width = 0.008 * (1.0 + 0.5 * wobble)
+    slab = smooth(joint_width, joint_width + 0.012, edge)
+    tones = rng.uniform(0.0, 1.0, len(seeds))
+    heights = rng.uniform(0.7, 0.9, len(seeds))
+    missing = rng.uniform(0.0, 1.0, len(seeds)) < 0.12
+    tone = tones[nearest]
+    slab = slab * (~missing[nearest])
+    grain = spectrum_noise(rng, 0.3, 90.0)
+    stone = mix((0.16, 0.14, 0.12), (0.30, 0.27, 0.22), tone) * (0.9 + 0.2 * unit(grain))[..., None]
+    # cracks of a ridged noise across some slabs, darker and lower
+    cracks = smooth(0.975, 0.993, 1.0 - np.abs(spectrum_noise(rng, 1.3, 4.0, 30.0))) * (unit(spectrum_noise(rng, 1.2, 2.0)) > 0.6)
+    stone = stone * (1.0 - 0.45 * cracks[..., None])
+    dirt_noise = unit(spectrum_noise(rng, 0.8, 20.0))
+    dirt = mix((0.08, 0.06, 0.045), (0.11, 0.085, 0.06), dirt_noise)
+    color = dirt * (1.0 - slab[..., None]) + stone * slab[..., None]
+    height = (0.1 + 0.15 * dirt_noise) * (1.0 - slab) + (heights[nearest] + 0.04 * grain - 0.15 * cracks) * slab
+    return color, np.clip(height, 0.0, 1.0), 0.8
+
+
 LAYERS = [
     ('Grass', make_grass),
     ('Sand', make_sand),
@@ -145,6 +206,10 @@ LAYERS = [
     ('Basalt', lambda rng: make_rock(rng, (0.012, 0.012, 0.014), (0.085, 0.08, 0.08))),
     ('Tundra', make_tundra),
     ('Steppe', make_steppe),
+]
+# layers past the photo-scanned ones, which DA_HexTerrainLayers finds by name (import_biome_textures.py appended); their seeds follow LAYERS
+APPENDED_LAYERS = [
+    ('CaveFlagstones', make_flagstones),
 ]
 
 
@@ -177,7 +242,15 @@ def get_normal(height, strength):
 
 def main():
     os.makedirs(OUTPUT, exist_ok=True)
-    for index, (name, make) in enumerate(LAYERS):
+    # names after -- (as Blender passes the arguments of the script) write only those layers
+    chosen = sys.argv[sys.argv.index('--') + 1:] if '--' in sys.argv else []
+    every = LAYERS + APPENDED_LAYERS
+    unknown = [name for name in chosen if name not in [each for each, _ in every]]
+    if unknown:
+        raise SystemExit('Unknown layers %s, known are %s' % (unknown, [each for each, _ in every]))
+    for index, (name, make) in enumerate(every):
+        if chosen and name not in chosen:
+            continue
         made = make(np.random.default_rng(500 + index))
         color, height, strength = made[:3]
         height = np.clip(height, 0.0, 1.0)

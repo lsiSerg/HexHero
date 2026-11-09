@@ -185,8 +185,13 @@ public:
 	UPROPERTY(EditAnywhere, Category="Travel", meta=(ClampMin=0))
 	float TravelFadeInTime = 0.45f;
 
-	/** Least time the screen stays black on a trip, in seconds, while the layer shown is swapped and its pieces around the camera are built;
-	 *  it waits for them at most JumpWaitMax */
+	/** Least time the screen stays black on a trip after the layers were swapped, in real seconds, while the layer shown draws its first frames
+	 *  and its pieces around the camera are built; it waits for them at most JumpWaitMax. Counted from the end of the swap in real time, as
+	 *  the long frame of the swap would use up a hold counted in game time from the start of the black screen */
 	UPROPERTY(EditAnywhere, Category="Travel", meta=(ClampMin=0))
 	float TravelHoldMin = 0.2f;
+
+	/** Least frames drawn black after the swap, so the new layer has drawn before it fades in, however fast the frames come */
+	UPROPERTY(EditAnywhere, Category="Travel", meta=(ClampMin=0))
+	int32 TravelHoldFrames = 2;
 };

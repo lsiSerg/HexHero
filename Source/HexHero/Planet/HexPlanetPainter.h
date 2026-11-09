@@ -67,10 +67,12 @@ enum class EHexPaintTab : uint8
 	Maze,
 	/** How the passages join the entrances of their networks, and generating them again */
 	Links,
+	/** The cave objects of the underground: stalagmites, mushrooms, crystals, bones and the rest, painted, erased and generated again */
+	CaveObjects,
 };
 
 /** Number of tabs of the palette */
-constexpr int32 NumPaintTabs = 7;
+constexpr int32 NumPaintTabs = 8;
 
 /** Old and new levels, biomes, relief, objects, rivers and entrances of the cells of one step of Undo, a stroke or a button */
 struct FHexPaintStep
@@ -91,10 +93,20 @@ struct FHexPaintStep
 	TArray<FHexEntrance> OldEntrances;
 	TArray<FHexEntrance> NewEntrances;
 
+	/** SeedOffset of the underground before and after, when the step is a new layout (UHexPlanetPainter::NewLayout) */
+	bool bSeedOffset = false;
+	int32 OldSeedOffset = 0;
+	int32 NewSeedOffset = 0;
+
+	/** Stamp of the step, from 1 in the order the steps were made (UHexPlanetPainter::AddStep), by which a layer knows it is back at the state
+	 *  of its last save */
+	int32 Id = 0;
+
 	/** Returns true if the step changes nothing */
 	bool IsEmpty() const
 	{
-		return NewLevels.IsEmpty() && NewBiomes.IsEmpty() && NewRelief.IsEmpty() && NewObjects.IsEmpty() && NewRivers.IsEmpty() && !(bEntrances && OldEntrances != NewEntrances);
+		return NewLevels.IsEmpty() && NewBiomes.IsEmpty() && NewRelief.IsEmpty() && NewObjects.IsEmpty() && NewRivers.IsEmpty() && !(bEntrances && OldEntrances != NewEntrances)
+			&& !(bSeedOffset && OldSeedOffset != NewSeedOffset);
 	}
 };
 
@@ -111,23 +123,33 @@ struct FHexPainterLayer
 	UPROPERTY(Transient)
 	TObjectPtr<const UHexPlanetConfig> Settings;
 
-	/** Flat tiles of the painted cells until the surface shows them */
+	/** Flat tiles of the painted cells until the surface shows them, in AHexPlanet::GetPreviewMaterial */
 	UPROPERTY(Transient)
 	TObjectPtr<UProceduralMeshComponent> PaintPreview;
-
-	/** Material of the tiles, the material of the cells of the planet with PreviewTile 1, so it draws them in their vertex colors */
-	UPROPERTY(Transient)
-	TObjectPtr<UMaterialInstanceDynamic> PreviewMaterial;
 
 	EHexPaintTab Tab = EHexPaintTab::Ground;
 	int32 Level = 0;
 	int32 Biome = 0;
+
+	/** The kinds of objects of the layer (UHexPlanetObjects::FindLayerSets), read once, so the palette has them before the layer is built, and
+	 *  those that can be painted among them (GetPaintableSets), of which ObjectSet is the one the brush puts */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UHexPlanetObjectSet>> LayerSets;
+	TArray<int32> PaintableSets;
+	int32 ObjectSet = 0;
 
 	/** Cells given to the planet whose surface is not rebuilt yet, shown as tiles, with the level the surface still shows (X) and the new one (Y) */
 	TMap<int32, FIntPoint> PendingLevels;
 
 	TArray<FHexPaintStep> UndoSteps;
 	TArray<FHexPaintStep> RedoSteps;
+
+	/** Id of the last step that the cap of PaintUndoSteps dropped, 0 while none was, which stands for the top of Undo when it is empty, so an
+	 *  emptied Undo whose dropped steps are still applied never reads as the saved state */
+	int32 BaseId = 0;
+
+	/** The top of Undo at the last save (UHexPlanetPainter::GetTop) */
+	int32 SavedTop = 0;
 };
 
 /**
@@ -210,17 +232,18 @@ public:
 	/** Returns true while the brush sets the relief of mountains and hills */
 	bool IsPaintingRelief() const { return Tool == EHexPaintTool::Relief; }
 
-	/** Returns the kinds of objects that can be put on cells of the surface, their names, colors and whether they are a cover */
-	int32 GetNumObjectSets() const;
-	FText GetObjectSetName(int32 Set) const;
-	FLinearColor GetObjectSetColor(int32 Set) const;
-	bool IsObjectSetCover(int32 Set) const;
+	/** Returns the kinds of objects that can be put on cells of a layer, by their place on the palette (UHexPlanetObjects::GetPaintableSets), their
+	 *  names, colors and whether they are a cover */
+	int32 GetNumObjectSets(EHexPlanetLayer Layer) const;
+	FText GetObjectSetName(EHexPlanetLayer Layer, int32 Set) const;
+	FLinearColor GetObjectSetColor(EHexPlanetLayer Layer, int32 Set) const;
+	bool IsObjectSetCover(EHexPlanetLayer Layer, int32 Set) const;
 
-	/** Returns the kind of object the brush puts, an index into UHexPlanetObjects::GetSets */
-	int32 GetObjectSet() const { return ObjectSet; }
+	/** Returns the kind of object the brush puts on the layer painted, by its place on the palette */
+	int32 GetObjectSet() const;
 
-	/** Sets the kind of object the brush puts, and makes it put objects */
-	void SetObjectSet(int32 InSet) { ObjectSet = InSet; SetTool(EHexPaintTool::Object, EHexPaintTab::Objects); }
+	/** Sets the kind of object the brush puts on the layer painted, by its place on the palette, and makes it put objects */
+	void SetObjectSet(int32 InSet);
 
 	/** Returns the density a cover is put at, 1 to 3 */
 	int32 GetObjectDensity() const { return ObjectDensity; }
@@ -228,7 +251,14 @@ public:
 
 	/** Returns true while the brush takes objects off cells */
 	bool IsErasing() const { return Tool == EHexPaintTool::Eraser; }
-	void SetEraser() { SetTool(EHexPaintTool::Eraser, EHexPaintTab::Objects); }
+	void SetEraser() { SetTool(EHexPaintTool::Eraser, GetObjectsTab()); }
+
+	/** Returns the tab of the objects of the layer painted */
+	EHexPaintTab GetObjectsTab() const { return Target == EHexPlanetLayer::Underground ? EHexPaintTab::CaveObjects : EHexPaintTab::Objects; }
+
+	/** Gives the passages of the underground the covers and decor its generation gives them again (HexPlanetUnderground::GenerateObjects), by the
+	 *  shares of the kinds, as one step of Undo; false if the underground is not painted or nothing changed */
+	bool RegenerateObjects();
 
 	/** Returns true while the brush lays rivers, or puts bridges; Ctrl takes them away */
 	bool IsPaintingRivers() const { return Tool == EHexPaintTool::River; }
@@ -261,6 +291,10 @@ public:
 	 *  underground; false if it is not painted or nothing changed */
 	bool Regenerate(int32 InNetwork);
 
+	/** Gives the underground another maze for the same entrances: SeedOffset of planet.json goes up by one, saved with the planet, and all
+	 *  networks are generated again with it, as one step of Undo that also takes the offset back; false if it is not painted or nothing changed */
+	bool NewLayout();
+
 	/** Returns a few lines on how the passages and entrances of the underground fit together, for the Links tab */
 	FText GetLinksText() const;
 
@@ -290,8 +324,12 @@ public:
 	/** Sets the size of the brush */
 	void SetBrushSize(int32 InSize) { BrushSize = FMath::Clamp(InSize, 1, MaxBrushSize); }
 
-	/** Returns how many rings of cells the outline of the brush shows: its size, or one cell for the tools that take a single cell */
-	int32 GetOutlineSize() const { return Tool == EHexPaintTool::Entrance || Tool == EHexPaintTool::Carve ? 1 : BrushSize; }
+	/** Returns true if the tool paints the rings of the brush; an entrance, a carved passage, a river and a bridge take a cell, a way or a side,
+	 *  whatever its size */
+	bool UsesBrushSize() const { return Tool != EHexPaintTool::Entrance && Tool != EHexPaintTool::Carve && Tool != EHexPaintTool::River && Tool != EHexPaintTool::Bridge; }
+
+	/** Returns how many rings of cells the outline of the brush shows: its size, or one cell for the tools that ignore the size */
+	int32 GetOutlineSize() const { return UsesBrushSize() ? BrushSize : 1; }
 
 	/** Makes the tools work as with Ctrl held, or not, whatever the keyboard says, for the console (hex.PlanetPaint) */
 	void SetBackwards(bool bInBackwards) { bBackwards = bInBackwards; }
@@ -342,13 +380,12 @@ private:
 
 	/** The tool each tab had last, by EHexPaintTab */
 	EHexPaintTool TabTools[NumPaintTabs] = {EHexPaintTool::Level, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None,
-		EHexPaintTool::Level, EHexPaintTool::None};
+		EHexPaintTool::Level, EHexPaintTool::None, EHexPaintTool::None};
 
 	bool bActive = false;
 	bool bPainting = false;
 	bool bBackwards = false;
 	EHexPaintTool Tool = EHexPaintTool::Level;
-	int32 ObjectSet = 0;
 	int32 ObjectDensity = 3;
 	EHexReliefTool ReliefTool = EHexReliefTool::Version;
 	int32 BrushSize = 1;
@@ -367,6 +404,19 @@ private:
 
 	/** Stroke painted now */
 	FHexPaintStep Stroke;
+
+	/** Id the next step of Undo takes, counting from 1 over both layers */
+	int32 NextStepId = 1;
+
+	/** Returns the Id of the top step of Undo of a layer, or its BaseId when Undo is empty */
+	static int32 GetTop(const FHexPainterLayer& State) { return State.UndoSteps.IsEmpty() ? State.BaseId : State.UndoSteps.Last().Id; }
+
+	/** Takes the tops of both layers as those of the saved state, after a save (AHexPlanet::OnSaved) */
+	void OnSaved();
+
+	/** After Undo or Redo: back at the tops of the last save, with nothing changed outside the steps, both layers count as saved again;
+	 *  else the layer painted counts as edited */
+	void UpdateSavedState();
 
 	/** Returns the state of the layer painted */
 	FHexPainterLayer& GetLayerState() { return Layers[int32(Target)]; }
@@ -398,7 +448,15 @@ private:
 
 	/** Gives the planet painted the levels, biomes and the rest of a step and shows the levels as tiles until it is rebuilt */
 	void Apply(const TMap<int32, int32>& Levels, const TMap<int32, int32>& Biomes, const HexPlanetSurface::FReliefOverrides& Relief = {},
-		const TMap<int32, FHexCellObjects>& Objects = {}, const TMap<uint64, uint8>& Rivers = {}, const TArray<FHexEntrance>* Entrances = nullptr);
+		const TMap<int32, FHexCellObjects>& Objects = {}, const TMap<uint64, uint8>& Rivers = {}, const TArray<FHexEntrance>* Entrances = nullptr,
+		const int32* SeedOffset = nullptr);
+
+	/** Generates the maze of the underground again from the manifest of the surface, all networks or one, into a step of the cells that changed,
+	 *  with the objects the generation gives the cells that became passages and none on those that became void */
+	bool MakeRegenerateStep(int32 InNetwork, FHexPaintStep& OutStep, FString& OutReport) const;
+
+	/** Returns the set index (UHexPlanetObjects::GetSets) of a place on the palette of a layer, or INDEX_NONE */
+	int32 GetPaintableSet(EHexPlanetLayer Layer, int32 Set) const;
 
 	/** Keeps a step as the last of Undo of the layer painted, which clears its Redo */
 	void AddStep(FHexPaintStep&& Step);

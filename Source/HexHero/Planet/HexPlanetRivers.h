@@ -203,8 +203,9 @@ public:
 	/** What stands on a side: 0 nothing, 1 a river, 2 a river with a bridge, by GetEdgeKey */
 	uint8 GetEdge(uint64 Key) const;
 
-	/** Sets the state of sides (GetEdge), shows the water at once and has the planet lower the valleys again */
-	void SetEdges(const TMap<uint64, uint8>& Changes);
+	/** Sets the state of sides (GetEdge), shows the water at once and has the planet lower the valleys again; bByStep tells that a step of Undo
+	 *  of the brush made the change (AHexPlanet::MarkLevelsEdited) */
+	void SetEdges(const TMap<uint64, uint8>& Changes, bool bByStep = false);
 
 	/** Returns true if a river may run along the side between two cells, by their levels now */
 	bool IsEdgeAllowed(int32 A, int32 B) const;

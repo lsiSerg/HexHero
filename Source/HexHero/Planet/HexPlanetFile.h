@@ -151,6 +151,25 @@ struct FHexUndergroundGeneration
 	/** Added to the seed of the planet, so the maze can change while the surface stays */
 	UPROPERTY()
 	int32 SeedOffset = 0;
+
+	/** Share of the voids that may hold lava or a lake (HexPlanetUnderground::GenerateBiomes), those within PoolRings of a passage, where they can
+	 *  be seen, and further than PoolExitRings from every exit, so the marker of an exit stays the brightest thing of its hall, that become lava
+	 *  (L), in patches of about PoolCells cells */
+	UPROPERTY()
+	double LavaShare = 0.01;
+
+	/** Share of the same voids that become dark lakes (K), of those left */
+	UPROPERTY()
+	double LakeShare = 0.02;
+
+	UPROPERTY()
+	int32 PoolRings = 3;
+
+	UPROPERTY()
+	double PoolCells = 5.0;
+
+	UPROPERTY()
+	int32 PoolExitRings = 2;
 };
 
 /** The relief of one cell set by hand with the brush, a line of relief.json (HexPlanetSurface::FReliefOverride); -1 leaves a choice to the hash */
@@ -211,6 +230,47 @@ struct FHexObjectCell
 	UPROPERTY()
 	FName Decor;
 };
+
+/** The objects of a cell: its cover and decor as an index into the sets of its layer (UHexPlanetObjects::GetSets) plus one, 0 for none, and the
+ *  density of the cover, 1 to 3. Here, beside the lines of objects.json, so the pure generation of the underground (HexPlanetUnderground) uses it */
+struct FHexCellObjects
+{
+	uint8 Cover = 0;
+	uint8 Density = 0;
+	uint8 Decor = 0;
+
+	bool IsEmpty() const { return Cover == 0 && Decor == 0; }
+	bool operator==(const FHexCellObjects& Other) const { return Cover == Other.Cover && Density == Other.Density && Decor == Other.Decor; }
+};
+
+/**
+ *  Returns the variant of a kind of object that a biome draws, by the letter of the biome in the files of its layer: the first variant whose
+ *  letters hold it, else the first with no letters, which serves every biome without a variant of its own, else INDEX_NONE. GetBiomes gives the
+ *  letters of variant I. The rule of UHexPlanetObjectSet::FindVariant, shared with the generation of the underground, which reads no UObject
+ */
+template <typename FGetBiomes>
+int32 FindHexObjectVariant(int32 NumVariants, TCHAR BiomeLetter, FGetBiomes&& GetBiomes)
+{
+	int32 Fallback = INDEX_NONE;
+	const TCHAR Letter = FChar::ToUpper(BiomeLetter);
+	for (int32 Index = 0; Index < NumVariants; ++Index)
+	{
+		const FString& Biomes = GetBiomes(Index);
+		if (Biomes.IsEmpty())
+		{
+			Fallback = Fallback == INDEX_NONE ? Index : Fallback;
+			continue;
+		}
+		for (const TCHAR Each : Biomes)
+		{
+			if (FChar::ToUpper(Each) == Letter)
+			{
+				return Index;
+			}
+		}
+	}
+	return Fallback;
+}
 
 /** objects.json of a planet: the cells with forests, bushes, stones and decor, a list only of them, which Git can merge */
 USTRUCT()
@@ -415,6 +475,16 @@ namespace HexPlanetFile
 
 	/** Writes planet.json of a folder, in the root that has it or else the writable root. Returns false with an error if it could not */
 	bool SaveManifest(const FString& Folder, const FHexPlanetManifest& Manifest, FString& OutError);
+
+	/** Sets seedOffset of the underground block in the text of a planet.json and leaves the rest of the text as it is, so Git sees one line
+	 *  change: the number when it is there, else a member added in the style of the file (its indents, line ends and the separators after its
+	 *  colons), and the block when it is missing. An offset of 0 on a text without one keeps the text, as 0 is the default. Returns false if the
+	 *  text is not an object of members it can read */
+	bool SetSeedOffsetText(const FString& Json, int32 SeedOffset, FString& OutJson);
+
+	/** Writes the seed offset of the underground of a manifest into planet.json of a folder by SetSeedOffsetText, so a new layout changes only
+	 *  that, when the file reads back as the manifest; else, or without a file, the whole manifest (SaveManifest) */
+	bool SaveSeedOffset(const FString& Folder, const FHexPlanetManifest& Manifest, FString& OutError);
 
 	/** Deletes levels.txt of a folder, so the planet generates its levels again. Returns false if it is there and could not be deleted */
 	bool DeleteLevels(const FString& Folder);

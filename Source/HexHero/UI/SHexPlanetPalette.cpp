@@ -28,7 +28,7 @@ namespace
 
 	/** The tabs of each layer, in the order of their buttons */
 	const EHexPaintTab SurfaceTabs[] = {EHexPaintTab::Ground, EHexPaintTab::Relief, EHexPaintTab::Objects, EHexPaintTab::Rivers, EHexPaintTab::Entrances};
-	const EHexPaintTab UndergroundTabs[] = {EHexPaintTab::Maze, EHexPaintTab::Links};
+	const EHexPaintTab UndergroundTabs[] = {EHexPaintTab::Maze, EHexPaintTab::Links, EHexPaintTab::CaveObjects};
 }
 
 void SHexPlanetPalette::Construct(const FArguments& InArgs)
@@ -264,22 +264,24 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 		Relief->AddSlot().AutoHeight()[MakeHelp(LOCTEXT("ReliefHelp", "Click a cell, Ctrl+click to go back or lower. Version and Turn only offer what keeps the sides joined to the neighbors, so a cell whose neighbors fix it stays as it is; the info at the cursor shows how many it has. Mirror and the height always fit. The middle button moves the planet."))];
 	}
 
-	// Objects: the kinds of objects, two to a row, which only go on the cells whose level allows them, the density of a cover, and the eraser
-	TSharedRef<SVerticalBox> Objects = SNew(SVerticalBox);
+	// Objects: the kinds of objects of a layer, two to a row, which only go on the cells whose level allows them, the density of a cover, and the
+	// eraser; the surface and the underground each have their own kinds (UHexPlanetObjectSet::PlanetLayers)
+	const auto MakeObjects = [&](EHexPlanetLayer Layer, TSharedRef<SVerticalBox> Objects)
 	{
-		const int32 NumSets = Painter.IsValid() ? Painter->GetNumObjectSets() : 0;
-		Objects->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("Objects", "Objects"), 0.0f)];
+		const int32 NumSets = Painter.IsValid() ? Painter->GetNumObjectSets(Layer) : 0;
+		Objects->AddSlot().AutoHeight()[MakeHeading(Layer == EHexPlanetLayer::Underground ? LOCTEXT("CaveObjects", "Cave objects") : LOCTEXT("Objects", "Objects"), 0.0f)];
 		if (NumSets > 0)
 		{
 			TSharedRef<SUniformGridPanel> ObjectGrid = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
 			for (int32 Set = 0; Set < NumSets; ++Set)
 			{
+				const bool bCover = Painter->IsObjectSetCover(Layer, Set);
 				const TSharedRef<SButton> Button = MakeButton(
-					MakeSwatch(Painter->GetObjectSetColor(Set), SwatchSize * 0.75f, SwatchSize * (Painter->IsObjectSetCover(Set) ? 0.75f : 0.4f), 6.0f, Painter->GetObjectSetName(Set),
+					MakeSwatch(Painter->GetObjectSetColor(Layer, Set), SwatchSize * 0.75f, SwatchSize * (bCover ? 0.75f : 0.4f), 6.0f, Painter->GetObjectSetName(Layer, Set),
 						Small, FText::GetEmpty()),
 					[Set](UHexPlanetPainter& Each) { Each.SetObjectSet(Set); },
-					[Set](const UHexPlanetPainter& Each) { return Each.GetTool() == EHexPaintTool::Object && Each.GetObjectSet() == Set; });
-				Button->SetToolTipText(Painter->IsObjectSetCover(Set)
+					[Set, Layer](const UHexPlanetPainter& Each) { return Each.GetTarget() == Layer && Each.GetTool() == EHexPaintTool::Object && Each.GetObjectSet() == Set; });
+				Button->SetToolTipText(bCover
 					? LOCTEXT("CoverTip", "Fills the cells at the density below; a cell holds one cover")
 					: LOCTEXT("DecorTip", "A piece of decor near the middle of the cell; a cell holds one, beside its cover"));
 				ObjectGrid->AddSlot(Set % 2, Set / 2)
@@ -311,12 +313,28 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 				[](const UHexPlanetPainter& Each) { return Each.IsErasing(); });
 			Eraser->SetToolTipText(LOCTEXT("EraserTip", "Takes the cover and the decor off the cells"));
 			Objects->AddSlot().AutoHeight()[Eraser];
+
+			if (Layer == EHexPlanetLayer::Underground)
+			{
+				const TSharedRef<SButton> Again = MakeButton(
+					MakeLabel(LOCTEXT("RegenerateObjects", "Generate again")),
+					[](UHexPlanetPainter& Each) { Each.RegenerateObjects(); },
+					nullptr,
+					[](const UHexPlanetPainter& Each) { return !Each.IsPainting(); });
+				Again->SetToolTipText(LOCTEXT("RegenerateObjectsTip", "Gives the passages generated covers and decor again by the shares of the kinds; one step of Undo"));
+				Objects->AddSlot().AutoHeight().Padding(0.0f, 3.0f, 0.0f, 0.0f)[Again];
+				Objects->AddSlot().AutoHeight()[MakeHelp(LOCTEXT("CaveObjectsHelp", "Cave objects stand on passages only and never hang over the void. None of them blocks movement, so the maze alone keeps heroes apart; nothing is drawn on an exit."))];
+			}
 		}
 		else
 		{
 			Objects->AddSlot().AutoHeight()[MakeHelp(LOCTEXT("NoObjects", "There are no kinds of objects (PlanetObjectsFolder of HexMapSettings)."))];
 		}
-	}
+	};
+	TSharedRef<SVerticalBox> Objects = SNew(SVerticalBox);
+	MakeObjects(EHexPlanetLayer::Surface, Objects);
+	TSharedRef<SVerticalBox> CaveObjects = SNew(SVerticalBox);
+	MakeObjects(EHexPlanetLayer::Underground, CaveObjects);
 
 	// Rivers: they run along the sides of the cells from corner to corner, and bridges stand on their sides
 	TSharedRef<SVerticalBox> RiverBody = SNew(SVerticalBox);
@@ -408,8 +426,15 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 			nullptr,
 			[](const UHexPlanetPainter& Each) { return !Each.IsPainting(); });
 		All->SetToolTipText(LOCTEXT("RegenerateAllTip", "Carves the whole maze again for the entrances, as a planet without one; one step of Undo"));
+		const TSharedRef<SButton> Layout = MakeButton(
+			MakeLabel(LOCTEXT("NewLayout", "New layout")),
+			[](UHexPlanetPainter& Each) { Each.NewLayout(); },
+			nullptr,
+			[](const UHexPlanetPainter& Each) { return !Each.IsPainting(); });
+		Layout->SetToolTipText(LOCTEXT("NewLayoutTip", "Another maze for the same entrances: the seed offset of the underground goes up by one and is saved in planet.json; one step of Undo"));
 		Links->AddSlot().AutoHeight().Padding(0.0f, 6.0f, 0.0f, 3.0f)[One];
-		Links->AddSlot().AutoHeight()[All];
+		Links->AddSlot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 3.0f)[All];
+		Links->AddSlot().AutoHeight()[Layout];
 		Links->AddSlot().AutoHeight()[MakeHelp(LOCTEXT("LinksHelp", "Passages take the color of their network, and grey where no exit reaches. Red: an exit in the void, the smaller pieces of a split network, networks joined, a passage one cell wide."))];
 	}
 
@@ -465,8 +490,9 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 		];
 	}
 
-	// the size of the brush
+	// the size of the brush, for the tools that paint its rings; an entrance, a carved passage, a river and a bridge ignore it
 	TSharedRef<SHorizontalBox> Sizes = SNew(SHorizontalBox);
+	const auto TakesSize = [](const UHexPlanetPainter& Each) { return Each.UsesBrushSize() || !Each.HasTool(); };
 	for (int32 Size = 1; Size <= UHexPlanetPainter::MaxBrushSize; ++Size)
 	{
 		Sizes->AddSlot()
@@ -479,7 +505,8 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 				.Font(Font)
 				.Justification(ETextJustify::Center),
 				[Size](UHexPlanetPainter& Each) { Each.SetBrushSize(Size); },
-				[Size](const UHexPlanetPainter& Each) { return Each.GetBrushSize() == Size; })
+				[Size, TakesSize](const UHexPlanetPainter& Each) { return TakesSize(Each) && Each.GetBrushSize() == Size; },
+				TakesSize)
 		];
 	}
 
@@ -562,6 +589,7 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 			+ SWidgetSwitcher::Slot()[EntranceBody]
 			+ SWidgetSwitcher::Slot()[Maze]
 			+ SWidgetSwitcher::Slot()[Links]
+			+ SWidgetSwitcher::Slot()[CaveObjects]
 		]
 
 		// Undo and Redo of the layer painted

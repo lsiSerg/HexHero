@@ -1194,7 +1194,7 @@ uint8 UHexPlanetRivers::GetEdge(uint64 Key) const
 	return Found ? *Found : 0;
 }
 
-void UHexPlanetRivers::SetEdges(const TMap<uint64, uint8>& Changes)
+void UHexPlanetRivers::SetEdges(const TMap<uint64, uint8>& Changes, bool bByStep)
 {
 	bool bChanged = false;
 	for (const TPair<uint64, uint8>& Each : Changes)
@@ -1215,7 +1215,7 @@ void UHexPlanetRivers::SetEdges(const TMap<uint64, uint8>& Changes)
 	}
 	// the water and the valley show once the planet has built them, as both follow the line of the rivers it builds with them
 	UpdateBridges();
-	Planet->OnRiversChanged();
+	Planet->OnRiversChanged(bByStep);
 }
 
 bool UHexPlanetRivers::IsEdgeAllowed(int32 A, int32 B) const

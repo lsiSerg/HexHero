@@ -18,6 +18,9 @@ enum class EHexObjectLayer : uint8
 	Cover,
 	/** A few objects, usually one, near the middle of the cell: a fallen tree, a giant tree, a big boulder */
 	Decor,
+	/** Stands along every side of a cell of its levels towards a cell RimMinDrop levels lower, the lip of a passage over a void, placed by the
+	 *  planet with the ground and not stored, painted or listed: rocks and spires on the lip, or stalactites down the cliff below it (bRimHang) */
+	Rim,
 };
 
 /** The look of a kind of object on some biomes: its meshes and how they stand there */
@@ -109,7 +112,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Look")
 	TSoftObjectPtr<UMaterialInterface> Material;
 
-	/** Objects in a cell at a density of 1, 2 and 3 (a decor takes the first), before CountFactor of the variant; a pentagon takes a sixth less */
+	/** Objects in a cell at a density of 1, 2 and 3 (a decor takes the first), before CountFactor of the variant; a pentagon takes a sixth less.
+	 *  A rim takes the first as the most on one side (RimCountMin) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Placement")
 	TArray<int32> CountByDensity = {6, 14, 26};
 
@@ -155,6 +159,99 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Placement")
 	float MinHeight = 1.5f;
 
+	/** Keeps the whole of each mesh inside its cell on the sides towards a cell at least 2 levels lower, a void underground, and towards the cell of
+	 *  an entrance: a point nearer such a side than the horizontal radius of the mesh about its pivot times its size, plus ObjectFootprintMargin of
+	 *  the config, takes no object, so nothing hangs over the abyss from the ledge of a passage. Off for the kinds of the surface */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Placement")
+	bool bClipFootprint = false;
+
+	/** A rim stands on the sides of its cells towards a neighbor at least this many levels lower: 2 from a passage to a void */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rim", meta=(ClampMin=1, ClampMax=4))
+	int32 RimMinDrop = 2;
+
+	/** How far onto its cell a rim stands from the line of the side at most, as a share of the apothem, at random from 0, so near 0 it overhangs */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rim", meta=(ClampMin=0, ClampMax=0.5))
+	float RimInset = 0.12f;
+
+	/** Hangs down the cliff of the lower cell from the lip, as stalactites, instead of standing on the lip: its mesh hangs along -Z in front of the
+	 *  face along +Y, its top at the height of the lip */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rim")
+	bool bRimHang = false;
+
+	/** How far past the line of the side, onto the lower cell, the face of the cliff is looked up for a rim that hangs, in world units */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rim", meta=(ClampMin=0.1))
+	float RimHangOut = 2.0f;
+
+	/** A rim that hangs needs a face there steeper than this: where the normal of the ground looked up past the side lies nearer the up of the
+	 *  planet (its dot with it is higher), it is no cliff, and the try is skipped */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rim", meta=(ClampMin=0, ClampMax=1))
+	float RimHangMaxUp = 0.9f;
+
+	/** Most degrees the X of a mesh turns away from the line of its side, at random either way */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rim", meta=(ClampMin=0, ClampMax=90))
+	float RimTurn = 25.0f;
+
+	/** Fewest objects on a side that takes the kind; the most is the first of CountByDensity, so no side stays a straight edge of a hex */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rim", meta=(ClampMin=0))
+	int32 RimCountMin = 0;
+
+	/** Share of the sides that take the kind at all, by a hash of the cell, the side and the Id */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rim", meta=(ClampMin=0, ClampMax=1))
+	float RimSideShare = 1.0f;
+
+	/** Share of a side kept free of the kind at each of its corners, where the lip turns to the next side; the objects spread over the rest */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rim", meta=(ClampMin=0, ClampMax=0.45))
+	float RimCornerGap = 0.08f;
+
+	/** Kinds of one group share one noise of patches in the generation of the underground, so the decor of a group stands in the hearts of the
+	 *  patches of its cover and a fungus grove or a crystal cavern is one place; None for a noise of its own */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Generation")
+	FName GenerateGroup;
+
+	/** Size of the patches of the generation of the underground, in cells; 0 places the kind anywhere at random. The surface keeps ObjectNoiseScale
+	 *  of DA_HexPlanet and its own rules */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Generation", meta=(ClampMin=0))
+	float GeneratePatchCells = 0.0f;
+
+	/** The densities a cover takes in the generation of the underground, by its rank in the cells it takes, highest first: the first value is the
+	 *  share of them that are dense (3), in the middle of a patch, the second the share that are dense or medium (2), and the rest are sparse (1) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Generation")
+	TArray<float> GenerateDensityShares = {0.4f, 0.75f};
+
+	/** The generation of the underground keeps the cells within this many rings of an exit free of the kind, 0 for the exit cell alone, so the
+	 *  marker of an exit stays the brightest thing of its hall and nothing tall hides it; a rim leaves out the sides of those cells */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Generation", meta=(ClampMin=0, ClampMax=3))
+	int32 ExitClearRings = 0;
+
+	/** Emissive color of the vertices whose alpha is 1, which M_HexPlanetCave takes as a parameter of the same name (HexMaterialConfig::Apply of
+	 *  the set); no light of its own, so Lumen alone may carry it onto the ground around */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Glow")
+	FLinearColor GlowColor = FLinearColor::Black;
+
+	/** Strength of the glow, 0 for none */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Glow", meta=(ClampMin=0))
+	float GlowStrength = 0.0f;
+
+	/** Share of the glow that breathes, GlowPulseSpeed radians a second, each instance at its own phase */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Glow", meta=(ClampMin=0, ClampMax=1))
+	float GlowPulse = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Glow", meta=(ClampMin=0))
+	float GlowPulseSpeed = 1.0f;
+
+	/** How strongly the kind lights the floor of its cell in GlowColor, a pool of its glow on the ground that spills a little into the cells beside it
+	 *  (UHexPlanetObjects::GetCellGlow, CellCanopy of the underground, the Glow pools values of DA_HexUnderground) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Glow", meta=(ClampMin=0, ClampMax=1))
+	float GlowPool = 0.0f;
+
+	/** The share of GlowPool a cover lights by its density, sparse (1) to dense (3), as a sparse cover lights less of its floor; a decor takes all */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Glow")
+	TArray<float> GlowPoolByDensity = {0.6f, 0.8f, 1.0f};
+
+	/** Spores in GlowColor rising from each cell with this kind near the camera (UHexPlanetMotes, the Spores values of DA_HexUnderground) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Glow", meta=(ClampMin=0))
+	int32 Spores = 0;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rendering")
 	bool bCastShadow = true;
 
@@ -175,7 +272,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Far", meta=(ClampMin=0, ClampMax=1))
 	float FarSnowShare = 0.6f;
 
-	/** Returns the variant a biome draws, its own or the one for every biome, else null */
+	/** Returns the variant a biome draws, its own or the one for every biome, else null (FindHexObjectVariant) */
 	const FHexObjectVariant* FindVariant(TCHAR BiomeLetter) const;
 
 #if WITH_EDITOR

@@ -126,10 +126,8 @@ void AHexMapPlayerController::BeginPlay()
 		SAssignNew(HoverInfo, SHexHoverInfo);
 		ViewportClient->AddViewportWidgetContent(HoverInfo.ToSharedRef());
 
+		// the legend comes once the pawn has bound its keys (UpdateLegend)
 		SAssignNew(DebugOverlay, SHexDebugOverlay);
-		const UHexInputConfig* InputConfig = GetDefault<UHexMapSettings>()->LoadInputConfig();
-		const UHexKeyLegendConfig* KeyLegend = GetDefault<UHexMapSettings>()->LoadKeyLegend();
-		DebugOverlay->SetLegend(KeyLegend->GetSections(*InputConfig), KeyLegend->GetHint(*InputConfig));
 		ViewportClient->AddViewportWidgetContent(DebugOverlay.ToSharedRef());
 	}
 
@@ -185,9 +183,29 @@ void AHexMapPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
+void AHexMapPlayerController::UpdateLegend()
+{
+	// the legend asset lists the keys of both levels, of which the flat map binds only some, so the keys of the planet, such as the layer and
+	// the sun, are left out here
+	TSet<const UInputAction*> BoundActions;
+	if (bLegendSet || !DebugOverlay.IsValid() || !UHexKeyLegendConfig::GetBoundActions(*this, BoundActions))
+	{
+		return;
+	}
+
+	const UHexInputConfig* InputConfig = GetDefault<UHexMapSettings>()->LoadInputConfig();
+	const UHexKeyLegendConfig* KeyLegend = GetDefault<UHexMapSettings>()->LoadKeyLegend();
+	const TArray<FHexLegendSection> Sections = KeyLegend->GetSections(*InputConfig, &BoundActions);
+	UHexKeyLegendConfig::LogSections(Sections, TEXT("the flat map"));
+	DebugOverlay->SetLegend(Sections, KeyLegend->GetHint(*InputConfig));
+	bLegendSet = true;
+}
+
 void AHexMapPlayerController::PlayerTick(float DeltaTime)
 {
 	Super::PlayerTick(DeltaTime);
+
+	UpdateLegend();
 
 	if (HoverInfo.IsValid())
 	{

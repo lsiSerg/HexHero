@@ -148,6 +148,8 @@ namespace HexPlanetSurface
 		/** Its mesh, and the cell of mountains it lies at, whose biome gives its rock */
 		int32 Mesh = 0;
 		int32 Cell = INDEX_NONE;
+		/** The neighbor of that cell it lies on, which the cell of an entrance keeps clear (AHexPlanet::UpdateBoulders) */
+		int32 Ground = INDEX_NONE;
 	};
 
 	/** Reads the pieces of every kit from their meshes, on the game thread. A missing config gives an empty kit, so every cell is a flat tile */
