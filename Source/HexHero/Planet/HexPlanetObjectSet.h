@@ -225,6 +225,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rim")
 	FVector2D RimWallHeights = FVector2D(0.15, 0.7);
 
+	/** How many times more of a rim of EHexRimSeat::WallFoot stand in an inside corner of the walls, where their line turns onto the passage
+	 *  (HexPlanetWalls::FSample::InnerReach) and rubble gathers, than along a straight wall: RimSideShare times 1 + this there */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Rim", meta=(ClampMin=0))
+	float RimCornerBoost = 0.0f;
+
 	/** Kinds of one group share one noise of patches in the generation of the underground, so the decor of a group stands in the hearts of the
 	 *  patches of its cover and a fungus grove or a crystal cavern is one place; None for a noise of its own */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Generation")

@@ -322,13 +322,13 @@ bool FHexPlanetUndergroundObjectsTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Never on a pentagon"), OnPentagons, 0);
 	TestEqual(TEXT("Indices of the sets"), BadIndex, 0);
 	TestEqual(TEXT("Kept two rings from the exits"), NearExit, 0);
-	TestEqual(TEXT("The blocking kind gets nothing"), Blocking, 0);
+	TestTrue(TEXT("The blocking kind gets cells where it cuts nothing"), Blocking > 0);
 	TestEqual(TEXT("Cover count"), Grove.Num(), FMath::RoundToInt32(0.5f * Candidates));
 	TestEqual(TEXT("Decor count"), Heart.Num(), FMath::RoundToInt32(0.2f * Candidates));
 	TestEqual(TEXT("Decor anywhere count"), Anywhere, FMath::RoundToInt32(0.1f * AnywhereCandidates));
 	TestEqual(TEXT("Report counts"), Report.Cells[0], Grove.Num());
 	TestTrue(TEXT("Report has the patch of the cover"), Grove.Contains(Report.PatchCenters[0]));
-	TestTrue(TEXT("The blocking kind is reported empty"), Report.Cells[3] == 0 && Report.PatchCenters[3] == INDEX_NONE);
+	TestEqual(TEXT("The blocking kind is reported"), Report.Cells[3], Blocking);
 	TestTrue(TEXT("The decor of a group stands in the patches of its cover"), Grove.Includes(Heart));
 
 	// patches: the cells of a cover have more neighbors of their own than the same number of cells chosen by a hash among the candidates. In
@@ -386,11 +386,13 @@ bool FHexPlanetUndergroundObjectsTest::RunTest(const FString& Parameters)
 	}
 	const FReport Before = Check(Case.Grid, Case.Surface, Levels, Entrances);
 	const FReport After = Check(Case.Grid, Case.Surface, Blocked, Entrances);
-	bool bSamePieces = After.Necks.Num() == Before.Necks.Num();
+	bool bSamePieces = After.Necks.Num() == Before.Necks.Num() && After.OrphanCells == Before.OrphanCells && After.Merged == Before.Merged;
 	for (int32 Network = 0; Network < HexPlanetFile::MaxNetworks; ++Network)
 	{
 		bSamePieces &= After.Networks[Network].Components == Before.Networks[Network].Components;
 	}
+	AddInfo(FString::Printf(TEXT("%d cells block: %d necks and %d cells out of reach before, %d and %d after"), Blocking, Before.Necks.Num(), Before.OrphanCells,
+		After.Necks.Num(), After.OrphanCells));
 	TestTrue(TEXT("No passage cut"), bSamePieces);
 	return true;
 }
@@ -817,12 +819,38 @@ bool FHexPlanetUndergroundObjectSetsTest::RunTest(const FString& Parameters)
 		TestTrue(*FString::Printf(TEXT("%s only on passages"), Id), Set.AllowedLevels == TArray<int32>({HexPlanetUnderground::PassageLevel}));
 		CheckMeshes(Set);
 	}
-	TestEqual(TEXT("The kinds the generation places"), UHexPlanetObjects::MakeObjectKinds(Underground).Num(), int32(UE_ARRAY_COUNT(CaveIds)));
-	TestEqual(TEXT("The kinds the palette paints"), UHexPlanetObjects::GetPaintableSets(Underground).Num(), int32(UE_ARRAY_COUNT(CaveIds)));
+	// the masses that fill a cell and block it: decor of the underground that sorts after the other kinds, so their indices in objects.json stay
+	const TCHAR* MassIds[] = {TEXT("CaveStalagmiteMass"), TEXT("CaveCrystalMass"), TEXT("CaveRockfall")};
+	int32 HighestCave = TNumericLimits<int32>::Lowest();
+	for (const TCHAR* Id : CaveIds)
+	{
+		const TObjectPtr<UHexPlanetObjectSet>* Found = Underground.FindByPredicate([Id](const UHexPlanetObjectSet* Each) { return Each->Id == FName(Id); });
+		HighestCave = Found ? FMath::Max(HighestCave, (*Found)->SortOrder) : HighestCave;
+	}
+	for (const TCHAR* Id : MassIds)
+	{
+		const TObjectPtr<UHexPlanetObjectSet>* Found = Underground.FindByPredicate([Id](const UHexPlanetObjectSet* Each) { return Each->Id == FName(Id); });
+		if (!TestNotNull(*FString::Printf(TEXT("%s exists underground"), Id), Found))
+		{
+			continue;
+		}
+		const UHexPlanetObjectSet& Set = **Found;
+		TestEqual(*FString::Printf(TEXT("%s only underground"), Id), Set.PlanetLayers, GetPlanetLayerBit(EHexPlanetLayer::Underground));
+		TestTrue(*FString::Printf(TEXT("%s blocks"), Id), Set.bBlocksMovement);
+		TestTrue(*FString::Printf(TEXT("%s is decor"), Id), Set.Layer == EHexObjectLayer::Decor);
+		TestTrue(*FString::Printf(TEXT("%s keeps off the voids"), Id), Set.bClipFootprint);
+		TestTrue(*FString::Printf(TEXT("%s is culled"), Id), Set.CullDistance > 0.0f);
+		TestTrue(*FString::Printf(TEXT("%s only on passages"), Id), Set.AllowedLevels == TArray<int32>({HexPlanetUnderground::PassageLevel}));
+		TestTrue(*FString::Printf(TEXT("%s sorts after the other cave kinds"), Id), Set.SortOrder > HighestCave && Set.SortOrder < 300);
+		CheckMeshes(Set);
+	}
+	const int32 Placed = int32(UE_ARRAY_COUNT(CaveIds) + UE_ARRAY_COUNT(MassIds));
+	TestEqual(TEXT("The kinds the generation places"), UHexPlanetObjects::MakeObjectKinds(Underground).Num(), Placed);
+	TestEqual(TEXT("The kinds the palette paints"), UHexPlanetObjects::GetPaintableSets(Underground).Num(), Placed);
 
 	// the rims of the chasms: placed along the sides by the planet, never stored, painted or generated, so they sort after every other kind and
 	// the indices of the cave kinds in objects.json stay as they are
-	const TCHAR* RimIds[] = {TEXT("CaveRim"), TEXT("CaveRimSpires"), TEXT("CaveStalactites"), TEXT("CaveRimRunes")};
+	const TCHAR* RimIds[] = {TEXT("CaveRim"), TEXT("CaveRimSpires"), TEXT("CaveStalactites"), TEXT("CaveRimRunes"), TEXT("CaveWallCrystals"), TEXT("CaveWallRubble")};
 	int32 HighestOther = TNumericLimits<int32>::Lowest();
 	for (const UHexPlanetObjectSet* Set : Underground)
 	{

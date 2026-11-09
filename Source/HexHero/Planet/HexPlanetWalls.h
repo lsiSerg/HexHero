@@ -21,6 +21,27 @@ class UHexPlanetConfig;
  */
 namespace HexPlanetWalls
 {
+	/** A style of the walls (FHexWallStyle): its weight, factors on the values of the walls where it holds, and how much its stone is flowstone and
+	 *  how much it shows its joints */
+	struct FStyle
+	{
+		double Weight = 1.0;
+		double Height = 1.0;
+		double Thickness = 1.0;
+		double Lean = 1.0;
+		double Overhang = 1.0;
+		double Bulge = 1.0;
+		double CrestJag = 1.0;
+		double CrestNotch = 1.0;
+		double RibSize = 1.0;
+		double RibDepth = 1.0;
+		double RibTip = 1.0;
+		double ColumnShare = 1.0;
+		double FluteDepth = 1.0;
+		double Flowstone = 0.3;
+		double Fracture = 0.5;
+	};
+
 	struct FParams
 	{
 		int32 MinDrop = 2;
@@ -54,6 +75,11 @@ namespace HexPlanetWalls
 		double ColumnShare = 0.12;
 		double FluteDepth = 7.0;
 		double FluteWidth = 0.3;
+		/** The styles, each holding in regions of a noise of the place StyleScale across, blending where they meet over less the higher
+		 *  StyleSharpness; none keeps the values as they are */
+		TArray<FStyle> Styles;
+		double StyleScale = 450.0;
+		double StyleSharpness = 5.0;
 		/** Moves the noises, so another planet has other walls */
 		int32 Seed = 0;
 
@@ -121,16 +147,22 @@ namespace HexPlanetWalls
 
 	/** The mesh of the walls of a chunk, in world space: positions, normals, in the first UV how deep in a hollow a point lies (0 to 1, flutes,
 	 *  under the overhang and between the stalactites) and its height above the floor as a share of the wall, in the second how much it is floor
-	 *  (the foot and the floor before it, 0 to 1) and how much of a stalactite stands out there (0 to 1), and three triangles each */
+	 *  (the foot and the floor before it, 0 to 1) and how much of a stalactite stands out there (0 to 1), in the third how much its stone is
+	 *  flowstone and how much it shows its joints (FStyle), and three triangles each */
 	struct FMesh
 	{
 		TArray<FVector3f> Positions;
 		TArray<FVector3f> Normals;
 		TArray<FVector2f> UVs;
 		TArray<FVector2f> UV1s;
+		TArray<FVector2f> UV2s;
 		TArray<int32> Triangles;
 	};
 	void BuildChunk(const FWalls& Walls, int32 Chunk, const FParams& Params, FMesh& Out);
+
+	/** The mesh of the walls along a cell, as BuildChunk builds it: the stretches from the samples listed for it (CellSamples) within Reach of its
+	 *  middle on the floor, so a void cell has the walls along its sides too, for the cells under the cursor in the wireframe view */
+	void BuildNear(const FWalls& Walls, int32 Cell, const FVector3d& Middle, double Reach, const FParams& Params, FMesh& Out);
 
 	/** Returns a hash of the samples of a chunk and of the next sample of each, by which a rebuild finds the chunks whose walls changed */
 	uint32 HashChunk(const FWalls& Walls, int32 Chunk);

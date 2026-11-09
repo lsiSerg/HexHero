@@ -3175,7 +3175,9 @@ def build_cave_object_material():
 # (LayerParams), so a wall goes on up from the cliff in the same stone, times CaveWallColor, as dripstone: lighter and warmer on the stalactites
 # (CaveWallRibTint, by how much of one stands out in V of the second UV), streaked down the faces (CaveWallStreaks, a noise of the direction from
 # the center, which a vertical line of a wall keeps), lighter or darker in broad patches (CaveWallTone) and in layers (CaveWallStrata), split into
-# facets that lean their own ways with cracks between them (CaveWallFacet*, CaveWallCrack*, a cellular pattern of the place); darker in its hollows (CaveWallCavityShade,
+# facets that lean their own ways with cracks between them (CaveWallFacet*, CaveWallCrack*, a cellular pattern of the place), in regions another rock
+# (CaveWallAltLayer, from CaveWallAltLayerName), and by the style of the wall in the third UV (FHexWallStyle) lighter and smoother as flowstone
+# (CaveWallFlow*) or showing its joints, layers and pale veins as broken rock (CaveWallVein*), with rusty stains down it (CaveWallStain*); darker in its hollows (CaveWallCavityShade,
 # by U of the first UV) and towards its crest (CaveWallTopShade from CaveWallTopStart, by the height share in V of the first UV), as the light of a
 # cave comes from its floor, and down its outer face below the floor (FloorRadius) as the cliffs darken into the abyss (AbyssDepthHalf), with Ambient
 # as the ground has. Its rounded foot and the floor before it (U of the second UV) are the floor of the passages, the terrain layer of their biome
@@ -3250,24 +3252,43 @@ float cavity = saturate(WallUV.x);
 float rise = WallUV.y;
 float floorShare = saturate(WallUV1.x);
 float ribShare = saturate(WallUV1.y);
+// how much the style of the wall here is flowstone and how much it shows its joints (FHexWallStyle)
+float flowstone = saturate(WallUV2.x);
+float fracture = saturate(WallUV2.y);
 
 // the rock of the cliff below, as dripstone: lighter and warmer on the stalactites, streaked down the faces, in broad patches of tone
 float3 rockBend;
 float3 albedo = layers.Sample(Colors, ColorsSampler, Normals, NormalsSampler, LayerParams, round(RockLayer), rockBend) * CaveWallColor.rgb;
+// in regions the walls are of another rock (CaveWallAltLayer, -1 without it), the edge of a region bent by a finer noise
+[branch] if (CaveWallAltLayer >= 0.0 && CaveWallAltShare > 0.0)
+{
+    float altNoise = caveNoise.Value(WorldPos / max(CaveWallAltScale, 1.0) + 6.1) * 0.75 + caveNoise.Value(WorldPos / max(CaveWallAltScale * 0.25, 1.0) + 1.3) * 0.25;
+    float alt = smoothstep(1.0 - CaveWallAltShare - 0.06, 1.0 - CaveWallAltShare + 0.06, altNoise);
+    [branch] if (alt > 0.001)
+    {
+        float3 altBend;
+        float3 altRock = layers.Sample(Colors, ColorsSampler, Normals, NormalsSampler, LayerParams, round(CaveWallAltLayer), altBend) * CaveWallAltColor.rgb;
+        albedo = lerp(albedo, altRock, alt);
+        rockBend = lerp(rockBend, altBend, alt);
+    }
+}
 albedo *= lerp(1.0, CaveWallRibTint.rgb, ribShare);
+albedo *= lerp(1.0, CaveWallFlowTint.rgb, flowstone);
 // a vertical line of a wall keeps its direction from the center, so a noise of that direction runs down the faces as streaks, changing slowly
 // with the height
 float streakScale = max(CaveWallStreakScale, 0.5);
 float3 streakPoint = up * (FloorRadius / streakScale) + (length(WorldPos) - FloorRadius) / (streakScale * 12.0);
 float streak = caveNoise.Value(streakPoint) * 0.65 + caveNoise.Value(streakPoint * 2.7 + 5.1) * 0.35;
-albedo *= 1.0 + (streak - 0.5) * 2.0 * CaveWallStreaks;
+albedo *= 1.0 + (streak - 0.5) * 2.0 * CaveWallStreaks * (0.6 + 0.8 * flowstone);
+// rusty stains run down the faces in streaks of their own
+albedo = lerp(albedo, albedo * CaveWallStainColor.rgb * 1.6, smoothstep(0.55, 0.85, caveNoise.Value(streakPoint * 0.6 + 9.4)) * CaveWallStains * (1.0 - floorShare));
 albedo *= 1.0 + (caveNoise.Value(WorldPos / max(CaveWallToneScale, 1.0) + 3.3) - 0.5) * 2.0 * CaveWallTone;
 // layers of the rock, each of its own tone, blending into the next near its top, their heights bent a little by a noise, but not on the
 // stalactites
 float strataPhase = (length(WorldPos) - FloorRadius + (caveNoise.Value(WorldPos / 60.0 + 7.7) - 0.5) * CaveWallStrataSpacing * 0.8) / max(CaveWallStrataSpacing, 1.0);
 int strataBand = (int)floor(strataPhase);
 float strataTone = lerp(caveNoise.Hash(int3(strataBand, 17, 5)), caveNoise.Hash(int3(strataBand + 1, 17, 5)), smoothstep(0.65, 1.0, frac(strataPhase)));
-albedo *= 1.0 + (strataTone - 0.5) * 2.0 * CaveWallStrata * (1.0 - ribShare) * (1.0 - floorShare);
+albedo *= 1.0 + (strataTone - 0.5) * 2.0 * CaveWallStrata * (0.3 + 0.7 * fracture) * (1.0 - ribShare) * (1.0 - floorShare);
 // the stone splits along its joints into slabs, cells of a pattern CaveWallFacetCell across and CaveWallFacetStretch times as tall, the height
 // above the floor being one of its axes, each leaning its normal its own way, with cracks between them in patches, fading out where a slab
 // covers only a few pixels
@@ -3303,9 +3324,22 @@ float3 facetNormal = n;
             second = d;
         }
     }
-    facetNormal = normalize(n + (lean - n * dot(lean, n)) * CaveWallFacetTilt * facetFade);
+    // broken rock shows its joints most, flowstone hardly
+    float joints = (0.35 + 0.65 * fracture) * (1.0 - 0.7 * flowstone);
+    facetNormal = normalize(n + (lean - n * dot(lean, n)) * CaveWallFacetTilt * facetFade * joints);
     float crackPatch = smoothstep(0.4, 0.7, caveNoise.Value(WorldPos / (facetCell * 3.0) + 2.2));
-    albedo *= 1.0 - CaveWallCrackShade * facetFade * crackPatch * (1.0 - smoothstep(0.0, max(CaveWallCrackWidth, 1e-3), sqrt(second) - sqrt(nearest)));
+    albedo *= 1.0 - CaveWallCrackShade * facetFade * joints * crackPatch * (1.0 - smoothstep(0.0, max(CaveWallCrackWidth, 1e-3), sqrt(second) - sqrt(nearest)));
+}
+// thin pale veins through broken rock, along a level line of a bent noise, fading out where they would be thinner than a pixel
+[branch] if (CaveWallVeins > 0.0 && fracture > 0.05 && floorShare < 0.99)
+{
+    float3 veinPos = WorldPos / max(CaveWallVeinScale, 1.0);
+    float veinField = caveNoise.Value(veinPos + caveNoise.Value(veinPos * 0.5 + 3.7) * 1.5);
+    float vein = 1.0 - smoothstep(0.0, max(CaveWallVeinWidth, 1e-3), abs(veinField - 0.5));
+    float veinFade = 1.0 - smoothstep(CaveWallVeinScale * CaveWallVeinWidth * 0.5, CaveWallVeinScale * CaveWallVeinWidth * 2.0, pixelWorld);
+    // only in some places, as level lines of a noise everywhere drew white scribbles over every wall
+    float veinPatch = smoothstep(0.6, 0.8, caveNoise.Value(veinPos * 0.35 + 8.3));
+    albedo = lerp(albedo, CaveWallVeinColor.rgb * (0.5 + 0.5 * dot(albedo, 1.0 / 3.0) * 4.0), saturate(vein * veinFade * veinPatch * CaveWallVeins * fracture * (1.0 - floorShare)));
 }
 // hollows lie in the shade, and the light of a cave comes from its floor, so the crest falls into the dark
 albedo *= 1.0 - CaveWallCavityShade * cavity;
@@ -3327,7 +3361,7 @@ albedo = lerp(albedo, floorColor, floorMix);
 float3 rockNormal = normalize(facetNormal + rockBend * CaveWallNormalStrength);
 float3 floorNormal = normalize(n + (floorBend - n * dot(floorBend, n)) * BiomeNormalStrength);
 OutNormal = normalize(lerp(rockNormal, floorNormal, floorMix));
-OutRoughness = lerp(lerp(CaveWallRoughness, CaveWallRibRoughness, ribShare), Roughness, floorMix);
+OutRoughness = lerp(lerp(lerp(CaveWallRoughness, CaveWallFlowRoughness, flowstone), CaveWallRibRoughness, ribShare), Roughness, floorMix);
 OutEmissive = albedo * Ambient;
 return albedo;
 '''
@@ -3348,8 +3382,10 @@ return noise < 1.0 - fade * (1.0 - CaveWallFadeKeep) ? 1.0 : 0.0;
 WALL_PARAMETERS = ['BiomeTileSize', 'TriplanarSharpness', 'BiomeNormalStrength', 'Roughness', 'CaveWallColor', 'CaveWallRibTint', 'CaveWallStreaks',
                    'CaveWallStreakScale', 'CaveWallTone', 'CaveWallToneScale', 'CaveWallCavityShade', 'CaveWallTopShade', 'CaveWallTopStart',
                    'CaveWallNormalStrength', 'CaveWallRoughness', 'CaveWallRibRoughness', 'CaveWallFloorNoise', 'CaveWallFacetCell', 'CaveWallFacetStretch',
-                   'CaveWallFacetTilt', 'CaveWallCrackShade', 'CaveWallCrackWidth', 'CaveWallStrata', 'CaveWallStrataSpacing', 'CaveFloorTint', 'CaveFloorBrightness',
-                   'CaveFloorPools', 'CaveFloorPoolScale', 'AbyssDepthHalf', 'Ambient']
+                   'CaveWallFacetTilt', 'CaveWallCrackShade', 'CaveWallCrackWidth', 'CaveWallStrata', 'CaveWallStrataSpacing', 'CaveWallAltShare', 'CaveWallAltScale',
+                   'CaveWallAltColor', 'CaveWallFlowTint', 'CaveWallFlowRoughness', 'CaveWallVeins', 'CaveWallVeinWidth', 'CaveWallVeinScale',
+                   'CaveWallVeinColor', 'CaveWallStains', 'CaveWallStainColor', 'CaveFloorTint', 'CaveFloorBrightness', 'CaveFloorPools',
+                   'CaveFloorPoolScale', 'AbyssDepthHalf', 'Ambient']
 WALL_FADE_PARAMETERS = ['CaveWallFadeRadius', 'CaveWallFadeSoftness', 'CaveWallFadeDepth', 'CaveWallFadeKeep']
 for _name in WALL_PARAMETERS:
     assert _name in WALL_CODE, _name
@@ -3373,12 +3409,16 @@ def build_wall_material():
     library.connect_material_expressions(position, '', position_ddy, '')
     wall_uv1 = library.create_material_expression(material, unreal.MaterialExpressionTextureCoordinate, -1000, 160)
     wall_uv1.set_editor_property('coordinate_index', 1)
+    wall_uv2 = library.create_material_expression(material, unreal.MaterialExpressionTextureCoordinate, -1000, 170)
+    wall_uv2.set_editor_property('coordinate_index', 2)
     connections = [('WorldPos', position, ''), ('PosDdx', position_ddx, ''), ('PosDdy', position_ddy, ''),
         ('VertexNormal', library.create_material_expression(material, unreal.MaterialExpressionVertexNormalWS, -1000, 100), ''),
         ('WallUV', library.create_material_expression(material, unreal.MaterialExpressionTextureCoordinate, -1000, 150), ''),
         ('WallUV1', wall_uv1, ''),
+        ('WallUV2', wall_uv2, ''),
         ('RockLayer', add_scalar(library, material, 'RockLayer', 7.0, 175), ''),
         ('FloorLayer', add_scalar(library, material, 'FloorLayer', 15.0, 185), ''),
+        ('CaveWallAltLayer', add_scalar(library, material, 'CaveWallAltLayer', -1.0, 195), ''),
         ('FloorRadius', add_scalar(library, material, 'FloorRadius', 11528.0, 200), ''),
         ('Colors', add_texture(library, material, COLORS, 'Colors', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 250), ''),
         ('Normals', add_texture(library, material, NORMALS, 'Normals', unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL, 275), ''),

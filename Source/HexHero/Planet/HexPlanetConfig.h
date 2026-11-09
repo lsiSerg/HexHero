@@ -22,6 +22,132 @@ enum class EHexEdgeRule : uint8
 };
 
 /**
+ *  A style of the walls of the underground (UHexPlanetConfig::WallStyles): factors on the values of the walls where it holds, and how the material
+ *  shades its stone. The styles hold in regions of a noise of the place each (WallStyleScale), blending where they meet (WallStyleSharpness), so a
+ *  stretch of wall is a curtain of stalactites, the next smooth flowstone, then broken rock or a row of columns
+ */
+USTRUCT(BlueprintType)
+struct FHexWallStyle
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, Category="Style")
+	FName Name;
+
+	/** How much of the walls it takes, against the weights of the others */
+	UPROPERTY(EditAnywhere, Category="Style", meta=(ClampMin=0))
+	float Weight = 1.0f;
+
+	/** Factors on WallHeight, WallThickness, WallLean, WallOverhang, WallBulge, WallCrestJag, WallCrestNotch, WallRibSize, WallRibDepth, the tips of
+	 *  the stalactites (WallRibTipMin and WallRibTipMax, so below 1 they hang lower), WallColumnShare and WallFluteDepth */
+	UPROPERTY(EditAnywhere, Category="Style", meta=(ClampMin=0.1))
+	float Height = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Style", meta=(ClampMin=0.1))
+	float Thickness = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Style", meta=(ClampMin=0))
+	float Lean = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Style", meta=(ClampMin=0))
+	float Overhang = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Style", meta=(ClampMin=0))
+	float Bulge = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Style", meta=(ClampMin=0))
+	float CrestJag = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Style", meta=(ClampMin=0))
+	float CrestNotch = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Style", meta=(ClampMin=0.2))
+	float RibSize = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Style", meta=(ClampMin=0))
+	float RibDepth = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Style", meta=(ClampMin=0.1))
+	float RibTip = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Style", meta=(ClampMin=0))
+	float ColumnShare = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Style", meta=(ClampMin=0))
+	float FluteDepth = 1.0f;
+
+	/** How much its stone shades as flowstone, lighter, warmer and wetter (CaveWallFlow*), and how much it shows its joints, layers, cracks and
+	 *  veins (CaveWallFacet*, CaveWallStrata, CaveWallVein*), each 0 to 1 */
+	UPROPERTY(EditAnywhere, Category="Style", meta=(ClampMin=0, ClampMax=1))
+	float Flowstone = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category="Style", meta=(ClampMin=0, ClampMax=1))
+	float Fracture = 0.5f;
+};
+
+/** The styles of the walls a config starts with: a curtain of stalactites under an overhang, smooth flowstone in long drapes, broken rock that
+ *  splits along its joints, and organ pipes, a row of columns down to the floor */
+inline TArray<FHexWallStyle> MakeDefaultWallStyles()
+{
+	TArray<FHexWallStyle> Styles;
+	FHexWallStyle& Curtain = Styles.AddDefaulted_GetRef();
+	Curtain.Name = TEXT("Stalactites");
+
+	FHexWallStyle& Flowstone = Styles.AddDefaulted_GetRef();
+	Flowstone.Name = TEXT("Flowstone");
+	Flowstone.Weight = 0.8f;
+	Flowstone.Height = 0.9f;
+	Flowstone.Thickness = 1.1f;
+	Flowstone.Lean = 0.6f;
+	Flowstone.Overhang = 0.4f;
+	Flowstone.Bulge = 1.8f;
+	Flowstone.CrestJag = 0.4f;
+	Flowstone.CrestNotch = 0.5f;
+	Flowstone.RibSize = 1.8f;
+	Flowstone.RibDepth = 1.4f;
+	Flowstone.RibTip = 0.55f;
+	Flowstone.ColumnShare = 1.5f;
+	Flowstone.FluteDepth = 0.5f;
+	Flowstone.Flowstone = 1.0f;
+	Flowstone.Fracture = 0.1f;
+
+	FHexWallStyle& Broken = Styles.AddDefaulted_GetRef();
+	Broken.Name = TEXT("BrokenRock");
+	Broken.Weight = 0.9f;
+	Broken.Height = 0.85f;
+	Broken.Thickness = 0.95f;
+	Broken.Lean = 2.0f;
+	Broken.Overhang = 0.3f;
+	Broken.Bulge = 1.4f;
+	Broken.CrestJag = 1.8f;
+	Broken.CrestNotch = 1.6f;
+	Broken.RibSize = 1.3f;
+	Broken.RibDepth = 0.35f;
+	Broken.RibTip = 1.15f;
+	Broken.ColumnShare = 0.3f;
+	Broken.FluteDepth = 0.4f;
+	Broken.Flowstone = 0.0f;
+	Broken.Fracture = 1.0f;
+
+	FHexWallStyle& Columns = Styles.AddDefaulted_GetRef();
+	Columns.Name = TEXT("OrganPipes");
+	Columns.Weight = 0.6f;
+	Columns.Height = 1.2f;
+	Columns.Overhang = 0.7f;
+	Columns.Bulge = 0.8f;
+	Columns.CrestJag = 1.4f;
+	Columns.CrestNotch = 1.2f;
+	Columns.RibSize = 0.7f;
+	Columns.RibDepth = 1.3f;
+	Columns.RibTip = 0.4f;
+	Columns.ColumnShare = 4.0f;
+	Columns.FluteDepth = 1.4f;
+	Columns.Flowstone = 0.6f;
+	Columns.Fracture = 0.3f;
+	return Styles;
+}
+
+/**
  *  The planets: the size of their cells, how levels are generated for a planet without levels.txt, the colors of its surface, the outlines of the cell under the mouse and the values of
  *  M_HexPlanet and M_HexPlanetWireframe. AHexPlanet gives every float and color of it to those materials as parameters of the same names,
  *  once when they are made. Tools/create_planet_assets.py creates DA_HexPlanet only when it is missing.
@@ -1429,10 +1555,10 @@ public:
 	float WallStep = 6.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
-	float WallFootReach = 12.0f;
+	float WallFootReach = 14.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
-	float WallFillet = 30.0f;
+	float WallFillet = 45.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=0.5))
 	float WallLean = 0.05f;
@@ -1487,6 +1613,17 @@ public:
 
 	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0.01, ClampMax=1))
 	float WallFluteWidth = 0.3f;
+
+	/** The styles of the walls (FHexWallStyle), each holding in regions of a noise of the place about WallStyleScale across, blending where they
+	 *  meet over less the higher WallStyleSharpness, so the walls do not look alike all along a passage */
+	UPROPERTY(EditAnywhere, Category="Underground|Walls")
+	TArray<FHexWallStyle> WallStyles = MakeDefaultWallStyles();
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=10))
+	float WallStyleScale = 450.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=20))
+	float WallStyleSharpness = 5.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
 	float WallCullDistance = 9000.0f;
@@ -1563,6 +1700,48 @@ public:
 
 	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=2))
 	float CaveWallFloorNoise = 0.6f;
+
+	/** The stone of the walls varies by the place: CaveWallAltShare of it, in regions about CaveWallAltScale across, is the rock layer named
+	 *  CaveWallAltLayerName (DA_HexTerrainLayers) instead of the rock of the abyss; where a style is flowstone it is lighter and warmer by
+	 *  CaveWallFlowTint and CaveWallFlowRoughness rough; where it is broken rock thin veins CaveWallVeinWidth wide of CaveWallVeinColor run through
+	 *  it in a pattern about CaveWallVeinScale across, by CaveWallVeins; and rusty stains of CaveWallStainColor run down it by CaveWallStains */
+	UPROPERTY(EditAnywhere, Category="Underground|Walls")
+	FName CaveWallAltLayerName = TEXT("OchreRock");
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
+	float CaveWallAltShare = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=10))
+	float CaveWallAltScale = 380.0f;
+
+	/** The tint of the other rock, in place of CaveWallColor, as a rock lighter than the basalt needs less */
+	UPROPERTY(EditAnywhere, Category="Underground|Walls")
+	FLinearColor CaveWallAltColor = FLinearColor(1.0f, 0.92f, 0.82f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls")
+	FLinearColor CaveWallFlowTint = FLinearColor(1.35f, 1.22f, 1.05f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
+	float CaveWallFlowRoughness = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
+	float CaveWallVeins = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0.001, ClampMax=0.5))
+	float CaveWallVeinWidth = 0.02f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=1))
+	float CaveWallVeinScale = 45.0f;
+
+	/** Lighter where the rock around is lighter, as a pale vein in dark basalt drew a white line */
+	UPROPERTY(EditAnywhere, Category="Underground|Walls")
+	FLinearColor CaveWallVeinColor = FLinearColor(0.6f, 0.55f, 0.48f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
+	float CaveWallStains = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls")
+	FLinearColor CaveWallStainColor = FLinearColor(0.8f, 0.42f, 0.2f, 1.0f);
 
 	/** The walls dissolve around the line from the camera to the point under the cursor, as in a game seen from above, where they stand in front
 	 *  of that point: within CaveWallFadeRadius world units of the line, softer over CaveWallFadeSoftness of it at its edge, fully from

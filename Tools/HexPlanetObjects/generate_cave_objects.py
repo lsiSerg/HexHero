@@ -1,6 +1,7 @@
 """Generates the meshes of the cave objects of the underground of the hex planet: clusters and fields of stalagmites, glowing mushrooms, crystal
-clusters, pebbles and broken slabs, a ribcage, a horned skull, scattered bones and rune stones, and the rims of the chasms: broken rocks, spires and
-blocks of runes on the lips of the passages and stalactites below them.
+clusters, pebbles and broken slabs, a ribcage, a horned skull, scattered bones and rune stones, the rims of the chasms: broken rocks, spires and
+blocks of runes on the lips of the passages and stalactites below them, and masses that fill a cell and block it: a mass of stalagmites, a druse of
+giant crystals and a rockfall.
 
 Run with any Python 3 without packages, for example the one in the engine:
     <Engine>/Engine/Binaries/ThirdParty/Python3/Win64/python.exe generate_cave_objects.py
@@ -64,9 +65,10 @@ def rotate_y(point, angle):
     return (point[0] * c + point[2] * s, point[1], -point[0] * s + point[2] * c)
 
 
-def add_spire(mesh, base, height, radius, seed, sink=2.0, sides=6, bend=0.14, fractions=None):
+def add_spire(mesh, base, height, radius, seed, sink=2.0, sides=6, bend=0.14, fractions=None, colors=None):
     """A sharp faceted cone of rock from below the ground to its tip, in rings of `sides` vertices that narrow upwards, its axis bending a little,
-    dark at its foot and lighter towards its tip"""
+    dark at its foot and lighter towards its tip (colors, the foot and the tip, ROCK_FOOT and ROCK_TIP unless given)"""
+    foot_color, tip_color = colors if colors else (ROCK_FOOT, ROCK_TIP)
     mesh.begin_part(flat=True)
     random = Random(seed)
     lean = (random.range(-bend, bend), random.range(-bend, bend))
@@ -84,7 +86,7 @@ def add_spire(mesh, base, height, radius, seed, sink=2.0, sides=6, bend=0.14, fr
     for index, f in enumerate(fractions):
         center = axis_at(f)
         ring_radius = radius * (1.0 - f) ** 0.85
-        color = lerp(ROCK_FOOT, ROCK_TIP, min(f * 1.1, 1.0))
+        color = lerp(foot_color, tip_color, min(f * 1.1, 1.0))
         ring = []
         for step in range(sides):
             angle = twist + 2.0 * math.pi * (step + 0.3 * (hash_unit(seed, index, step) - 0.5)) / sides
@@ -93,7 +95,7 @@ def add_spire(mesh, base, height, radius, seed, sink=2.0, sides=6, bend=0.14, fr
             ring.append(mesh.vertex(position, scale_color(color, 0.85 + 0.3 * hash_unit(seed, index, step, 3)), 0.0))
         rings.append((ring, center))
     tip_point = axis_at(1.0)
-    tip = mesh.vertex(tip_point, ROCK_TIP, 0.0)
+    tip = mesh.vertex(tip_point, tip_color, 0.0)
     for index in range(len(rings) - 1):
         lower, lower_center = rings[index]
         upper, upper_center = rings[index + 1]
@@ -126,15 +128,16 @@ def add_lump(mesh, center, radii, color, seed, subdivisions=1, alpha=0.0, bumps=
         mesh.triangle(indices[a], indices[b], indices[c], center)
 
 
-def add_cut_stone(mesh, center, radius, seed, color, subdivisions=1, squash=None):
-    """A stone cut by a few planes into broad split faces, turned at random, a normal per face"""
+def add_cut_stone(mesh, center, radius, seed, color, subdivisions=1, squash=None, cuts=4, depth=(0.55, 0.85)):
+    """A stone cut by a few planes (cuts, each at depth of its radius from its middle) into broad split faces, turned at random, a normal per face;
+    more and deeper cuts make an angular block"""
     mesh.begin_part(flat=True)
     random = Random(seed)
     points, faces = icosphere(subdivisions)
     planes = []
-    for _ in range(4):
+    for _ in range(cuts):
         normal = unit((random.range(-1.0, 1.0), random.range(-1.0, 1.0), random.range(-0.3, 1.0)))
-        planes.append((normal, random.range(0.55, 0.85)))
+        planes.append((normal, random.range(depth[0], depth[1])))
     squash = squash if squash is not None else random.range(0.5, 0.75)
     stretch = random.range(1.0, 1.4)
     yaw = random.range(0.0, 2.0 * math.pi)
@@ -810,6 +813,110 @@ RIM_RUNES = [
 ]
 
 
+# --- masses that fill a cell and block it -------------------------------------------------------------------------------------------------------
+# a cell of a passage no hero crosses, which the generation of the underground gives only where no passage gets narrower than two cells: they fill
+# most of the cell and stand about as high as the walls, but keep within MASS_REACH of its middle, inside the cell on its sides towards a void
+# (an apothem of about 87, less the margin of the footprint)
+
+MASS_REACH = 74.0
+# darker than the spires of the floor, as the first masses read as pale cones of plastic: the rock of the walls near them is dark basalt
+MASS_FOOT = (0.04, 0.032, 0.024)
+MASS_TIP = (0.13, 0.105, 0.08)
+
+
+def stalagmite_mass(seed, count, radius):
+    """A mass of tall stalagmites fused at their feet on a high mound of rock: the tallest, about as high as the walls, near the middle and lower
+    towards the edge, a few thick ones among many thin"""
+    mesh = Mesh()
+    random = Random(seed)
+    spots = place_in_disc(random, count, radius, lambda i, j: 7.0)
+    for index, (x, y) in enumerate(spots):
+        out = math.hypot(x, y) / radius
+        height = max((175.0 - 120.0 * out ** 1.1) * random.range(0.7, 1.08), 34.0 * random.range(0.9, 1.15))
+        thick = random.range(0.15, 0.2) if random.unit() > 0.25 else random.range(0.24, 0.32)
+        spire_radius = max(height * thick, 4.0)
+        # the foot of a spire, whose ring reaches up to 1.2 times its radius, and its leaning tip stay within the reach
+        room = MASS_REACH - 2.0 - math.hypot(x, y) - 0.08 * height
+        if room < 1.2 * spire_radius:
+            if room < 1.2 * 3.0:
+                continue
+            spire_radius = room / 1.2
+        tall = height >= 80.0
+        add_spire(mesh, (x, y, 0.0), height, spire_radius, seed * 43 + index, sides=7 if tall else 6, bend=0.08,
+                  fractions=[0.0, 0.22, 0.45, 0.68, 0.86] if tall else None, colors=(MASS_FOOT, MASS_TIP))
+    # a high mound of lumps under them, so the mass stands on solid rock rather than on the floor
+    for index in range(7):
+        angle = 2.0 * math.pi * index / 7 + random.range(-0.4, 0.4)
+        out = radius * (0.0 if index == 0 else random.range(0.3, 0.42))
+        size = radius * random.range(0.36, 0.42)
+        add_lump(mesh, (math.cos(angle) * out, math.sin(angle) * out, 0.0), (size, size, size * 0.65), MASS_FOOT, seed * 19 + index,
+                 subdivisions=2, bumps=0.25)
+    return mesh
+
+
+def crystal_mass(seed, count, small_count):
+    """A druse of giant teal crystals splayed from a mound of rock, the longest near the middle and nearly upright, with smaller ones around its
+    foot"""
+    mesh = Mesh()
+    random = Random(seed)
+    for index in range(count):
+        out = 0.0 if index == 0 else random.range(0.2, 1.0)
+        angle = random.range(0.0, 2.0 * math.pi)
+        lean = math.radians(lerp((5.0,), (38.0,), out)[0] * random.range(0.8, 1.1))
+        direction = (math.sin(lean) * math.cos(angle), math.sin(lean) * math.sin(angle), math.cos(lean))
+        base_out = out * 30.0
+        size = 165.0 if index == 0 else lerp((135.0,), (55.0,), out)[0] * random.range(0.8, 1.1)
+        radius = max(5.0, min(16.0, size * random.range(0.08, 0.1)))
+        # the tip within the reach
+        room = MASS_REACH - 2.0 - base_out - radius
+        if math.sin(lean) * size > room:
+            size = room / max(math.sin(lean), 1e-6)
+        add_prism(mesh, (math.cos(angle) * base_out, math.sin(angle) * base_out, -6.0), direction, size, radius, seed * 47 + index)
+    for index in range(small_count):
+        angle = random.range(0.0, 2.0 * math.pi)
+        out = random.range(36.0, 50.0)
+        lean = math.radians(random.range(25.0, 50.0))
+        direction = (math.sin(lean) * math.cos(angle), math.sin(lean) * math.sin(angle), math.cos(lean))
+        add_prism(mesh, (math.cos(angle) * out, math.sin(angle) * out, -1.0), direction, random.range(12.0, 24.0), random.range(2.6, 3.8),
+                  seed * 53 + index, alpha_root=0.3)
+    # a mound of the rock of the cave, as the dark base of the small clusters drew a black disc under a druse this size
+    for index in range(5):
+        angle = 2.0 * math.pi * index / 5 + random.range(-0.4, 0.4)
+        out = 0.0 if index == 0 else random.range(16.0, 26.0)
+        size = random.range(26.0, 32.0)
+        add_lump(mesh, (math.cos(angle) * out, math.sin(angle) * out, -2.0), (size, size, size * 0.5), ROCK_FOOT, seed * 5 + 7 + index, subdivisions=2,
+                 bumps=0.3)
+    for index in range(8):
+        angle = random.range(0.0, 2.0 * math.pi)
+        add_cut_stone(mesh, (math.cos(angle) * 54.0, math.sin(angle) * 54.0, 0.0), random.range(5.0, 8.0), seed * 59 + index, RIM_ROCK, subdivisions=0)
+    return mesh
+
+
+def rockfall(seed, count, small_count):
+    """A heap of fallen blocks of rock that fills a cell: big split blocks at its foot, smaller ones stacked on them towards the middle up to a few
+    on its top, and rubble around it"""
+    mesh = Mesh()
+    random = Random(seed)
+    # a broad ring of angular blocks at its foot, so it fills the cell rather than standing as a cairn of round stones in its middle, as the
+    # first one did, and dark as the rock of the walls
+    layers = ((33.0, 46.0, 19.0, 25.0, 0.0), (16.0, 28.0, 16.0, 21.0, 24.0), (6.0, 14.0, 13.0, 17.0, 46.0), (0.0, 6.0, 11.0, 14.0, 66.0))
+    shares = (0.5, 0.78, 0.93, 1.0)
+    for index in range(count):
+        layer = next(each for each, share in enumerate(shares) if index < count * share)
+        low_out, high_out, low_size, high_size, z = layers[layer]
+        out = random.range(low_out, high_out)
+        size = random.range(low_size, high_size)
+        angle = random.range(0.0, 2.0 * math.pi)
+        color = lerp(MASS_FOOT, MASS_TIP, 0.35 + 0.2 * layer)
+        add_cut_stone(mesh, (math.cos(angle) * out, math.sin(angle) * out, z + random.range(-4.0, 4.0)), size, seed * 61 + index, color,
+                      subdivisions=1, squash=random.range(0.65, 0.9), cuts=8, depth=(0.42, 0.7))
+    for index in range(small_count):
+        angle = random.range(0.0, 2.0 * math.pi)
+        out = random.range(48.0, 62.0)
+        add_cut_stone(mesh, (math.cos(angle) * out, math.sin(angle) * out, 0.0), random.range(3.0, 5.5), seed * 67 + index, RIM_ROCK, subdivisions=0)
+    return mesh
+
+
 # --- output -------------------------------------------------------------------------------------------------------------------------------------
 
 # each mesh: its name, how it is made, its material (cave: M_HexPlanetCave by its vertex colors, rock: M_HexPlanetBoulder in the rock of its cell)
@@ -846,6 +953,13 @@ MESHES = [
     ('Stalactites_1', lambda: stalactites(479, 7), 'cave', 'small'),
     ('RuneBlock_0', lambda: rune_block(487, RIM_RUNES[0]), 'cave', 'small'),
     ('RuneBlock_1', lambda: rune_block(491, RIM_RUNES[1]), 'cave', 'small'),
+    # the masses that fill a cell and block it
+    ('StalagmiteMass_0', lambda: stalagmite_mass(503, 44, 62.0), 'cave', 'default'),
+    ('StalagmiteMass_1', lambda: stalagmite_mass(509, 52, 66.0), 'cave', 'default'),
+    ('CrystalMass_0', lambda: crystal_mass(521, 13, 18), 'cave', 'default'),
+    ('CrystalMass_1', lambda: crystal_mass(523, 16, 22), 'cave', 'default'),
+    ('Rockfall_0', lambda: rockfall(541, 30, 12), 'cave', 'default'),
+    ('Rockfall_1', lambda: rockfall(547, 34, 14), 'cave', 'default'),
 ]
 
 

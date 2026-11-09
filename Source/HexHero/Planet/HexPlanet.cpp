@@ -2307,7 +2307,7 @@ void AHexPlanet::Tick(float DeltaTime)
 	}
 
 	Objects->SetShown(CVarHexPlanetObjects.GetValueOnGameThread(), CVarHexPlanetRims.GetValueOnGameThread());
-	const bool bWallsShown = CVarHexPlanetWalls.GetValueOnGameThread();
+	const bool bWallsShown = CVarHexPlanetWalls.GetValueOnGameThread() && !bWallsHiddenByWire;
 	for (UHexPlanetMeshComponent* Wall : WallChunks)
 	{
 		if (Wall && Wall->IsVisible() != bWallsShown)
@@ -2928,6 +2928,16 @@ void AHexPlanet::UpdateDebugView()
 		BuildWireSections();
 	}
 
+	// the walls are no terrain: their copies while the triangles of every cell are drawn, and the walls themselves hidden while they are drawn
+	// alone; built again with every change of the surface, as the walls follow it
+	const bool bWallWires = WireTarget.IsSet() && IsWireTarget(1, WireTarget.GetValue()) && !WallChunks.IsEmpty();
+	bWallsHiddenByWire = bWallWires && View.Mode == EHexWireframeMode::Only;
+	if (bWallWires != bAppliedWallWires || (bWallWires && bSurfaceChangedNow))
+	{
+		bAppliedWallWires = bWallWires;
+		BuildWallWires(bWallWires);
+	}
+
 	if (View.Mode != AppliedView.Mode || View.Scope != AppliedView.Scope || View.Target != AppliedView.Target || HoveredCell != AppliedWireCell || bSurfaceChangedNow)
 	{
 		AppliedWireCell = HoveredCell;
@@ -2979,11 +2989,88 @@ void AHexPlanet::BuildHoverWireframe(const FHexDebugViewSettings& View)
 		}
 	}
 
+	// the walls of these cells, which are no terrain, in the color of their cell
+	if (!WallChunks.IsEmpty() && IsWireTarget(1, View.Target))
+	{
+		for (const TPair<int32, FLinearColor>& Each : Chosen)
+		{
+			HexPlanetWalls::FMesh Mesh;
+			HexPlanetWalls::BuildNear(Walls, Each.Key, Grid.GetCells()[Each.Key].Center * WallParams.FloorRadius, Settings->HexRadius * 1.1, WallParams, Mesh);
+			const int32 First = Positions.Num();
+			for (const FVector3f& Position : Mesh.Positions)
+			{
+				Positions.Add(FVector(Position));
+				Colors.Add(Each.Value);
+			}
+			for (const int32 Index : Mesh.Triangles)
+			{
+				Triangles.Add(First + Index);
+			}
+		}
+	}
+
 	if (!Triangles.IsEmpty())
 	{
 		HoverWireframe->CreateMeshSection_LinearColor(0, Positions, Triangles, {}, {}, Colors, {}, false);
 		HoverWireframe->SetMaterial(0, HoverWireframeMaterial);
 	}
+}
+
+void AHexPlanet::BuildWallWires(bool bShown)
+{
+	for (UProceduralMeshComponent* Wire : WallWireChunks)
+	{
+		if (Wire)
+		{
+			Wire->ClearAllMeshSections();
+		}
+	}
+	if (!bShown || !WireframeMaterial)
+	{
+		return;
+	}
+
+	// the walls keep their meshes on the GPU alone, so the debug view builds them again from their lines
+	const double Start = FPlatformTime::Seconds();
+	const int32 NumChunks = Walls.ChunkSamples.Num();
+	TArray<HexPlanetWalls::FMesh> Meshes;
+	Meshes.SetNum(NumChunks);
+	ParallelFor(NumChunks, [&](int32 Chunk) { HexPlanetWalls::BuildChunk(Walls, Chunk, WallParams, Meshes[Chunk]); });
+	WallWireChunks.SetNum(NumChunks);
+	int64 Total = 0;
+	for (int32 Chunk = 0; Chunk < NumChunks; ++Chunk)
+	{
+		const HexPlanetWalls::FMesh& Mesh = Meshes[Chunk];
+		if (Mesh.Triangles.IsEmpty())
+		{
+			continue;
+		}
+		UProceduralMeshComponent* Wire = WallWireChunks[Chunk];
+		if (!Wire)
+		{
+			Wire = NewObject<UProceduralMeshComponent>(this, *FString::Printf(TEXT("WallWireChunk%d"), Chunk));
+			Wire->SetupAttachment(Wireframe);
+			Wire->SetCastShadow(false);
+			Wire->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			Wire->SetTranslucentSortPriority(Wireframe->TranslucencySortPriority);
+			Wire->RegisterComponent();
+			WallWireChunks[Chunk] = Wire;
+		}
+		TArray<FVector> Positions;
+		Positions.Reserve(Mesh.Positions.Num());
+		for (const FVector3f& Position : Mesh.Positions)
+		{
+			Positions.Add(FVector(Position));
+		}
+		Wire->CreateMeshSection_LinearColor(0, Positions, Mesh.Triangles, {}, {}, {}, {}, false);
+		Wire->SetMaterial(0, WireframeMaterial);
+		if (WallChunks.IsValidIndex(Chunk) && WallChunks[Chunk])
+		{
+			Wire->SetCullDistance(WallChunks[Chunk]->LDMaxDrawDistance);
+		}
+		Total += Mesh.Triangles.Num() / 3;
+	}
+	UE_LOG(LogHexHero, Log, TEXT("Planet: built the copies of the walls in the wireframe, %lld triangles, in %.0f ms"), Total, (FPlatformTime::Seconds() - Start) * 1000.0);
 }
 
 void AHexPlanet::UpdateWaterHide(const FHexDebugViewSettings& View)
@@ -5660,6 +5747,12 @@ void AHexPlanet::UpdateWalls(TArray<int32>& Chunks)
 	{
 		WallMaterial->SetScalarParameterValue(TEXT("FloorLayer"), float(FMath::Max(BiomeConfigs[FloorBiome]->TerrainLayer, 0)));
 	}
+	// in regions the walls are of another rock, -1 without it
+	if (WallMaterial)
+	{
+		const UHexTerrainLayersConfig* TerrainLayers = GetDefault<UHexMapSettings>()->LoadTerrainLayers();
+		WallMaterial->SetScalarParameterValue(TEXT("CaveWallAltLayer"), float(TerrainLayers ? TerrainLayers->FindLayer(Settings->CaveWallAltLayerName) : INDEX_NONE));
+	}
 
 	WallParams = HexPlanetWalls::FParams::FromConfig(*Settings, Radius + Settings->LevelHeight, HexPlanetUnderground::GetSeed(GetManifest()));
 	HexPlanetWalls::Build(Grid, ShownLevels, [this](int32 Cell) { return ShownLevels[Cell] >= 0; }, WallParams, Walls);
@@ -5699,7 +5792,7 @@ void AHexPlanet::UpdateWalls(TArray<int32>& Chunks)
 		Source.Normals = Mesh.Normals;
 		Source.UVs[0] = Mesh.UVs;
 		Source.UVs[1] = Mesh.UV1s;
-		Source.UVs[2] = Zeros;
+		Source.UVs[2] = Mesh.UV2s;
 		Source.UVs[3] = Zeros;
 		Source.Triangles = Mesh.Triangles;
 		Prepared[Index] = UHexPlanetMeshComponent::PrepareSection(Source, FName(*FString::Printf(TEXT("WallChunk%d"), Changed[Index])));

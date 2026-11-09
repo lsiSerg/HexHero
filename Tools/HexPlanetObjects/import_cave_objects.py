@@ -46,9 +46,9 @@ RIM_SETS = [
     {'id': 'CaveRim', 'name': 'Chasm rim', 'order': 310, 'color': (0.3, 0.28, 0.26), 'counts': (1, 3), 'share': 0.035, 'scale': (1.4, 2.4),
      'giant': (0.05, 1.6), 'spacing': 8.0, 'inset': 0.16, 'turn': 40.0, 'align': 0.6, 'tilt': 20.0, 'sink': 2.5, 'shadow': False, 'cull': 9000.0,
      'rings': 0, 'seat': 'face', 'heights': (0.08, 0.75), 'meshes': ['RimRock_0', 'RimRock_1']},
-    {'id': 'CaveRimSpires', 'name': 'Wall foot spires', 'order': 320, 'color': (0.32, 0.29, 0.26), 'counts': (1, 2), 'share': 0.22, 'scale': (0.35, 0.8),
+    {'id': 'CaveRimSpires', 'name': 'Wall foot spires', 'order': 320, 'color': (0.32, 0.29, 0.26), 'counts': (1, 2), 'share': 0.12, 'scale': (0.35, 0.8),
      'giant': (0.06, 1.6), 'spacing': 10.0, 'inset': 0.08, 'turn': 180.0, 'align': 0.0, 'tilt': 12.0, 'sink': 1.0, 'shadow': False, 'cull': 7000.0,
-     'rings': 0, 'seat': 'foot', 'meshes': ['RimSpire_0', 'RimSpire_1']},
+     'rings': 0, 'seat': 'foot', 'corner': 3.0, 'meshes': ['RimSpire_0', 'RimSpire_1']},
     {'id': 'CaveStalactites', 'name': 'Stalactites', 'order': 330, 'color': (0.28, 0.26, 0.24), 'counts': (0, 2), 'share': 0.04, 'scale': (1.0, 1.8),
      'giant': (0.1, 1.8), 'spacing': 9.0, 'out': 2.0, 'turn': 6.0, 'align': 0.0, 'tilt': 6.0, 'sink': 1.5, 'shadow': False, 'cull': 7000.0,
      'rings': 0, 'hang': True, 'seat': 'face', 'heights': (0.35, 0.92), 'meshes': ['Stalactites_0', 'Stalactites_1']},
@@ -59,12 +59,16 @@ RIM_SETS = [
      'giant': (0.1, 1.5), 'spacing': 10.0, 'turn': 60.0, 'align': 0.0, 'tilt': 25.0, 'sink': 2.0, 'shadow': False, 'cull': 7000.0,
      'rings': 1, 'seat': 'face', 'heights': (0.1, 0.65), 'glow': dict(CRYSTAL_GLOW, pool=0.0),
      'meshes': ['Crystals_0', 'Crystals_1', 'Crystals_2']},
+    # stones and pebbles fallen to the foot of the walls, 'corner' times more in their inside corners (RimCornerBoost), as are the spires
+    {'id': 'CaveWallRubble', 'name': 'Wall foot rubble', 'order': 360, 'color': (0.4, 0.36, 0.3), 'counts': (1, 1), 'share': 0.06, 'scale': (0.7, 1.3),
+     'giant': (0.08, 1.7), 'spacing': 8.0, 'turn': 180.0, 'align': 0.6, 'tilt': 14.0, 'sink': 0.8, 'shadow': False, 'cull': 5000.0,
+     'rings': 0, 'seat': 'foot', 'corner': 2.5, 'meshes': ['Pebbles_0', 'Pebbles_1', 'RimRock_0', 'RimRock_1']},
 ]
 SEATS = {'lip': 'LIP', 'foot': 'WALL_FOOT', 'face': 'WALL_FACE'}
 
 # each kind: its values, its meshes, the share of the passages the generation gives it, and its group, patches and the rings of an exit it keeps
-# clear of; all stand on passages (level 0) of every cave floor, block nothing and keep their meshes off the voids. Glowing and tall kinds keep
-# two rings from an exit, so its marker stays the brightest thing of its hall
+# clear of; all stand on passages (level 0) of every cave floor and keep their meshes off the voids, and none blocks but the masses below.
+# Glowing and tall kinds keep two rings from an exit, so its marker stays the brightest thing of its hall
 SETS = [
     {'id': 'CaveMushrooms', 'name': 'Mushrooms', 'order': 110, 'color': (0.1, 0.7, 0.8), 'layer': 'cover', 'counts': [4, 8, 14], 'scale': (0.8, 1.3),
      'giant': (0.08, 2.0), 'spacing': 12.0, 'reach': 1.0, 'min_up': 0.6, 'align': 0.3, 'tilt': 8.0, 'sink': 0.3, 'shadow': False, 'cull': 3500.0,
@@ -88,6 +92,19 @@ SETS = [
     {'id': 'CaveRuneStone', 'name': 'Rune stone', 'order': 230, 'color': (0.5, 0.5, 0.56), 'layer': 'decor', 'counts': [1], 'scale': (1.6, 2.0),
      'giant': (0.0, 1.0), 'spacing': 10.0, 'reach': 0.35, 'min_up': 0.7, 'align': 0.2, 'tilt': 4.0, 'sink': 1.0, 'shadow': True, 'cull': 4500.0,
      'group': '', 'patch': 0.0, 'share': 0.008, 'rings': 2, 'glow': RUNE_GLOW, 'meshes': ['RuneStone_0', 'RuneStone_1']},
+    # masses that fill a cell and block it ('blocks'), which the generation gives only empty cells where no passage gets narrower than two cells
+    # and the ways around them stay (HexPlanetUnderground::GenerateObjects), 'share' of those cells; sorted after the other kinds, so the indices
+    # of objects.json stay. Each a mesh at the middle of its cell, filling most of it, about as high as the walls but for the rockfall
+    {'id': 'CaveStalagmiteMass', 'name': 'Stalagmite mass', 'order': 240, 'color': (0.24, 0.2, 0.17), 'layer': 'decor', 'counts': [1], 'scale': (0.92, 1.04),
+     'giant': (0.0, 1.0), 'spacing': 10.0, 'reach': 0.04, 'min_up': 0.5, 'align': 0.0, 'tilt': 2.0, 'sink': 2.0, 'shadow': True, 'cull': 9000.0,
+     'group': '', 'patch': 0.0, 'share': 0.3, 'rings': 2, 'blocks': True, 'meshes': ['StalagmiteMass_0', 'StalagmiteMass_1']},
+    {'id': 'CaveCrystalMass', 'name': 'Crystal druse', 'order': 245, 'color': (0.4, 0.9, 0.9), 'layer': 'decor', 'counts': [1], 'scale': (0.92, 1.04),
+     'giant': (0.0, 1.0), 'spacing': 10.0, 'reach': 0.04, 'min_up': 0.5, 'align': 0.0, 'tilt': 3.0, 'sink': 2.0, 'shadow': True, 'cull': 9000.0,
+     'group': '', 'patch': 0.0, 'share': 0.2, 'rings': 2, 'blocks': True, 'glow': dict(CRYSTAL_GLOW, strength=0.7, pool=0.9),
+     'meshes': ['CrystalMass_0', 'CrystalMass_1']},
+    {'id': 'CaveRockfall', 'name': 'Rockfall', 'order': 250, 'color': (0.36, 0.31, 0.25), 'layer': 'decor', 'counts': [1], 'scale': (0.92, 1.04),
+     'giant': (0.0, 1.0), 'spacing': 10.0, 'reach': 0.04, 'min_up': 0.5, 'align': 0.3, 'tilt': 4.0, 'sink': 1.5, 'shadow': True, 'cull': 7000.0,
+     'group': '', 'patch': 0.0, 'share': 0.25, 'rings': 1, 'blocks': True, 'meshes': ['Rockfall_0', 'Rockfall_1']},
 ]
 
 
@@ -183,7 +200,7 @@ def make_set(entry):
     config.set_editor_property('palette_color', unreal.LinearColor(*entry['color'], 1.0))
     config.set_editor_property('layer', unreal.HexObjectLayer.COVER if entry['layer'] == 'cover' else unreal.HexObjectLayer.DECOR)
     config.set_editor_property('planet_layers', UNDERGROUND_LAYER)
-    config.set_editor_property('blocks_movement', False)
+    config.set_editor_property('blocks_movement', entry.get('blocks', False))
     config.set_editor_property('allowed_levels', [0])
     config.set_editor_property('count_by_density', entry['counts'])
     config.set_editor_property('scale_min', entry['scale'][0])
@@ -257,6 +274,7 @@ def make_rim_set(entry):
     config.set_editor_property('exit_clear_rings', entry['rings'])
     config.set_editor_property('rim_seat', getattr(unreal.HexRimSeat, SEATS[entry.get('seat', 'lip')]))
     config.set_editor_property('rim_wall_heights', unreal.Vector2D(*entry.get('heights', (0.15, 0.7))))
+    config.set_editor_property('rim_corner_boost', entry.get('corner', 0.0))
     glow = entry.get('glow')
     if glow:
         config.set_editor_property('glow_color', unreal.LinearColor(*glow['color'], 1.0))

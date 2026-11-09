@@ -254,12 +254,7 @@ TArray<HexPlanetUnderground::FObjectKind> UHexPlanetObjects::MakeObjectKinds(TCo
 	for (const int32 Index : GetPaintableSets(LayerSets))
 	{
 		const UHexPlanetObjectSet& Set = *LayerSets[Index];
-		if (Set.bBlocksMovement)
-		{
-			// the corridors are as wide as passages may be, so a cell that blocks would cut one; painting it stays the choice of the designer
-			UE_LOG(LogHexHero, Warning, TEXT("Planet: the object set %s blocks movement, so the generation of the underground leaves it out, as it would cut passages"), *Set.Id.ToString());
-			continue;
-		}
+		// a kind that blocks takes only cells it cannot cut a passage at (FObjectKind::bBlocks); painting it anywhere stays the choice of the designer
 		HexPlanetUnderground::FObjectKind& Kind = Kinds.AddDefaulted_GetRef();
 		Kind.SetIndex = Index;
 		Kind.Id = Set.Id.ToString();
@@ -1283,7 +1278,10 @@ void UHexPlanetObjects::PlaceOnWalls(int32 Chunk, TArray<FInstance>& Out, FPlace
 			const HexPlanetWalls::FSample& Sample = Walls.Get(At);
 			const FIntVector Key(FMath::RoundToInt32(Sample.Position.X * 0.5), FMath::RoundToInt32(Sample.Position.Y * 0.5), FMath::RoundToInt32(Sample.Position.Z * 0.5));
 			FRandomStream Random(int32(HashCombine(GetTypeHash(Key), IdHash)));
-			if (Random.FRand() >= Set.RimSideShare)
+			// more at the foot of an inside corner, where the line turns onto the passage about as tightly as its corners are rounded
+			const double Corner = Set.RimSeat == EHexRimSeat::WallFoot && Sample.InnerReach < 1e9
+				? FMath::Clamp(WallParams.CornerRound * 1.2 / FMath::Max(Sample.InnerReach, 1.0), 0.0, 1.0) : 0.0;
+			if (Random.FRand() >= Set.RimSideShare * (1.0 + Set.RimCornerBoost * Corner))
 			{
 				continue;
 			}
@@ -1470,9 +1468,10 @@ void UHexPlanetObjects::PlaceInCell(int32 Cell, int32 SetIndex, int32 Density, b
 		{
 			continue;
 		}
-		// nor in the wall on a lip or on its foot
-		if (WallClearance > 0.0 && Set.bClipFootprint
-			&& HexPlanetWalls::GetDistanceToLine(Planet->GetWalls(), Cell, FVector3d(Position)) < WallClearance + Slots[Slot].FootprintRadius * Scale + Settings->ObjectFootprintMargin)
+		// nor in the wall on a lip or on its foot; a mass that blocks its cell fills it and may lean on the foot, as long as it stays off the line
+		const double Clearance = Set.bBlocksMovement ? 0.0 : WallClearance + Slots[Slot].FootprintRadius * Scale + Settings->ObjectFootprintMargin;
+		if (WallClearance > 0.0 && Set.bClipFootprint && Clearance > 0.0
+			&& HexPlanetWalls::GetDistanceToLine(Planet->GetWalls(), Cell, FVector3d(Position)) < Clearance)
 		{
 			continue;
 		}

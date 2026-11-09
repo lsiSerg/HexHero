@@ -24,9 +24,9 @@ namespace
 		InnerLip,
 		InnerUnder,
 		InnerFirst,
-		InnerLast = InnerFirst + 8,
+		InnerLast = InnerFirst + 7,
 		FootFirst,
-		FootLast = FootFirst + 2,
+		FootLast = FootFirst + 4,
 		FloorStart,
 		FloorEnd,
 		Buried,
@@ -62,6 +62,13 @@ namespace
 	double Noise(const FVector3d& Point, double Scale, const FVector& Offset)
 	{
 		return double(FMath::PerlinNoise3D(FVector(Point / FMath::Max(Scale, 1.0)) + Offset));
+	}
+
+	/** The offset of the noise of the regions of a style, from the seed and the place of the style */
+	FVector GetStyleOffset(int32 Seed, int32 Style)
+	{
+		FRandomStream Random(Seed * 104729 + Style * 7907 + 3);
+		return FVector(Random.FRandRange(-100.0, 100.0), Random.FRandRange(-100.0, 100.0), Random.FRandRange(-100.0, 100.0));
 	}
 
 	uint32 Mix(uint32 Hash)
@@ -129,24 +136,92 @@ namespace
 		 *  RibDepth */
 		double Tip = 1.0;
 		double Strength = 0.0;
+
+		/** The values of the walls here, by the styles that hold where the sample lies (FParams::Styles), and how much its stone is flowstone
+		 *  and how much it shows its joints, for the material */
+		double Thickness = 0.0;
+		double Lean = 0.0;
+		double Overhang = 0.0;
+		double Bulge = 1.0;
+		double RibDepth = 0.0;
+		double FluteDepth = 0.0;
+		double Flowstone = 0.0;
+		double Fracture = 0.0;
 	};
+
+	/** The factors of the styles where a point lies, each weighed by its weight and by a noise of its regions (FParams::Styles); all 1 without
+	 *  styles */
+	FStyle GetStyle(const FVector3d& Point, const FParams& Params)
+	{
+		FStyle Mixed;
+		if (Params.Styles.IsEmpty())
+		{
+			return Mixed;
+		}
+		double Total = 0.0;
+		TArray<double, TInlineAllocator<8>> Weights;
+		for (int32 Index = 0; Index < Params.Styles.Num(); ++Index)
+		{
+			const double Weight = Params.Styles[Index].Weight * FMath::Exp(Params.StyleSharpness * Noise(Point, Params.StyleScale, GetStyleOffset(Params.Seed, Index)));
+			Weights.Add(Weight);
+			Total += Weight;
+		}
+		if (Total <= 0.0)
+		{
+			return Mixed;
+		}
+		FStyle Sum;
+		Sum.Weight = Sum.Height = Sum.Thickness = Sum.Lean = Sum.Overhang = Sum.Bulge = Sum.CrestJag = Sum.CrestNotch = Sum.RibSize = Sum.RibDepth = Sum.RibTip
+			= Sum.ColumnShare = Sum.FluteDepth = Sum.Flowstone = Sum.Fracture = 0.0;
+		for (int32 Index = 0; Index < Params.Styles.Num(); ++Index)
+		{
+			const FStyle& Style = Params.Styles[Index];
+			const double Share = Weights[Index] / Total;
+			Sum.Height += Style.Height * Share;
+			Sum.Thickness += Style.Thickness * Share;
+			Sum.Lean += Style.Lean * Share;
+			Sum.Overhang += Style.Overhang * Share;
+			Sum.Bulge += Style.Bulge * Share;
+			Sum.CrestJag += Style.CrestJag * Share;
+			Sum.CrestNotch += Style.CrestNotch * Share;
+			Sum.RibSize += Style.RibSize * Share;
+			Sum.RibDepth += Style.RibDepth * Share;
+			Sum.RibTip += Style.RibTip * Share;
+			Sum.ColumnShare += Style.ColumnShare * Share;
+			Sum.FluteDepth += Style.FluteDepth * Share;
+			Sum.Flowstone += Style.Flowstone * Share;
+			Sum.Fracture += Style.Fracture * Share;
+		}
+		Sum.Weight = 1.0;
+		return Sum;
+	}
 
 	FWallFrame GetFrame(const FSample& Sample, const FParams& Params, const FOffsets& Offsets)
 	{
 		FWallFrame Frame;
-		Frame.Base = Params.Height * FMath::Max(1.0 + Params.HeightNoise * Noise(Sample.Position, Params.HeightNoiseScale, Offsets.Height), 0.2);
+		const FStyle Style = GetStyle(Sample.Position, Params);
+		Frame.Base = Params.Height * Style.Height * FMath::Max(1.0 + Params.HeightNoise * Noise(Sample.Position, Params.HeightNoiseScale, Offsets.Height), 0.2);
 		uint32 Hash = 0;
-		GetCells(Sample.Position, Params.RibSize, Offsets.Ribs, Frame.Edge, Hash);
-		Frame.Tip = ToShare(Mix(Hash + 11u)) < Params.ColumnShare ? 0.0
-			: FMath::Lerp(Params.RibTipMin, FMath::Max(Params.RibTipMin, Params.RibTipMax), ToShare(Mix(Hash + 12u)));
+		GetCells(Sample.Position, Params.RibSize * Style.RibSize, Offsets.Ribs, Frame.Edge, Hash);
+		const double TipMin = FMath::Clamp(Params.RibTipMin * Style.RibTip, 0.05, 0.82);
+		const double TipMax = FMath::Clamp(Params.RibTipMax * Style.RibTip, TipMin, 0.82);
+		Frame.Tip = ToShare(Mix(Hash + 11u)) < Params.ColumnShare * Style.ColumnShare ? 0.0 : FMath::Lerp(TipMin, TipMax, ToShare(Mix(Hash + 12u)));
 		Frame.Strength = 0.55 + 0.45 * ToShare(Mix(Hash + 13u));
 		// the crest rises or falls over each stalactite by a hash of it and dips between them, so its line is ragged
 		const double Rise = ToShare(Mix(Hash + 14u)) * 2.0 - 1.0;
 		const double Rib = FMath::Sqrt(Frame.Edge);
 		Frame.Crest = Frame.Base * FMath::Max(1.0 + Params.CrestNoise * Noise(Sample.Position, Params.BulgeScale * 0.7, Offsets.Crest)
-			+ Params.CrestJag * Rise * Rib - Params.CrestNotch * (1.0 - Rib), MinCrest);
+			+ Params.CrestJag * Style.CrestJag * Rise * Rib - Params.CrestNotch * Style.CrestNotch * (1.0 - Rib), MinCrest);
 		uint32 OuterHash = 0;
-		GetCells(Sample.Position, Params.RibSize * 1.3, Offsets.OuterRibs, Frame.OuterEdge, OuterHash);
+		GetCells(Sample.Position, Params.RibSize * Style.RibSize * 1.3, Offsets.OuterRibs, Frame.OuterEdge, OuterHash);
+		Frame.Thickness = Params.Thickness * Style.Thickness;
+		Frame.Lean = Params.Lean * Style.Lean;
+		Frame.Overhang = Params.Overhang * Style.Overhang;
+		Frame.Bulge = Style.Bulge;
+		Frame.RibDepth = Params.RibDepth * Style.RibDepth;
+		Frame.FluteDepth = Params.FluteDepth * Style.FluteDepth;
+		Frame.Flowstone = FMath::Clamp(Style.Flowstone, 0.0, 1.0);
+		Frame.Fracture = FMath::Clamp(Style.Fracture, 0.0, 1.0);
 		return Frame;
 	}
 
@@ -187,8 +262,8 @@ namespace
 		const double Foot = Params.FootReach;
 		// the inner face rises from the top of the rounded foot, leaning back as it goes up
 		const double FaceBase = Foot - Fillet;
-		const auto Face = [&](double Up) { return FaceBase - Params.Lean * Up; };
-		const double Thickness = Params.Thickness;
+		const auto Face = [&](double Up) { return FaceBase - Frame.Lean * Up; };
+		const double Thickness = Frame.Thickness;
 		const double Flare = Params.OuterFlare;
 		const auto At = [&Frame](double Share) { return GetRowHeight(Frame, Share); };
 
@@ -204,10 +279,10 @@ namespace
 		case OuterHigh: Share = 0.7; Local = {FaceBase - Thickness * 0.82, At(Share), 1.0}; Kind = EKind::Outer; break;
 		// the top of the crest lies between its shoulders (GetRing), its offset only for its noise
 		case CrestOuter: Share = 0.91; Local = {FaceBase - Thickness * 0.66, At(Share), 1.0}; Kind = EKind::Crest; break;
-		case CrestTop: Share = 1.0; Local = {FaceBase - Thickness * 0.42 - Params.Lean * Frame.Crest, At(Share), 0.5}; Kind = EKind::Crest; break;
-		case CrestInner: Share = 0.96; Local = {Face(At(Share)) + Params.Overhang * 0.45, At(Share), 0.0}; Kind = EKind::Crest; break;
-		case InnerLip: Share = LipShare; Local = {Face(At(Share)) + Params.Overhang, At(Share), 0.0}; break;
-		case InnerUnder: Share = 0.8; Local = {Face(At(Share)) + Params.Overhang * 0.3, At(Share), 0.0}; Local.Cavity = 0.45; break;
+		case CrestTop: Share = 1.0; Local = {FaceBase - Thickness * 0.42 - Frame.Lean * Frame.Crest, At(Share), 0.5}; Kind = EKind::Crest; break;
+		case CrestInner: Share = 0.96; Local = {Face(At(Share)) + Frame.Overhang * 0.45, At(Share), 0.0}; Kind = EKind::Crest; break;
+		case InnerLip: Share = LipShare; Local = {Face(At(Share)) + Frame.Overhang, At(Share), 0.0}; break;
+		case InnerUnder: Share = 0.8; Local = {Face(At(Share)) + Frame.Overhang * 0.3, At(Share), 0.0}; Local.Cavity = 0.45; break;
 		case FloorStart: Local = {Foot, 0.12, 0.0}; Kind = EKind::Floor; break;
 		case FloorEnd: Local = {FMath::Max(Foot, Sample.Gap) + 2.0, 0.12, 0.0}; Kind = EKind::Floor; break;
 		case Buried: Local = {FMath::Max(Foot, Sample.Gap) + 6.0, -2.5, 0.0}; Kind = EKind::Floor; break;
@@ -220,11 +295,13 @@ namespace
 			}
 			else
 			{
-				// the foot is a quarter of a circle of Fillet from the inner face, upright, to the floor, flat, at 200, 225 and 250 degrees
-				const double Angle = FMath::DegreesToRadians(200.0 + 25.0 * (Row - FootFirst));
+				// the foot is a quarter of a circle of Fillet from the inner face, upright, to the floor, flat, every 15 degrees from 195 to 255
+				const int32 Step = Row - FootFirst;
+				const double Angle = FMath::DegreesToRadians(195.0 + 15.0 * Step);
 				Local = {Foot + Fillet * FMath::Cos(Angle), Fillet * (1.0 + FMath::Sin(Angle)), 0.0};
-				Local.Floor = 0.15 + 0.35 * (Row - FootFirst);
-				Local.Cavity = 0.15 - 0.05 * (Row - FootFirst);
+				const double Floors[] = {0.08, 0.25, 0.5, 0.75, 0.92};
+				Local.Floor = Floors[FMath::Clamp(Step, 0, 4)];
+				Local.Cavity = 0.18 - 0.04 * Step;
 				Kind = EKind::Foot;
 			}
 			break;
@@ -232,8 +309,8 @@ namespace
 
 		// lumps of a 3D noise where the row lies, so the wall is no extruded profile
 		const FVector3d Place = Sample.Position + Sample.Inward * Local.Across + Sample.Up * Local.Up;
-		const double Bulge = Params.Bulge * Noise(Place, Params.BulgeScale, Offsets.Bulge) + Params.Detail * Noise(Place, Params.DetailScale, Offsets.Detail);
-		const double OuterRib = Params.RibDepth * 0.6 * FMath::Sqrt(Frame.OuterEdge);
+		const double Bulge = Params.Bulge * Frame.Bulge * Noise(Place, Params.BulgeScale, Offsets.Bulge) + Params.Detail * Noise(Place, Params.DetailScale, Offsets.Detail);
+		const double OuterRib = Frame.RibDepth * 0.6 * FMath::Sqrt(Frame.OuterEdge);
 		switch (Kind)
 		{
 		case EKind::Outer:
@@ -248,7 +325,7 @@ namespace
 				const double Ridge = 1.0 - FMath::Abs(Noise(Sample.Position, Params.DetailScale, Offsets.Crest));
 				Local.Up += Frame.Base * Params.CrestNoise * (Ridge * Ridge - 0.5);
 			}
-			Local.Across += Bulge * 0.3 + (Row == CrestOuter ? -OuterRib * 0.5 : Row == CrestInner ? Params.RibDepth * 0.5 * GetStalactite(Frame, Share) : 0.0);
+			Local.Across += Bulge * 0.3 + (Row == CrestOuter ? -OuterRib * 0.5 : Row == CrestInner ? Frame.RibDepth * 0.5 * GetStalactite(Frame, Share) : 0.0);
 			break;
 		case EKind::Inner:
 		{
@@ -257,7 +334,7 @@ namespace
 			const double Stalactite = GetStalactite(Frame, Share);
 			const double Flute = 1.0 - FMath::SmoothStep(0.0, FMath::Max(Params.FluteWidth, 1e-3), Frame.Edge);
 			const double Fade = FMath::SmoothStep(Fillet, Fillet * 2.0 + 1.0, Local.Up) * (1.0 - FMath::SmoothStep(0.82, 0.95, Share));
-			Local.Across += Bulge + Params.RibDepth * Stalactite - Params.FluteDepth * Flute * Fade;
+			Local.Across += Bulge + Frame.RibDepth * Stalactite - Frame.FluteDepth * Flute * Fade;
 			// between the stalactites, from the lowest of their tips up to the lip, the face lies in their shade
 			const double Zone = FMath::SmoothStep(Params.RibTipMin - 0.06, Params.RibTipMin + 0.06, Share) * (1.0 - FMath::SmoothStep(LipShare - 0.03, LipShare, Share));
 			Local.Rib = FMath::Clamp(Stalactite, 0.0, 1.0);
@@ -267,7 +344,7 @@ namespace
 		case EKind::Foot:
 		{
 			const double Flute = 1.0 - FMath::SmoothStep(0.0, FMath::Max(Params.FluteWidth, 1e-3), Frame.Edge);
-			Local.Across += Bulge * 0.35 - Params.FluteDepth * Flute * (Row == FootFirst ? 0.4 : 0.0);
+			Local.Across += Bulge * 0.35 - Frame.FluteDepth * Flute * (Row == FootFirst ? 0.4 : 0.0);
 			break;
 		}
 		case EKind::Floor:
@@ -486,13 +563,34 @@ HexPlanetWalls::FParams HexPlanetWalls::FParams::FromConfig(const UHexPlanetConf
 	Params.ColumnShare = Config.WallColumnShare;
 	Params.FluteDepth = Config.WallFluteDepth;
 	Params.FluteWidth = Config.WallFluteWidth;
+	Params.StyleScale = FMath::Max(Config.WallStyleScale, 10.0f);
+	Params.StyleSharpness = FMath::Max(Config.WallStyleSharpness, 0.0f);
+	for (const FHexWallStyle& Style : Config.WallStyles)
+	{
+		FStyle& Each = Params.Styles.AddDefaulted_GetRef();
+		Each.Weight = FMath::Max(Style.Weight, 0.0f);
+		Each.Height = Style.Height;
+		Each.Thickness = Style.Thickness;
+		Each.Lean = Style.Lean;
+		Each.Overhang = Style.Overhang;
+		Each.Bulge = Style.Bulge;
+		Each.CrestJag = Style.CrestJag;
+		Each.CrestNotch = Style.CrestNotch;
+		Each.RibSize = Style.RibSize;
+		Each.RibDepth = Style.RibDepth;
+		Each.RibTip = Style.RibTip;
+		Each.ColumnShare = Style.ColumnShare;
+		Each.FluteDepth = Style.FluteDepth;
+		Each.Flowstone = Style.Flowstone;
+		Each.Fracture = Style.Fracture;
+	}
 	return Params;
 }
 
 double HexPlanetWalls::GetHeight(const FSample& Sample, const FParams& Params)
 {
 	const FOffsets Offsets(Params.Seed);
-	return Params.Height * FMath::Max(1.0 + Params.HeightNoise * Noise(Sample.Position, Params.HeightNoiseScale, Offsets.Height), 0.2);
+	return Params.Height * GetStyle(Sample.Position, Params).Height * FMath::Max(1.0 + Params.HeightNoise * Noise(Sample.Position, Params.HeightNoiseScale, Offsets.Height), 0.2);
 }
 
 double HexPlanetWalls::GetFootReach(const FParams& Params)
@@ -799,93 +897,126 @@ double HexPlanetWalls::GetDistanceToLine(const FWalls& Walls, int32 Cell, const 
 	return bOutside ? 0.0 : Nearest;
 }
 
+namespace
+{
+	/** The mesh of the stretches from each of some samples to the next */
+	void BuildSamples(const FWalls& Walls, TConstArrayView<FIntPoint> Samples, const FParams& Params, FMesh& Out)
+	{
+		const FOffsets Offsets(Params.Seed);
+
+		// the rings of the samples, of the next sample of each and, for the normals, of the samples around them
+		struct FRing
+		{
+			FVector3d Points[Rows];
+			FLocal Locals[Rows];
+			double Height = 0.0;
+			FVector2f Stone = FVector2f::ZeroVector;
+		};
+		TMap<FIntPoint, FRing> Rings;
+		const auto FindRing = [&](const FIntPoint& At) -> const FRing&
+		{
+			if (const FRing* Found = Rings.Find(At))
+			{
+				return *Found;
+			}
+			FRing Ring;
+			const FSample& Sample = Walls.Get(At);
+			const FWallFrame Frame = GetFrame(Sample, Params, Offsets);
+			Ring.Height = Frame.Base;
+			Ring.Stone = FVector2f(float(Frame.Flowstone), float(Frame.Fracture));
+			GetRing(Sample, Frame, Params, Offsets, Ring.Locals, Ring.Points);
+			return Rings.Add(At, Ring);
+		};
+		const auto Offset = [&Walls](const FIntPoint& At, int32 By)
+		{
+			const int32 Count = Walls.Lines[At.X].Num();
+			return FIntPoint(At.X, ((At.Y + By) % Count + Count) % Count);
+		};
+
+		TMap<FIntPoint, int32> RingVertices;
+		const auto AddRing = [&](const FIntPoint& At) -> int32
+		{
+			if (const int32* Found = RingVertices.Find(At))
+			{
+				return *Found;
+			}
+			const FSample& Sample = Walls.Get(At);
+			// copies, as the map may grow and move the rings while the neighbors are built
+			const FRing Ring = FindRing(At);
+			const FRing Before = FindRing(Offset(At, -1));
+			const FRing After = FindRing(Offset(At, 1));
+			const int32 First = Out.Positions.Num();
+			for (int32 Row = 0; Row < Rows; ++Row)
+			{
+				const FVector3d AcrossLine = After.Points[Row] - Before.Points[Row];
+				const FVector3d DownProfile = Ring.Points[FMath::Min(Row + 1, Rows - 1)] - Ring.Points[FMath::Max(Row - 1, 0)];
+				FVector3d Normal = FVector3d::CrossProduct(DownProfile, AcrossLine).GetSafeNormal();
+				if (FVector3d::DotProduct(Normal, GetRowOutside(Sample, Row)) < 0.0)
+				{
+					Normal = -Normal;
+				}
+				const FLocal& Local = Ring.Locals[Row];
+				Out.Positions.Add(FVector3f(Ring.Points[Row]));
+				Out.Normals.Add(FVector3f(Normal));
+				Out.UVs.Add(FVector2f(float(Local.Cavity), float(Local.Up / FMath::Max(Ring.Height, 1.0))));
+				Out.UV1s.Add(FVector2f(float(Local.Floor), float(Local.Rib)));
+				Out.UV2s.Add(Ring.Stone);
+			}
+			RingVertices.Add(At, First);
+			return First;
+		};
+
+		for (const FIntPoint& At : Samples)
+		{
+			const int32 A = AddRing(At);
+			const int32 B = AddRing(Offset(At, 1));
+			for (int32 Row = 0; Row < Rows - 1; ++Row)
+			{
+				const int32 Quad[4] = {A + Row, B + Row, B + Row + 1, A + Row + 1};
+				// a triangle shows on the side where (C - A) x (B - A) points, which must be out of the wall
+				const FVector3f Outside = Out.Normals[Quad[0]] + Out.Normals[Quad[1]] + Out.Normals[Quad[2]] + Out.Normals[Quad[3]];
+				const FVector3f Face = FVector3f::CrossProduct(Out.Positions[Quad[2]] - Out.Positions[Quad[0]], Out.Positions[Quad[1]] - Out.Positions[Quad[0]]);
+				if (FVector3f::DotProduct(Face, Outside) >= 0.0f)
+				{
+					Out.Triangles.Append({Quad[0], Quad[1], Quad[2], Quad[0], Quad[2], Quad[3]});
+				}
+				else
+				{
+					Out.Triangles.Append({Quad[0], Quad[2], Quad[1], Quad[0], Quad[3], Quad[2]});
+				}
+			}
+		}
+	}
+}
+
 void HexPlanetWalls::BuildChunk(const FWalls& Walls, int32 Chunk, const FParams& Params, FMesh& Out)
 {
 	Out = FMesh();
-	if (!Walls.ChunkSamples.IsValidIndex(Chunk) || Walls.ChunkSamples[Chunk].IsEmpty())
+	if (Walls.ChunkSamples.IsValidIndex(Chunk) && !Walls.ChunkSamples[Chunk].IsEmpty())
+	{
+		BuildSamples(Walls, Walls.ChunkSamples[Chunk], Params, Out);
+	}
+}
+
+void HexPlanetWalls::BuildNear(const FWalls& Walls, int32 Cell, const FVector3d& Middle, double Reach, const FParams& Params, FMesh& Out)
+{
+	Out = FMesh();
+	if (!Walls.CellSamples.IsValidIndex(Cell))
 	{
 		return;
 	}
-	const FOffsets Offsets(Params.Seed);
-
-	// the rings of the samples of the chunk, of the next sample of each and, for the normals, of the samples around them
-	struct FRing
+	// the samples listed for a cell are those of the passages it and its neighbors are, so a wall along any of its sides is among them
+	TArray<FIntPoint> Samples;
+	for (const FIntPoint& At : Walls.CellSamples[Cell])
 	{
-		FVector3d Points[Rows];
-		FLocal Locals[Rows];
-		double Height = 0.0;
-	};
-	TMap<FIntPoint, FRing> Rings;
-	const auto FindRing = [&](const FIntPoint& At) -> const FRing&
-	{
-		if (const FRing* Found = Rings.Find(At))
+		if (FVector3d::DistSquared(Walls.Get(At).Position, Middle) <= Reach * Reach)
 		{
-			return *Found;
+			Samples.AddUnique(At);
 		}
-		FRing Ring;
-		const FSample& Sample = Walls.Get(At);
-		const FWallFrame Frame = GetFrame(Sample, Params, Offsets);
-		Ring.Height = Frame.Base;
-		GetRing(Sample, Frame, Params, Offsets, Ring.Locals, Ring.Points);
-		return Rings.Add(At, Ring);
-	};
-	const auto Offset = [&Walls](const FIntPoint& At, int32 By)
+	}
+	if (!Samples.IsEmpty())
 	{
-		const int32 Count = Walls.Lines[At.X].Num();
-		return FIntPoint(At.X, ((At.Y + By) % Count + Count) % Count);
-	};
-
-	TMap<FIntPoint, int32> RingVertices;
-	const auto AddRing = [&](const FIntPoint& At) -> int32
-	{
-		if (const int32* Found = RingVertices.Find(At))
-		{
-			return *Found;
-		}
-		const FSample& Sample = Walls.Get(At);
-		// copies, as the map may grow and move the rings while the neighbors are built
-		const FRing Ring = FindRing(At);
-		const FRing Before = FindRing(Offset(At, -1));
-		const FRing After = FindRing(Offset(At, 1));
-		const int32 First = Out.Positions.Num();
-		for (int32 Row = 0; Row < Rows; ++Row)
-		{
-			const FVector3d AcrossLine = After.Points[Row] - Before.Points[Row];
-			const FVector3d DownProfile = Ring.Points[FMath::Min(Row + 1, Rows - 1)] - Ring.Points[FMath::Max(Row - 1, 0)];
-			FVector3d Normal = FVector3d::CrossProduct(DownProfile, AcrossLine).GetSafeNormal();
-			if (FVector3d::DotProduct(Normal, GetRowOutside(Sample, Row)) < 0.0)
-			{
-				Normal = -Normal;
-			}
-			const FLocal& Local = Ring.Locals[Row];
-			Out.Positions.Add(FVector3f(Ring.Points[Row]));
-			Out.Normals.Add(FVector3f(Normal));
-			Out.UVs.Add(FVector2f(float(Local.Cavity), float(Local.Up / FMath::Max(Ring.Height, 1.0))));
-			Out.UV1s.Add(FVector2f(float(Local.Floor), float(Local.Rib)));
-		}
-		RingVertices.Add(At, First);
-		return First;
-	};
-
-	for (const FIntPoint& At : Walls.ChunkSamples[Chunk])
-	{
-		const int32 A = AddRing(At);
-		const int32 B = AddRing(Offset(At, 1));
-		for (int32 Row = 0; Row < Rows - 1; ++Row)
-		{
-			const int32 Quad[4] = {A + Row, B + Row, B + Row + 1, A + Row + 1};
-			// a triangle shows on the side where (C - A) x (B - A) points, which must be out of the wall
-			const FVector3f Outside = Out.Normals[Quad[0]] + Out.Normals[Quad[1]] + Out.Normals[Quad[2]] + Out.Normals[Quad[3]];
-			const FVector3f Face = FVector3f::CrossProduct(Out.Positions[Quad[2]] - Out.Positions[Quad[0]], Out.Positions[Quad[1]] - Out.Positions[Quad[0]]);
-			if (FVector3f::DotProduct(Face, Outside) >= 0.0f)
-			{
-				Out.Triangles.Append({Quad[0], Quad[1], Quad[2], Quad[0], Quad[2], Quad[3]});
-			}
-			else
-			{
-				Out.Triangles.Append({Quad[0], Quad[2], Quad[1], Quad[0], Quad[3], Quad[2]});
-			}
-		}
+		BuildSamples(Walls, Samples, Params, Out);
 	}
 }
 

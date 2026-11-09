@@ -1509,10 +1509,57 @@ void HexPlanetUnderground::GenerateObjects(const FHexSphereGrid& Grid, TConstArr
 	Keys.SetNumZeroed(NumCells);
 	TArray<uint8> Marked;
 
+	// the levels with every cell that a kind which blocks took made void: a cell blocks only where that leaves no passage one cell wide (IsNeck)
+	// and its passages around it still meet without it, so the maze keeps every way it had
+	TArray<int8> Blocked(Levels.GetData(), Levels.Num());
+	TArray<int32> Seen;
+	Seen.Init(INDEX_NONE, NumCells);
+	TArray<int32> Frontier;
+	const auto CanBlock = [&](int32 Cell)
+	{
+		if (!IsPassage(Blocked[Cell]))
+		{
+			return false;
+		}
+		const int8 Level = Blocked[Cell];
+		Blocked[Cell] = VoidLevel;
+		bool bClear = true;
+		int32 First = INDEX_NONE;
+		for (const int32 Neighbor : Cells[Cell].Neighbors)
+		{
+			bClear &= !IsNeck(Grid, Blocked, Neighbor);
+			First = First == INDEX_NONE && IsPassage(Blocked[Neighbor]) ? Neighbor : First;
+		}
+		// the passages around it meet within a few rings without it
+		if (bClear && First != INDEX_NONE)
+		{
+			Frontier.Reset();
+			Frontier.Add(First);
+			Seen[First] = Cell;
+			for (int32 Index = 0; Index < Frontier.Num() && Frontier.Num() < 400; ++Index)
+			{
+				for (const int32 Next : Cells[Frontier[Index]].Neighbors)
+				{
+					if (Seen[Next] != Cell && IsPassage(Blocked[Next]) && FVector3d::DistSquared(Cells[Next].Center, Cells[Cell].Center) < FMath::Square(Spacing * 6.0))
+					{
+						Seen[Next] = Cell;
+						Frontier.Add(Next);
+					}
+				}
+			}
+			for (const int32 Neighbor : Cells[Cell].Neighbors)
+			{
+				bClear &= !IsPassage(Blocked[Neighbor]) || Seen[Neighbor] == Cell;
+			}
+		}
+		Blocked[Cell] = Level;
+		return bClear;
+	};
+
 	for (int32 KindIndex = 0; KindIndex < Kinds.Num(); ++KindIndex)
 	{
 		const FObjectKind& Kind = Kinds[KindIndex];
-		if (Kind.bBlocks || Kind.SetIndex < 0 || Kind.SetIndex > 253)
+		if (Kind.SetIndex < 0 || Kind.SetIndex > 253)
 		{
 			continue;
 		}
@@ -1545,6 +1592,11 @@ void HexPlanetUnderground::GenerateObjects(const FHexSphereGrid& Grid, TConstArr
 				{
 					continue;
 				}
+				// a kind that blocks fills a cell of its own, and only one it can block
+				if (Kind.bBlocks && (!Objects.IsEmpty() || !CanBlock(Cell)))
+				{
+					continue;
+				}
 				const TCHAR Letter = CellBiomeLetters.IsValidIndex(Cell) ? CellBiomeLetters[Cell] : TEXT('\0');
 				if (FindHexObjectVariant(Kind.Variants.Num(), Letter, [&Kind](int32 Each) -> const FString& { return Kind.Variants[Each].Key; }) != Variant)
 				{
@@ -1557,8 +1609,19 @@ void HexPlanetUnderground::GenerateObjects(const FHexSphereGrid& Grid, TConstArr
 			// highest first, ties by cell, so the order never depends on the sort
 			Candidates.Sort([&Keys](int32 A, int32 B) { return Keys[A] != Keys[B] ? Keys[A] > Keys[B] : A < B; });
 			const int32 Count = FMath::RoundToInt32(Share * Candidates.Num());
-			for (int32 Rank = 0; Rank < Count; ++Rank)
+			// a cell that blocks is checked again, as one taken before may have made it a neck; then the next one takes its place
+			int32 Taken = 0;
+			for (int32 Rank = 0; Rank < Candidates.Num() && Taken < Count; ++Rank)
 			{
+				if (Kind.bBlocks)
+				{
+					if (!CanBlock(Candidates[Rank]))
+					{
+						continue;
+					}
+					Blocked[Candidates[Rank]] = VoidLevel;
+				}
+				const int32 Place = Taken++;
 				FHexCellObjects& Objects = OutObjects[Candidates[Rank]];
 				if (Kind.bDecor)
 				{
@@ -1568,14 +1631,14 @@ void HexPlanetUnderground::GenerateObjects(const FHexSphereGrid& Grid, TConstArr
 				{
 					// dense in the middle of a patch, sparse at its edge
 					Objects.Cover = Stored;
-					Objects.Density = Rank < Count * Kind.DenseShare ? 3 : Rank < Count * Kind.MediumShare ? 2 : 1;
+					Objects.Density = Place < Count * Kind.DenseShare ? 3 : Place < Count * Kind.MediumShare ? 2 : 1;
 				}
 				if (OutReport)
 				{
 					Marked[Candidates[Rank]] = 1;
 				}
 			}
-			Given += Count;
+			Given += Taken;
 		}
 
 		if (OutReport)

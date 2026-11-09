@@ -782,9 +782,20 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> WallMaterial;
 
+	/** Triangles of the walls, drawn by hex.Wireframe when it draws every cell and its target is not the terrain alone (walls are not terrain):
+	 *  a copy of each chunk of walls, made the first time, under the empty Wireframe; and whether the view hides the walls themselves, as
+	 *  hex.Wireframe 2 draws their triangles alone */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UProceduralMeshComponent>> WallWireChunks;
+
+	bool bWallsHiddenByWire = false;
+
 	/** Builds the walls again from the levels shown, gives the chunks whose walls changed their meshes, and adds those chunks to Chunks, whose
 	 *  objects stand on the walls too */
 	void UpdateWalls(TArray<int32>& Chunks);
+
+	/** Gives the copies of the walls in the wireframe the triangles of every chunk of walls, or clears them when Shown is false */
+	void BuildWallWires(bool bShown);
 
 	/** Frozen cells of the sea the sea field shown now was built from, see GetFrozenCells */
 	TArray<uint8> ShownFrozen;
@@ -946,6 +957,9 @@ private:
 
 	/** True while the surface hides the cells around the cursor, as only their triangles are drawn */
 	bool bAppliedCut = false;
+
+	/** Whether the copies of the walls in the wireframe have their triangles (BuildWallWires) */
+	bool bAppliedWallWires = false;
 
 	/** Cell and number of cells around it that the surface hides */
 	int32 AppliedCutCell = INDEX_NONE;

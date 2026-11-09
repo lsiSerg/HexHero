@@ -224,7 +224,8 @@ namespace HexPlanetUnderground
 
 		bool bDecor = false;
 
-		/** It keeps heroes out; such a kind gets nothing, so the generation never cuts a passage */
+		/** It keeps heroes out, so it takes only an empty cell whose blocking leaves no passage one cell wide (IsNeck) and the passages around it
+		 *  meeting without it, checked again as it takes each, so the generation never cuts a passage */
 		bool bBlocks = false;
 
 		/** Levels it may stand on */
@@ -257,7 +258,8 @@ namespace HexPlanetUnderground
 	/**
 	 *  Gives the passages of an underground their objects, by kind in the order given (SortOrder): a variant takes Share of its candidate cells,
 	 *  those of a level the kind allows and a biome that draws the variant, no exit nor within ClearRings of one, no pentagon, and no cover yet for
-	 *  a cover or no decor yet for a decor. They are ranked by a noise of patches PatchCells across, shared by the kinds of a Group and offset by
+	 *  a cover or no decor yet for a decor; a kind that blocks takes only empty cells it cannot cut a passage at (FObjectKind::bBlocks), the next
+	 *  in rank taking the place of one that the cells taken before made a neck. They are ranked by a noise of patches PatchCells across, shared by the kinds of a Group and offset by
 	 *  the seed and the group, or by a hash, and the highest taken; a cover gets the density 3, 2 or 1 by rank (the first DenseShare, up to
 	 *  MediumShare, the rest). Pure and deterministic, so any thread may call it and a run of the game and hex.PlanetUnderground write the same file
 	 */
