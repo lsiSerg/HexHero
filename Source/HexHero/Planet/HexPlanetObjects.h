@@ -190,11 +190,16 @@ public:
 	static bool SaveCells(const FString& Folder, TConstArrayView<FHexCellObjects> Cells, TConstArrayView<int8> Levels,
 		TConstArrayView<TObjectPtr<UHexPlanetObjectSet>> LayerSets, FString& OutError);
 
-	/** On the underground, the objects its generation gives the cells for levels and biomes (indices into the biomes of the planet), as the editor
-	 *  asks; false on the surface or before Init */
+	/** The objects the generation of the layer gives the cells for levels and biomes (indices into the biomes of the planet), as a planet without
+	 *  objects.json gets them and as the editor asks; false before Init or without kinds */
 	bool GenerateCells(TConstArrayView<int8> Levels, TConstArrayView<uint8> Biomes, TArray<FHexCellObjects>& OutObjects) const;
 
 private:
+
+	/** The objects of the land of the surface: each variant of a kind takes GenerateShare of the free cells of its biomes its levels allow, a
+	 *  cover the highest of a noise of patches GeneratePatchCells of the kind across (ObjectNoiseScale of the config without it), densest in
+	 *  their middles by GenerateDensityShares, and a decor any of them; the kinds in the order of the layer, so a cell keeps the first */
+	void GenerateSurfaceObjects(TConstArrayView<int8> Levels, TConstArrayView<TCHAR> CellBiomeLetters, TArray<FHexCellObjects>& OutObjects) const;
 
 	/** A mesh of a kind of object, drawn by a component per chunk */
 	struct FSlot

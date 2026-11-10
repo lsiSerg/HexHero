@@ -25,6 +25,9 @@ namespace
 {
 	const TCHAR* DensityNames[] = {TEXT("sparse"), TEXT("medium"), TEXT("dense")};
 
+	TAutoConsoleVariable<bool> CVarHexPlanetObjectShadowCache(TEXT("hex.PlanetObjectShadowCache"), true,
+		TEXT("Keeps the shadows of the objects of the planet in the cache of the virtual shadow maps though their leaves sway (1), or lets every sway draw them again (0); read when the components of a chunk are made, so set it before the planet is built."));
+
 	int64 GetComponentKey(int32 Chunk, int32 Slot)
 	{
 		return int64(Chunk) * 65536 + Slot;
@@ -351,7 +354,7 @@ bool UHexPlanetObjects::SaveCells(const FString& Folder, TConstArrayView<FHexCel
 
 bool UHexPlanetObjects::GenerateCells(TConstArrayView<int8> Levels, TConstArrayView<uint8> Biomes, TArray<FHexCellObjects>& OutObjects) const
 {
-	if (!Planet || Planet->GetLayer() != EHexPlanetLayer::Underground || Sets.IsEmpty())
+	if (!Planet || Sets.IsEmpty() || Levels.Num() != Planet->GetGrid().GetCells().Num() || Biomes.Num() != Levels.Num())
 	{
 		return false;
 	}
@@ -363,7 +366,14 @@ bool UHexPlanetObjects::GenerateCells(TConstArrayView<int8> Levels, TConstArrayV
 		CellLetters[Cell] = Letters.IsValidIndex(Biomes[Cell]) ? Letters[Biomes[Cell]] : TEXT('\0');
 	}
 	// by the kinds of the layer alone, whose indices come first in Sets
-	GenerateUndergroundObjects(Planet->GetGrid(), Levels, CellLetters, Planet->GetEntrances(), Planet->GetManifest(), MakeArrayView(Sets.GetData(), NumOwnSets), OutObjects);
+	if (Planet->GetLayer() == EHexPlanetLayer::Underground)
+	{
+		GenerateUndergroundObjects(Planet->GetGrid(), Levels, CellLetters, Planet->GetEntrances(), Planet->GetManifest(), MakeArrayView(Sets.GetData(), NumOwnSets), OutObjects);
+	}
+	else
+	{
+		GenerateSurfaceObjects(Levels, CellLetters, OutObjects);
+	}
 	return true;
 }
 
@@ -501,21 +511,24 @@ void UHexPlanetObjects::Load()
 
 void UHexPlanetObjects::Generate()
 {
-	// the passages of the underground by their own shares and patches, kept off the exits (HexPlanetUnderground::GenerateObjects)
-	if (Planet->GetLayer() == EHexPlanetLayer::Underground)
+	// the passages of the underground by their own shares and patches, kept off the exits (HexPlanetUnderground::GenerateObjects), and the land
+	// of the surface by the shares of the variants
+	if (!GenerateCells(Planet->GetLevels(), Planet->GetCellBiomes(), CellObjects))
 	{
-		if (!GenerateCells(Planet->GetLevels(), Planet->GetCellBiomes(), CellObjects))
-		{
-			CellObjects.Init(FHexCellObjects(), Planet->GetGrid().GetCells().Num());
-		}
-		return;
+		CellObjects.Init(FHexCellObjects(), Planet->GetGrid().GetCells().Num());
 	}
+}
 
+void UHexPlanetObjects::GenerateSurfaceObjects(TConstArrayView<int8> Levels, TConstArrayView<TCHAR> CellBiomeLetters, TArray<FHexCellObjects>& OutObjects) const
+{
 	const TArray<FHexSphereCell>& Cells = Planet->GetGrid().GetCells();
+	OutObjects.Init(FHexCellObjects(), Cells.Num());
 	const FHexPlanetManifest& Manifest = Planet->GetManifest();
 	FRandomStream Random(Manifest.Seed * 7919 + 17);
 	const FVector3d Offset(Random.FRandRange(-100.0, 100.0), Random.FRandRange(-100.0, 100.0), Random.FRandRange(-100.0, 100.0));
 	const double Scale = Settings->ObjectNoiseScale * Settings->GetSizeRatio(Manifest.Frequency);
+	// the lattice of the noise of a kind with patches of its own size is twice that size, as the noise rises and falls about once over a step
+	const double CellAngle = FMath::Sqrt(4.0 * UE_DOUBLE_PI / FMath::Max(Cells.Num(), 1));
 	int32 Placed = 0;
 
 	for (int32 SetIndex = 0; SetIndex < NumOwnSets; ++SetIndex)
@@ -528,6 +541,10 @@ void UHexPlanetObjects::Generate()
 		}
 		const bool bDecor = Set.Layer == EHexObjectLayer::Decor;
 		const FVector3d SetOffset = Offset + FVector3d(SetIndex * 17.3, SetIndex * -9.1, SetIndex * 5.7);
+		const double SetScale = Set.GeneratePatchCells > 0.0f ? 1.0 / (2.0 * Set.GeneratePatchCells * CellAngle) : Scale;
+		const double DenseShare = Set.GenerateDensityShares.IsValidIndex(0) ? Set.GenerateDensityShares[0] : 0.4;
+		const double MediumShare = FMath::Max(Set.GenerateDensityShares.IsValidIndex(1) ? double(Set.GenerateDensityShares[1]) : 0.75, DenseShare);
+		int32 SetPlaced = 0;
 
 		for (const FHexObjectVariant& Variant : Set.Variants)
 		{
@@ -542,22 +559,22 @@ void UHexPlanetObjects::Generate()
 			Keys.SetNumZeroed(Cells.Num());
 			for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
 			{
-				const FHexCellObjects& Objects = CellObjects[Cell];
-				if (Cells[Cell].IsPentagon() || (bDecor ? Objects.Decor != 0 : Objects.Cover != 0) || !Set.AllowedLevels.Contains(Planet->GetCellLevel(Cell))
-					|| Set.FindVariant(Planet->GetCellBiomeLetter(Cell)) != &Variant)
+				const FHexCellObjects& Objects = OutObjects[Cell];
+				if (Cells[Cell].IsPentagon() || (bDecor ? Objects.Decor != 0 : Objects.Cover != 0) || !Set.AllowedLevels.Contains(int32(Levels[Cell]))
+					|| Set.FindVariant(CellBiomeLetters[Cell]) != &Variant)
 				{
 					continue;
 				}
 				Candidates.Add(Cell);
 				// a cover lies in patches, a decor anywhere
-				Keys[Cell] = bDecor ? Random.FRand() : PatchNoise(Cells[Cell].Center, Scale, SetOffset);
+				Keys[Cell] = bDecor ? Random.FRand() : PatchNoise(Cells[Cell].Center, SetScale, SetOffset);
 			}
 
 			Candidates.Sort([&Keys](int32 A, int32 B) { return Keys[A] > Keys[B]; });
 			const int32 Count = FMath::RoundToInt32(Variant.GenerateShare * Candidates.Num());
 			for (int32 Rank = 0; Rank < Count; ++Rank)
 			{
-				FHexCellObjects& Objects = CellObjects[Candidates[Rank]];
+				FHexCellObjects& Objects = OutObjects[Candidates[Rank]];
 				if (bDecor)
 				{
 					Objects.Decor = uint8(SetIndex + 1);
@@ -566,13 +583,15 @@ void UHexPlanetObjects::Generate()
 				{
 					// dense in the middle of a patch, sparse at its edge
 					Objects.Cover = uint8(SetIndex + 1);
-					Objects.Density = Rank < Count * 0.4 ? 3 : Rank < Count * 0.75 ? 2 : 1;
+					Objects.Density = Rank < Count * DenseShare ? 3 : Rank < Count * MediumShare ? 2 : 1;
 				}
 				++Placed;
+				++SetPlaced;
 			}
 		}
+		UE_LOG(LogHexHero, Log, TEXT("Planet: generated %s on %d cells"), *Set.Id.ToString(), SetPlaced);
 	}
-	UE_LOG(LogHexHero, Log, TEXT("Planet: generated objects on %d cells from %d object sets"), Placed, Sets.Num());
+	UE_LOG(LogHexHero, Log, TEXT("Planet: generated objects on %d cells from %d object sets"), Placed, NumOwnSets);
 }
 
 bool UHexPlanetObjects::Save(const FString& Folder, const TSet<int32>& KeptEntranceCells, FString& OutError) const
@@ -2188,6 +2207,12 @@ void UHexPlanetObjects::ApplyChunk(int32 Chunk, const TArray<FInstance>& Instanc
 			Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 			Component->SetCanEverAffectNavigation(false);
 			Component->SetCastShadow(Set.bCastShadow);
+			// its shadow is kept in the cache of the virtual shadow maps though its leaves sway: redrawn every frame for a sway nobody sees in
+			// a shadow, the trees of a dense forest cost most of what they cost at all (hex.PlanetObjectShadowCache 0 for the old way)
+			if (CVarHexPlanetObjectShadowCache.GetValueOnGameThread())
+			{
+				Component->ShadowCacheInvalidationBehavior = EShadowCacheInvalidationBehavior::Rigid;
+			}
 			Component->bAffectDistanceFieldLighting = false;
 			Component->SetCullDistances(0, int32(Set.CullDistance));
 			// hidden with the rest while hex.PlanetObjects hides them, a rim also while hex.PlanetRims does

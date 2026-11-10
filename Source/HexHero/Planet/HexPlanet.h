@@ -32,6 +32,7 @@ class UHierarchicalInstancedStaticMeshComponent;
 class UHexBiomeConfig;
 class UHexPlanetCloudConfig;
 class UHexPlanetConfig;
+class UHexPlanetFlocks;
 class UHexPlanetMotes;
 class UHexPlanetObjects;
 class UHexPlanetRivers;
@@ -82,6 +83,10 @@ class AHexPlanet : public AActor
 	/** The rivers along the sides of the cells and the bridges over them */
 	UPROPERTY(VisibleAnywhere, Category="Planet")
 	TObjectPtr<UHexPlanetRivers> Rivers;
+
+	/** The birds or bats of the layer (UHexPlanetConfig::bFlocks), made when the layer is built */
+	UPROPERTY(Transient)
+	TObjectPtr<UHexPlanetFlocks> Flocks;
 
 	/** The motes over the passages and the spores of the underground (UHexPlanetConfig::bMotes), made when the layer is built */
 	UPROPERTY(Transient)

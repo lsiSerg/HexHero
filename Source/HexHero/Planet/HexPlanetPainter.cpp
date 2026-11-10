@@ -1300,12 +1300,12 @@ bool UHexPlanetPainter::Regenerate(int32 InNetwork)
 
 bool UHexPlanetPainter::RegenerateObjects()
 {
-	if (bPainting || Target != EHexPlanetLayer::Underground || !Planet || !Planet->IsBuilt() || !Planet->GetObjects())
+	if (bPainting || !Planet || !Planet->IsBuilt() || !Planet->GetObjects())
 	{
 		return false;
 	}
 
-	// the whole underground again, painted objects too, as a planet without objects.json gets them
+	// the whole layer again, painted objects too, as a planet without objects.json gets them
 	UHexPlanetObjects* Objects = Planet->GetObjects();
 	TArray<FHexCellObjects> Generated;
 	if (!Objects->GenerateCells(Planet->GetLevels(), Planet->GetCellBiomes(), Generated))
@@ -1332,7 +1332,7 @@ bool UHexPlanetPainter::RegenerateObjects()
 		}
 		return false;
 	}
-	UE_LOG(LogHexHero, Log, TEXT("Painter: generated the objects of the underground again, %d cells changed"), Step.NewObjects.Num());
+	UE_LOG(LogHexHero, Log, TEXT("Painter: generated the objects of the %s again, %d cells changed"), GetPlanetLayerName(Target), Step.NewObjects.Num());
 	Apply({}, {}, {}, Step.NewObjects);
 	AddStep(MoveTemp(Step));
 	return true;

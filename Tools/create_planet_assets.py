@@ -12,6 +12,7 @@ Running it again rebuilds the material and the level; -script="<this file> confi
 -script="<this file> underground markers" also those of the markers.
 """
 
+import os
 import re
 import sys
 
@@ -2001,9 +2002,11 @@ def build_floe_material():
 
 
 # the trees, bushes, flowers and decor of UHexPlanetObjects: the color of the vertices, whose alpha is how leafy a vertex is and how much it sways,
-# lighter or darker and warmer or cooler by instance (FoliageTint, FoliageHueShift), the leaves broken into clumps by a noise and lit through on
-# the side away from the sun (FoliageTranslucency), and snow of the snow layer on what faces up, as much as the second custom data of an instance
-# says (the Snow of its variant), broken by the noise
+# times the tile of the atlas T_HexFoliage a card shows (FoliageBrightness), while the wood, whose UV lies outside the atlas, draws the color of
+# its vertices alone; lighter or darker and warmer or cooler by instance (FoliageTint, FoliageHueShift), the leaves broken into clumps by a noise
+# and lit through on the side away from the sun (FoliageTranslucency), and snow of the snow layer on what faces up, as much as the second custom
+# data of an instance says (the Snow of its variant), broken by the noise. The normal is that of the vertices from both sides of a card, which
+# generate_planet_objects.py turns away from the middle of a crown, so the cards of a crown are lit as one round volume
 FOLIAGE_CODE = r"""
 float3 n = normalize(VertexNormal);
 float3 up = normalize(WorldPos);
@@ -2016,7 +2019,8 @@ float noise = HexNoise.SampleGrad(HexNoiseSampler, np.yz, ndx.yz, ndy.yz).r * pl
     + HexNoise.SampleGrad(HexNoiseSampler, np.xz, ndx.xz, ndy.xz).r * planes.y
     + HexNoise.SampleGrad(HexNoiseSampler, np.xy, ndx.xy, ndy.xy).r * planes.z;
 float leafy = saturate(VertexAlpha * 1.5);
-float3 color = VertexRGB.rgb * (1.0 + (InstanceRandom * 2.0 - 1.0) * FoliageTint);
+float solid = step(1.5, UV.x);
+float3 color = VertexRGB.rgb * lerp(AtlasColor.rgb * FoliageBrightness, float3(1.0, 1.0, 1.0), solid) * (1.0 + (InstanceRandom * 2.0 - 1.0) * FoliageTint);
 float warm = frac(InstanceRandom * 7.31) * 2.0 - 1.0;
 color *= float3(1.0 + warm * FoliageHueShift, 1.0, 1.0 - warm * FoliageHueShift);
 color *= lerp(1.0, 0.55 + noise * 0.9, FoliageNoiseStrength * leafy);
@@ -2041,16 +2045,58 @@ float gust = 0.6 + 0.4 * sin(Time * WindSpeed * 0.37 + dot(ObjectPos, float3(0.0
 float sway = sin(phase) * gust * WindStrength * VertexAlpha;
 return side * sway + across * sway * 0.4 * sin(phase * 1.7);
 """
+# a card is cut where its tile is clear, at FoliageAlphaCut of its alpha: the material clips at a third, so the cut of the config lands there
+FOLIAGE_MASK_CODE = r"""
+return max(AtlasAlpha, step(1.5, UV.x)) - FoliageAlphaCut + 0.3333;
+"""
 FOLIAGE_MATERIAL = FOLDER + '/M_HexPlanetFoliage'
+FOLIAGE_ATLAS = FOLDER + '/Objects/T_HexFoliage'
+
+
+def import_foliage_atlas():
+    """Imports T_HexFoliage.png, which generate_foliage_atlas.py wrote, when it is there, and gives the texture the settings a leaf atlas needs:
+    its mips keep the share of each tile its alpha covers, as plain mips thin the crowns out from far away, and it does not repeat, so the UV of
+    the wood, outside it, reads its edge"""
+    assets = unreal.EditorAssetLibrary
+    source = os.path.join(unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_saved_dir()), 'HexPlanetObjects', 'T_HexFoliage.png')
+    if os.path.exists(source):
+        task = unreal.AssetImportTask()
+        task.set_editor_property('filename', source)
+        task.set_editor_property('destination_path', FOLIAGE_ATLAS.rsplit('/', 1)[0])
+        task.set_editor_property('automated', True)
+        task.set_editor_property('replace_existing', True)
+        task.set_editor_property('save', True)
+        unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks([task])
+    if not assets.does_asset_exist(FOLIAGE_ATLAS):
+        raise RuntimeError('%s is missing and so is %s: run Tools/HexPlanetObjects/generate_foliage_atlas.py first' % (FOLIAGE_ATLAS, source))
+    texture = unreal.load_asset(FOLIAGE_ATLAS)
+    texture.set_editor_property('srgb', True)
+    texture.set_editor_property('compression_settings', unreal.TextureCompressionSettings.TC_DEFAULT)
+    texture.set_editor_property('address_x', unreal.TextureAddress.TA_CLAMP)
+    texture.set_editor_property('address_y', unreal.TextureAddress.TA_CLAMP)
+    for name, value in (('do_scale_mips_for_alpha_coverage', True), ('alpha_coverage_thresholds', unreal.Vector4(0.0, 0.0, 0.0, 0.33))):
+        try:
+            texture.set_editor_property(name, value)
+        except Exception as error:
+            unreal.log_warning('PLANET %s: could not set %s: %s' % (FOLIAGE_ATLAS, name, error))
+    assets.save_asset(FOLIAGE_ATLAS, only_if_is_dirty=False)
+    unreal.log('PLANET %s imported' % FOLIAGE_ATLAS)
+    return texture
 
 
 def build_foliage_material(collection):
     library = unreal.MaterialEditingLibrary
     assets = unreal.EditorAssetLibrary
+    atlas = import_foliage_atlas()
     material = unreal.load_asset(FOLIAGE_MATERIAL) if assets.does_asset_exist(FOLIAGE_MATERIAL) else unreal.AssetToolsHelpers.get_asset_tools().create_asset(
         FOLIAGE_MATERIAL.split('/')[-1], FOLDER, unreal.Material, unreal.MaterialFactoryNew())
     clear_expressions(material)
     material.set_editor_property('used_with_instanced_static_meshes', True)
+    # cards seen from both sides, cut by the alpha of their tile, and LODs that dissolve into each other, as those of cards differ much
+    material.set_editor_property('blend_mode', unreal.BlendMode.BLEND_MASKED)
+    material.set_editor_property('two_sided', True)
+    material.set_editor_property('tangent_space_normal', False)
+    material.set_editor_property('dithered_lod_transition', True)
 
     position = library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1100, 0)
     position_ddx = library.create_material_expression(material, unreal.MaterialExpressionDDX, -900, 0)
@@ -2063,15 +2109,26 @@ def build_foliage_material(collection):
     sun = library.create_material_expression(material, unreal.MaterialExpressionCollectionParameter, -1000, 240)
     sun.set_editor_property('collection', collection)
     sun.set_editor_property('parameter_name', 'SunDirection')
+    uv = library.create_material_expression(material, unreal.MaterialExpressionTextureCoordinate, -1300, -200)
+    tile = library.create_material_expression(material, unreal.MaterialExpressionTextureSampleParameter2D, -1100, -200)
+    tile.set_editor_property('parameter_name', 'FoliageAtlas')
+    tile.set_editor_property('texture', atlas)
+    tile.set_editor_property('sampler_type', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR)
+    library.connect_material_expressions(uv, '', tile, 'UVs')
+    vertex_normal = library.create_material_expression(material, unreal.MaterialExpressionVertexNormalWS, -1000, 100)
+    library.connect_material_property(vertex_normal, '', unreal.MaterialProperty.MP_NORMAL)
+    mask = add_custom(library, material, FOLIAGE_MASK_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT1, [('AtlasAlpha', tile, 'A'), ('UV', uv, '')
+        ] + add_config_parameters(library, material, unreal.HexPlanetConfig, ['FoliageAlphaCut'], -400), -300)
+    library.connect_material_property(mask, '', unreal.MaterialProperty.MP_OPACITY_MASK)
     connections = [('WorldPos', position, ''), ('PosDdx', position_ddx, ''), ('PosDdy', position_ddy, ''),
-        ('VertexNormal', library.create_material_expression(material, unreal.MaterialExpressionVertexNormalWS, -1000, 100), ''),
+        ('VertexNormal', vertex_normal, ''), ('AtlasColor', tile, 'RGB'), ('UV', uv, ''),
         ('VertexRGB', vertex_color, ''), ('VertexAlpha', vertex_color, 'A'), ('Snow', snow, ''), ('SunDirection', sun, ''),
         ('InstanceRandom', library.create_material_expression(material, unreal.MaterialExpressionPerInstanceRandom, -900, 220), ''),
         ('Colors', add_texture(library, material, COLORS, 'Colors', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 250), ''),
         ('HexNoise', add_texture(library, material, NOISE, 'HexNoise', unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_GRAYSCALE, 260), '')
         ] + add_config_parameters(library, material, unreal.HexPlanetConfig,
         ['BiomeTileSize', 'TriplanarSharpness', 'FoliageTint', 'FoliageHueShift', 'FoliageNoiseScale', 'FoliageNoiseStrength', 'FoliageTranslucency',
-         'FoliageSnowUpStart', 'FoliageSnowUpEnd', 'FoliageSnowBreakup'], 300)
+         'FoliageSnowUpStart', 'FoliageSnowUpEnd', 'FoliageSnowBreakup', 'FoliageBrightness'], 300)
     custom = add_custom(library, material, FOLIAGE_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, connections, 0)
     library.connect_material_property(custom, '', unreal.MaterialProperty.MP_BASE_COLOR)
     roughness = add_config_parameters(library, material, unreal.HexPlanetConfig, ['Roughness'], 700)[0][1]
@@ -2088,6 +2145,71 @@ def build_foliage_material(collection):
     library.connect_material_property(offset, '', unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
     library.recompile_material(material)
     assets.save_asset(FOLIAGE_MATERIAL)
+    return material
+
+
+# the birds and bats of UHexPlanetFlocks, which moves them: the color of the vertices, and wings that beat about the line of the body. A vertex
+# out on a wing, as far as its first UV says, swings up and down, each animal at its own pace by the custom data of its instance, and between
+# bouts of beating it glides with its wings held GlideAngle above level; FlapRate, FlapAngle, GlideShare and GlideAngle are those of its kind
+# (FHexFlockKind), which UHexPlanetFlocks gives the instance of the material of each kind
+FLOCK_OFFSET_CODE = r"""
+float beat = Time * FlapRate * 6.2831853 * (0.85 + 0.3 * Seed) + Seed * 40.0;
+float bout = sin(Time * 0.45 * (0.6 + 0.8 * frac(Seed * 7.13)) + Seed * 91.0);
+float edge = GlideShare * 2.0 - 1.0;
+float beating = GlideShare <= 0.0 ? 1.0 : smoothstep(edge - 0.2, edge + 0.2, bout);
+float angle = lerp(GlideAngle, sin(beat) * FlapAngle, beating) * UV.x;
+float reach = abs(LocalPos.y);
+float3 moved = float3(0.0, sign(LocalPos.y) * reach * (cos(angle) - 1.0), reach * sin(angle));
+return AxisX * moved.x + AxisY * moved.y + AxisZ * moved.z;
+"""
+FLOCK_CODE = r"""
+return VertexRGB.rgb * FlockBrightness;
+"""
+FLOCK_MATERIAL = FOLDER + '/M_HexPlanetFlock'
+# how far a wing may move a vertex, for the bounds of an instance: the half span of the largest mesh at its largest size
+FLOCK_WPO_BOUND = 16.0
+
+
+def build_flock_material():
+    library = unreal.MaterialEditingLibrary
+    assets = unreal.EditorAssetLibrary
+    material = unreal.load_asset(FLOCK_MATERIAL) if assets.does_asset_exist(FLOCK_MATERIAL) else unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+        FLOCK_MATERIAL.split('/')[-1], FOLDER, unreal.Material, unreal.MaterialFactoryNew())
+    clear_expressions(material)
+    material.set_editor_property('used_with_instanced_static_meshes', True)
+    material.set_editor_property('two_sided', True)
+    material.set_editor_property('max_world_position_offset_displacement', FLOCK_WPO_BOUND)
+
+    vertex_color = library.create_material_expression(material, unreal.MaterialExpressionVertexColor, -1000, 0)
+    custom = add_custom(library, material, FLOCK_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, [('VertexRGB', vertex_color, ''),
+        ('FlockBrightness', add_scalar(library, material, 'FlockBrightness', 1.0, 100), '')], 0)
+    library.connect_material_property(custom, '', unreal.MaterialProperty.MP_BASE_COLOR)
+    roughness = add_config_parameters(library, material, unreal.HexPlanetConfig, ['Roughness'], 300)[0][1]
+    library.connect_material_property(roughness, '', unreal.MaterialProperty.MP_ROUGHNESS)
+
+    axes = []
+    for index, (name, value) in enumerate((('AxisX', unreal.LinearColor(1.0, 0.0, 0.0, 0.0)), ('AxisY', unreal.LinearColor(0.0, 1.0, 0.0, 0.0)),
+                                           ('AxisZ', unreal.LinearColor(0.0, 0.0, 1.0, 0.0)))):
+        constant = library.create_material_expression(material, unreal.MaterialExpressionConstant3Vector, -1300, 1000 + index * 100)
+        constant.set_editor_property('constant', value)
+        transform = library.create_material_expression(material, unreal.MaterialExpressionTransform, -1100, 1000 + index * 100)
+        transform.set_editor_property('transform_source_type', unreal.MaterialVectorCoordTransformSource.TRANSFORMSOURCE_LOCAL)
+        transform.set_editor_property('transform_type', unreal.MaterialVectorCoordTransform.TRANSFORM_WORLD)
+        library.connect_material_expressions(constant, '', transform, '')
+        axes.append((name, transform, ''))
+    seed = library.create_material_expression(material, unreal.MaterialExpressionPerInstanceCustomData, -1100, 1400)
+    seed.set_editor_property('data_index', 0)
+    # the values of a kind, which UHexPlanetFlocks sets; these are those of a gull
+    kind = [(name, add_scalar(library, material, name, value, 1450 + index * 50), '') for index, (name, value) in enumerate(
+        (('FlapRate', 2.6), ('FlapAngle', 0.6), ('GlideShare', 0.7), ('GlideAngle', 0.12)))]
+    offset = add_custom(library, material, FLOCK_OFFSET_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, axes + [
+        ('LocalPos', library.create_material_expression(material, unreal.MaterialExpressionLocalPosition, -1100, 1300), ''),
+        ('UV', library.create_material_expression(material, unreal.MaterialExpressionTextureCoordinate, -1100, 1350), ''),
+        ('Time', library.create_material_expression(material, unreal.MaterialExpressionTime, -1100, 1380), ''),
+        ('Seed', seed, '')] + kind, 1000)
+    library.connect_material_property(offset, '', unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
+    library.recompile_material(material)
+    assets.save_asset(FLOCK_MATERIAL)
     return material
 
 
@@ -4251,6 +4373,16 @@ def main():
         build_underground('markers' in sys.argv[1:])
         unreal.log('PLANET underground assets created')
         return
+    # with foliage only the atlas of the plants and their material, after generate_foliage_atlas.py drew the atlas again
+    if 'foliage' in sys.argv[1:]:
+        build_foliage_material(build_parameter_collection())
+        unreal.log('PLANET foliage assets created')
+        return
+    # with flocks only the material of the birds and bats
+    if 'flocks' in sys.argv[1:]:
+        build_flock_material()
+        unreal.log('PLANET flock assets created')
+        return
     material = build_material()
     water_material = build_water()
     water_grid_material = build_water_grid()
@@ -4260,6 +4392,7 @@ def main():
     build_boulder_material()
     build_floe_material()
     build_foliage_material(build_parameter_collection())
+    build_flock_material()
     build_underground()
     wire_material = build_wireframe()
     build_level(material, water_material, water_grid_material, wire_material)

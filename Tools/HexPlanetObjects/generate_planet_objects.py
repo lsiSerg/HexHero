@@ -1,15 +1,22 @@
-"""Generates the meshes of the objects of the hex planet: trees, bushes, reeds, flowers, stones, rocks, fallen logs and stumps.
+"""Generates the meshes of the objects of the hex planet: trees, bushes, reeds, flowers, grass, wheat, stones, rocks, fallen logs and stumps.
 
 Run with any Python 3 without packages, for example the one in the engine:
     <Engine>/Engine/Binaries/ThirdParty/Python3/Win64/python.exe generate_planet_objects.py
-Writes GLB files and objects.json to Saved/HexPlanetObjects, then run import_planet_objects.py with the commandlet. The GLB files open in Blender,
-so a mesh can be reworked by hand, or replaced by any other in its UHexPlanetObjectSet.
+Writes GLB files and objects.json to Saved/HexPlanetObjects, then run generate_foliage_atlas.py, which draws the atlas their leaves show, and
+import_planet_objects.py with the commandlet. The GLB files open in Blender, so a mesh can be reworked by hand, or replaced by any other in its
+UHexPlanetObjectSet.
 
 Every mesh stands on its pivot at height 0, in world units (a cell is about 200 across, a hill 25 high), and is drawn by UHexPlanetObjects as instances.
-The color of a vertex is its color in linear space, which M_HexPlanetFoliage varies by instance and breaks by a noise, and its alpha says how leafy
-a vertex is and how much it sways in the wind: 0 at the foot of a trunk, 1 in the leaves. Stones and rocks are drawn with M_HexPlanetBoulder, in the
-rock of the biome of their cell, so their color is not used. The shapes aim at a realistic look from the camera of the planet, a few hundred units
-away: layered skirts of needles for spruces, clumps of leaves on branches for broadleaf trees, split faces for rocks.
+A plant is wood and cards. The wood, a trunk that forks into limbs and twigs, is solid: its UV lies outside the atlas (SOLID_UV), where
+M_HexPlanetFoliage draws the color of the vertices alone. A card is a small sheet that shows one tile of the atlas T_HexFoliage (foliage_tiles.py),
+a spray of leaves, a bough of needles or a tuft of grass, cut by its alpha: the cards of a crown lie like shingles on the lobes of its limbs, and
+their normals point away from the middle of the crown, so it is lit as one round volume and not as sheets. The color of a vertex is its color in
+linear space, which the tile of a card multiplies, darker inside and under a crown, where little light reaches, and M_HexPlanetFoliage varies by
+instance; its alpha says how much it sways in the wind: 0 at the foot of a trunk, 1 at the tips of the leaves.
+
+A mesh of cards is written three times, the whole one and two with fewer and larger cards (_LOD1, _LOD2), which the import gives it as its LODs,
+as reducing the triangles of cards tears the crowns apart. Stones and rocks are drawn with M_HexPlanetBoulder, in the rock of the biome of their
+cell, so their color is not used, and they and the logs keep LODs reduced from their triangles.
 """
 
 import json
@@ -17,7 +24,12 @@ import math
 import os
 import struct
 
+from foliage_tiles import tile_uv
+
 OUTPUT_FOLDER = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'Saved', 'HexPlanetObjects'))
+
+# the UV of every vertex that is no card: outside the atlas, where M_HexPlanetFoliage draws the color of the vertex alone, whole
+SOLID_UV = (2.5, 0.5)
 
 
 # --- small vector helpers -------------------------------------------------------------------------------------------------------------------------
@@ -59,6 +71,11 @@ def scale_color(color, factor):
     return tuple(min(value * factor, 1.0) for value in color)
 
 
+def smooth(t):
+    t = min(max(t, 0.0), 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
 def hash_unit(*values):
     """A number in [0, 1) from integers, the same in every run"""
     h = 2166136261
@@ -86,6 +103,9 @@ class Random:
 
     def pick(self, items):
         return items[min(int(self.unit() * len(items)), len(items) - 1)]
+
+    def jitter(self, amount):
+        return (self.range(-amount, amount), self.range(-amount, amount), self.range(-amount, amount))
 
 
 def value_noise(x, y, z, seed):
@@ -117,26 +137,32 @@ def fractal_noise(point, seed, octaves=3):
 # --- mesh -----------------------------------------------------------------------------------------------------------------------------------------
 
 class Mesh:
-    """Vertices with a color and alpha each, and triangles, each turned to face away from a reference point; normals are smooth within a part
-    and flat for a faceted part"""
+    """Vertices with a color, an alpha and a UV each, and triangles, each turned to face away from a reference point; normals are smooth within
+    a part and flat for a faceted part, but for a vertex given its own, as those of a card"""
 
     def __init__(self):
         self.positions = []
         self.colors = []
+        self.uvs = []
+        self.own_normals = {}
         self.triangles = []
         self.flat = []
         self.part_of = []
         self.parts = 0
+        self.current_flat = False
 
     def begin_part(self, flat=False):
         self.parts += 1
         self.current_flat = flat
         return self.parts
 
-    def vertex(self, position, color, alpha):
+    def vertex(self, position, color, alpha, uv=SOLID_UV, normal=None):
         self.positions.append(tuple(position))
         self.colors.append((color[0], color[1], color[2], alpha))
+        self.uvs.append(uv)
         self.part_of.append(self.parts)
+        if normal is not None:
+            self.own_normals[len(self.positions) - 1] = normal
         return len(self.positions) - 1
 
     def triangle(self, a, b, c, outside_of):
@@ -155,8 +181,13 @@ class Mesh:
         self.triangle(a, b, c, outside_of)
         self.triangle(a, c, d, outside_of)
 
+    def sheet(self, a, b, c):
+        """A triangle of a card, seen from both its sides, so which way it winds does not matter"""
+        self.triangles.append((a, b, c))
+        self.flat.append(False)
+
     def build(self):
-        """Returns positions, normals, colors and indices, flat parts with a vertex per corner of each triangle"""
+        """Returns positions, normals, colors, UVs and indices, flat parts with a vertex per corner of each triangle"""
         normals = [(0.0, 0.0, 0.0)] * len(self.positions)
         face_normals = []
         for a, b, c in self.triangles:
@@ -166,8 +197,10 @@ class Mesh:
             for index in (a, b, c):
                 normals[index] = add(normals[index], normal)
         normals = [unit(normal) for normal in normals]
+        for index, normal in self.own_normals.items():
+            normals[index] = unit(normal)
 
-        positions, out_normals, colors, indices = [], [], [], []
+        positions, out_normals, colors, uvs, indices = [], [], [], [], []
         remap = {}
         for triangle, flat, face_normal in zip(self.triangles, self.flat, face_normals):
             for index in triangle:
@@ -175,6 +208,7 @@ class Mesh:
                     positions.append(self.positions[index])
                     out_normals.append(face_normal)
                     colors.append(self.colors[index])
+                    uvs.append(self.uvs[index])
                     indices.append(len(positions) - 1)
                 else:
                     if index not in remap:
@@ -182,8 +216,9 @@ class Mesh:
                         positions.append(self.positions[index])
                         out_normals.append(normals[index])
                         colors.append(self.colors[index])
+                        uvs.append(self.uvs[index])
                     indices.append(remap[index])
-        return positions, out_normals, colors, indices
+        return positions, out_normals, colors, uvs, indices
 
 
 ICOSAHEDRON_POINTS = None
@@ -216,7 +251,7 @@ def icosphere(subdivisions):
 # --- parts ----------------------------------------------------------------------------------------------------------------------------------------
 
 def add_blob(mesh, center, radii, color, alpha, seed, subdivisions=1, bumps=0.28, bump_scale=1.7, flatten=0.55, shade=0.45, flat=False):
-    """A lumpy ellipsoid, a clump of leaves or a stone: darker underneath, as little light reaches there, and lighter and darker in patches"""
+    """A lumpy ellipsoid, a stone or a clump of moss: darker underneath, as little light reaches there, and lighter and darker in patches"""
     mesh.begin_part(flat)
     points, faces = icosphere(subdivisions)
     indices = []
@@ -281,49 +316,73 @@ def bent_path(start, direction, total, steps, bend, seed, droop=0.0):
     return points
 
 
-def add_skirt(mesh, center, bottom, height, radius, color, seed, segments=10, droop=0.18):
-    """A layer of a spruce: a jagged cone of needles from its tip down to a drooping rim, with a hollow underneath"""
+def add_card(mesh, base, along, face, long, width, tile, color, sway=(0.5, 1.0), bend=0.0, rows=2, round_to=None, normal_to=None, rounding=0.6,
+             shades=(0.82, 1.0), mirror=False):
+    """A card that shows a tile of the atlas: from the foot of the tile at base it runs along a direction, as wide as width across it, and faces
+    the direction face, away from which its far end droops by bend. Its normals turn by rounding towards the way from the point round_to, the
+    middle of a crown, or towards the direction normal_to, as up for grass, so many cards are lit as one soft volume. Its color goes from the
+    first of shades at its foot to the second at its end, and its sway alike."""
+    along = unit(along)
+    side = cross(face, along)
+    if length(side) < 1e-4:
+        _, side, _ = frame_of(along)
+    side = unit(side)
+    normal = unit(cross(along, side))
+    u0, v0, u1, v1 = tile_uv(tile)
+    if mirror:
+        u0, u1 = u1, u0
     mesh.begin_part()
-    tip = mesh.vertex((center[0], center[1], bottom + height), scale_color(color, 1.15), 1.0)
-    middle_ring, rim_ring = [], []
-    for step in range(segments):
-        angle = 2.0 * math.pi * (step + 0.35 * hash_unit(seed, step, 1)) / segments
-        reach = radius * (0.72 + 0.4 * hash_unit(seed, step, 2))
-        rim_z = bottom - radius * droop * (0.6 + 0.8 * hash_unit(seed, step, 3))
-        middle_z = bottom + height * 0.45 + height * 0.06
-        middle_ring.append(mesh.vertex((center[0] + math.cos(angle) * reach * 0.5, center[1] + math.sin(angle) * reach * 0.5, middle_z),
-                                       scale_color(color, 1.0 + 0.2 * hash_unit(seed, step, 4)), 1.0))
-        rim_ring.append(mesh.vertex((center[0] + math.cos(angle) * reach, center[1] + math.sin(angle) * reach, rim_z),
-                                    scale_color(color, 0.85 + 0.25 * hash_unit(seed, step, 5)), 1.0))
-    inside = (center[0], center[1], bottom + height * 0.15)
-    for step in range(segments):
-        following = (step + 1) % segments
-        mesh.triangle(tip, middle_ring[step], middle_ring[following], inside)
-        mesh.quad(middle_ring[step], rim_ring[step], rim_ring[following], middle_ring[following], inside)
-    # the underside, darker, as the layers shade each other
-    mesh.begin_part()
-    under = mesh.vertex((center[0], center[1], bottom + height * 0.3), scale_color(color, 0.45), 1.0)
-    under_ring = [mesh.vertex(mesh.positions[index], scale_color(color, 0.5), 1.0) for index in rim_ring]
-    above = (center[0], center[1], bottom + height)
-    for step in range(segments):
-        mesh.triangle(under_ring[step], under_ring[(step + 1) % segments], under, above)
+    grid = []
+    for row in range(rows + 1):
+        t = row / rows
+        middle = add(add(base, mul(along, long * t)), mul(normal, -bend * long * t * t))
+        for across in (-0.5, 0.5):
+            position = add(middle, mul(side, width * across))
+            own = normal
+            if round_to is not None:
+                own = unit(lerp(normal, unit(sub(position, round_to)), rounding))
+            elif normal_to is not None:
+                own = unit(lerp(normal, normal_to, rounding))
+            shade = shades[0] + (shades[1] - shades[0]) * t
+            grid.append(mesh.vertex(position, scale_color(color, shade), sway[0] + (sway[1] - sway[0]) * t,
+                                    (u0 + (u1 - u0) * (across + 0.5), v1 + (v0 - v1) * t), own))
+    for row in range(rows):
+        a, b, c, d = grid[row * 2], grid[row * 2 + 1], grid[row * 2 + 3], grid[row * 2 + 2]
+        mesh.sheet(a, b, c)
+        mesh.sheet(a, c, d)
 
 
-def add_crown(mesh, random, center, spread, count, radius, color, seed, stretch=(1.0, 1.0, 0.85), flat_top=False, droop=0.0):
-    """Clumps of leaves around a middle, on the outside of an ellipsoid, each a little other in tone; returns their centers for branches"""
-    centers = []
+UP = (0.0, 0.0, 1.0)
+
+
+def add_standing_card(mesh, foot, yaw, height, width, tile, color, lean=0.0, rows=1, shades=(0.7, 1.0), mirror=False, sway=(0.0, 1.0)):
+    """A card that stands on the ground and leans the way it faces, as a tuft of grass; its normals point mostly up, so the sun lights it as
+    it lights the ground under it, whichever way it faces"""
+    facing = (math.cos(yaw), math.sin(yaw), 0.0)
+    along = (facing[0] * math.sin(lean), facing[1] * math.sin(lean), math.cos(lean))
+    add_card(mesh, foot, along, facing, height, width, tile, color, sway=sway, rows=rows, normal_to=UP, rounding=0.8, shades=shades, mirror=mirror)
+
+
+def add_lying_card(mesh, center, size, tile, color, yaw=0.0, tilt=(0.0, 0.0), sway=0.0, shades=(1.0, 1.0), mirror=False):
+    """A card that lies over the ground, facing up, as a tuft of grass or blossoms seen from above, leaning a little by tilt"""
+    face = unit((tilt[0], tilt[1], 1.0))
+    along = (math.cos(yaw), math.sin(yaw), 0.0)
+    along = unit(sub(along, mul(face, dot(along, face))))
+    add_card(mesh, sub(center, mul(along, size * 0.5)), along, face, size, size, tile, color, sway=(sway, sway), rows=1, normal_to=UP, rounding=0.5,
+             shades=shades, mirror=mirror)
+
+
+def sphere_points(count, seed):
+    """Directions spread evenly over a sphere, turned by the seed"""
+    golden = math.pi * (3.0 - math.sqrt(5.0))
+    turn = hash_unit(seed, 71) * 2.0 * math.pi
+    points = []
     for index in range(count):
-        angle = 2.0 * math.pi * (index + random.range(-0.3, 0.3)) / count
-        out = random.range(0.45, 1.0)
-        height = random.range(-0.55, 0.6) if not flat_top else random.range(-0.15, 0.2)
-        clump = (center[0] + math.cos(angle) * spread[0] * out, center[1] + math.sin(angle) * spread[1] * out, center[2] + height * spread[2] - droop * out)
-        size = radius * random.range(0.8, 1.15)
-        tone = scale_color(color, random.range(0.85, 1.15))
-        add_blob(mesh, clump, (size * stretch[0], size * stretch[1], size * stretch[2]), tone, 1.0, seed * 13 + index, bumps=0.32)
-        centers.append(clump)
-    # one in the middle on top, so the crown has no hole
-    add_blob(mesh, add(center, (0.0, 0.0, spread[2] * (0.45 if not flat_top else 0.25))), mul(stretch, radius * 1.1), color, 1.0, seed * 13 + 99, bumps=0.3)
-    return centers
+        z = 1.0 - 2.0 * (index + 0.5) / count
+        ring = math.sqrt(max(1.0 - z * z, 0.0))
+        angle = golden * index + turn
+        points.append((math.cos(angle) * ring, math.sin(angle) * ring, z))
+    return points
 
 
 # --- trees ----------------------------------------------------------------------------------------------------------------------------------------
@@ -332,221 +391,502 @@ BARK = (0.075, 0.052, 0.034)
 DARK_BARK = (0.05, 0.038, 0.028)
 PINE_BARK = (0.14, 0.07, 0.04)
 DEAD_WOOD = (0.16, 0.145, 0.125)
-NEEDLES = (0.04, 0.078, 0.042)
-PINE_NEEDLES = (0.042, 0.08, 0.05)
-LEAVES = (0.075, 0.13, 0.036)
-BIRCH_LEAVES = (0.12, 0.18, 0.05)
-OAK_LEAVES = (0.06, 0.11, 0.032)
-WILLOW_LEAVES = (0.075, 0.1, 0.04)
-ACACIA_LEAVES = (0.085, 0.105, 0.042)
+# the colors of leaves are lighter than the leaves come out, as the tiles of the atlas, nearly white, darken them by about a third
+NEEDLES = (0.058, 0.115, 0.064)
+PINE_NEEDLES = (0.07, 0.135, 0.082)
+LEAVES = (0.125, 0.225, 0.056)
+LINDEN_LEAVES = (0.105, 0.205, 0.062)
+BIRCH_LEAVES = (0.19, 0.285, 0.07)
+OAK_LEAVES = (0.1, 0.19, 0.05)
+WILLOW_LEAVES = (0.145, 0.205, 0.072)
+ACACIA_LEAVES = (0.145, 0.19, 0.066)
+BUSH_LEAVES = (0.12, 0.21, 0.058)
+GRASS = (0.22, 0.36, 0.08)
+WHITE = (0.85, 0.85, 0.85)
+
+# how many of its cards a mesh keeps at each LOD, as one in so many, and how much larger those are, so a crown stays as full
+LOD_STRIDE = (1, 2, 5)
+LOD_GROWTH = (1.0, 1.4, 2.1)
+TREE_SCREENS = [1.0, 0.045, 0.02]
+PLANT_SCREENS = [1.0, 0.03, 0.012]
 
 
-def spruce(seed):
-    """A spruce or fir: a straight trunk under layered drooping skirts of needles, narrowing to a spike"""
+def at_height(path, height):
+    """The point of a path that rises, such as a trunk, at a height"""
+    for a, b in zip(path, path[1:]):
+        if b[2] >= height and b[2] > a[2]:
+            return lerp(a, b, min(max((height - a[2]) / (b[2] - a[2]), 0.0), 1.0))
+    return path[-1]
+
+
+def add_lobe_cards(mesh, lod, seed, lobes, index, crown_center, crown_bottom, crown_top, tiles, color, card, per_lobe, hang, axis, twig_color,
+                   droop=0.12, hide=0.66):
+    """The leaves of one lobe of a crown: cards over the part of its surface that no other lobe hides, darker low in the crown. Two of three
+    lie on it like shingles, pointing out and a little down, and the third stands out of it as the end of a twig does, so the outline of a
+    crown is leaves and not a smooth ball. A few dark ones inside close the view through it, and thin twigs run to some"""
+    center, radius, tone = lobes[index]
+    random = Random(seed * 31 + index * 7 + 5)
+    cards = []
+    for direction in sphere_points(per_lobe, seed + index * 3):
+        out = unit(add(direction, random.jitter(0.25)))
+        reach = random.range(0.78, 1.04)
+        point = (center[0] + out[0] * radius * reach, center[1] + out[1] * radius * reach, center[2] + out[2] * radius * reach * 0.88)
+        size = random.range(card[0] * 0.85, card[1] * 1.2)
+        spin = random.jitter(0.6)
+        tint = random.range(0.88, 1.12)
+        mirror = random.unit() < 0.5
+        tile = random.pick(tiles)
+        if out[2] < -0.6:
+            continue
+        if any(other != index and length(sub(point, lobes[other][0])) < lobes[other][1] * hide for other in range(len(lobes))):
+            continue
+        cards.append((out, point, size, spin, tint, mirror, tile))
+
+    stride = LOD_STRIDE[lod]
+    growth = LOD_GROWTH[lod]
+    for number, (out, point, size, spin, tint, mirror, tile) in enumerate(cards):
+        if number % stride != stride // 2:
+            continue
+        size *= growth
+        if number % 3 == 1 and lod < 2:
+            # the end of a twig, standing out of the lobe
+            along = unit(add(add(out, (0.0, 0.0, -hang * 0.6)), mul(spin, 0.5)))
+            face = add(sub(UP, mul(along, along[2])), mul(spin, 0.7))
+            base = sub(point, mul(along, size * 0.62))
+        else:
+            face = unit(add(add(out, (0.0, 0.0, 0.3)), mul(spin, 0.75)))
+            outward = unit((point[0] - axis[0], point[1] - axis[1], 0.0))
+            wish = add(add(mul(outward, 0.7), (0.0, 0.0, -hang)), spin)
+            along = unit(sub(wish, mul(face, dot(wish, face))))
+            base = sub(point, mul(along, size * 0.45))
+        # little light reaches the lower and inner leaves of a crown
+        high = smooth((point[2] - crown_bottom) / max(crown_top - crown_bottom, 1.0))
+        outer = smooth(length(sub(point, crown_center)) / max(radius * 2.2, 1.0))
+        light = (0.66 + 0.4 * high) * (0.86 + 0.14 * outer)
+        add_card(mesh, base, along, face, size, size * 0.92, tile, scale_color(color, tone * tint * light), sway=(0.55, 1.0), bend=droop,
+                 rows=2 if lod == 0 else 1, round_to=lerp(center, crown_center, 0.55), rounding=0.7, mirror=mirror)
+        if lod == 0 and number % 3 == 0:
+            add_tube(mesh, [center, lerp(center, base, 0.6), base], [0.2, 0.14, 0.08], twig_color, [0.5, 0.6, 0.7], seed * 3 + number, segments=3,
+                     cap=False, bark=0.1)
+    if lod < 2:
+        # cards inside the lobe, dark, so the sky does not show through the gaps between its leaves
+        for inner in range(2):
+            face = unit(random.jitter(1.0))
+            along = unit(cross(face, (0.3, 0.5, 0.8)))
+            size = radius * 1.5
+            add_card(mesh, sub(center, mul(along, size * 0.5)), along, face, size, size, tiles[0], scale_color(color, tone * 0.55), sway=(0.6, 0.6),
+                     rows=1, round_to=crown_center, rounding=0.5, shades=(1.0, 1.0))
+
+
+def leafy_tree(seed, lod, height=(23.0, 28.0), fork=(0.26, 0.34), spread=(9.0, 10.5), lobe_count=8, lobe_size=(0.4, 0.5), tiles=('LeafA',), leaves=LEAVES,
+               bark=BARK, trunk_radius=1.15, card=(5.0, 6.4), per_lobe=14, hang=0.3, leader=0.45, lean=0.08, bark_at=None, flare=1.5, top_lobe=0.5,
+               lobe_out=(0.52, 0.68), hide=0.66):
+    """A broadleaf tree: a trunk that forks into limbs, each carrying a lobe of leaves, which together make a lumpy crown with gaps, as a real
+    crown has, and not a ball"""
     mesh = Mesh()
     random = Random(seed)
-    height = random.range(27.0, 33.0)
-    radius = random.range(6.5, 8.0)
-    add_tube(mesh, bent_path((0.0, 0.0, -1.0), (0.0, 0.0, 1.0), height * 0.95 + 1.0, 4, 0.04, seed), [1.1, 0.8, 0.55, 0.35, 0.2], DARK_BARK,
-             [0.0, 0.1, 0.25, 0.45, 0.6], seed, segments=6)
-    layers = 8
-    for layer in range(layers):
-        f = layer / (layers - 1)
-        bottom = height * (0.13 + 0.74 * f)
-        add_skirt(mesh, (0.0, 0.0, 0.0), bottom, height * (0.24 - 0.1 * f), radius * (1.0 - f) ** 0.9 + 0.9,
-                  scale_color(NEEDLES, 0.85 + 0.35 * f), seed * 17 + layer)
-    add_skirt(mesh, (0.0, 0.0, 0.0), height * 0.9, height * 0.12, 0.9, NEEDLES, seed * 17 + 50, segments=6, droop=0.05)
+    total = random.range(*height)
+    radius = random.range(*spread)
+    bottom = total * random.range(*fork)
+    half = (total - bottom) * 0.5
+    middle = bottom + half
+
+    # the trunk up to where it forks, and thinner on through the crown as its leader
+    leader_top = middle + half * leader
+    direction = (random.range(-lean, lean), random.range(-lean, lean), 1.0)
+    steps = 5 if lod == 0 else 3
+    trunk = bent_path((0.0, 0.0, -1.0), direction, leader_top + 1.0, steps, 0.16, seed)
+    radii = [trunk_radius * (flare if step == 0 else 1.0 - 0.75 * step / steps) for step in range(steps + 1)]
+    add_tube(mesh, trunk, radii, bark, [min(0.5 * step / steps, 0.5) for step in range(steps + 1)], seed, segments=8 if lod == 0 else 6 if lod == 1 else 4,
+             bark=0.22, color_at=bark_at)
+    axis = at_height(trunk, middle)
+    crown_center = (axis[0], axis[1], middle)
+
+    # the lobes: one at the end of each limb, spread around the trunk and up the crown, and one on its top
+    lobes = []
+    golden = math.pi * (3.0 - math.sqrt(5.0))
+    turn = random.range(0.0, 2.0 * math.pi)
+    for index in range(lobe_count):
+        level = ((index * 0.618034 + 0.3) % 1.0) * 1.05 - 0.5
+        angle = golden * index + turn + random.range(-0.3, 0.3)
+        out = radius * random.range(*lobe_out) * math.sqrt(max(1.0 - level * level * 1.6, 0.15))
+        center = (axis[0] + math.cos(angle) * out, axis[1] + math.sin(angle) * out, middle + level * half * 1.05)
+        lobes.append((center, radius * random.range(*lobe_size), random.range(0.88, 1.12)))
+    lobes.append(((axis[0] + random.range(-1.0, 1.0), axis[1] + random.range(-1.0, 1.0), middle + half * 0.55), radius * top_lobe, random.range(0.95, 1.1)))
+
+    for index, (center, lobe_radius, tone) in enumerate(lobes):
+        if lod < 2 and index < lobe_count:
+            start = at_height(trunk, min(max(center[2] - lobe_radius * 0.9, bottom * 0.8), leader_top - 0.5))
+            bow = lerp(start, center, 0.55)
+            bow = (bow[0], bow[1], bow[2] + length(sub(center, start)) * 0.12)
+            add_tube(mesh, [start, bow, center], [trunk_radius * 0.5, trunk_radius * 0.34, trunk_radius * 0.16], bark, [0.3, 0.45, 0.6], seed * 7 + index,
+                     segments=5 if lod == 0 else 4, cap=False, color_at=bark_at)
+        add_lobe_cards(mesh, lod, seed, lobes, index, crown_center, bottom, total, tiles, leaves, card, per_lobe, hang, axis, bark, hide=hide)
     return mesh
 
 
-def pine(seed):
-    """A pine: a tall bare trunk, reddish higher up, with a few flat dark clumps of needles on its top"""
+def broadleaf(seed, lod, tiles=('LeafA',), leaves=LEAVES):
+    return leafy_tree(seed, lod, tiles=tiles, leaves=leaves)
+
+
+def birch(seed, lod):
+    """A birch: a slender white trunk with dark marks under a narrow light crown whose twigs hang"""
+    def bark_at(position, t):
+        band = value_noise(position[0] * 2.0, position[1] * 2.0, position[2] * 0.9, seed + 3)
+        return (0.62, 0.6, 0.56) if band > 0.36 else (0.08, 0.07, 0.06)
+
+    return leafy_tree(seed, lod, height=(24.0, 29.0), fork=(0.3, 0.38), spread=(4.6, 5.4), lobe_count=7, lobe_size=(0.55, 0.7), tiles=('Birch',),
+                      leaves=BIRCH_LEAVES, bark=(0.62, 0.6, 0.56), trunk_radius=0.7, card=(4.2, 5.4), per_lobe=12, hang=0.8, leader=0.85, lean=0.07,
+                      bark_at=bark_at, flare=1.2, top_lobe=0.6, lobe_out=(0.45, 0.6), hide=0.45)
+
+
+def oak(seed, lod):
+    """A giant old tree: a thick short trunk with a wide foot and a broad crown of many lobes, for a lone landmark"""
+    return leafy_tree(seed, lod, height=(33.0, 37.0), fork=(0.22, 0.28), spread=(13.5, 15.0), lobe_count=11, lobe_size=(0.36, 0.46), tiles=('Oak',),
+                      leaves=OAK_LEAVES, bark=DARK_BARK, trunk_radius=2.3, card=(6.6, 8.4), per_lobe=14, hang=0.25, leader=0.3, lean=0.08, flare=1.45,
+                      top_lobe=0.45)
+
+
+def spruce(seed, lod):
+    """A spruce or fir: a straight trunk with whorls of boughs that droop and shorten towards its spike, each bough a fan of needles"""
+    mesh = Mesh()
+    random = Random(seed)
+    height = random.range(27.0, 33.0)
+    radius = random.range(6.8, 8.2)
+    steps = 4 if lod < 2 else 2
+    add_tube(mesh, bent_path((0.0, 0.0, -1.0), (0.0, 0.0, 1.0), height * 0.96 + 1.0, steps, 0.04, seed), [1.1 - 0.95 * step / steps for step in range(steps + 1)],
+             DARK_BARK, [0.6 * step / steps for step in range(steps + 1)], seed, segments=6 if lod == 0 else 4)
+
+    whorls = (12, 8, 5)[lod]
+    boughs = (6, 5, 4)[lod]
+    for whorl in range(whorls):
+        f = whorl / (whorls - 1)
+        level = height * (0.13 + 0.78 * f)
+        reach = radius * (1.0 - f) ** 0.85 + 0.9
+        droop = 0.5 - 0.3 * f
+        turn = random.range(0.0, 2.0 * math.pi)
+        for bough in range(boughs):
+            angle = turn + 2.0 * math.pi * (bough + random.range(-0.25, 0.25)) / boughs
+            long = reach * random.range(0.86, 1.14) * (1.0 + 0.25 * lod)
+            along = unit((math.cos(angle), math.sin(angle), -droop * random.range(0.7, 1.2)))
+            face = unit((along[0] * droop, along[1] * droop, 1.0))
+            base = (math.cos(angle) * 0.2, math.sin(angle) * 0.2, level + random.range(-0.5, 0.5))
+            # the boughs under others get less light, and the needles at their tips are the young, lighter ones
+            tone = (0.62 + 0.42 * f) * random.range(0.9, 1.1)
+            add_card(mesh, base, along, face, long, long * random.range(0.8, 0.95), 'Spruce', scale_color(NEEDLES, tone), sway=(0.25, 0.8), bend=-0.1,
+                     rows=2 if lod == 0 else 1, normal_to=unit((along[0] * 0.8, along[1] * 0.8, 1.0)), rounding=0.75, shades=(0.6, 1.1),
+                     mirror=random.unit() < 0.5)
+    # the spike: three small boughs standing up around the tip
+    for blade in range(3 if lod < 2 else 2):
+        angle = 2.0 * math.pi * blade / 3.0 + seed
+        face = (math.cos(angle), math.sin(angle), 0.0)
+        long = height * 0.15
+        add_card(mesh, (0.0, 0.0, height * 0.88), UP, face, long, long * 0.6, 'Spruce', scale_color(NEEDLES, 1.05), sway=(0.6, 1.0), rows=1,
+                 normal_to=unit((face[0], face[1], 0.6)), rounding=0.7)
+    return mesh
+
+
+def pine(seed, lod):
+    """A pine: a tall bare trunk, reddish higher up, with a few limbs near its top that carry flat plates of long needles"""
     mesh = Mesh()
     random = Random(seed)
     height = random.range(28.0, 34.0)
-    trunk = bent_path((0.0, 0.0, -1.0), (random.range(-0.1, 0.1), random.range(-0.1, 0.1), 1.0), height * 0.85, 5, 0.12, seed)
+    steps = 5 if lod < 2 else 3
+    trunk = bent_path((0.0, 0.0, -1.0), (random.range(-0.1, 0.1), random.range(-0.1, 0.1), 1.0), height * 0.9, steps, 0.12, seed)
 
     def bark_at(position, t):
         return lerp(BARK, PINE_BARK, min(t * 1.4, 1.0))
 
-    add_tube(mesh, trunk, [1.2, 1.0, 0.85, 0.7, 0.55, 0.4], BARK, [0.0, 0.05, 0.15, 0.3, 0.5, 0.7], seed, segments=7, color_at=bark_at)
+    add_tube(mesh, trunk, [1.25 - 0.9 * step / steps for step in range(steps + 1)], BARK, [0.7 * step / steps for step in range(steps + 1)], seed,
+             segments=7 if lod == 0 else 5 if lod == 1 else 4, color_at=bark_at)
     top = trunk[-1]
-    centers = add_crown(mesh, random, add(top, (0.0, 0.0, -1.0)), (5.5, 5.5, 3.0), 5, 3.4, PINE_NEEDLES, seed, stretch=(1.25, 1.25, 0.55))
-    for index, clump in enumerate(centers):
-        start = trunk[3 + index % 2]
-        add_tube(mesh, [start, lerp(start, clump, 0.5), clump], [0.45, 0.3, 0.2], PINE_BARK, [0.4, 0.7, 0.9], seed + index, segments=4, cap=False)
+    limbs = 8
+    plates = [(add(top, (0.0, 0.0, 0.6)), 4.2, 1.1)]
+    turn = random.range(0.0, 2.0 * math.pi)
+    for limb in range(limbs):
+        f = limb / (limbs - 1)
+        angle = turn + limb * 2.4 + random.range(-0.3, 0.3)
+        start = at_height(trunk, height * (0.52 + 0.34 * f))
+        out = random.range(5.5, 8.5) * (1.0 - 0.4 * f)
+        end = (start[0] + math.cos(angle) * out, start[1] + math.sin(angle) * out, start[2] + random.range(1.5, 4.0))
+        if lod < 2:
+            bow = lerp(start, end, 0.5)
+            add_tube(mesh, [start, (bow[0], bow[1], bow[2] - 0.6), end], [0.5, 0.36, 0.2], PINE_BARK, [0.4, 0.6, 0.8], seed + limb,
+                     segments=5 if lod == 0 else 4, cap=False)
+        plates.append((end, random.range(3.0, 4.0), 0.8 + 0.3 * f))
+        plates.append((add(lerp(start, end, 0.55), (0.0, 0.0, 0.8)), random.range(2.4, 3.2), 0.7 + 0.3 * f))
+    for number, (center, size, tone) in enumerate(plates):
+        cards = (5, 3, 2)[lod]
+        grown = size * (1.0, 1.25, 1.7)[lod]
+        spin = random.range(0.0, 2.0 * math.pi)
+        for card in range(cards):
+            angle = spin + 2.0 * math.pi * card / cards
+            along = unit((math.cos(angle), math.sin(angle), random.range(0.1, 0.75)))
+            face = unit((along[0] * -0.5 + random.range(-0.3, 0.3), along[1] * -0.5 + random.range(-0.3, 0.3), 1.0))
+            long = grown * random.range(1.3, 1.6)
+            add_card(mesh, sub(center, mul(along, long * 0.2)), along, face, long, long * 0.95, 'Pine', scale_color(PINE_NEEDLES, tone * random.range(0.9, 1.1)),
+                     sway=(0.5, 1.0), bend=0.08, rows=1, round_to=sub(center, (0.0, 0.0, 3.0)), rounding=0.6, shades=(0.7, 1.05), mirror=card % 2 == 0)
     return mesh
 
 
-def broadleaf(seed, height_range=(22.0, 27.0), leaves=LEAVES, clumps=8, spread=7.5, clump_radius=5.4, trunk_radius=1.4):
-    """A broadleaf tree: a trunk forking into branches that carry clumps of leaves in a round crown"""
-    mesh = Mesh()
-    random = Random(seed)
-    height = random.range(*height_range)
-    fork = height * random.range(0.22, 0.3)
-    trunk = bent_path((0.0, 0.0, -1.0), (random.range(-0.15, 0.15), random.range(-0.15, 0.15), 1.0), fork + 1.0, 3, 0.15, seed)
-    add_tube(mesh, trunk, [trunk_radius * 1.25, trunk_radius, trunk_radius * 0.85, trunk_radius * 0.7], BARK, [0.0, 0.05, 0.15, 0.3], seed, segments=8)
-    crown_middle = (trunk[-1][0], trunk[-1][1], height - spread * 0.95)
-    centers = add_crown(mesh, random, crown_middle, (spread, spread, spread * 0.85), clumps, clump_radius, leaves, seed)
-    for index, clump in enumerate(centers):
-        middle = add(lerp(trunk[-1], clump, 0.5), (0.0, 0.0, 1.5))
-        add_tube(mesh, [trunk[-1], middle, lerp(clump, middle, 0.3)], [trunk_radius * 0.6, trunk_radius * 0.4, trunk_radius * 0.25], BARK,
-                 [0.3, 0.6, 0.85], seed * 7 + index, segments=5, cap=False)
-    return mesh
-
-
-def birch(seed):
-    """A birch: a slender white trunk with dark bands and a narrow light crown"""
-    mesh = Mesh()
-    random = Random(seed)
-    height = random.range(22.0, 27.0)
-    trunk = bent_path((0.0, 0.0, -1.0), (random.range(-0.12, 0.12), random.range(-0.12, 0.12), 1.0), height * 0.8, 5, 0.1, seed)
-
-    def bark_at(position, t):
-        band = value_noise(0.0, 0.0, position[2] * 0.9, seed + 3)
-        return (0.55, 0.53, 0.5) if band > 0.35 else (0.08, 0.07, 0.06)
-
-    add_tube(mesh, trunk, [0.75, 0.65, 0.55, 0.45, 0.35, 0.25], (0.55, 0.53, 0.5), [0.0, 0.1, 0.2, 0.35, 0.55, 0.75], seed, segments=6, color_at=bark_at)
-    middle = (trunk[3][0], trunk[3][1], height * 0.66)
-    add_crown(mesh, random, middle, (3.5, 3.5, height * 0.25), 6, 3.0, BIRCH_LEAVES, seed, stretch=(0.9, 0.9, 1.25))
-    return mesh
-
-
-def oak(seed):
-    """A giant old tree: a thick short trunk and a broad crown of many clumps, for a lone landmark"""
-    return broadleaf(seed, height_range=(33.0, 37.0), leaves=OAK_LEAVES, clumps=9, spread=11.0, clump_radius=6.2, trunk_radius=2.4)
-
-
-def snag(seed):
-    """A dead tree: a gnarled bare trunk broken at its top and a few bare branches"""
-    mesh = Mesh()
-    random = Random(seed)
-    height = random.range(18.0, 24.0)
-    trunk = bent_path((0.0, 0.0, -1.0), (random.range(-0.2, 0.2), random.range(-0.2, 0.2), 1.0), height, 6, 0.35, seed)
-    add_tube(mesh, trunk, [1.2, 1.0, 0.85, 0.7, 0.55, 0.45, 0.4], DEAD_WOOD, [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3], seed, segments=6, bark=0.4)
-    for index in range(random.pick([3, 4, 5])):
-        start = trunk[2 + index % 4]
-        angle = random.range(0.0, 2.0 * math.pi)
-        branch = bent_path(start, (math.cos(angle), math.sin(angle), random.range(0.4, 1.0)), random.range(4.0, 8.0), 3, 0.5, seed * 3 + index)
-        add_tube(mesh, branch, [0.4, 0.3, 0.2, 0.1], DEAD_WOOD, [0.2, 0.25, 0.3, 0.35], seed * 5 + index, segments=4)
-    return mesh
-
-
-def willow(seed):
-    """A swamp willow: a short leaning trunk under a dark crown whose clumps hang down"""
+def willow(seed, lod):
+    """A swamp willow: a short leaning trunk whose limbs arch out, and from them curtains of long leaves hang"""
     mesh = Mesh()
     random = Random(seed)
     height = random.range(17.0, 21.0)
-    lean = (random.range(-0.35, 0.35), random.range(-0.35, 0.35), 1.0)
-    trunk = bent_path((0.0, 0.0, -1.0), lean, height * 0.55, 3, 0.3, seed)
-    add_tube(mesh, trunk, [1.6, 1.3, 1.0, 0.8], DARK_BARK, [0.0, 0.1, 0.25, 0.4], seed, segments=7, bark=0.45)
-    middle = add(trunk[-1], (0.0, 0.0, height * 0.18))
-    add_crown(mesh, random, middle, (7.0, 7.0, 3.0), 7, 3.6, WILLOW_LEAVES, seed, stretch=(0.85, 0.85, 1.6), droop=3.0)
+    lean = (random.range(-0.3, 0.3), random.range(-0.3, 0.3), 1.0)
+    steps = 3
+    trunk = bent_path((0.0, 0.0, -1.0), lean, height * 0.55, steps, 0.3, seed)
+    add_tube(mesh, trunk, [1.9, 1.4, 1.1, 0.8], DARK_BARK, [0.0, 0.1, 0.25, 0.4], seed, segments=7 if lod == 0 else 5, bark=0.45)
+    top = trunk[-1]
+    crown = add(top, (0.0, 0.0, height * 0.2))
+    limbs = 7
+    turn = random.range(0.0, 2.0 * math.pi)
+    stride = LOD_STRIDE[lod]
+    for limb in range(limbs):
+        angle = turn + 2.0 * math.pi * (limb + random.range(-0.2, 0.2)) / limbs
+        out = random.range(5.0, 7.5)
+        end = (top[0] + math.cos(angle) * out, top[1] + math.sin(angle) * out, top[2] + height * random.range(0.14, 0.3))
+        bow = lerp(top, end, 0.5)
+        bow = (bow[0], bow[1], bow[2] + 1.6)
+        if lod < 2:
+            add_tube(mesh, [top, bow, end], [0.5, 0.32, 0.15], DARK_BARK, [0.4, 0.55, 0.7], seed + limb, segments=5 if lod == 0 else 4, cap=False)
+        tone = random.range(0.88, 1.1)
+        # the top of the limb: sprays that lie on the dome of the crown
+        for card in range(4):
+            long = random.range(6.0, 7.6) * LOD_GROWTH[lod]
+            spray = angle + random.range(-0.9, 0.9)
+            along = unit((math.cos(spray), math.sin(spray), -0.15))
+            point = add(lerp(top, end, random.range(0.0, 1.0)), (0.0, 0.0, random.range(1.6, 2.6)))
+            mirror = random.unit() < 0.5
+            if (limb * 4 + card) % stride == stride // 2:
+                add_card(mesh, sub(point, mul(along, long * 0.4)), along, unit((along[0] * 0.3, along[1] * 0.3, 1.0)), long, long * 0.9, 'Willow',
+                         scale_color(WILLOW_LEAVES, tone * 1.05), sway=(0.5, 1.0), bend=0.25, rows=2 if lod == 0 else 1, round_to=crown, rounding=0.6, mirror=mirror)
+        # the curtains: strands that hang from along the limb, longer at its end
+        for card in range(4):
+            t = 0.35 + 0.65 * card / 3.0
+            point = lerp(bow, end, t) if t > 0.5 else lerp(top, bow, t * 2.0)
+            point = add(point, (random.range(-1.0, 1.0), random.range(-1.0, 1.0), 0.0))
+            long = min(random.range(7.0, 11.0) * (0.7 + 0.5 * t), point[2] - 1.0) * (1.0 + 0.1 * lod)
+            face = unit((point[0] - top[0] + random.range(-1.5, 1.5), point[1] - top[1] + random.range(-1.5, 1.5), 0.0))
+            mirror = random.unit() < 0.5
+            width = long * random.range(0.6, 0.75) * LOD_GROWTH[lod]
+            if (limb * 4 + card) % stride == stride // 2:
+                add_card(mesh, point, unit((face[0] * 0.15, face[1] * 0.15, -1.0)), face, long, width, 'Willow', scale_color(WILLOW_LEAVES, tone * (0.6 + 0.4 * t)),
+                         sway=(0.4, 1.0), bend=-0.06, rows=2 if lod == 0 else 1, normal_to=unit((face[0], face[1], 0.8)), rounding=0.7, shades=(1.0, 0.75),
+                         mirror=mirror)
     return mesh
 
 
-def acacia(seed):
-    """A tree of dry land: a trunk forking low into spreading branches under a flat wide crown"""
+def acacia(seed, lod):
+    """A tree of dry land: a trunk forking low into spreading limbs under a flat wide crown of feathery leaves"""
     mesh = Mesh()
     random = Random(seed)
     height = random.range(15.0, 19.0)
     trunk = bent_path((0.0, 0.0, -1.0), (random.range(-0.2, 0.2), random.range(-0.2, 0.2), 1.0), height * 0.35, 2, 0.2, seed)
-    add_tube(mesh, trunk, [1.0, 0.85, 0.7], BARK, [0.0, 0.1, 0.2], seed, segments=6)
-    tops = []
-    for index in range(3):
-        angle = 2.0 * math.pi * index / 3 + random.range(-0.4, 0.4)
-        branch = bent_path(trunk[-1], (math.cos(angle) * 0.8, math.sin(angle) * 0.8, 1.0), height * 0.7, 3, 0.15, seed * 3 + index)
-        add_tube(mesh, branch, [0.6, 0.45, 0.35, 0.25], BARK, [0.2, 0.4, 0.6, 0.8], seed * 5 + index, segments=5, cap=False)
-        tops.append(branch[-1])
-    middle = mul(add(add(tops[0], tops[1]), tops[2]), 1.0 / 3.0)
-    add_crown(mesh, random, add(middle, (0.0, 0.0, 0.5)), (7.5, 7.5, 1.2), 5, 4.0, ACACIA_LEAVES, seed, stretch=(1.4, 1.4, 0.38), flat_top=True)
+    add_tube(mesh, trunk, [1.25, 0.9, 0.75], BARK, [0.0, 0.1, 0.2], seed, segments=6 if lod < 2 else 4)
+    stride = LOD_STRIDE[lod]
+    number = 0
+    for limb in range(4):
+        angle = 2.0 * math.pi * limb / 4 + random.range(-0.4, 0.4)
+        branch = bent_path(trunk[-1], (math.cos(angle) * 0.85, math.sin(angle) * 0.85, 1.0), height * 0.72, 3, 0.15, seed * 3 + limb)
+        if lod < 2:
+            add_tube(mesh, branch, [0.62, 0.46, 0.34, 0.2], BARK, [0.2, 0.4, 0.6, 0.8], seed * 5 + limb, segments=5 if lod == 0 else 4, cap=False)
+        top = branch[-1]
+        tone = random.range(0.9, 1.1)
+        # an umbrella over the end of each limb: sprays lying flat, pointing out from it
+        for card in range(12):
+            spray = 2.0 * math.pi * card / 12.0 * 2.0 + random.range(-0.3, 0.3)
+            out = random.range(0.0, 3.2)
+            long = random.range(5.0, 6.4) * LOD_GROWTH[lod]
+            along = unit((math.cos(spray), math.sin(spray), random.range(-0.12, 0.05)))
+            point = (top[0] + math.cos(spray) * out, top[1] + math.sin(spray) * out, top[2] + random.range(-0.4, 0.7) - (1.2 if card >= 6 else 0.0))
+            mirror = random.unit() < 0.5
+            number += 1
+            if number % stride != stride // 2:
+                continue
+            add_card(mesh, sub(point, mul(along, long * 0.25)), along, unit((random.range(-0.15, 0.15), random.range(-0.15, 0.15), 1.0)), long, long * 0.95,
+                     'Acacia', scale_color(ACACIA_LEAVES, tone * random.range(0.88, 1.1)), sway=(0.5, 1.0), bend=0.08, rows=1,
+                     round_to=(trunk[-1][0], trunk[-1][1], top[2] - 6.0), rounding=0.5, shades=(0.8, 1.05), mirror=mirror)
+    return mesh
+
+
+def snag(seed, lod):
+    """A dead tree: a gnarled bare trunk broken at its top and bare branches that end in fine twigs"""
+    mesh = Mesh()
+    random = Random(seed)
+    height = random.range(18.0, 24.0)
+    trunk = bent_path((0.0, 0.0, -1.0), (random.range(-0.2, 0.2), random.range(-0.2, 0.2), 1.0), height, 6, 0.35, seed)
+    add_tube(mesh, trunk, [1.4, 1.0, 0.85, 0.7, 0.55, 0.45, 0.4], DEAD_WOOD, [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3], seed, segments=6 if lod < 2 else 4, bark=0.4)
+    for index in range(random.pick([4, 5, 6])):
+        start = trunk[2 + index % 4]
+        angle = random.range(0.0, 2.0 * math.pi)
+        branch = bent_path(start, (math.cos(angle), math.sin(angle), random.range(0.4, 1.0)), random.range(4.0, 8.0), 3, 0.5, seed * 3 + index)
+        if lod < 2:
+            add_tube(mesh, branch, [0.42, 0.3, 0.2, 0.1], DEAD_WOOD, [0.2, 0.25, 0.3, 0.35], seed * 5 + index, segments=4 if lod == 0 else 3)
+        along = unit(sub(branch[-1], branch[-2]))
+        long = random.range(4.5, 6.5) * (1.0 + 0.3 * lod)
+        if lod == 2 and index % 2:
+            continue
+        add_card(mesh, branch[-2], along, unit(cross(along, random.jitter(1.0))), long, long, 'DryTwig', scale_color(DEAD_WOOD, 1.4), sway=(0.3, 0.6), rows=1,
+                 normal_to=UP, rounding=0.5, shades=(1.0, 1.0), mirror=index % 2 == 0)
     return mesh
 
 
 # --- low plants -----------------------------------------------------------------------------------------------------------------------------------
 
-def bush(seed, color=(0.05, 0.09, 0.03), size=1.0):
-    """A bush: a few clumps of leaves on the ground"""
+def bush(seed, lod, color=BUSH_LEAVES, size=1.0, tile='Bush'):
+    """A thicket: a few shrubs grown together, each a low lobe of small leaves on thin stems"""
     mesh = Mesh()
     random = Random(seed)
-    for index in range(random.pick([3, 4, 5])):
+    lobes = []
+    for index in range(random.pick([4, 5, 5])):
         angle = random.range(0.0, 2.0 * math.pi)
-        out = random.range(0.0, 2.6) * size
-        radius = random.range(2.0, 3.2) * size
-        center = (math.cos(angle) * out, math.sin(angle) * out, radius * random.range(0.55, 0.85))
-        add_blob(mesh, center, (radius, radius, radius * 0.85), scale_color(color, random.range(0.8, 1.2)), 0.6, seed * 11 + index, bumps=0.35)
+        out = random.range(0.0, 5.0) * size
+        radius = random.range(2.6, 3.8) * size
+        lobes.append(((math.cos(angle) * out, math.sin(angle) * out, radius * random.range(0.85, 1.15)), radius, random.range(0.85, 1.15)))
+    crown = (0.0, 0.0, 1.0)
+    for index, (center, radius, tone) in enumerate(lobes):
+        if lod == 0:
+            foot = (center[0] * 0.5, center[1] * 0.5, -0.3)
+            add_tube(mesh, [foot, lerp(foot, center, 0.6), center], [0.22, 0.16, 0.08], BARK, [0.1, 0.3, 0.5], seed + index, segments=3, cap=False)
+        add_lobe_cards(mesh, lod, seed, lobes, index, crown, 0.0, 7.0 * size, (tile,), color, (3.8 * size, 4.8 * size), 10, 0.2, (0.0, 0.0, 0.0), BARK)
     return mesh
 
 
-def dry_bush(seed):
-    """A bush of dry land: bare twigs fanning out of the ground with a few small dusty clumps"""
+def dry_bush(seed, lod):
+    """A bush of dry land: bare twigs fanning out of the ground with a few dusty leaves"""
     mesh = Mesh()
     random = Random(seed)
-    for index in range(random.pick([6, 7, 8])):
-        angle = random.range(0.0, 2.0 * math.pi)
-        twig = bent_path((0.0, 0.0, -0.3), (math.cos(angle) * 0.7, math.sin(angle) * 0.7, 1.0), random.range(3.5, 5.5), 3, 0.6, seed * 3 + index)
-        add_tube(mesh, twig, [0.22, 0.16, 0.1, 0.05], (0.15, 0.11, 0.07), [0.1, 0.4, 0.7, 1.0], seed * 7 + index, segments=4)
-        if index % 2 == 0:
-            add_blob(mesh, twig[-1], (1.3, 1.3, 1.0), (0.11, 0.1, 0.05), 0.8, seed * 13 + index, bumps=0.4)
+    cards = (7, 4, 3)[lod]
+    for index in range(cards):
+        yaw = 2.0 * math.pi * index / cards + random.range(-0.4, 0.4)
+        high = random.range(4.5, 6.5) * (1.0 + 0.2 * lod)
+        foot = (random.range(-0.8, 0.8), random.range(-0.8, 0.8), -0.3)
+        add_standing_card(mesh, foot, yaw, high, high * 1.1, 'DryTwig', scale_color((0.22, 0.17, 0.11), random.range(0.85, 1.2)), lean=random.range(0.3, 0.7),
+                          shades=(0.8, 1.0), mirror=index % 2 == 0, sway=(0.0, 0.7))
+    for index in range((4, 2, 0)[lod]):
+        yaw = random.range(0.0, 2.0 * math.pi)
+        out = random.range(1.0, 2.6)
+        add_lying_card(mesh, (math.cos(yaw) * out, math.sin(yaw) * out, random.range(2.2, 3.6)), random.range(2.4, 3.2), 'Bush', (0.13, 0.13, 0.06), yaw,
+                       tilt=(random.range(-0.4, 0.4), random.range(-0.4, 0.4)), sway=0.6)
     return mesh
 
 
-def tundra_shrub(seed):
-    """Low flat clumps of dwarf birch and heather, olive and rusty"""
+def tundra_shrub(seed, lod):
+    """Low mats of heather and dwarf birch of the tundra, olive and rusty, with a few twigs standing out of them"""
     mesh = Mesh()
     random = Random(seed)
-    for index in range(random.pick([4, 5, 6])):
+    for index in range((6, 4, 2)[lod]):
         angle = random.range(0.0, 2.0 * math.pi)
-        out = random.range(0.0, 3.0)
-        radius = random.range(1.8, 2.8)
-        color = random.pick([(0.085, 0.065, 0.032), (0.06, 0.07, 0.03), (0.1, 0.055, 0.03)])
-        add_blob(mesh, (math.cos(angle) * out, math.sin(angle) * out, radius * 0.25), (radius, radius, radius * 0.45), color, 0.4, seed * 11 + index)
+        out = random.range(0.0, 3.2) * (1.0 if lod < 2 else 0.4)
+        size = random.range(5.0, 7.0) * (1.0 + 0.35 * lod)
+        add_lying_card(mesh, (math.cos(angle) * out, math.sin(angle) * out, random.range(0.5, 1.4)), size, 'Heather', scale_color(WHITE, random.range(0.75, 1.0)),
+                       random.range(0.0, 6.28), tilt=(random.range(-0.25, 0.25), random.range(-0.25, 0.25)), sway=0.2)
+    for index in range((4, 2, 0)[lod]):
+        yaw = random.range(0.0, 2.0 * math.pi)
+        high = random.range(2.4, 3.4)
+        add_standing_card(mesh, (random.range(-2.5, 2.5), random.range(-2.5, 2.5), -0.2), yaw, high, high * 1.2, 'Bush',
+                          random.pick([(0.3, 0.19, 0.08), (0.2, 0.24, 0.1), (0.34, 0.17, 0.08)]), lean=random.range(0.1, 0.4), sway=(0.0, 0.6))
     return mesh
 
 
-def reeds(seed):
-    """A clump of reeds and sedge of a swamp: thin blades leaning out of the water"""
+def reeds(seed, lod):
+    """A clump of reeds and cattails of a swamp: tall blades leaning out of the water"""
     mesh = Mesh()
     random = Random(seed)
-    for index in range(random.pick([14, 16, 18])):
-        angle = random.range(0.0, 2.0 * math.pi)
-        out = random.range(0.0, 2.2)
-        base = (math.cos(angle) * out, math.sin(angle) * out, -0.3)
-        lean = (math.cos(angle) * random.range(0.05, 0.3), math.sin(angle) * random.range(0.05, 0.3), 1.0)
-        blade = bent_path(base, lean, random.range(4.5, 8.0), 3, 0.15, seed * 3 + index, droop=0.15)
-        color = lerp((0.1, 0.12, 0.04), (0.2, 0.17, 0.07), random.unit())
-        add_tube(mesh, blade, [0.18, 0.13, 0.08, 0.02], color, [0.1, 0.4, 0.75, 1.0], seed * 7 + index, segments=3, cap=False, bark=0.1)
-        if random.unit() < 0.3:
-            add_blob(mesh, blade[-2], (0.25, 0.25, 0.7), (0.09, 0.05, 0.03), 0.9, seed * 13 + index, subdivisions=0, bumps=0.1)
+    cards = (7, 4, 3)[lod]
+    for index in range(cards):
+        yaw = math.pi * index / cards + random.range(-0.3, 0.3)
+        high = random.range(8.5, 11.5)
+        foot = (random.range(-1.6, 1.6), random.range(-1.6, 1.6), -0.4)
+        add_standing_card(mesh, foot, yaw, high, high * 0.5 * (1.0 + 0.25 * lod), 'Reeds', scale_color(WHITE, random.range(0.8, 1.0)), lean=random.range(-0.2, 0.2),
+                          rows=1, shades=(0.65, 1.0), mirror=index % 2 == 0)
+    if lod < 2:
+        add_lying_card(mesh, (0.0, 0.0, 0.5), 7.0, 'GrassTop', scale_color(GRASS, 0.8), random.range(0.0, 6.28))
     return mesh
 
 
-FLOWER_COLORS = [
-    [(0.8, 0.58, 0.04), (0.8, 0.8, 0.75)],
-    [(0.32, 0.08, 0.5), (0.14, 0.22, 0.65), (0.8, 0.8, 0.75)],
-    [(0.68, 0.06, 0.04), (0.8, 0.62, 0.05), (0.8, 0.8, 0.75)],
+BLOSSOMS = [
+    ('FlowersA', ['BlossomWhite', 'BlossomYellow', 'BlossomWhite']),
+    ('FlowersB', ['BlossomBlue', 'BlossomWhite', 'BlossomBlue']),
+    ('FlowersB', ['BlossomRed', 'BlossomYellow', 'BlossomRed']),
 ]
 
 
-def flowers(seed, palette):
-    """A patch of wild flowers: low leafy clumps scattered with blossoms"""
+def flowers(seed, lod, palette):
+    """A patch of a meadow in flower: tufts of grass, stems of flowers among them and blossoms open to the sky over them"""
     mesh = Mesh()
     random = Random(seed)
-    clumps = []
-    for index in range(4):
+    side_tile, tops = BLOSSOMS[palette]
+    reach = 9.5
+    # the grass, lying out over the ground and standing in tufts
+    for index in range((4, 3, 2)[lod]):
         angle = random.range(0.0, 2.0 * math.pi)
-        out = random.range(0.0, 3.0)
-        radius = random.range(2.0, 3.0)
-        center = (math.cos(angle) * out, math.sin(angle) * out, 0.1)
-        clumps.append((center, radius))
-        add_blob(mesh, center, (radius, radius, 0.7), (0.06, 0.1, 0.03), 0.3, seed * 11 + index, bumps=0.3)
-    for index in range(26):
-        center, radius = random.pick(clumps)
+        out = random.range(0.0, reach * 0.6)
+        add_lying_card(mesh, (math.cos(angle) * out, math.sin(angle) * out, random.range(0.4, 0.9)), random.range(9.0, 12.0) * (1.0 + 0.2 * lod), 'GrassTop',
+                       scale_color(GRASS, random.range(0.75, 1.0)), random.range(0.0, 6.28))
+    for index in range((11, 6, 0)[lod]):
         angle = random.range(0.0, 2.0 * math.pi)
-        out = random.range(0.0, radius * 0.9)
-        point = (center[0] + math.cos(angle) * out, center[1] + math.sin(angle) * out, center[2] + random.range(0.5, 0.95))
-        size = random.range(0.3, 0.45)
-        add_blob(mesh, point, (size, size, size * 0.6), random.pick(palette), 0.5, seed * 17 + index, subdivisions=0, bumps=0.1, shade=0.2)
+        out = math.sqrt(random.unit()) * reach
+        high = random.range(3.4, 5.2)
+        add_standing_card(mesh, (math.cos(angle) * out, math.sin(angle) * out, -0.2), random.range(0.0, 6.28), high, high * 1.35, 'Grass',
+                          scale_color(GRASS, random.range(0.8, 1.1)), lean=random.range(0.05, 0.35), mirror=index % 2 == 0)
+    # the flowers from their side, for a low camera
+    for index in range((8, 4, 0)[lod]):
+        angle = random.range(0.0, 2.0 * math.pi)
+        out = math.sqrt(random.unit()) * reach
+        high = random.range(5.0, 6.8)
+        add_standing_card(mesh, (math.cos(angle) * out, math.sin(angle) * out, -0.2), random.range(0.0, 6.28), high, high * 0.5, side_tile,
+                          scale_color(WHITE, random.range(0.85, 1.0)), lean=random.range(0.0, 0.3), mirror=index % 2 == 0, shades=(0.8, 1.0))
+    # and from above, where a camera high up sees only these
+    for index in range((11, 7, 4)[lod]):
+        angle = random.range(0.0, 2.0 * math.pi)
+        out = math.sqrt(random.unit()) * reach
+        size = random.range(3.6, 5.2) * (1.0 + 0.3 * lod)
+        add_lying_card(mesh, (math.cos(angle) * out, math.sin(angle) * out, random.range(3.2, 5.4)), size, random.pick(tops), scale_color(WHITE, random.range(0.9, 1.0)),
+                       random.range(0.0, 6.28), tilt=(random.range(-0.3, 0.3), random.range(-0.3, 0.3)), sway=0.8)
+    return mesh
+
+
+def tall_grass(seed, lod, tile='Grass', color=GRASS, top_color=None, high=(4.5, 7.0), reach=7.5):
+    """A patch of tall grass: tufts standing and leaning every way over blades that lie out on the ground"""
+    mesh = Mesh()
+    random = Random(seed)
+    top_color = top_color or color
+    for index in range((4, 3, 2)[lod]):
+        angle = random.range(0.0, 2.0 * math.pi)
+        out = random.range(0.0, reach * 0.6)
+        add_lying_card(mesh, (math.cos(angle) * out, math.sin(angle) * out, random.range(0.5, 1.6)), random.range(9.0, 12.0) * (1.0 + 0.2 * lod), 'GrassTop',
+                       scale_color(top_color, random.range(0.75, 1.0)), random.range(0.0, 6.28), sway=0.2)
+    for index in range((14, 8, 4)[lod]):
+        angle = random.range(0.0, 2.0 * math.pi)
+        out = math.sqrt(random.unit()) * reach
+        tall = random.range(*high) * (1.0 + 0.12 * lod)
+        add_standing_card(mesh, (math.cos(angle) * out, math.sin(angle) * out, -0.2), random.range(0.0, 6.28), tall, tall * 1.3 * (1.0 + 0.2 * lod), tile,
+                          scale_color(color, random.range(0.8, 1.1)), lean=random.range(0.1, 0.45), mirror=index % 2 == 0)
+    return mesh
+
+
+def wheat(seed, lod):
+    """A patch of a field of wheat: stalks standing close in rows, leaning one way in the wind, and their ears from above"""
+    mesh = Mesh()
+    random = Random(seed)
+    reach = 12.0
+    wind = random.range(0.0, 2.0 * math.pi)
+    for index in range((30, 15, 6)[lod]):
+        angle = random.range(0.0, 2.0 * math.pi)
+        out = math.sqrt(random.unit()) * reach
+        tall = random.range(8.0, 9.6)
+        # in three directions, so the field is full from every side
+        yaw = wind + (index % 3) * math.pi / 3.0 + random.range(-0.2, 0.2)
+        add_standing_card(mesh, (math.cos(angle) * out, math.sin(angle) * out, -0.2), yaw, tall, tall * 0.56 * (1.0 + 0.35 * lod), 'Wheat',
+                          scale_color(WHITE, random.range(0.82, 1.0)), lean=random.range(0.05, 0.22), mirror=index % 2 == 0, shades=(0.7, 1.0))
+    for index in range((18, 11, 6)[lod]):
+        angle = random.range(0.0, 2.0 * math.pi)
+        out = math.sqrt(random.unit()) * reach * 0.9
+        add_lying_card(mesh, (math.cos(angle) * out, math.sin(angle) * out, random.range(7.0, 7.8)), random.range(9.5, 12.5) * (1.0 + 0.3 * lod), 'WheatTop',
+                       scale_color(WHITE, random.range(0.9, 1.0)), wind + random.range(-0.3, 0.3), tilt=(random.range(-0.06, 0.06), random.range(-0.06, 0.06)), sway=0.9)
     return mesh
 
 
@@ -649,8 +989,9 @@ def to_file_axes(x, y, z):
     return x, z, y
 
 
-def write_glb(mesh, path, name):
-    positions, normals, colors, indices = mesh.build()
+def write_glb(mesh, path, name, with_uvs=False):
+    """Writes a mesh as a GLB file and returns the number of its triangles; with_uvs adds the UVs, which the cards of the plants need"""
+    positions, normals, colors, uvs, indices = mesh.build()
     positions = [to_file_axes(*(value * 0.01 for value in position)) for position in positions]
     normals = [to_file_axes(*normal) for normal in normals]
     count = len(positions)
@@ -658,28 +999,36 @@ def write_glb(mesh, path, name):
     position_data = b''.join(struct.pack('<3f', *value) for value in positions)
     normal_data = b''.join(struct.pack('<3f', *value) for value in normals)
     color_data = b''.join(struct.pack('<4f', *value) for value in colors)
+    uv_data = b''.join(struct.pack('<2f', *value) for value in uvs) if with_uvs else b''
     index_data = struct.pack('<%dI' % len(indices), *indices)
-    binary = position_data + normal_data + color_data + index_data
+    binary = position_data + normal_data + color_data + uv_data + index_data
 
     views = []
     offset = 0
-    for data, target in ((position_data, 34962), (normal_data, 34962), (color_data, 34962), (index_data, 34963)):
+    for data, target in ((position_data, 34962), (normal_data, 34962), (color_data, 34962), (uv_data, 34962), (index_data, 34963)):
+        if not data:
+            continue
         views.append({'buffer': 0, 'byteOffset': offset, 'byteLength': len(data), 'target': target})
         offset += len(data)
 
     stored = [struct.unpack('<3f', struct.pack('<3f', *value)) for value in positions]
+    attributes = {'POSITION': 0, 'NORMAL': 1, 'COLOR_0': 2}
+    accessors = [
+        {'bufferView': 0, 'componentType': 5126, 'count': count, 'type': 'VEC3', 'min': [min(value[axis] for value in stored) for axis in range(3)], 'max': [max(value[axis] for value in stored) for axis in range(3)]},
+        {'bufferView': 1, 'componentType': 5126, 'count': count, 'type': 'VEC3'},
+        {'bufferView': 2, 'componentType': 5126, 'count': count, 'type': 'VEC4'},
+    ]
+    if with_uvs:
+        attributes['TEXCOORD_0'] = 3
+        accessors.append({'bufferView': 3, 'componentType': 5126, 'count': count, 'type': 'VEC2'})
+    accessors.append({'bufferView': len(accessors), 'componentType': 5125, 'count': len(indices), 'type': 'SCALAR'})
     document = {
         'asset': {'version': '2.0', 'generator': 'generate_planet_objects.py'},
         'scene': 0,
         'scenes': [{'nodes': [0]}],
         'nodes': [{'mesh': 0, 'name': name}],
-        'meshes': [{'name': name, 'primitives': [{'attributes': {'POSITION': 0, 'NORMAL': 1, 'COLOR_0': 2}, 'indices': 3}]}],
-        'accessors': [
-            {'bufferView': 0, 'componentType': 5126, 'count': count, 'type': 'VEC3', 'min': [min(value[axis] for value in stored) for axis in range(3)], 'max': [max(value[axis] for value in stored) for axis in range(3)]},
-            {'bufferView': 1, 'componentType': 5126, 'count': count, 'type': 'VEC3'},
-            {'bufferView': 2, 'componentType': 5126, 'count': count, 'type': 'VEC4'},
-            {'bufferView': 3, 'componentType': 5125, 'count': len(indices), 'type': 'SCALAR'},
-        ],
+        'meshes': [{'name': name, 'primitives': [{'attributes': attributes, 'indices': len(accessors) - 1}]}],
+        'accessors': accessors,
         'bufferViews': views,
         'buffers': [{'byteLength': len(binary)}],
     }
@@ -694,46 +1043,53 @@ def write_glb(mesh, path, name):
     return len(indices) // 3
 
 
-# each mesh: its name, how it is made, and its material: foliage for plants and wood, stone for stones and rocks
+# each mesh: its name, how it is made at a LOD, its material (foliage for plants and wood, stone for stones and rocks), and whether it is made of
+# cards, so it is written at three LODs, or solid, with LODs reduced from its triangles by the import
 MESHES = [
-    ('Spruce_0', lambda: spruce(11), 'foliage'),
-    ('Spruce_1', lambda: spruce(23), 'foliage'),
-    ('Spruce_2', lambda: spruce(37), 'foliage'),
-    ('Pine_0', lambda: pine(41), 'foliage'),
-    ('Pine_1', lambda: pine(53), 'foliage'),
-    ('Broadleaf_0', lambda: broadleaf(61), 'foliage'),
-    ('Broadleaf_1', lambda: broadleaf(73), 'foliage'),
-    ('Broadleaf_2', lambda: broadleaf(89), 'foliage'),
-    ('Birch_0', lambda: birch(97), 'foliage'),
-    ('Birch_1', lambda: birch(101), 'foliage'),
-    ('Oak_0', lambda: oak(107), 'foliage'),
-    ('Snag_0', lambda: snag(113), 'foliage'),
-    ('Snag_1', lambda: snag(127), 'foliage'),
-    ('Willow_0', lambda: willow(131), 'foliage'),
-    ('Acacia_0', lambda: acacia(137), 'foliage'),
-    ('Acacia_1', lambda: acacia(149), 'foliage'),
-    ('Bush_0', lambda: bush(151), 'foliage'),
-    ('Bush_1', lambda: bush(163, (0.06, 0.095, 0.035), 1.1), 'foliage'),
-    ('Bush_2', lambda: bush(173, (0.045, 0.075, 0.028), 0.9), 'foliage'),
-    ('DryBush_0', lambda: dry_bush(179), 'foliage'),
-    ('DryBush_1', lambda: dry_bush(181), 'foliage'),
-    ('TundraShrub_0', lambda: tundra_shrub(191), 'foliage'),
-    ('TundraShrub_1', lambda: tundra_shrub(193), 'foliage'),
-    ('Reeds_0', lambda: reeds(197), 'foliage'),
-    ('Reeds_1', lambda: reeds(199), 'foliage'),
-    ('Flowers_0', lambda: flowers(211, FLOWER_COLORS[0]), 'foliage'),
-    ('Flowers_1', lambda: flowers(223, FLOWER_COLORS[1]), 'foliage'),
-    ('Flowers_2', lambda: flowers(227, FLOWER_COLORS[2]), 'foliage'),
-    ('Stone_0', lambda: stone(229, 2.2), 'stone'),
-    ('Stone_1', lambda: stone(233, 2.0, 3), 'stone'),
-    ('Stone_2', lambda: stone(239, 2.6), 'stone'),
-    ('Stone_3', lambda: stone(241, 1.8, 5), 'stone'),
-    ('Rock_0', lambda: stone(251, 7.0, 5), 'stone'),
-    ('Rock_1', lambda: stone(257, 6.5, 6), 'stone'),
-    ('Rock_2', lambda: stone(263, 7.5, 4), 'stone'),
-    ('Log_0', lambda: log(269), 'foliage'),
-    ('Log_1', lambda: log(271), 'foliage'),
-    ('Stump_0', lambda: stump(277), 'foliage'),
+    ('Spruce_0', lambda lod: spruce(11, lod), 'foliage', True),
+    ('Spruce_1', lambda lod: spruce(23, lod), 'foliage', True),
+    ('Spruce_2', lambda lod: spruce(37, lod), 'foliage', True),
+    ('Pine_0', lambda lod: pine(41, lod), 'foliage', True),
+    ('Pine_1', lambda lod: pine(53, lod), 'foliage', True),
+    ('Broadleaf_0', lambda lod: broadleaf(61, lod), 'foliage', True),
+    ('Broadleaf_1', lambda lod: broadleaf(73, lod, ('LeafB',), LINDEN_LEAVES), 'foliage', True),
+    ('Broadleaf_2', lambda lod: broadleaf(89, lod, ('LeafA', 'LeafB'), scale_color(LEAVES, 0.9)), 'foliage', True),
+    ('Birch_0', lambda lod: birch(97, lod), 'foliage', True),
+    ('Birch_1', lambda lod: birch(101, lod), 'foliage', True),
+    ('Oak_0', lambda lod: oak(107, lod), 'foliage', True),
+    ('Snag_0', lambda lod: snag(113, lod), 'foliage', True),
+    ('Snag_1', lambda lod: snag(127, lod), 'foliage', True),
+    ('Willow_0', lambda lod: willow(131, lod), 'foliage', True),
+    ('Acacia_0', lambda lod: acacia(137, lod), 'foliage', True),
+    ('Acacia_1', lambda lod: acacia(149, lod), 'foliage', True),
+    ('Bush_0', lambda lod: bush(151, lod), 'foliage', True),
+    ('Bush_1', lambda lod: bush(163, lod, scale_color(BUSH_LEAVES, 1.15), 1.1), 'foliage', True),
+    ('Bush_2', lambda lod: bush(173, lod, scale_color(BUSH_LEAVES, 0.88), 0.9, 'LeafB'), 'foliage', True),
+    ('DryBush_0', lambda lod: dry_bush(179, lod), 'foliage', True),
+    ('DryBush_1', lambda lod: dry_bush(181, lod), 'foliage', True),
+    ('TundraShrub_0', lambda lod: tundra_shrub(191, lod), 'foliage', True),
+    ('TundraShrub_1', lambda lod: tundra_shrub(193, lod), 'foliage', True),
+    ('Reeds_0', lambda lod: reeds(197, lod), 'foliage', True),
+    ('Reeds_1', lambda lod: reeds(199, lod), 'foliage', True),
+    ('Flowers_0', lambda lod: flowers(211, lod, 0), 'foliage', True),
+    ('Flowers_1', lambda lod: flowers(223, lod, 1), 'foliage', True),
+    ('Flowers_2', lambda lod: flowers(227, lod, 2), 'foliage', True),
+    ('Grass_0', lambda lod: tall_grass(281, lod), 'foliage', True),
+    ('Grass_1', lambda lod: tall_grass(283, lod), 'foliage', True),
+    ('DryGrass_0', lambda lod: tall_grass(293, lod, 'DryGrass', WHITE, (0.5, 0.44, 0.24)), 'foliage', True),
+    ('DryGrass_1', lambda lod: tall_grass(307, lod, 'DryGrass', WHITE, (0.5, 0.44, 0.24)), 'foliage', True),
+    ('Wheat_0', lambda lod: wheat(311, lod), 'foliage', True),
+    ('Wheat_1', lambda lod: wheat(313, lod), 'foliage', True),
+    ('Stone_0', lambda lod: stone(229, 2.2), 'stone', False),
+    ('Stone_1', lambda lod: stone(233, 2.0, 3), 'stone', False),
+    ('Stone_2', lambda lod: stone(239, 2.6), 'stone', False),
+    ('Stone_3', lambda lod: stone(241, 1.8, 5), 'stone', False),
+    ('Rock_0', lambda lod: stone(251, 7.0, 5), 'stone', False),
+    ('Rock_1', lambda lod: stone(257, 6.5, 6), 'stone', False),
+    ('Rock_2', lambda lod: stone(263, 7.5, 4), 'stone', False),
+    ('Log_0', lambda lod: log(269), 'foliage', False),
+    ('Log_1', lambda lod: log(271), 'foliage', False),
+    ('Stump_0', lambda lod: stump(277), 'foliage', False),
 ]
 
 
@@ -744,11 +1100,20 @@ def main():
             os.remove(os.path.join(OUTPUT_FOLDER, old))
 
     manifest = {'meshes': []}
-    for name, make, material in MESHES:
+    for name, make, material, cards in MESHES:
         asset = 'SM_PlanetObject_' + name
-        triangles = write_glb(make(), os.path.join(OUTPUT_FOLDER, asset + '.glb'), asset)
-        manifest['meshes'].append({'name': asset, 'material': material, 'triangles': triangles})
-        print('%s: %d triangles' % (asset, triangles))
+        whole = make(0)
+        triangles = [write_glb(whole, os.path.join(OUTPUT_FOLDER, asset + '.glb'), asset, True)]
+        lods = []
+        for lod in (1, 2) if cards else ():
+            lods.append('%s_LOD%d' % (asset, lod))
+            triangles.append(write_glb(make(lod), os.path.join(OUTPUT_FOLDER, lods[-1] + '.glb'), lods[-1], True))
+        # the screen sizes from which the LODs of the cards are drawn: a tree keeps its whole mesh to about 1000 from the camera and its second
+        # to about 2200, and a low plant, smaller on the screen at the same distance, switches at smaller sizes, about as far away
+        tall = max(position[2] for position in whole.positions) > 12.0
+        manifest['meshes'].append({'name': asset, 'material': material, 'triangles': triangles[0], 'lods': lods,
+                                   'screens': TREE_SCREENS if tall else PLANT_SCREENS})
+        print('%s: %s triangles' % (asset, ', '.join(str(count) for count in triangles)))
     with open(os.path.join(OUTPUT_FOLDER, 'objects.json'), 'w', encoding='utf-8') as file:
         json.dump(manifest, file, indent=2)
     print('Wrote %d meshes to %s' % (len(MESHES), OUTPUT_FOLDER))

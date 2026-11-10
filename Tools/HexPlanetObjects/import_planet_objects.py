@@ -1,9 +1,12 @@
 """Imports the meshes that generate_planet_objects.py wrote, and creates the kinds of objects of the planet (UHexPlanetObjectSet) that are missing.
 
-Run with UnrealEditor-Cmd.exe <uproject> -run=pythonscript -script=<this file> -unattended -nullrhi, after create_planet_assets.py made
-M_HexPlanetFoliage and M_HexPlanetBoulder. The meshes go to /Game/HexPlanet/Objects/Meshes, replaced each run, with two reduced LODs and the
-material their kind needs; the sets go to /Game/HexPlanet/Objects/Sets (PlanetObjectsFolder of HexMapSettings) only when an asset of that name is
-missing, as they belong to the artist once they exist: delete one to have it made again from SETS.
+Run with UnrealEditor-Cmd.exe <uproject> -run=pythonscript -script=<this file> -unattended -nullrhi, after create_planet_assets.py (or its
+argument foliage) imported the atlas T_HexFoliage and made M_HexPlanetFoliage and M_HexPlanetBoulder. The meshes go to
+/Game/HexPlanet/Objects/Meshes, replaced each run, with the material their kind needs and two more LODs: those of a mesh of cards, a tree or a
+tuft, are the meshes the generator wrote for them with fewer and larger cards, and those of a solid mesh, a stone or a log, are reduced from its
+triangles. The sets go to /Game/HexPlanet/Objects/Sets (PlanetObjectsFolder of HexMapSettings) only when an asset of that name is missing, as
+they belong to the artist once they exist: delete one to have it made again from SETS. A set that is there takes the values of MIGRATIONS only
+while it still holds their old values, so tuning by hand stays.
 """
 
 import json
@@ -13,9 +16,12 @@ import unreal
 
 SOURCE_FOLDER = os.path.join(unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_saved_dir()), 'HexPlanetObjects')
 MESHES = '/Game/HexPlanet/Objects/Meshes'
+# the meshes of the LODs of the cards are imported here, copied into the LODs of their mesh, and deleted again
+LOD_MESHES = MESHES + '/Lods'
 SETS_FOLDER = '/Game/HexPlanet/Objects/Sets'
 MATERIALS = {'foliage': '/Game/HexPlanet/M_HexPlanetFoliage', 'stone': '/Game/HexPlanet/M_HexPlanetBoulder'}
-# the share of triangles of each LOD and the screen size from which it is drawn; a tree 30 high covers about 0.04 of the screen 600 away
+# for a solid mesh: the share of triangles of each LOD and the screen size from which it is drawn; a tree 30 high covers about 0.04 of the
+# screen 600 away. A mesh of cards has its screen sizes in the manifest of the generator
 LODS = [(1.0, 1.0), (0.35, 0.05), (0.12, 0.02)]
 
 # biome letters: G grass, D sand, N snow, M swamp, T tundra, P steppe, R rock
@@ -27,20 +33,29 @@ TREES = {'G': ['Broadleaf_0', 'Broadleaf_1', 'Broadleaf_2', 'Spruce_0', 'Pine_0'
 SETS = [
     {'id': 'Forest', 'name': 'Forest', 'order': 10, 'color': (0.05, 0.2, 0.06), 'layer': 'cover', 'blocks': True, 'levels': [0, 1],
      'counts': [10, 24, 46], 'scale': (1.15, 1.7), 'giant': (0.03, 1.8), 'spacing': 10.0, 'reach': 1.0, 'min_up': 0.72, 'align': 0.1, 'tilt': 4.0,
-     'sink': 1.0, 'shadow': True, 'cull': 5000.0, 'far': (0.9, (0.03, 0.065, 0.025)),
+     'sink': 1.0, 'shadow': True, 'cull': 5000.0, 'far': (0.9, (0.03, 0.065, 0.025)), 'patch': 7.0,
      'variants': [('G', TREES['G'], 0.0, 1.0, 1.0, 0.33), ('N', TREES['N'], 0.85, 0.9, 1.0, 0.25), ('T', TREES['T'], 0.0, 0.75, 0.7, 0.3),
                   ('M', TREES['M'], 0.0, 0.9, 0.6, 0.3), ('P', TREES['P'], 0.0, 0.9, 0.45, 0.07), ('D', TREES['D'], 0.0, 0.85, 0.3, 0.03)]},
     {'id': 'Bushes', 'name': 'Bushes', 'order': 20, 'color': (0.3, 0.4, 0.1), 'layer': 'cover', 'blocks': False, 'levels': [0, 1],
-     'counts': [10, 22, 40], 'scale': (1.0, 1.6), 'giant': (0.0, 1.0), 'spacing': 7.0, 'reach': 1.0, 'min_up': 0.6, 'align': 0.4, 'tilt': 6.0,
-     'sink': 0.5, 'shadow': False, 'cull': 3500.0, 'far': (0.35, (0.07, 0.085, 0.03)),
+     'counts': [10, 22, 40], 'scale': (1.0, 1.6), 'giant': (0.0, 1.0), 'spacing': 9.0, 'reach': 1.0, 'min_up': 0.6, 'align': 0.4, 'tilt': 6.0,
+     'sink': 0.5, 'shadow': True, 'cull': 3500.0, 'far': (0.35, (0.07, 0.085, 0.03)), 'patch': 4.0,
      'variants': [('G', ['Bush_0', 'Bush_1', 'Bush_2'], 0.0, 1.0, 1.0, 0.12), ('N', ['Bush_0', 'Bush_2'], 0.9, 0.9, 1.0, 0.08),
                   ('T', ['TundraShrub_0', 'TundraShrub_1'], 0.0, 1.0, 1.0, 0.25), ('M', ['Reeds_0', 'Reeds_1', 'Bush_2'], 0.0, 1.0, 1.0, 0.3),
                   ('P', ['DryBush_0', 'DryBush_1', 'Bush_1'], 0.0, 1.0, 1.0, 0.25), ('D', ['DryBush_0', 'DryBush_1'], 0.0, 0.9, 0.5, 0.15)]},
     {'id': 'Flowers', 'name': 'Flowers', 'order': 30, 'color': (0.75, 0.6, 0.1), 'layer': 'cover', 'blocks': False, 'levels': [0, 1],
-     'counts': [8, 16, 28], 'scale': (1.1, 1.6), 'giant': (0.0, 1.0), 'spacing': 8.0, 'reach': 1.0, 'min_up': 0.8, 'align': 0.8, 'tilt': 0.0,
-     'sink': 0.2, 'shadow': False, 'cull': 2500.0,
-     'variants': [('G', ['Flowers_0', 'Flowers_1', 'Flowers_2'], 0.0, 1.0, 1.0, 0.08), ('P', ['Flowers_0', 'Flowers_2'], 0.0, 1.0, 1.0, 0.06),
-                  ('T', ['Flowers_1'], 0.0, 0.8, 1.0, 0.05)]},
+     'counts': [10, 20, 36], 'scale': (1.1, 1.6), 'giant': (0.0, 1.0), 'spacing': 10.0, 'reach': 1.0, 'min_up': 0.8, 'align': 0.8, 'tilt': 0.0,
+     'sink': 0.2, 'shadow': False, 'cull': 3500.0, 'far': (0.3, (0.1, 0.14, 0.045)), 'patch': 5.0,
+     'variants': [('G', ['Flowers_0', 'Flowers_1', 'Flowers_2'], 0.0, 1.0, 1.0, 0.14), ('P', ['Flowers_0', 'Flowers_2'], 0.0, 1.0, 1.0, 0.08),
+                  ('T', ['Flowers_1'], 0.0, 0.8, 1.0, 0.06)]},
+    {'id': 'TallGrass', 'name': 'Tall grass', 'order': 34, 'color': (0.5, 0.55, 0.2), 'layer': 'cover', 'blocks': False, 'levels': [0, 1],
+     'counts': [12, 26, 44], 'scale': (1.0, 1.5), 'giant': (0.0, 1.0), 'spacing': 9.0, 'reach': 1.0, 'min_up': 0.75, 'align': 0.8, 'tilt': 0.0,
+     'sink': 0.2, 'shadow': False, 'cull': 3500.0, 'far': (0.45, (0.2, 0.17, 0.08)), 'patch': 6.0,
+     'variants': [('GM', ['Grass_0', 'Grass_1'], 0.0, 1.0, 1.0, 0.06), ('PD', ['DryGrass_0', 'DryGrass_1'], 0.0, 1.0, 1.0, 0.3),
+                  ('T', ['DryGrass_0', 'Grass_1'], 0.0, 0.85, 0.8, 0.1)]},
+    {'id': 'Wheat', 'name': 'Wheat', 'order': 37, 'color': (0.85, 0.65, 0.2), 'layer': 'cover', 'blocks': False, 'levels': [0, 1],
+     'counts': [38, 44, 50], 'scale': (1.05, 1.35), 'giant': (0.0, 1.0), 'spacing': 9.0, 'reach': 1.0, 'min_up': 0.85, 'align': 0.9, 'tilt': 0.0,
+     'sink': 0.2, 'shadow': False, 'cull': 4000.0, 'far': (0.8, (0.34, 0.27, 0.11)), 'patch': 2.5,
+     'variants': [('GP', ['Wheat_0', 'Wheat_1'], 0.0, 1.0, 1.0, 0.02)]},
     {'id': 'Stones', 'name': 'Stones', 'order': 40, 'color': (0.45, 0.45, 0.42), 'layer': 'cover', 'blocks': False, 'levels': [0, 1, 2],
      'counts': [5, 10, 18], 'scale': (0.7, 1.4), 'giant': (0.05, 1.8), 'spacing': 7.0, 'reach': 1.0, 'min_up': 0.4, 'align': 0.9, 'tilt': 25.0,
      'sink': 0.6, 'shadow': False, 'cull': 3000.0,
@@ -72,6 +87,35 @@ SETS = [
      'variants': [('GTM', ['Stump_0'], 0.0, 1.0, 1.0, 0.005), ('N', ['Stump_0'], 0.8, 1.0, 1.0, 0.004)]},
 ]
 
+# values of sets that are there, as (set, property, old value, new value): a set takes the new one only while it still holds the old one. The
+# flowers became meadows and the bushes thickets, larger than the tufts of before, so they stand further apart, show from further and, for the
+# flowers, from far away as a tint of the ground; and each kind got patches of its own size, wider for forests and meadows
+MIGRATIONS = [
+    ('Forest', 'generate_patch_cells', 0.0, 7.0),
+    ('Bushes', 'generate_patch_cells', 0.0, 4.0), ('Bushes', 'spacing', 7.0, 9.0), ('Bushes', 'cast_shadow', False, True),
+    ('Flowers', 'generate_patch_cells', 0.0, 5.0), ('Flowers', 'spacing', 8.0, 10.0), ('Flowers', 'cull_distance', 2500.0, 3500.0),
+    ('Flowers', 'count_by_density', [8, 16, 28], [10, 20, 36]), ('Flowers', 'far_cover', 0.0, 0.3),
+    ('Flowers', 'far_color', (0.035, 0.07, 0.03), (0.1, 0.14, 0.045)),
+]
+# the shares the variants of sets that are there generate, as (set, biomes of the variant, old share, new share)
+SHARE_MIGRATIONS = [('Flowers', 'G', 0.08, 0.14), ('Flowers', 'P', 0.06, 0.08), ('Flowers', 'T', 0.05, 0.06)]
+
+
+def find_imported(folder, name):
+    """Moves a mesh the glTF importer put into folders of its own to its folder, and returns it"""
+    assets = unreal.EditorAssetLibrary
+    target = '%s/%s' % (folder, name)
+    nested = '%s/%s/StaticMeshes/%s' % (folder, name, name)
+    if assets.does_asset_exist(nested):
+        if assets.does_asset_exist(target):
+            assets.delete_asset(target)
+        assets.rename_asset(nested, target)
+        assets.delete_directory('%s/%s' % (folder, name))
+    mesh = unreal.load_asset(target)
+    if not mesh:
+        raise RuntimeError('could not import %s' % name)
+    return mesh
+
 
 def import_meshes(manifest):
     assets = unreal.EditorAssetLibrary
@@ -84,39 +128,36 @@ def import_meshes(manifest):
 
     tasks = []
     for entry in manifest['meshes']:
-        task = unreal.AssetImportTask()
-        task.set_editor_property('filename', os.path.join(SOURCE_FOLDER, entry['name'] + '.glb'))
-        task.set_editor_property('destination_path', MESHES)
-        task.set_editor_property('automated', True)
-        task.set_editor_property('replace_existing', True)
-        task.set_editor_property('save', True)
-        task.set_editor_property('options', pipeline)
-        tasks.append(task)
+        for name, folder in [(entry['name'], MESHES)] + [(lod, LOD_MESHES) for lod in entry.get('lods', [])]:
+            task = unreal.AssetImportTask()
+            task.set_editor_property('filename', os.path.join(SOURCE_FOLDER, name + '.glb'))
+            task.set_editor_property('destination_path', folder)
+            task.set_editor_property('automated', True)
+            task.set_editor_property('replace_existing', True)
+            task.set_editor_property('save', True)
+            task.set_editor_property('options', pipeline)
+            tasks.append(task)
     unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks(tasks)
 
     for entry in manifest['meshes']:
         name = entry['name']
-        target = '%s/%s' % (MESHES, name)
-        # the glTF importer gives every file its own folders
-        nested = '%s/%s/StaticMeshes/%s' % (MESHES, name, name)
-        if assets.does_asset_exist(nested):
-            if assets.does_asset_exist(target):
-                assets.delete_asset(target)
-            assets.rename_asset(nested, target)
-            assets.delete_directory('%s/%s' % (MESHES, name))
-        mesh = unreal.load_asset(target)
-        if not mesh:
-            raise RuntimeError('could not import %s' % name)
-
+        mesh = find_imported(MESHES, name)
         nanite = mesh.get_editor_property('nanite_settings')
         nanite.set_editor_property('enabled', False)
         mesh.set_editor_property('nanite_settings', nanite)
         mesh.set_material(0, unreal.load_asset(MATERIALS[entry['material']]))
 
         # the editor subsystem that sets LODs is missing in a commandlet, so the module does it
-        lods = unreal.HexPlanetObjectSet.set_mesh_lods(mesh, [share for share, _ in LODS], [screen for _, screen in LODS])
+        if entry.get('lods'):
+            lods = unreal.HexPlanetObjectSet.set_mesh_lods_from(mesh, [find_imported(LOD_MESHES, lod) for lod in entry['lods']], entry['screens'])
+        else:
+            lods = unreal.HexPlanetObjectSet.set_mesh_lods(mesh, [share for share, _ in LODS], [screen for _, screen in LODS])
+        if lods != 3:
+            raise RuntimeError('%s has %d LODs' % (name, lods))
         assets.save_loaded_asset(mesh, only_if_is_dirty=False)
         unreal.log('OBJECTS %s: %d triangles, %d LODs' % (name, entry['triangles'], lods))
+    if assets.does_directory_exist(LOD_MESHES):
+        assets.delete_directory(LOD_MESHES)
 
 
 def make_set(entry):
@@ -147,6 +188,8 @@ def make_set(entry):
     config.set_editor_property('sink', entry['sink'])
     config.set_editor_property('cast_shadow', entry['shadow'])
     config.set_editor_property('cull_distance', entry['cull'])
+    # how wide the patches of a cover are in a generated planet, in cells
+    config.set_editor_property('generate_patch_cells', entry.get('patch', 0.0))
     # how the cover tints its ground from far away, where the objects are culled (M_HexPlanet, CANOPY_CODE)
     if 'far' in entry:
         config.set_editor_property('far_cover', entry['far'][0])
@@ -166,12 +209,50 @@ def make_set(entry):
     unreal.log('OBJECTS created %s' % path)
 
 
+def holds(value, old):
+    """Returns true if a property holds an old value, a float to a few digits, as the asset keeps it in single precision"""
+    if isinstance(value, unreal.LinearColor):
+        return all(abs(a - b) <= 1e-4 for a, b in zip((value.r, value.g, value.b), old))
+    if isinstance(old, float):
+        return abs(float(value) - old) <= 1e-4 * max(1.0, abs(old))
+    if isinstance(old, list):
+        return list(value) == old
+    return value == old
+
+
+def migrate_sets():
+    assets = unreal.EditorAssetLibrary
+    changed = {}
+    for set_id, name, old, new in MIGRATIONS:
+        path = '%s/DA_HexObject_%s' % (SETS_FOLDER, set_id)
+        config = unreal.load_asset(path) if assets.does_asset_exist(path) else None
+        if config and holds(config.get_editor_property(name), old):
+            config.set_editor_property(name, unreal.LinearColor(*new, 1.0) if isinstance(new, tuple) else new)
+            changed[path] = config
+            unreal.log('OBJECTS %s: %s from %s to %s' % (path, name, old, new))
+    for set_id, biomes, old, new in SHARE_MIGRATIONS:
+        path = '%s/DA_HexObject_%s' % (SETS_FOLDER, set_id)
+        config = unreal.load_asset(path) if assets.does_asset_exist(path) else None
+        if not config:
+            continue
+        variants = list(config.get_editor_property('variants'))
+        for variant in variants:
+            if variant.get_editor_property('biomes') == biomes and holds(variant.get_editor_property('generate_share'), old):
+                variant.set_editor_property('generate_share', new)
+                config.set_editor_property('variants', variants)
+                changed[path] = config
+                unreal.log('OBJECTS %s: the share of %s from %s to %s' % (path, biomes, old, new))
+    for path in changed:
+        assets.save_asset(path, only_if_is_dirty=False)
+
+
 def main():
     with open(os.path.join(SOURCE_FOLDER, 'objects.json'), encoding='utf-8') as file:
         manifest = json.load(file)
     import_meshes(manifest)
     for entry in SETS:
         make_set(entry)
+    migrate_sets()
     unreal.log('OBJECTS DONE')
 
 

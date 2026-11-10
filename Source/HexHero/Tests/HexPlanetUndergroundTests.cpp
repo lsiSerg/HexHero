@@ -1053,7 +1053,17 @@ bool FHexPlanetUndergroundObjectSetsTest::RunTest(const FString& Parameters)
 		CheckMeshes(Set);
 	}
 
-	TestEqual(TEXT("The surface has its ten kinds"), Surface.Num(), 10);
+	TestEqual(TEXT("The surface has its twelve kinds"), Surface.Num(), 12);
+	// the covers that came with the meadows, which a hero walks through
+	for (const TCHAR* Id : {TEXT("TallGrass"), TEXT("Wheat")})
+	{
+		const TObjectPtr<UHexPlanetObjectSet>* Found = Surface.FindByPredicate([Id](const UHexPlanetObjectSet* Each) { return Each->Id == FName(Id); });
+		if (TestNotNull(*FString::Printf(TEXT("%s exists on the surface"), Id), Found))
+		{
+			TestTrue(*FString::Printf(TEXT("%s is a cover"), Id), (*Found)->Layer == EHexObjectLayer::Cover);
+			TestFalse(*FString::Printf(TEXT("%s blocks nothing"), Id), (*Found)->bBlocksMovement);
+		}
+	}
 	for (const UHexPlanetObjectSet* Set : Surface)
 	{
 		TestFalse(*FString::Printf(TEXT("%s not underground"), *Set->Id.ToString()), Set->IsOnLayer(EHexPlanetLayer::Underground));

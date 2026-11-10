@@ -239,13 +239,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Generation")
 	FName GenerateGroup;
 
-	/** Size of the patches of the generation of the underground, in cells; 0 places the kind anywhere at random. The surface keeps ObjectNoiseScale
-	 *  of DA_HexPlanet and its own rules */
+	/** Size of the patches of the generation, in cells. Underground 0 places the kind anywhere at random; on the surface 0 takes
+	 *  ObjectNoiseScale of DA_HexPlanet, and more gives wider forests and meadows with wider clearings between them */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Generation", meta=(ClampMin=0))
 	float GeneratePatchCells = 0.0f;
 
-	/** The densities a cover takes in the generation of the underground, by its rank in the cells it takes, highest first: the first value is the
-	 *  share of them that are dense (3), in the middle of a patch, the second the share that are dense or medium (2), and the rest are sparse (1) */
+	/** The densities a cover takes in the generation, by its rank in the cells it takes, highest first: the first value is the share of them
+	 *  that are dense (3), in the middle of a patch, the second the share that are dense or medium (2), and the rest are sparse (1) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Generation")
 	TArray<float> GenerateDensityShares = {0.4f, 0.75f};
 
@@ -311,5 +311,11 @@ public:
 	 *  of LODs. For import_planet_objects.py, as the editor subsystem that does it is missing in a commandlet */
 	UFUNCTION(BlueprintCallable, Category="Objects")
 	static int32 SetMeshLods(UStaticMesh* Mesh, const TArray<float>& TriangleShares, const TArray<float>& ScreenSizes);
+
+	/** Gives a mesh the first LOD of each of other meshes as its further LODs, each drawn from its screen size (the first of ScreenSizes is that
+	 *  of the mesh itself), and builds it. Returns the number of LODs. For a mesh of cards, such as a tree, whose LODs
+	 *  generate_planet_objects.py makes with fewer and larger cards, as reducing the triangles of cards tears a crown apart */
+	UFUNCTION(BlueprintCallable, Category="Objects")
+	static int32 SetMeshLodsFrom(UStaticMesh* Mesh, const TArray<UStaticMesh*>& LodMeshes, const TArray<float>& ScreenSizes);
 #endif
 };

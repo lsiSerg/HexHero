@@ -5,6 +5,11 @@
 #include "HexPlanetFile.h"
 
 #if WITH_EDITOR
+#include "MeshDescription.h"
+#include "StaticMeshAttributes.h"
+#endif
+
+#if WITH_EDITOR
 int32 UHexPlanetObjectSet::SetMeshLods(UStaticMesh* Mesh, const TArray<float>& TriangleShares, const TArray<float>& ScreenSizes)
 {
 	if (!Mesh || TriangleShares.IsEmpty() || TriangleShares.Num() != ScreenSizes.Num())
@@ -21,6 +26,50 @@ int32 UHexPlanetObjectSet::SetMeshLods(UStaticMesh* Mesh, const TArray<float>& T
 			Model.BuildSettings = Mesh->GetSourceModel(0).BuildSettings;
 		}
 		Model.ReductionSettings.PercentTriangles = FMath::Clamp(TriangleShares[Lod], 0.01f, 1.0f);
+		Model.ReductionSettings.PercentVertices = 1.0f;
+		Model.ScreenSize.Default = ScreenSizes[Lod];
+	}
+	Mesh->bAutoComputeLODScreenSize = false;
+	Mesh->PostEditChange();
+	return Mesh->GetNumLODs();
+}
+
+int32 UHexPlanetObjectSet::SetMeshLodsFrom(UStaticMesh* Mesh, const TArray<UStaticMesh*>& LodMeshes, const TArray<float>& ScreenSizes)
+{
+	if (!Mesh || ScreenSizes.Num() != LodMeshes.Num() + 1)
+	{
+		return 0;
+	}
+	for (const UStaticMesh* LodMesh : LodMeshes)
+	{
+		if (!LodMesh || !LodMesh->GetMeshDescription(0))
+		{
+			return 0;
+		}
+	}
+
+	Mesh->Modify();
+	Mesh->SetNumSourceModels(LodMeshes.Num() + 1);
+	for (int32 Lod = 0; Lod <= LodMeshes.Num(); ++Lod)
+	{
+		if (Lod > 0)
+		{
+			Mesh->GetSourceModel(Lod).BuildSettings = Mesh->GetSourceModel(0).BuildSettings;
+			FMeshDescription* Description = Mesh->CreateMeshDescription(Lod, *LodMeshes[Lod - 1]->GetMeshDescription(0));
+			// its triangles draw with the material of the mesh, whose slot the import named after the mesh and not after the LOD
+			if (Description && !Mesh->GetStaticMaterials().IsEmpty())
+			{
+				TPolygonGroupAttributesRef<FName> SlotNames = FStaticMeshAttributes(*Description).GetPolygonGroupMaterialSlotNames();
+				for (const FPolygonGroupID Group : Description->PolygonGroups().GetElementIDs())
+				{
+					SlotNames[Group] = Mesh->GetStaticMaterials()[0].ImportedMaterialSlotName;
+				}
+			}
+			Mesh->CommitMeshDescription(Lod);
+		}
+		// every LOD keeps the triangles it was made with
+		FStaticMeshSourceModel& Model = Mesh->GetSourceModel(Lod);
+		Model.ReductionSettings.PercentTriangles = 1.0f;
 		Model.ReductionSettings.PercentVertices = 1.0f;
 		Model.ScreenSize.Default = ScreenSizes[Lod];
 	}

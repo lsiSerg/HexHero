@@ -380,15 +380,17 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 				? LOCTEXT("PlacedCaveHelp", "By hand an object may reach over into the next cell, but never over the void nor into a wall, and blocks nothing; a mass that blocks fills its cell and is painted on cells. Touching one of a cell painted on cells turns that cell into objects placed by hand.")
 				: LOCTEXT("PlacedHelp", "By hand an object may reach over into the next cell, but not into a river, and blocks nothing, even a tree of a forest. Touching one of a cell painted on cells turns that cell into objects placed by hand."))];
 
+			const TSharedRef<SButton> Again = MakeButton(
+				MakeLabel(LOCTEXT("RegenerateObjects", "Generate again")),
+				[](UHexPlanetPainter& Each) { Each.RegenerateObjects(); },
+				nullptr,
+				[](const UHexPlanetPainter& Each) { return !Each.IsPainting(); });
+			Again->SetToolTipText(Layer == EHexPlanetLayer::Underground
+				? LOCTEXT("RegenerateObjectsTip", "Gives the passages generated covers and decor again by the shares of the kinds; one step of Undo")
+				: LOCTEXT("RegenerateSurfaceObjectsTip", "Gives the land generated covers and decor again by the shares of the kinds, in place of what was painted on cells; what was placed by hand stays; one step of Undo"));
+			Objects->AddSlot().AutoHeight().Padding(0.0f, 3.0f, 0.0f, 0.0f)[Again];
 			if (Layer == EHexPlanetLayer::Underground)
 			{
-				const TSharedRef<SButton> Again = MakeButton(
-					MakeLabel(LOCTEXT("RegenerateObjects", "Generate again")),
-					[](UHexPlanetPainter& Each) { Each.RegenerateObjects(); },
-					nullptr,
-					[](const UHexPlanetPainter& Each) { return !Each.IsPainting(); });
-				Again->SetToolTipText(LOCTEXT("RegenerateObjectsTip", "Gives the passages generated covers and decor again by the shares of the kinds; one step of Undo"));
-				Objects->AddSlot().AutoHeight().Padding(0.0f, 3.0f, 0.0f, 0.0f)[Again];
 				Objects->AddSlot().AutoHeight()[MakeHelp(LOCTEXT("CaveObjectsHelp", "Cave objects stand on passages only and never hang over the void. None of them blocks movement, so the maze alone keeps heroes apart; nothing is drawn on an exit."))];
 			}
 		}

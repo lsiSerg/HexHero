@@ -53,6 +53,7 @@
 #include "RenderTimer.h"
 #include "Algo/BinarySearch.h"
 #include "Async/ParallelFor.h"
+#include "HexPlanetFlocks.h"
 #include "HexPlanetMeshComponent.h"
 #include "HexPlanetMotes.h"
 
@@ -75,6 +76,9 @@ namespace
 
 	TAutoConsoleVariable<int32> CVarHexPlanetWallLod(TEXT("hex.PlanetWallLod"), 0,
 		TEXT("Draws each chunk of the walls of the underground by its distance (0), or every chunk whole where its whole walls are built (1), in the band where both dissolve into each other (2) or coarse (3)."));
+
+	TAutoConsoleVariable<bool> CVarHexPlanetFlocks(TEXT("hex.PlanetFlocks"), true,
+		TEXT("Draws the birds over the surface and the bats of the underground (1), or hides them (0), to see what they cost."));
 
 	TAutoConsoleVariable<bool> CVarHexPlanetMotes(TEXT("hex.PlanetMotes"), true,
 		TEXT("Draws the motes drifting over the passages of the underground and the spores rising from its mushrooms (1), or hides them (0), to see what they cost."));
@@ -1505,6 +1509,13 @@ void AHexPlanet::BuildPlanet()
 		Motes->RegisterComponent();
 		Motes->Init(this, Settings);
 	}
+	if (Settings->bFlocks && !Flocks)
+	{
+		Flocks = NewObject<UHexPlanetFlocks>(this, TEXT("Flocks"));
+		Flocks->SetupAttachment(Surface);
+		Flocks->RegisterComponent();
+		Flocks->Init(this, Settings);
+	}
 	if (Settings->bHeroLight && !HeroLight)
 	{
 		CreateHeroLight();
@@ -2404,6 +2415,11 @@ void AHexPlanet::Tick(float DeltaTime)
 	{
 		Motes->SetShown(CVarHexPlanetMotes.GetValueOnGameThread());
 		Motes->Update(PlayerController, DeltaTime);
+	}
+	if (Flocks)
+	{
+		Flocks->SetShown(CVarHexPlanetFlocks.GetValueOnGameThread());
+		Flocks->Update(PlayerController, DeltaTime);
 	}
 
 	// the light of the hero, for now over the focus of the camera where it stands in this frame (the view target, as the camera manager has the

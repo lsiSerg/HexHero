@@ -147,6 +147,206 @@ inline TArray<FHexWallStyle> MakeDefaultWallStyles()
 	return Styles;
 }
 
+/** Where the flocks of a kind have their homes (FHexFlockKind::Habitat, UHexPlanetFlocks::IsHome) */
+UENUM(BlueprintType)
+enum class EHexFlockHabitat : uint8
+{
+	/** Over the sea beside land, on the surface: gulls */
+	Coast,
+	/** Over land whose cover shows from far away (UHexPlanetObjectSet::FarCover of a half or more), a forest, on the surface */
+	Forest,
+	/** Over open plains and hills of the surface */
+	Land,
+	/** Over the mountains of the surface, so its heights must clear their peaks */
+	Mountains,
+	/** In the halls of the underground, the passages whose neighbors are all passages, so a loop stays between the walls */
+	Passage,
+};
+
+/**
+ *  A kind of bird or bat (UHexPlanetConfig::Flocks, UHexPlanetFlocks): its mesh, where its flocks have their homes and how they fly. An animal
+ *  flies a loop around the home of its flock, PathRadius from it and PathStretch of that across, which bulges and pinches by PathWander, at
+ *  HeightMin to HeightMax above the highest ground around the home.
+ */
+USTRUCT(BlueprintType)
+struct FHexFlockKind
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, Category="Flock")
+	FName Name;
+
+	/** Its mesh, which flies along its X with its Z up; the first UV of a vertex is how far out on a wing it lies, 0 on the body and 1 at a
+	 *  tip, by which M_HexPlanetFlock beats the wings, and the color of a vertex is its color */
+	UPROPERTY(EditAnywhere, Category="Flock")
+	TSoftObjectPtr<UStaticMesh> Mesh;
+
+	UPROPERTY(EditAnywhere, Category="Flock")
+	EHexFlockHabitat Habitat = EHexFlockHabitat::Land;
+
+	/** Share of the cells of its habitat that are the home of a flock, by a hash of the cell */
+	UPROPERTY(EditAnywhere, Category="Flock", meta=(ClampMin=0, ClampMax=1))
+	float CellShare = 0.03f;
+
+	/** Animals in a flock, at random between these */
+	UPROPERTY(EditAnywhere, Category="Flock", meta=(ClampMin=1))
+	int32 CountMin = 3;
+
+	UPROPERTY(EditAnywhere, Category="Flock", meta=(ClampMin=1))
+	int32 CountMax = 6;
+
+	/** The animals of a flock keep together on one loop, Spread apart, as small birds do; else each circles on a loop of its own width, at its
+	 *  own place and pace, as gulls and bats do */
+	UPROPERTY(EditAnywhere, Category="Flight")
+	bool bTogether = false;
+
+	/** How far from its home a flock flies, in world units (a cell is about 200 across), how much narrower its loop is across, and how much the
+	 *  loop bulges and pinches, 0 for an ellipse */
+	UPROPERTY(EditAnywhere, Category="Flight", meta=(ClampMin=1))
+	float PathRadius = 120.0f;
+
+	UPROPERTY(EditAnywhere, Category="Flight", meta=(ClampMin=0.1, ClampMax=1))
+	float PathStretch = 0.7f;
+
+	UPROPERTY(EditAnywhere, Category="Flight", meta=(ClampMin=0, ClampMax=0.9))
+	float PathWander = 0.25f;
+
+	/** How far the animals of a flock fly from its middle, in world units */
+	UPROPERTY(EditAnywhere, Category="Flight", meta=(ClampMin=0))
+	float Spread = 20.0f;
+
+	/** Heights it flies between, above the highest top of its home and the cells around it, in world units; a tree stands up to about 60 and a
+	 *  giant one over 100, a mountain over its top up to about 200 */
+	UPROPERTY(EditAnywhere, Category="Flight", meta=(ClampMin=0))
+	float HeightMin = 60.0f;
+
+	UPROPERTY(EditAnywhere, Category="Flight", meta=(ClampMin=0))
+	float HeightMax = 100.0f;
+
+	/** Its speed along the loop, in world units a second */
+	UPROPERTY(EditAnywhere, Category="Flight", meta=(ClampMin=0))
+	float Speed = 35.0f;
+
+	/** How far it leans into a turn, in radians for each radian a second it turns */
+	UPROPERTY(EditAnywhere, Category="Flight", meta=(ClampMin=0))
+	float Bank = 1.2f;
+
+	/** Its size as a factor on its mesh, larger or smaller by animal by SizeVariation of it; larger than life, as a gull of its true size is
+	 *  a dozen pixels from the closest camera (hex.PlanetFlockSize tries sizes while the game runs) */
+	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=0.05))
+	float Size = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=0, ClampMax=0.9))
+	float SizeVariation = 0.15f;
+
+	/** Beats of its wings a second and how far they swing, in radians; it glides GlideShare of the time, its wings held GlideAngle above level */
+	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=0))
+	float FlapRate = 3.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=0, ClampMax=1.5))
+	float FlapAngle = 0.7f;
+
+	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=0, ClampMax=1))
+	float GlideShare = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=-1, ClampMax=1))
+	float GlideAngle = 0.12f;
+
+	/** Its shadow runs over the ground under it, and over the seabed of the shallows; it cost nothing that could be measured */
+	UPROPERTY(EditAnywhere, Category="Look")
+	bool bCastShadow = true;
+};
+
+/** The kinds of birds and bats a config starts with: gulls circling off the coasts, flocks of small birds over the forests, a raptor soaring
+ *  over the mountains, and bats in the halls of the underground. A layer flies only the kinds whose habitat it has */
+inline TArray<FHexFlockKind> MakeDefaultFlockKinds()
+{
+	const auto MakeMesh = [](const TCHAR* Name)
+	{
+		return TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(FString::Printf(TEXT("/Game/HexPlanet/Flocks/%s.%s"), Name, Name)));
+	};
+	TArray<FHexFlockKind> Flocks;
+	FHexFlockKind& Gulls = Flocks.AddDefaulted_GetRef();
+	Gulls.Name = TEXT("Gulls");
+	Gulls.Mesh = MakeMesh(TEXT("SM_PlanetGull"));
+	Gulls.Habitat = EHexFlockHabitat::Coast;
+	Gulls.CellShare = 0.16f;
+	Gulls.CountMin = 4;
+	Gulls.CountMax = 8;
+	Gulls.PathRadius = 130.0f;
+	Gulls.PathStretch = 0.75f;
+	Gulls.Spread = 26.0f;
+	Gulls.HeightMin = 45.0f;
+	Gulls.HeightMax = 85.0f;
+	Gulls.Speed = 32.0f;
+	Gulls.FlapRate = 2.6f;
+	Gulls.FlapAngle = 0.6f;
+	Gulls.GlideShare = 0.7f;
+	Gulls.Size = 2.2f;
+
+	FHexFlockKind& Birds = Flocks.AddDefaulted_GetRef();
+	Birds.Name = TEXT("Birds");
+	Birds.Mesh = MakeMesh(TEXT("SM_PlanetBird"));
+	Birds.Habitat = EHexFlockHabitat::Forest;
+	Birds.CellShare = 0.05f;
+	Birds.CountMin = 8;
+	Birds.CountMax = 14;
+	Birds.bTogether = true;
+	Birds.PathRadius = 230.0f;
+	Birds.PathStretch = 0.6f;
+	Birds.PathWander = 0.35f;
+	Birds.Spread = 20.0f;
+	Birds.HeightMin = 80.0f;
+	Birds.HeightMax = 115.0f;
+	Birds.Speed = 52.0f;
+	Birds.FlapRate = 5.5f;
+	Birds.FlapAngle = 0.9f;
+	Birds.GlideShare = 0.15f;
+	Birds.Size = 2.0f;
+
+	FHexFlockKind& Raptors = Flocks.AddDefaulted_GetRef();
+	Raptors.Name = TEXT("Raptors");
+	Raptors.Mesh = MakeMesh(TEXT("SM_PlanetRaptor"));
+	Raptors.Habitat = EHexFlockHabitat::Mountains;
+	Raptors.CellShare = 0.025f;
+	Raptors.CountMin = 1;
+	Raptors.CountMax = 2;
+	Raptors.PathRadius = 190.0f;
+	Raptors.PathStretch = 0.85f;
+	Raptors.PathWander = 0.15f;
+	Raptors.Spread = 40.0f;
+	Raptors.HeightMin = 190.0f;
+	Raptors.HeightMax = 240.0f;
+	Raptors.Speed = 30.0f;
+	Raptors.FlapRate = 1.6f;
+	Raptors.FlapAngle = 0.5f;
+	Raptors.GlideShare = 0.9f;
+	Raptors.GlideAngle = 0.18f;
+	Raptors.Size = 1.6f;
+
+	FHexFlockKind& Bats = Flocks.AddDefaulted_GetRef();
+	Bats.Name = TEXT("Bats");
+	Bats.Mesh = MakeMesh(TEXT("SM_PlanetBat"));
+	Bats.Habitat = EHexFlockHabitat::Passage;
+	Bats.CellShare = 0.4f;
+	Bats.CountMin = 3;
+	Bats.CountMax = 7;
+	Bats.PathRadius = 60.0f;
+	Bats.PathStretch = 0.8f;
+	Bats.PathWander = 0.6f;
+	Bats.Spread = 22.0f;
+	Bats.HeightMin = 24.0f;
+	Bats.HeightMax = 62.0f;
+	Bats.Speed = 58.0f;
+	Bats.Bank = 0.6f;
+	Bats.FlapRate = 9.0f;
+	Bats.FlapAngle = 1.0f;
+	Bats.GlideShare = 0.0f;
+	Bats.Size = 1.8f;
+	Bats.bCastShadow = false;
+	return Flocks;
+}
+
 /**
  *  The planets: the size of their cells, how levels are generated for a planet without levels.txt, the colors of its surface, the outlines of the cell under the mouse and the values of
  *  M_HexPlanet and M_HexPlanetWireframe. AHexPlanet gives every float and color of it to those materials as parameters of the same names,
@@ -257,6 +457,11 @@ public:
 	 *  underground is around the hero, but where it is dark much lighter than it, never night. The surface has it, the underground not */
 	UPROPERTY(EditAnywhere, Category="Features")
 	bool bHeroShade = true;
+
+	/** Birds and bats, decor alone (UHexPlanetFlocks, M_HexPlanetFlock): the kinds of Flocks whose habitat the layer has, with the values of the
+	 *  category Flocks */
+	UPROPERTY(EditAnywhere, Category="Features")
+	bool bFlocks = true;
 
 	/** Scale of the largest octave of the noise of levels, on the unit sphere, divided by ContinentSize of a planet; the shares of levels are in planet.json */
 	UPROPERTY(EditAnywhere, Category="Levels", meta=(ClampMin=0.01))
@@ -630,6 +835,14 @@ public:
 	/** Leaves facing the sun get lighter, those facing away darker, as a canopy scatters light (FoliageTranslucency on the dark side) */
 	UPROPERTY(EditAnywhere, Category="Objects", meta=(ClampMin=0, ClampMax=1))
 	float FoliageTranslucency = 0.25f;
+
+	/** How bright the tiles of the atlas T_HexFoliage draw the leaves of a card, a factor on them, and the alpha of a tile below which a card is
+	 *  cut away: lower gives fuller crowns, higher lacier ones */
+	UPROPERTY(EditAnywhere, Category="Objects", meta=(ClampMin=0))
+	float FoliageBrightness = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Objects", meta=(ClampMin=0.01, ClampMax=0.99))
+	float FoliageAlphaCut = 0.33f;
 
 	/** Snow on objects whose variant has snow: from how much the surface faces up it starts and is full, and how much a noise breaks it */
 	UPROPERTY(EditAnywhere, Category="Objects", meta=(ClampMin=-1, ClampMax=1))
@@ -2636,6 +2849,33 @@ public:
 
 	UPROPERTY(EditAnywhere, Category="Underground|Spores", meta=(ClampMin=0, ClampMax=1))
 	float SporeSpread = 0.6f;
+
+	/** The kinds of birds and bats (bFlocks, UHexPlanetFlocks); a layer flies those whose habitat it has */
+	UPROPERTY(EditAnywhere, Category="Flocks")
+	TArray<FHexFlockKind> Flocks = MakeDefaultFlockKinds();
+
+	/** Material of the meshes of the flocks, which beats their wings (M_HexPlanetFlock) */
+	UPROPERTY(EditAnywhere, Category="Flocks")
+	TSoftObjectPtr<UMaterialInterface> FlockMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/HexPlanet/M_HexPlanetFlock.M_HexPlanetFlock")));
+
+	/** How far from the point the camera looks at the homes of flocks are gathered, in world units, and the most animals of a kind at once */
+	UPROPERTY(EditAnywhere, Category="Flocks", meta=(ClampMin=0))
+	float FlockRadius = 2200.0f;
+
+	UPROPERTY(EditAnywhere, Category="Flocks", meta=(ClampMin=0))
+	int32 FlockMax = 120;
+
+	/** Distance from the camera from which an animal shrinks, to nothing at FlockFadeEnd; a camera further than that from the point it looks at
+	 *  sees none, and they are hidden */
+	UPROPERTY(EditAnywhere, Category="Flocks", meta=(ClampMin=0))
+	float FlockFadeStart = 2400.0f;
+
+	UPROPERTY(EditAnywhere, Category="Flocks", meta=(ClampMin=1))
+	float FlockFadeEnd = 3400.0f;
+
+	/** A factor on the colors of the vertices of the animals */
+	UPROPERTY(EditAnywhere, Category="Flocks", meta=(ClampMin=0))
+	float FlockBrightness = 1.0f;
 
 	/** The bound M_HexPlanetMote must give the offsets of its vertices (max_world_position_offset_displacement, which create_planet_assets.py
 	 *  sets from DA_HexUnderground), as a mote may move from where its instance stands anywhere in its box */
