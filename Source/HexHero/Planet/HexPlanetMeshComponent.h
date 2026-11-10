@@ -11,19 +11,23 @@ class FHexPlanetMeshRenderData;
 /** The render data of one section of UHexPlanetMeshComponent, shared by the component and its scene proxies */
 using FHexPlanetMeshSectionRef = TSharedPtr<FHexPlanetMeshRenderData, ESPMode::ThreadSafe>;
 
-/** A section to prepare for UHexPlanetMeshComponent: positions, normals, the four UVs of M_HexPlanet and three indices a triangle */
+/** A section to prepare for UHexPlanetMeshComponent: positions, normals, the four UVs of M_HexPlanet, a fifth that only the walls of the
+ *  underground have (the pixel of their sample in AHexPlanet::WallGlowTexture), and three indices a triangle */
 struct FHexPlanetMeshSource
 {
+	static constexpr int32 MaxUVs = 5;
+
 	TConstArrayView<FVector3f> Positions;
 	TConstArrayView<FVector3f> Normals;
-	TConstArrayView<FVector2f> UVs[4];
+	TConstArrayView<FVector2f> UVs[MaxUVs];
 	TConstArrayView<int32> Triangles;
 };
 
 /**
  *  A mesh of sections for the surface of the planet that keeps nothing of them on the CPU. UProceduralMeshComponent held each section three
  *  times, in the component, in its scene proxy and on the GPU, and its vertices in 152 bytes each; here a section goes to the GPU once, as
- *  a position, packed tangents and four UVs of half floats, 36 bytes a vertex, with no vertex colors and indices of 16 bits when they fit,
+ *  a position, packed tangents and four UVs of half floats, 36 bytes a vertex (the walls of the underground have a fifth, 40), with no vertex
+ *  colors and indices of 16 bits when they fit,
  *  and the CPU frees it there. The render data outlives the scene proxies, so a change of material or visibility does not upload it again,
  *  and its ray tracing geometry is built for tracing and compacted.
  *

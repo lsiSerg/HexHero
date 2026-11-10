@@ -668,16 +668,44 @@ bool FHexPlanetUndergroundWallsTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Within the jitter"), PastJitter, 0);
 	TestEqual(TEXT("No jitter without a share"), StrayJitter, 0);
 
+	// every sample has a pixel of its own for the pools of light on the walls (GetSampleTexel), each line from the start of a row
+	{
+		TSet<int32> Pixels;
+		int32 Shared = 0;
+		int32 Outside = 0;
+		for (int32 Line = 0; Line < Walls.Lines.Num(); ++Line)
+		{
+			TestEqual(TEXT("A line starts a row"), Walls.LineStarts[Line] % HexPlanetWalls::SampleColumns, 0);
+			for (int32 Index = 0; Index < Walls.Lines[Line].Num(); ++Index)
+			{
+				const FVector2f Texel = HexPlanetWalls::GetSampleTexel(Walls, FIntPoint(Line, Index));
+				const int32 Pixel = int32(Texel.Y) * HexPlanetWalls::SampleColumns + int32(Texel.X);
+				Shared += Pixels.Contains(Pixel) ? 1 : 0;
+				Outside += Pixel >= Walls.NumSamples ? 1 : 0;
+				Pixels.Add(Pixel);
+			}
+		}
+		TestEqual(TEXT("No two samples share a pixel"), Shared, 0);
+		TestEqual(TEXT("Every pixel within the samples"), Outside, 0);
+	}
+
 	// the mesh of every chunk, its triangles of an area and facing out of the wall, and a chunk of no walls empty
 	int64 Triangles = 0;
 	int32 Degenerate = 0;
 	int32 Inward = 0;
+	int32 StrayTexels = 0;
 	TArray<int32> InwardByRow;
 	for (int32 Chunk = 0; Chunk < Grid.GetNumChunks(); ++Chunk)
 	{
 		HexPlanetWalls::FMesh Mesh;
 		HexPlanetWalls::BuildChunk(Walls, Chunk, Params, Mesh);
 		TestEqual(TEXT("Empty without samples"), Mesh.Triangles.IsEmpty(), Walls.ChunkSamples[Chunk].IsEmpty());
+		TestEqual(TEXT("A pixel of a sample for every vertex"), Mesh.UV4s.Num(), Mesh.Positions.Num());
+		// whole numbers, which UVs of half floats hold exactly up to 2048
+		for (const FVector2f& Texel : Mesh.UV4s)
+		{
+			StrayTexels += Texel.X != FMath::RoundToFloat(Texel.X) || Texel.X >= HexPlanetWalls::SampleColumns || Texel.Y > 2048.0f ? 1 : 0;
+		}
 		Triangles += Mesh.Triangles.Num() / 3;
 		// the quads of a sample, a strip between two rings, two triangles each
 		const int32 Quads = Walls.ChunkSamples[Chunk].IsEmpty() ? 1 : Mesh.Triangles.Num() / 6 / Walls.ChunkSamples[Chunk].Num();
@@ -704,6 +732,7 @@ bool FHexPlanetUndergroundWallsTest::RunTest(const FString& Parameters)
 	}
 	UE_LOG(LogHexHero, Display, TEXT("Walls test: %lld triangles, %d degenerate, %d facing into the wall, by row of the profile%s"), Triangles, Degenerate, Inward, *ByRow);
 	TestTrue(TEXT("Walls have triangles"), Triangles > 0);
+	TestEqual(TEXT("The pixels of the samples are whole numbers in the texture"), StrayTexels, 0);
 	// a few at the knobs of the crest, whose top twists a quad between two samples (63 of 898,426 when written, 253 of 937,488 since the lip
 	// changes in runs and its stalactites in width, 287 of 952,224 since the corners take cuts of their own, hollows carry canopies and the walls of
 	// the voids differ in height)

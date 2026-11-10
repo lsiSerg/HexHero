@@ -819,6 +819,22 @@ void UHexPlanetObjects::SetShown(bool bInObjects, bool bInRims)
 	}
 }
 
+void UHexPlanetObjects::SetFadeFocus(const FLinearColor& Center)
+{
+	if (Center == FadeCenter)
+	{
+		return;
+	}
+	FadeCenter = Center;
+	for (UMaterialInstanceDynamic* Instance : FadeMaterials)
+	{
+		if (Instance)
+		{
+			Instance->SetVectorParameterValue(TEXT("WallFadeCenter"), Center);
+		}
+	}
+}
+
 void UHexPlanetObjects::SetCells(const TMap<int32, FHexCellObjects>& Changes)
 {
 	TArray<int32> Changed;
@@ -1519,6 +1535,16 @@ UMaterialInterface* UHexPlanetObjects::GetMaterial(UMaterialInterface* Parent, c
 		return nullptr;
 	}
 
+	// an instance of the material of what stands on the walls dissolves with them, around the point SetFadeFocus gives
+	const auto KeepFading = [this, Parent](UMaterialInstanceDynamic* Material)
+	{
+		if (Parent == Planet->GetWallObjectMaterial())
+		{
+			Material->SetVectorParameterValue(TEXT("WallFadeCenter"), FadeCenter);
+			FadeMaterials.Add(Material);
+		}
+	};
+
 	// a set that glows takes its values of the glow (M_HexPlanetCave), so it has an instance of its own; every other set shares one per parent
 	if (Set && Set->GlowStrength > 0.0f)
 	{
@@ -1530,6 +1556,7 @@ UMaterialInterface* UHexPlanetObjects::GetMaterial(UMaterialInterface* Parent, c
 		UMaterialInstanceDynamic* Material = UMaterialInstanceDynamic::Create(Parent, this);
 		HexMaterialConfig::Apply(Material, Settings);
 		HexMaterialConfig::Apply(Material, Set);
+		KeepFading(Material);
 		GlowMaterialKeys.Add({Parent, Set});
 		GlowMaterials.Add(Material);
 		return Material;
@@ -1541,6 +1568,7 @@ UMaterialInterface* UHexPlanetObjects::GetMaterial(UMaterialInterface* Parent, c
 	}
 	UMaterialInstanceDynamic* Material = UMaterialInstanceDynamic::Create(Parent, this);
 	HexMaterialConfig::Apply(Material, Settings);
+	KeepFading(Material);
 	Materials.Add(Parent, Material);
 	return Material;
 }
@@ -1569,7 +1597,17 @@ void UHexPlanetObjects::ApplyChunk(int32 Chunk, const TArray<FInstance>& Instanc
 			Component = NewObject<UHierarchicalInstancedStaticMeshComponent>(this, *FString::Printf(TEXT("Objects_%d_%d"), Chunk, Slot));
 			Component->SetupAttachment(this);
 			Component->SetStaticMesh(Slots[Slot].Mesh);
-			if (UMaterialInterface* SetMaterial = Set.Material.LoadSynchronous())
+			// what stands on the walls takes their material for objects, which dissolves with them in front of the point under the cursor
+			UMaterialInterface* WallObjectMaterial = Set.Layer == EHexObjectLayer::Rim && Set.RimSeat != EHexRimSeat::Lip && Planet->HasWalls()
+				? Planet->GetWallObjectMaterial() : nullptr;
+			if (WallObjectMaterial)
+			{
+				for (int32 Element = 0; Element < Slots[Slot].Mesh->GetStaticMaterials().Num(); ++Element)
+				{
+					Component->SetMaterial(Element, GetMaterial(WallObjectMaterial, &Set));
+				}
+			}
+			else if (UMaterialInterface* SetMaterial = Set.Material.LoadSynchronous())
 			{
 				for (int32 Element = 0; Element < Slots[Slot].Mesh->GetStaticMaterials().Num(); ++Element)
 				{

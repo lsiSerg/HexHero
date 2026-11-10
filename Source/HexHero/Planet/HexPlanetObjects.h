@@ -13,6 +13,7 @@ class AHexPlanet;
 class UHexPlanetConfig;
 class UHexPlanetObjectSet;
 class UHierarchicalInstancedStaticMeshComponent;
+class UMaterialInstanceDynamic;
 class UMaterialInterface;
 class UStaticMesh;
 
@@ -97,6 +98,10 @@ public:
 	/** Shows the objects (hex.PlanetObjects) and, with them, the rims (hex.PlanetRims), or hides them, to see what they cost */
 	void SetShown(bool bInObjects, bool bInRims);
 
+	/** Gives what stands on the walls the point under the cursor, around which it dissolves with them (WallFadeCenter of M_HexPlanetCaveWall),
+	 *  alpha 0 for none */
+	void SetFadeFocus(const FLinearColor& Center);
+
 	/** Returns true if the layer has kinds of rims */
 	bool HasRims() const { return !RimSets.IsEmpty(); }
 
@@ -176,6 +181,12 @@ private:
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UMaterialInterface>> GlowMaterials;
 	TArray<TPair<const UMaterialInterface*, const UHexPlanetObjectSet*>> GlowMaterialKeys;
+
+	/** The instances of the material of what stands on the walls (AHexPlanet::GetWallObjectMaterial), which SetFadeFocus gives the point the walls
+	 *  dissolve around, and the point it gave last, for an instance made after it */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UMaterialInstanceDynamic>> FadeMaterials;
+	FLinearColor FadeCenter = FLinearColor::Transparent;
 
 	/** The component of each chunk and slot that has drawn objects, by Chunk * 65536 + Slot */
 	UPROPERTY(Transient)

@@ -1108,6 +1108,17 @@ void HexPlanetWalls::Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Lev
 			}
 		}
 	}
+
+	// the index of each sample among all of them, line after line, by which it has its pixel in the texture of the pools of light on the walls;
+	// each line starts a row of its own, so a line whose length an edit changed moves the pixels of the lines after it only when it takes a row
+	// more or less (an edit already moves every sample of its own line, which is sampled evenly from its start)
+	Out.LineStarts.SetNum(Out.Lines.Num());
+	for (int32 Line = 0; Line < Out.Lines.Num(); ++Line)
+	{
+		Out.LineStarts[Line] = Out.NumSamples;
+		Out.NumSamples += Out.Lines[Line].Num();
+		Out.NumSamples = Line + 1 < Out.Lines.Num() ? FMath::DivideAndRoundUp(Out.NumSamples, SampleColumns) * SampleColumns : Out.NumSamples;
+	}
 }
 
 void HexPlanetWalls::GetInnerFace(const FWalls& Walls, const FIntPoint& At, double Height, const FParams& Params, FVector3d& OutPosition, FVector3d& OutNormal)
@@ -1199,6 +1210,7 @@ namespace
 			double Height = 0.0;
 			FVector2f Stone = FVector2f::ZeroVector;
 			FVector2f Pools = FVector2f::ZeroVector;
+			FVector2f Texel = FVector2f::ZeroVector;
 		};
 		TMap<FIntPoint, FRing> Rings;
 		const auto FindRing = [&](const FIntPoint& At) -> const FRing&
@@ -1213,6 +1225,7 @@ namespace
 			Ring.Height = Frame.Base;
 			Ring.Stone = FVector2f(float(Frame.Flowstone), float(Frame.Fracture));
 			Ring.Pools = FVector2f(float(Sample.Lava), float(Sample.Lake));
+			Ring.Texel = GetSampleTexel(Walls, At);
 			GetRing(Sample, Frame, Params, Offsets, Ring.Locals, Ring.Points);
 			return Rings.Add(At, Ring);
 		};
@@ -1264,6 +1277,7 @@ namespace
 				Out.UV1s.Add(FVector2f(float(Local.Floor - Local.Smooth), float(Local.Rib)));
 				Out.UV2s.Add(Ring.Stone);
 				Out.UV3s.Add(Ring.Pools);
+				Out.UV4s.Add(Ring.Texel);
 			}
 			RingVertices.Add(At, First);
 			return First;
@@ -1351,7 +1365,10 @@ uint32 HexPlanetWalls::HashChunk(const FWalls& Walls, int32 Chunk)
 		// the normals of a ring take the samples on both sides of it, a coarse ring those three samples away
 		for (int32 Step = -3; Step <= 4; ++Step)
 		{
-			const FSample& Sample = Line[((At.Y + Step) % Line.Num() + Line.Num()) % Line.Num()];
+			const int32 Index = ((At.Y + Step) % Line.Num() + Line.Num()) % Line.Num();
+			const FSample& Sample = Line[Index];
+			// and its pixel of the pools of light, which its vertices carry
+			Hash = HashCombine(Hash, GetTypeHash(Walls.GetIndex(FIntPoint(At.X, Index))));
 			Hash = HashCombine(Hash, GetTypeHash(Round(Sample.Position)));
 			Hash = HashCombine(Hash, GetTypeHash(Round(Sample.OuterPosition)));
 			Hash = HashCombine(Hash, GetTypeHash(Round(Sample.TopPosition)));

@@ -246,6 +246,11 @@ public:
 	UPROPERTY(EditAnywhere, Category="Features")
 	bool bMotes = false;
 
+	/** A light around the hero, for now around the point the camera looks at (AHexPlanet::HeroLight), with the values of the category
+	 *  Underground|Light; the dark underground has it, the surface not */
+	UPROPERTY(EditAnywhere, Category="Features")
+	bool bHeroLight = false;
+
 	/** Scale of the largest octave of the noise of levels, on the unit sphere, divided by ContinentSize of a planet; the shares of levels are in planet.json */
 	UPROPERTY(EditAnywhere, Category="Levels", meta=(ClampMin=0.01))
 	float LevelNoiseScale = 1.6f;
@@ -1398,6 +1403,49 @@ public:
 	UPROPERTY(EditAnywhere, Category="Underground|Fog", meta=(ClampMin=0, ClampMax=1))
 	float FogMistMax = 0.15f;
 
+	/** And away from the hero (for now the point the camera looks at, where the light of bHeroLight stands) the air thickens: clear within
+	 *  FogFocusStart times the reach of that light, FogFocusMax of FogColor from FogFocusEnd times it, so what lies beyond the light fades into the
+	 *  dark while what glows still shows through */
+	UPROPERTY(EditAnywhere, Category="Underground|Fog", meta=(ClampMin=0))
+	float FogFocusStart = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Fog", meta=(ClampMin=0))
+	float FogFocusEnd = 3.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Fog", meta=(ClampMin=0, ClampMax=1))
+	float FogFocusMax = 0.4f;
+
+	/** The light around the hero (bHeroLight, AHexPlanet::HeroLight): the developer decided on 2026-11-10 that the underground is dark but around
+	 *  the hero, around what glows and at the exits, the maze dim from any distance and still readable. One day it reaches as far as the hero can
+	 *  go in a turn; for now it stands over the point where the view through the middle of the screen meets the tops of the passages. A point
+	 *  light HeroLightHeight above the floor there that fades out HeroLightReach cells away on the floor (from the middle of one cell to the
+	 *  next), by HeroLightFalloff, in HeroLightColor at HeroLightIntensity; the walls and what stands on the floor cast its shadows while
+	 *  bHeroLightShadows, softened by HeroLightSourceRadius */
+	UPROPERTY(EditAnywhere, Category="Underground|Light")
+	FLinearColor HeroLightColor = FLinearColor(1.0f, 0.74f, 0.5f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Light", meta=(ClampMin=0))
+	float HeroLightIntensity = 4.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Light", meta=(ClampMin=0.5))
+	float HeroLightReach = 4.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Light", meta=(ClampMin=10))
+	float HeroLightHeight = 220.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Light", meta=(ClampMin=0.1, ClampMax=16))
+	float HeroLightFalloff = 1.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Light")
+	bool bHeroLightShadows = true;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Light", meta=(ClampMin=0))
+	float HeroLightSourceRadius = 15.0f;
+
+	/** Returns how far the light of the hero reaches on the floor, in world units, HeroLightReach times the distance between the middles of two
+	 *  neighboring cells */
+	double GetHeroLightReach() const { return double(HeroLightReach) * FMath::Sqrt(3.0) * double(HexRadius); }
+
 	/** The colors of the networks of entrances A to H, of the chips of the editor and the markers of entrances and exits; the surface's are used
 	 *  for both layers */
 	UPROPERTY(EditAnywhere, Category="Underground|Entrances")
@@ -1854,8 +1902,8 @@ public:
 
 	/** The glowing moss of the rims grows on the foot of the walls instead of the floor beside them (which it would poke out from under), up to
 	 *  CaveWallMossTop of their height on the inner face alone, in the patches, speckles and colors of CaveMoss*, by CaveWallMoss; and lava beyond
-	 *  a wall lights its rock in LavaLightColor: the low parapet by CaveWallLavaGlow, fading up it and less on its inner face, the outer face as
-	 *  the cliffs of the void (LavaCliff*), and the floor at its foot as the passage there (GlowPoolEdge of LavaPool) */
+	 *  a wall lights its rock in LavaLightColor: the low parapet by CaveWallLavaGlow, fading up it and less on its inner face, and the outer face as
+	 *  the cliffs of the void (LavaCliff*), while the floor at its foot takes the pool of light of the passage there (CaveWallGlow*) */
 	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
 	float CaveWallMoss = 1.0f;
 
@@ -1864,6 +1912,15 @@ public:
 
 	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
 	float CaveWallLavaGlow = 0.8f;
+
+	/** The pools of light of the floor (GlowPool*) reach the walls along it (AHexPlanet::WallGlowTexture, a pixel per sample of the walls, read by
+	 *  the fifth UV of their vertices): their foot and the floor before it take the pool as the floor beside them does, and their inner face
+	 *  CaveWallGlowLight of it, fading out up to CaveWallGlowRise of the height of the wall, so a wall in a crystal cavern is lit from below */
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float CaveWallGlowLight = 0.8f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0.01, ClampMax=1))
+	float CaveWallGlowRise = 0.6f;
 
 	/** The walls dissolve around the line from the camera to the point under the cursor, as in a game seen from above, where they stand in front
 	 *  of that point: within CaveWallFadeRadius world units of the line, softer over CaveWallFadeSoftness of it at its edge, fully from
@@ -2101,30 +2158,26 @@ public:
 	UPROPERTY(EditAnywhere, Category="Underground|Moss", meta=(ClampMin=0.01, ClampMax=1))
 	float CaveMossFade = 0.5f;
 
-	/** Pools of light under the kinds that glow (UHexPlanetObjectSet::GlowPool) and beside lava (LavaPool), from CellCanopy, which the underground
-	 *  fills with the glow of each cell (AHexPlanet::UpdateCanopy): the floor of such a cell is lit by its glow color times GlowPoolStrength,
-	 *  all of it within GlowPoolInner of the cell radius from its middle and GlowPoolEdge of it at its sides, the line moved by a noise
-	 *  (GlowPoolNoise, GlowPoolNoiseScale), and a cell beside it takes GlowPoolEdge of it, fading out GlowPoolSpill of the radius into it; the
-	 *  light fades out GlowPoolDepth down the cliffs. A glowing cell falls off only towards the sides of neighbors that do not glow, and its
-	 *  strength and color are GlowPoolBlend of the way to the mean of it and its glowing neighbors, so a patch is one pool and no hex shows; the
-	 *  pool lights the floor by its albedo and GlowPoolLight of it whatever the albedo, so a tan floor turns the color of the glow */
+	/** Pools of light under the kinds that glow (UHexPlanetObjectSet::GlowPool), beside lava (LavaPool) and at the exits (ExitPool*), from
+	 *  CellCanopy, which the underground fills with the glow of each cell (AHexPlanet::UpdateCanopy): each glowing cell lights the floor around
+	 *  its middle out to GlowPoolReach of the cell radius, falling off smoothly as a light does, in its glow color times GlowPoolStrength, and the
+	 *  light of neighboring glowing cells adds up to all of their strength, so a patch is one pool with a round edge and no hex shows (until
+	 *  2026-11-10 each cell was lit evenly, falling off only at its sides, which in the dark read as pale hexagons); a cell that does not glow
+	 *  takes the light of its glowing neighbors in their mean color. A noise moves the edge (GlowPoolNoise of the cell radius, GlowPoolNoiseScale),
+	 *  the light fades out GlowPoolDepth down the cliffs, and the strength and color of a glowing cell are GlowPoolBlend of the way to the mean of
+	 *  it and its glowing neighbors; the pool lights the floor by its albedo and GlowPoolLight of it whatever the albedo, so a tan floor turns the
+	 *  color of the glow, and the walls along it take the same pool at their foot (CaveWallGlow*) */
 	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=0))
-	float GlowPoolStrength = 0.8f;
+	float GlowPoolStrength = 0.4f;
 
-	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=0, ClampMax=1))
-	float GlowPoolEdge = 0.35f;
-
-	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=0, ClampMax=1))
-	float GlowPoolInner = 0.35f;
+	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=0.5, ClampMax=1.9))
+	float GlowPoolReach = 1.55f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=0))
-	float GlowPoolNoise = 0.12f;
+	float GlowPoolNoise = 0.2f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=1))
 	float GlowPoolNoiseScale = 70.0f;
-
-	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=0.01, ClampMax=1))
-	float GlowPoolSpill = 0.35f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=1))
 	float GlowPoolDepth = 60.0f;
@@ -2133,11 +2186,26 @@ public:
 	float GlowPoolBlend = 0.5f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=0))
-	float GlowPoolLight = 0.2f;
+	float GlowPoolLight = 0.08f;
 
 	/** How strongly a lava void lights the passages beside it, its glow in CellCanopy, in LavaLightColor at its brightest channel 1 */
 	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=0, ClampMax=1))
 	float LavaPool = 1.0f;
+
+	/** The exits are lit as what glows is (AHexPlanet::UpdateCanopy), so in the dark an exit shows its hall: the cell of an exit that can be used
+	 *  takes a pool of light of ExitPoolStrength in ExitPoolColor, ExitPoolNetworkShare of the way to the color of its network, and the passages
+	 *  around it ExitPoolRingShare of that, unless what stands on them glows more */
+	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=0, ClampMax=1))
+	float ExitPoolStrength = 0.9f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Glow pools")
+	FLinearColor ExitPoolColor = FLinearColor(1.0f, 0.92f, 0.78f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=0, ClampMax=1))
+	float ExitPoolNetworkShare = 0.45f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=0, ClampMax=1))
+	float ExitPoolRingShare = 0.45f;
 
 	/** Small still pools of water on the passages, drawn by the material: where a noise CavePuddleScale across lies above CavePuddleCover, raised
 	 *  in the hollows of a floor that rises (FloorNoise) and lowered on its swells by up to CavePuddleHollow of the noise, so they gather in the
@@ -2387,6 +2455,14 @@ public:
 
 	UPROPERTY(EditAnywhere, Category="Underground|Motes", meta=(ClampMin=0))
 	float MoteBrightness = 0.4f;
+
+	/** Away from the light of the hero (bHeroLight) the motes keep MoteDarkShare of their brightness, as dust shows in the light, and in it they
+	 *  take MoteLightTint of the way to its color */
+	UPROPERTY(EditAnywhere, Category="Underground|Motes", meta=(ClampMin=0, ClampMax=1))
+	float MoteDarkShare = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Motes", meta=(ClampMin=0, ClampMax=1))
+	float MoteLightTint = 0.6f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Motes")
 	FVector MoteDrift = FVector(6.0, -3.0, 2.0);

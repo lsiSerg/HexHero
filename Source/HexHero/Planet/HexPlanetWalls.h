@@ -173,10 +173,18 @@ namespace HexPlanetWalls
 		double TopOuterReach = TNumericLimits<double>::Max();
 	};
 
+	/** Columns of the texture with a pixel per sample of the walls, line after line (AHexPlanet::WallGlowTexture); UVs are half floats, which hold
+	 *  whole numbers exactly only up to 2048, so the column and the row go into the fifth UV of a vertex apart */
+	constexpr int32 SampleColumns = 2048;
+
 	struct FWalls
 	{
 		/** Closed loops of samples */
 		TArray<TArray<FSample>> Lines;
+
+		/** The index of the first sample of each line among all of them, by which a sample has its pixel (GetSampleTexel), and how many there are */
+		TArray<int32> LineStarts;
+		int32 NumSamples = 0;
 
 		/** (line, sample) of each chunk, by the chunk of the cell of the sample; a chunk builds the stretch from each of its samples to the next */
 		TArray<TArray<FIntPoint>> ChunkSamples;
@@ -186,7 +194,17 @@ namespace HexPlanetWalls
 
 		const FSample& Get(const FIntPoint& At) const { return Lines[At.X][At.Y]; }
 		int32 Next(const FIntPoint& At) const { return (At.Y + 1) % Lines[At.X].Num(); }
+
+		/** Returns the index of a sample among all of them */
+		int32 GetIndex(const FIntPoint& At) const { return LineStarts.IsValidIndex(At.X) ? LineStarts[At.X] + At.Y : At.Y; }
 	};
+
+	/** Returns the pixel of a sample in a texture of SampleColumns columns, its column and row */
+	inline FVector2f GetSampleTexel(const FWalls& Walls, const FIntPoint& At)
+	{
+		const int32 Index = Walls.GetIndex(At);
+		return FVector2f(float(Index % SampleColumns), float(Index / SampleColumns));
+	}
 
 	/** Builds the lines of the walls along every side of a cell that CanHold towards a neighbor at least MinDrop levels lower; VoidStyles, a value
 	 *  per cell, says which voids are lava (1) or a lake (2), which light the wall, and VoidHeights, a value per cell, the factor on the height of
@@ -219,7 +237,8 @@ namespace HexPlanetWalls
 	 *  (the foot and the floor before it, 0 to 1) or, below 0, how much it is the outer face (to -1, over the crest towards the chasm, from the
 	 *  smoothed line), as no row is both, and how much of a stalactite stands out there (0 to 1), in the third how much its stone is
 	 *  flowstone and how much it shows its joints (FStyle), in the fourth how much lava and how much lake lies beyond it (FSample::Lava, Lake),
-	 *  and three triangles each */
+	 *  in the fifth the pixel of its sample (GetSampleTexel), by which the material finds the pool of light of the floor there, and three
+	 *  triangles each */
 	struct FMesh
 	{
 		TArray<FVector3f> Positions;
@@ -228,6 +247,7 @@ namespace HexPlanetWalls
 		TArray<FVector2f> UV1s;
 		TArray<FVector2f> UV2s;
 		TArray<FVector2f> UV3s;
+		TArray<FVector2f> UV4s;
 		TArray<int32> Triangles;
 	};
 	/** Builds it whole, or coarse: every third sample and 14 of the rows of the profile, about a fifth of the triangles, which the planet draws

@@ -22,6 +22,7 @@ class UMaterialParameterCollection;
 class UNiagaraComponent;
 class UNiagaraSystem;
 class UProceduralMeshComponent;
+class UPointLightComponent;
 class UPostProcessComponent;
 class USkyLightComponent;
 class UTexture2D;
@@ -138,6 +139,11 @@ class AHexPlanet : public AActor
 	/** The plain white cubemap the sky light takes */
 	UPROPERTY(Transient)
 	TObjectPtr<UTextureCube> SkyCubemap;
+
+	/** The light around the hero (UHexPlanetConfig::bHeroLight), for now over the point where the view through the middle of the screen meets the
+	 *  tops of the passages, which UpdateHeroLight moves every frame; hidden with the layer */
+	UPROPERTY(Transient)
+	TObjectPtr<UPointLightComponent> HeroLight;
 
 	/** Lays the haze of the air over every view, unbound, with HazeMaterial */
 	UPROPERTY(VisibleAnywhere, Category="Components")
@@ -347,6 +353,11 @@ public:
 	UPROPERTY(EditAnywhere, Category="Planet|Underground")
 	TSoftObjectPtr<UMaterialInterface> WallMaterialAsset = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/HexPlanet/M_HexUndergroundWall.M_HexUndergroundWall")));
 
+	/** Material of what stands on the walls (the rims of EHexRimSeat::WallFoot and WallFace), in place of the material of their set: that of the
+	 *  cave objects, masked, so it dissolves with the walls in front of the point under the cursor, from Tools/create_planet_assets.py */
+	UPROPERTY(EditAnywhere, Category="Planet|Underground")
+	TSoftObjectPtr<UMaterialInterface> WallObjectMaterialAsset = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/HexPlanet/M_HexPlanetCaveWall.M_HexPlanetCaveWall")));
+
 	/** Constructor */
 	AHexPlanet();
 
@@ -549,8 +560,15 @@ public:
 	int32 GetWallStyle(int32 Level, int32 Biome) const;
 
 	/** Gives the walls the point under the cursor, around which they dissolve where they stand in front of it (WallFadeCenter of
-	 *  M_HexUndergroundWall), or none while the cursor is off the planet */
+	 *  M_HexUndergroundWall), or none while the cursor is off the planet; what stands on them dissolves with them (M_HexPlanetCaveWall) */
 	void SetFadeFocus(bool bOnPlanet, const FVector& Point);
+
+	/** Returns the material of what stands on the walls, loaded once (WallObjectMaterialAsset), or null while the script has not made it */
+	UMaterialInterface* GetWallObjectMaterial();
+
+	/** Returns the point where the view through the middle of the screen meets the shell of the tops of the passages (the radius of level 0),
+	 *  else the point of that shell under the camera: the focus of the camera, where the light of the hero stands for now and the motes gather */
+	FVector3d FindViewFocus(const FVector3d& CameraLocation, const FVector3d& CameraForward) const;
 
 	/** Returns the rivers and bridges */
 	UHexPlanetRivers* GetRivers() const { return Rivers; }
@@ -899,9 +917,48 @@ private:
 	TObjectPtr<UTexture2D> CellCanopyTexture;
 	TArray<FColor> CanopyPixels;
 
+	/** Underground, the pool of light of each cell as CellCanopy holds it before it is encoded (UpdateCanopy): a glowing cell its color with its
+	 *  strength in alpha, in fifteenths (GlowStrengthSteps), a cell beside glowing ones the mean of their colors by their strengths with alpha 0,
+	 *  else nothing */
+	TArray<FLinearColor> CellGlowPools;
+
+	/** Underground, a pixel per cell in the layout of CellCanopy with how strongly each of its neighbors glows, in fifteenths, four bits each:
+	 *  neighbors 0 and 1 in red, 2 and 3 in green, 4 and 5 in blue, by which M_HexUnderground adds up the light of each glowing cell by its own
+	 *  strength, so two neighbors of different strengths meet without a step (CellGlowNear) */
+	UPROPERTY(Transient)
+	TObjectPtr<UTexture2D> CellGlowNearTexture;
+	TArray<FColor> GlowNearPixels;
+
+	/** The steps of the strength of a pool of light, as four bits hold it */
+	static constexpr int32 GlowStrengthSteps = 15;
+
+	/** A pixel per sample of the walls, line after line (HexPlanetWalls::GetSampleTexel), with the pool of light of the floor at its foot as the
+	 *  root of the linear color, which M_HexUndergroundWall reads in its vertex shader by the fifth UV of the vertices of the sample */
+	UPROPERTY(Transient)
+	TObjectPtr<UTexture2D> WallGlowTexture;
+	TArray<FColor> WallGlowPixels;
+
+	/** Writes WallGlowTexture from CellGlowPools and the walls shown: the pool of light of the floor of the passage of each sample where it stands,
+	 *  as M_HexUnderground draws it there (the light of the middles of the cell and its glowing neighbors, GlowPoolReach), making the
+	 *  texture again when the walls have more samples than it holds */
+	void UpdateWallGlow();
+
+	/** The light around the hero (HeroLight), made when the layer is built, and placed over the focus of the camera every frame */
+	void CreateHeroLight();
+	void UpdateHeroLight(const FVector3d& Focus);
+
+	/** The focus of the camera in the frame drawn, where the light of the hero stands, which the fog clears around (FogFocus of
+	 *  M_HexUndergroundFog), and whether there is one */
+	FVector3d HeroFocus = FVector3d::ZeroVector;
+	bool bHasHeroFocus = false;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInterface> LoadedWallObjectMaterial;
+
 public:
 
-	/** Writes CellCanopyTexture and the bits of its neighbors from the objects of every cell, making the texture the first time */
+	/** Writes CellCanopyTexture and the bits of its neighbors from the objects of every cell, making the texture the first time; underground also
+	 *  the pools of light of the exits and, from them, WallGlowTexture */
 	void UpdateCanopy();
 
 private:

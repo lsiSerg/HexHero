@@ -11,8 +11,8 @@
  *  The light of a layer of the planet, which the camera applies when the layer is shown (AHexPlanetCameraPawn::ApplyLighting): the sun of the
  *  level, which follows the point the camera looks at, and the exposure of the camera. The sky light of a layer is SkyLightColor and
  *  SkyLightIntensity of its UHexPlanetConfig, as each layer has its own. UHexPlanetCameraConfig::GetLighting gives the light of a layer: the
- *  surface from the values of the config as they were, the underground from UndergroundLighting, a placeholder until the light of the game
- *  is designed
+ *  surface from the values of the config as they were, the underground from UndergroundLighting, dim and cool since 2026-11-10, when the
+ *  developer decided that the underground is dark but around the hero (UHexPlanetConfig::bHeroLight), what glows and the exits
  */
 USTRUCT()
 struct FHexLayerLighting
@@ -41,12 +41,13 @@ struct FHexLayerLighting
 	UPROPERTY(EditAnywhere, Category="Light")
 	float ExposureBias = -1.0f;
 
-	/** Returns the placeholder light of the underground, dim and cool */
+	/** Returns the light of the underground: a faint, cool key light, by which the maze stays readable in the dark (1.5 lux until 2026-11-10,
+	 *  a placeholder that lit everything evenly) */
 	static FHexLayerLighting MakeUnderground()
 	{
 		FHexLayerLighting Lighting;
 		Lighting.SunColor = FLinearColor(0.55f, 0.68f, 0.85f, 1.0f);
-		Lighting.SunIntensity = 1.5f;
+		Lighting.SunIntensity = 0.12f;
 		Lighting.SunCloseElevation = 55.0f;
 		Lighting.SunFarElevation = 70.0f;
 		Lighting.ExposureBias = 0.5f;
@@ -163,8 +164,8 @@ public:
 	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=0.01))
 	float SunMoveTime = 1.5f;
 
-	/** The light of the underground, a placeholder for the developer to tune: a dim, cool key light that follows the camera as the sun does,
-	 *  and its own exposure; its dim sky light is that of DA_HexUnderground */
+	/** The light of the underground: a faint, cool key light that follows the camera as the sun does, so the dark maze stays readable, and its
+	 *  own exposure; its dim sky light is that of DA_HexUnderground, and the light around the hero its HeroLight* */
 	UPROPERTY(EditAnywhere, Category="Light|Underground")
 	FHexLayerLighting UndergroundLighting = FHexLayerLighting::MakeUnderground();
 

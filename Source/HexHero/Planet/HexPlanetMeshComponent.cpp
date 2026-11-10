@@ -25,8 +25,9 @@
 #include UE_INLINE_GENERATED_CPP_BY_NAME(HexPlanetMeshComponent)
 
 /**
- *  One section on the GPU: a position, tangents and four UVs a vertex, the indices, the vertex factory and the ray tracing geometry. It is
- *  filled on any thread, initialized on the render thread, where the CPU frees what it filled, and released there
+ *  One section on the GPU: a position, tangents and four UVs a vertex (five for the walls of the underground), the indices, the vertex factory
+ *  and the ray tracing geometry. It is filled on any thread, initialized on the render thread, where the CPU frees what it filled, and
+ *  released there
  */
 class FHexPlanetMeshRenderData
 {
@@ -43,6 +44,7 @@ public:
 	FBox3f Bounds = FBox3f(ForceInit);
 	int32 NumVertices = 0;
 	int32 NumIndices = 0;
+	int32 NumUVs = 4;
 	bool bWideIndices = false;
 
 	/** True once SetSection sent it to the render thread; before that it holds no resources and may be deleted on any thread */
@@ -60,8 +62,8 @@ public:
 
 	int64 GetGpuBytes() const
 	{
-		// a position of 12 bytes, tangents of 8 and four UVs of half floats, 16
-		return int64(NumVertices) * 36 + int64(NumIndices) * (bWideIndices ? 4 : 2);
+		// a position of 12 bytes, tangents of 8 and the UVs of half floats, 4 each
+		return int64(NumVertices) * (20 + 4 * NumUVs) + int64(NumIndices) * (bWideIndices ? 4 : 2);
 	}
 
 	void InitResources(FRHICommandListBase& RHICmdList)
@@ -396,10 +398,12 @@ FHexPlanetMeshSectionRef UHexPlanetMeshComponent::PrepareSection(const FHexPlane
 	Data->DebugName = DebugName;
 	Data->NumVertices = NumVertices;
 	Data->NumIndices = Source.Triangles.Num();
+	// four UVs, and a fifth only where a section has it, as only the walls of the underground do
+	Data->NumUVs = Source.UVs[4].IsEmpty() ? 4 : FHexPlanetMeshSource::MaxUVs;
 
 	// without CPU access, so a cooked game frees the data once it is on the GPU; InitResources frees it in any build
 	Data->Positions.Init(NumVertices, false);
-	Data->Attributes.Init(NumVertices, 4, false);
+	Data->Attributes.Init(NumVertices, Data->NumUVs, false);
 	for (int32 Vertex = 0; Vertex < NumVertices; ++Vertex)
 	{
 		const FVector3f& Position = Source.Positions[Vertex];
@@ -411,7 +415,7 @@ FHexPlanetMeshSectionRef UHexPlanetMeshComponent::PrepareSection(const FHexPlane
 		const FVector3f& Normal = Source.Normals[Vertex];
 		const FVector3f TangentX(1.0f, 0.0f, 0.0f);
 		Data->Attributes.SetVertexTangents(Vertex, TangentX, FVector3f::CrossProduct(Normal, TangentX), Normal);
-		for (int32 Channel = 0; Channel < 4; ++Channel)
+		for (int32 Channel = 0; Channel < Data->NumUVs; ++Channel)
 		{
 			Data->Attributes.SetVertexUV(Vertex, Channel, Source.UVs[Channel].IsValidIndex(Vertex) ? Source.UVs[Channel][Vertex] : FVector2f::ZeroVector);
 		}

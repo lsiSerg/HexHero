@@ -1498,8 +1498,9 @@ UNDERGROUND_VALUES = {
     'deep_depth': 10.0, 'shallow_depth': 5.0, 'coast_wobble': 0.0,
     # the floor of the passages rises and falls by a noise the cells share (HexPlanetKit::GetFloorRise)
     'floor_noise': 24.0,
-    # a dim, cool light of the sky, a placeholder until the light of the game is designed
-    'sky_light_color': unreal.LinearColor(0.32, 0.42, 0.48, 1.0), 'sky_light_intensity': 0.3,
+    # a dark underground (2026-11-10): a faint, cool light of the sky and of the surface itself, so the maze stays readable, the light around the
+    # hero, what glows and the exits lighting the rest
+    'sky_light_color': unreal.LinearColor(0.32, 0.42, 0.48, 1.0), 'sky_light_intensity': 0.04, 'ambient': 0.012, 'hero_light': True,
 }
 # values of an existing DA_HexUnderground that a later stage changed, as (property, old value, new value): each is set only while the asset still
 # holds the old value, so tuning by hand is never overwritten. The cave objects are generated on the passages since 2026-11-09, and the motes drift
@@ -1510,7 +1511,12 @@ UNDERGROUND_MIGRATIONS = [('generate_objects', False, True), ('motes', False, Tr
     ('deep_depth', 200.0, 10.0), ('shallow_depth', 22.0, 5.0), ('coast_wobble', 20.0, 0.0), ('floor_noise', 0.0, 14.0), ('floor_noise', 14.0, 24.0),
     ('abyss_fade_start', 25.0, 4.0), ('abyss_fade_end', 140.0, 32.0), ('abyss_brightness', 0.55, 0.24), ('abyss_mist_start', 60.0, 8.0),
     ('abyss_mist_end', 190.0, 30.0), ('wall_outer_depth', 160.0, 60.0), ('cave_moss_wall_depth', 60.0, 20.0), ('cave_rune_top', 10.0, 4.0),
-    ('cave_rune_size', 48.0, 24.0), ('lava_cliff_reach', 140.0, 40.0), ('void_floor_height', 30.0, 12.0), ('mote_height_below', 150.0, 35.0)]
+    ('cave_rune_size', 48.0, 24.0), ('lava_cliff_reach', 140.0, 40.0), ('void_floor_height', 30.0, 12.0), ('mote_height_below', 150.0, 35.0),
+    # the dark underground of 2026-11-10, lit around the hero, by what glows and at the exits
+    ('hero_light', False, True), ('sky_light_intensity', 0.3, 0.04), ('ambient', 0.06, 0.012)]
+# and of DA_HexPlanetCamera, as (field of UndergroundLighting, old value, new value): its key light dimmed from the placeholder that lit everything
+CAMERA_CONFIG = FOLDER + '/DA_HexPlanetCamera'
+CAMERA_UNDERGROUND_MIGRATIONS = [('sun_intensity', 1.5, 0.12)]
 
 
 def holds(value, old):
@@ -1593,6 +1599,24 @@ def build_configs():
             unreal.AssetToolsHelpers.get_asset_tools().create_asset(path.split('/')[-1], FOLDER, config_class, unreal.DataAssetFactory())
             unreal.EditorAssetLibrary.save_asset(path, only_if_is_dirty=False)
     build_underground_config()
+    migrate_camera_config()
+
+
+def migrate_camera_config():
+    """Sets the fields of UndergroundLighting of DA_HexPlanetCamera that still hold their old values (CAMERA_UNDERGROUND_MIGRATIONS)"""
+    if not unreal.EditorAssetLibrary.does_asset_exist(CAMERA_CONFIG):
+        return
+    config = unreal.load_asset(CAMERA_CONFIG)
+    lighting = config.get_editor_property('underground_lighting')
+    changed = False
+    for name, old, new in CAMERA_UNDERGROUND_MIGRATIONS:
+        if holds(lighting.get_editor_property(name), old):
+            lighting.set_editor_property(name, new)
+            changed = True
+            unreal.log('PLANET %s: underground_lighting.%s from %s to %s' % (CAMERA_CONFIG, name, old, new))
+    if changed:
+        config.set_editor_property('underground_lighting', lighting)
+        unreal.EditorAssetLibrary.save_asset(CAMERA_CONFIG, only_if_is_dirty=False)
 
 
 def build_underground_config():
@@ -2426,10 +2450,10 @@ def build_auroras():
 # The underground (DA_HexUnderground, EdgeRule HigherHolds): M_HexUnderground draws its surface as M_HexPlanet does, from the layers of its cave
 # biomes with the grid lines and the outlines, but without the sea, the beach, rivers, the run-up, the canopy and the shadows of clouds. Every
 # height is measured below the top of the passages, the level 0 that lies LevelHeight above the sea. On the tops of the passages the floor is
-# warm earth (CaveFloor*, a tint of its layer, as the placeholder light is cool), not of one ground nor one tone, with old flagstones here and
+# warm earth (CaveFloor*, a tint of its layer, as the light of the underground is cool), not of one ground nor one tone, with old flagstones here and
 # there under sand (CAVE_FLOOR_CODE), in pools of tone, with small dark pools of water (CavePuddle*,
 # never cut by the side of a cell with objects, which they keep off as off the rims), green glowing moss along the rims and down the upper
-# walls (CaveMoss*) and pools of light under what glows and beside lava (GLOW_POOL_CODE, CellCanopy, AHexPlanet::UpdateCanopy). The rock of a
+# walls (CaveMoss*) and pools of light under what glows, beside lava and at the exits (GlowPool*, CellCanopy, CellGlowNear, AHexPlanet::UpdateCanopy). The rock of a
 # cliff darkens down into the abyss (AbyssFadeStart, AbyssFadeEnd), a few walls carry carved runes (CaveRune*), and the floor of a void draws a
 # teal grey mist as its light, a noise taken in AbyssSlices slices under the floor along the view and laid front to back, so deeper ones are
 # darker and hidden by those above and what none covers is nearly black (AbyssBottomColor); far away, where the coarse mesh draws a void next to
@@ -2941,11 +2965,15 @@ albedo *= 1.0 - mistShare * AbyssFloorHide;
 
 float lip = (1.0 - smoothstep(0.0, AbyssLipWidth, lipDistance)) * (1.0 - smoothstep(0.0, AbyssLipDepth, depthBelow));
 
-// pools of light under what glows and beside lava (CellCanopy, AHexPlanet::UpdateCanopy): a glowing cell is lit by its color times its strength,
-// all of it in its middle and falling to GlowPoolEdge only at its sides towards cells that do not glow, so a patch is one pool, and a cell beside it
-// takes the mean of its glowing neighbors over the sides towards them; the noise moves the line inside the cells and not on a side, where both
-// cells take GlowPoolEdge, and the light fades out down the cliffs and off the water of a pool. It lights the floor by its albedo and GlowPoolLight
-// of it whatever the albedo, so a tan floor turns the color of the glow
+// pools of light under what glows, beside lava and at the exits (CellCanopy, AHexPlanet::UpdateCanopy): each glowing cell lights the floor around
+// its middle out to GlowPoolReach of the cell radius, falling off smoothly as a light does, times its strength, and the light of neighboring
+// glowing cells adds up, at most to 1, so a patch is one pool with a round edge and no hex shows; the bump of a GlowPoolReach about 1.55 adds up to
+// nearly the same over a patch. A cell holds its strength in fifteenths in the alpha of CellCanopy and those of its neighbors in CellGlowNear, so
+// a point on a side, which sees the middles of the two cells of the side and the faint light of the two at its ends, adds up the same light
+// from either cell, and two neighbors of different strengths meet without a step; a glowing cell holds its color, one that does not the mean of
+// the colors of its glowing neighbors by their strengths. A noise moves the edge, and the light fades out down the cliffs and off the water of a
+// pool. It lights the floor by its albedo and GlowPoolLight of it whatever the albedo, so a tan floor turns the color of the glow; the walls take
+// the same pool at their foot (AHexPlanet::UpdateWallGlow)
 float3 glowLight = 0.0;
 float3 glowAdd = 0.0;
 [branch] if (notPreview > 0.5)
@@ -2954,37 +2982,24 @@ float3 glowAdd = 0.0;
     uint glowNear = biomeNear.a & 63u;
     [branch] if (glowPixel.a > 0.0 || glowNear != 0u)
     {
+        float4 nearPixel = CellGlowNear.Load(int3(biomeCell, 0));
+        uint nearSteps = (uint)round(nearPixel.r * 255.0) | ((uint)round(nearPixel.g * 255.0) << 8) | ((uint)round(nearPixel.b * 255.0) << 16);
         float glowJitter = (cloudNoise.Value(WorldPos / max(GlowPoolNoiseScale, 1.0) + 8.2) - 0.5) * 2.0 * GlowPoolNoise;
-        float glowNoiseReach = max(GlowPoolNoise, 1e-3);
+        float glowReach = max(GlowPoolReach, 0.5);
+        float glowT = saturate((length(LocalUV) + glowJitter) / glowReach);
+        float glowSum = round(glowPixel.a * 15.0) / 15.0 * (1.0 - glowT * glowT) * (1.0 - glowT * glowT);
+        [unroll] for (int glowSide = 0; glowSide < 6; ++glowSide)
+        {
+            float nearStrength = (float)((nearSteps >> (4 * glowSide)) & 15u) / 15.0;
+            if (glowSide < biomeSides && nearStrength > 0.0)
+            {
+                float2 glowMiddle = 2.0 * apothem * float2(cos(glowSide * biomeTurn), sin(glowSide * biomeTurn));
+                glowT = saturate((length(LocalUV - glowMiddle) + glowJitter) / glowReach);
+                glowSum += nearStrength * (1.0 - glowT * glowT) * (1.0 - glowT * glowT);
+            }
+        }
         float3 glowColor = glowPixel.rgb * glowPixel.rgb;
-        float glowShape = 0.0;
-        if (glowPixel.a > 0.0)
-        {
-            float glowFall = 0.0;
-            [unroll] for (int glowSide = 0; glowSide < 6; ++glowSide)
-            {
-                if (glowSide < biomeSides && ((glowNear >> glowSide) & 1u) == 0u)
-                {
-                    float toSide = apothem - dot(LocalUV, float2(cos(glowSide * biomeTurn), sin(glowSide * biomeTurn)));
-                    float moved = toSide + glowJitter * saturate(toSide / glowNoiseReach);
-                    glowFall = max(glowFall, 1.0 - smoothstep(0.0, max(apothem - GlowPoolInner, 1e-3), moved));
-                }
-            }
-            glowShape = glowPixel.a * lerp(1.0, GlowPoolEdge, glowFall);
-        }
-        else
-        {
-            [unroll] for (int glowSide = 0; glowSide < 6; ++glowSide)
-            {
-                if (glowSide < biomeSides && ((glowNear >> glowSide) & 1u) != 0u)
-                {
-                    float toSide = apothem - dot(LocalUV, float2(cos(glowSide * biomeTurn), sin(glowSide * biomeTurn)));
-                    float moved = toSide + glowJitter * saturate(toSide / glowNoiseReach);
-                    glowShape = max(glowShape, (1.0 - smoothstep(0.0, max(GlowPoolSpill, 1e-3), moved)) * GlowPoolEdge);
-                }
-            }
-        }
-        float3 glowPool = glowColor * glowShape * (1.0 - smoothstep(0.0, max(GlowPoolDepth, 1.0), max(depthBelow, 0.0))) * (1.0 - puddle);
+        float3 glowPool = glowColor * saturate(glowSum) * (1.0 - smoothstep(0.0, max(GlowPoolDepth, 1.0), max(depthBelow, 0.0))) * (1.0 - puddle);
         glowLight = glowPool * GlowPoolStrength;
         glowAdd = glowPool * GlowPoolLight;
     }
@@ -3021,7 +3036,7 @@ UNDERGROUND_PARAMETERS = ['LevelHeight', 'HexRadius', 'CoarseDistance', 'CoarseB
     'CaveFloorTint', 'CaveFloorBrightness', 'CaveFloorPools', 'CaveFloorPoolScale', 'CaveFloorTopDepth', 'FloorNoise', 'CaveFloorRiseShade', 'CaveFloorBumps', 'CaveFloorBumpScale',
     'CaveMossReach', 'CaveMossWallDepth', 'CaveMossPatchScale', 'CaveMossCover', 'CaveMossSpeckleScale', 'CaveMossSpeckle', 'CaveMossDetailFadeStart',
     'CaveMossDetailFadeEnd', 'CaveMossFarGlow', 'CaveMossAlbedo', 'CaveMossAlbedoShare', 'CaveMossColor', 'CaveMossGlow', 'CaveMossSoftness', 'CaveMossFade',
-    'GlowPoolStrength', 'GlowPoolEdge', 'GlowPoolInner', 'GlowPoolNoise', 'GlowPoolNoiseScale', 'GlowPoolSpill', 'GlowPoolDepth', 'GlowPoolLight',
+    'GlowPoolStrength', 'GlowPoolReach', 'GlowPoolNoise', 'GlowPoolNoiseScale', 'GlowPoolDepth', 'GlowPoolLight',
     'CavePuddleScale', 'CavePuddleCover', 'CavePuddleRimGap', 'CavePuddleRim', 'CavePuddleWetDarkening', 'CavePuddleColor', 'CavePuddleRoughness', 'CavePuddleSheen',
     'CavePuddleSpecular', 'CavePuddleDepth', 'CavePuddleEdge', 'CavePuddleHollow',
     'CaveRuneShare', 'CaveRuneTop', 'CaveRuneSize', 'CaveRuneStroke', 'CaveRuneDarkening', 'CaveRuneBevel', 'CaveRuneColor', 'CaveRuneGlow', 'CaveRuneFadeStart',
@@ -3087,8 +3102,9 @@ def build_underground_material():
         ('Colors', add_texture(library, material, COLORS, 'Colors', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 3400), ''),
         ('Normals', add_texture(library, material, NORMALS, 'Normals', unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL, 3450), ''),
         ('LayerParams', add_texture(library, material, DEFAULT_MARKS, 'LayerParams', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 3460), ''),
-        # the pool of light of each cell (GLOW_POOL_CODE), read with Load
+        # the pool of light of each cell and the strengths of its neighbors (AHexPlanet::UpdateCanopy), read with Load
         ('CellCanopy', add_texture(library, material, DEFAULT_MARKS, 'CellCanopy', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 3470), ''),
+        ('CellGlowNear', add_texture(library, material, DEFAULT_MARKS, 'CellGlowNear', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 3480), ''),
         ('WallsShown', add_scalar(library, material, 'WallsShown', 0.0, 3490), ''),
         # the layers of the patches of another ground and of the flagstones (CAVE_FLOOR_CODE), -1 without them (AHexPlanet::SetBiomeLayers)
         ('CaveFloorAltLayer', add_scalar(library, material, 'CaveFloorAltLayer', -1.0, 3493), ''),
@@ -3153,6 +3169,14 @@ float3 fogDir = -normalize(CameraVector);
 bool fogSpace = SceneDepth > 1e6;
 float fogEnd = fogSpace ? 1e9 : length(WorldPos - CameraPos);
 float darkAmount = FogMax * (1.0 - exp(-max(min(fogEnd, 1e6) - FogStart, 0.0) * FogDensity));
+// away from the hero (FogFocus, where the light of the hero stands, its alpha how far that light reaches on the floor, 0 without it) the air
+// thickens into the dark, while what glows still shows through
+if (FogFocus.w > 0.0 && !fogSpace)
+{
+    float focusStart = FogFocus.w * FogFocusStart;
+    float focusFog = FogFocusMax * smoothstep(focusStart, max(FogFocus.w * FogFocusEnd, focusStart + 1.0), distance(WorldPos, FogFocus.xyz));
+    darkAmount = 1.0 - (1.0 - darkAmount) * (1.0 - focusFog);
+}
 float mistTop = PlanetRadius + LevelHeight - FogMistTop;
 float mistB = dot(CameraPos, fogDir);
 float mistDisc = mistB * mistB - (dot(CameraPos, CameraPos) - mistTop * mistTop);
@@ -3178,7 +3202,9 @@ float3 fogColor = lerp(SceneColor.rgb, FogMistColor.rgb, mistAmount);
 return lerp(fogColor, fogSpace ? FogSpaceColor.rgb : FogColor.rgb, fogSpace ? 1.0 : darkAmount);
 '''
 UNDERGROUND_FOG_PARAMETERS = ['LevelHeight', 'FogColor', 'FogStart', 'FogDensity', 'FogMax', 'FogSpaceColor', 'FogMistColor', 'FogMistTop', 'FogMistDepth',
-    'FogMistDensity', 'FogMistMax']
+    'FogMistDensity', 'FogMistMax', 'FogFocusStart', 'FogFocusEnd', 'FogFocusMax']
+for _name in UNDERGROUND_FOG_PARAMETERS:
+    assert _name in UNDERGROUND_FOG_CODE, _name
 
 
 def build_underground_fog():
@@ -3197,7 +3223,9 @@ def build_underground_fog():
         ('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1000, -250), ''),
         ('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1000, -200), ''),
         ('CameraVector', library.create_material_expression(material, unreal.MaterialExpressionCameraVectorWS, -1000, -150), ''),
-        ('PlanetRadius', add_scalar(library, material, 'PlanetRadius', 0.0, -50), '')
+        ('PlanetRadius', add_scalar(library, material, 'PlanetRadius', 0.0, -50), ''),
+        # where the light of the hero stands and how far it reaches, which AHexPlanet::UpdateHeroLight gives every frame
+        ('FogFocus', add_vector4(library, material, 'FogFocus', unreal.LinearColor(0.0, 0.0, 0.0, 0.0), -100), '')
         ] + add_config_parameters(library, material, unreal.HexPlanetConfig, UNDERGROUND_FOG_PARAMETERS, 0)
     custom = add_custom(library, material, UNDERGROUND_FOG_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, connections, 0)
     library.connect_material_property(custom, '', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
@@ -3333,13 +3361,21 @@ CAVE_OBJECT_PARAMETERS = ['CaveObjectTint', 'CaveObjectNoise', 'CaveObjectNoiseS
 CAVE_OBJECT_GLOW_PARAMETERS = ['GlowColor', 'GlowStrength', 'GlowPulse', 'GlowPulseSpeed']
 
 
-def build_cave_object_material():
+# and the same, masked, for what stands on the walls (AHexPlanet::WallObjectMaterialAsset, in place of the material of their sets), which dissolves
+# with the walls in front of the point under the cursor by WALL_FADE_CODE (WallFadeCenter, UHexPlanetObjects::SetFadeFocus), so no stalactite or
+# crystal of a wall hangs in the air where the wall is gone
+CAVE_WALL_OBJECT_MATERIAL = FOLDER + '/M_HexPlanetCaveWall'
+
+
+def build_cave_object_material(path=CAVE_OBJECT_MATERIAL, fade=False):
     library = unreal.MaterialEditingLibrary
     assets = unreal.EditorAssetLibrary
-    material = unreal.load_asset(CAVE_OBJECT_MATERIAL) if assets.does_asset_exist(CAVE_OBJECT_MATERIAL) else unreal.AssetToolsHelpers.get_asset_tools().create_asset(
-        CAVE_OBJECT_MATERIAL.split('/')[-1], FOLDER, unreal.Material, unreal.MaterialFactoryNew())
+    material = unreal.load_asset(path) if assets.does_asset_exist(path) else unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+        path.split('/')[-1], FOLDER, unreal.Material, unreal.MaterialFactoryNew())
     clear_expressions(material)
     material.set_editor_property('used_with_instanced_static_meshes', True)
+    if fade:
+        material.set_editor_property('blend_mode', unreal.BlendMode.BLEND_MASKED)
     vertex_color = library.create_material_expression(material, unreal.MaterialExpressionVertexColor, -1000, 100)
     connections = [('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1100, 0), ''),
         ('VertexRGB', vertex_color, ''), ('VertexAlpha', vertex_color, 'A'),
@@ -3353,8 +3389,10 @@ def build_cave_object_material():
     library.connect_material_property(custom, 'OutEmissive', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
     roughness = add_config_parameters(library, material, unreal.HexPlanetConfig, ['CaveObjectRoughness'], 1100)[0][1]
     library.connect_material_property(roughness, '', unreal.MaterialProperty.MP_ROUGHNESS)
+    if fade:
+        add_wall_fade(library, material, 1300)
     library.recompile_material(material)
-    assets.save_asset(CAVE_OBJECT_MATERIAL)
+    assets.save_asset(path)
     return material
 
 
@@ -3367,8 +3405,10 @@ def build_cave_object_material():
 # (CaveWallAltLayer, from CaveWallAltLayerName), and by the style of the wall in the third UV (FHexWallStyle) lighter and smoother as flowstone
 # (CaveWallFlow*) or showing its joints, layers and pale veins as broken rock (CaveWallVein*), with rusty stains down it (CaveWallStain*), the glowing
 # moss of the rims on its foot and the lowest part of its inner face (CaveWallMoss*, CaveMoss*; U of the second UV below 0 is the outer face, which
-# takes none) and, over lava (the fourth UV), its rock lit by it: the low parapet by CaveWallLavaGlow, the outer face as the cliffs of the void
-# (LavaCliff*) and the floor at its foot as the pool of light of the passage at that side (GlowPoolEdge of LavaPool); darker in its hollows (CaveWallCavityShade,
+# takes none) and, over lava (the fourth UV), its rock lit by it: the low parapet by CaveWallLavaGlow and the outer face as the cliffs of the void
+# (LavaCliff*); the pools of light of the floor, of what glows, of lava and of the exits, on the floor at its foot and up its inner face
+# (CaveWallGlow*, by the pixel of its sample in WallGlow, read in the vertex shader by the fifth UV, AHexPlanet::UpdateWallGlow); darker in its
+# hollows (CaveWallCavityShade,
 # by U of the first UV) and towards its crest (CaveWallTopShade from CaveWallTopStart, by the height share in V of the first UV), as the light of a
 # cave comes from its floor, and down its outer face below the floor (FloorRadius) as the cliffs darken into the abyss (AbyssFade*, AbyssDarkness), with Ambient
 # as the ground has. Its rounded foot and the floor before it (U of the second UV) are the floor of the passages, the terrain layer of their biome
@@ -3602,19 +3642,24 @@ float3 wallGlow = 0.0;
         wallGlow += CaveMossColor.rgb * CaveMossGlow * moss * speckle;
     }
 }
-// lava beyond lights the wall by its rock and not as a plate of light: the floor at its foot takes the pool of light the passage has at that side
-// (GlowPoolEdge of LavaPool in the color of the light of lava, as M_HexUnderground draws it), the low parapet is lit by CaveWallLavaGlow of its
-// rock, fading up it and darkening down the outer face, less on its inner face, which the lava does not see, and the outer face glows as the
-// cliffs of the void do, up to LavaCliffReach above the floor of the void (LevelHeight + DeepDepth below the passages)
+// lava beyond lights the wall by its rock and not as a plate of light: the low parapet is lit by CaveWallLavaGlow of its rock, fading up it and
+// darkening down the outer face, less on its inner face, which the lava does not see, and the outer face glows as the cliffs of the void do, up to
+// LavaCliffReach above the floor of the void (LevelHeight + DeepDepth below the passages); the floor at its foot takes the pool of light of the
+// passage there with the others below (a lava void glows in CellCanopy)
 [branch] if (lavaBeyond > 0.001)
 {
-    float3 lavaColor = LavaLightColor.rgb / max(max(LavaLightColor.r, LavaLightColor.g), max(LavaLightColor.b, 1e-3));
-    float3 floorPool = lavaColor * LavaPool * GlowPoolEdge * lavaBeyond;
-    wallGlow += (floorColor * GlowPoolStrength + GlowPoolLight) * floorPool * floorMix;
     float parapet = pow(saturate(1.0 - rise), 1.5) * lerp(0.4, 1.0, outer) * abyssKeep;
     float lavaBand = (1.0 - smoothstep(0.0, max(LavaCliffReach, 1.0), LevelHeight + DeepDepth - depthBelowFloor)) * lavaBeyond;
     wallGlow += LavaLightColor.rgb * (rockAlbedo * (CaveWallLavaGlow * lavaBeyond * parapet + LavaCliffLight * lavaBand) + LavaCliffGlow * lavaBand) * (1.0 - floorMix);
     albedo *= lerp((float3)1.0, LavaLightColor.rgb, lavaBand * LavaCliffTint * (1.0 - floorMix));
+}
+// the pool of light of the floor at the foot of the wall here (WallGlowPool, the pixel of its sample in WallGlowTexture, which the vertex shader
+// reads by the fifth UV), as the floor beside it has it: the foot and the floor before it are lit by their albedo and GlowPoolLight of it, as the
+// floor is, and the inner face by CaveWallGlowLight of it, fading out up to CaveWallGlowRise of the height of the wall, never the outer face
+[branch] if (WallGlowPool.r + WallGlowPool.g + WallGlowPool.b > 1e-4)
+{
+    float glowFace = (1.0 - smoothstep(0.0, max(CaveWallGlowRise, 1e-3), rise)) * (1.0 - outer) * CaveWallGlowLight;
+    wallGlow += WallGlowPool * (albedo * GlowPoolStrength * lerp(glowFace, 1.0, floorMix) + GlowPoolLight * floorMix);
 }
 OutRoughness = lerp(lerp(lerp(CaveWallRoughness, CaveWallFlowRoughness, flowstone), CaveWallRibRoughness, ribShare), Roughness, floorMix);
 OutEmissive = albedo * Ambient + wallGlow;
@@ -3653,7 +3698,15 @@ WALL_PARAMETERS = ['BiomeTileSize', 'TriplanarSharpness', 'BiomeNormalStrength',
                    'CaveMossSoftness', 'CaveMossPatchScale', 'CaveMossDetailFadeStart', 'CaveMossDetailFadeEnd', 'CaveMossSpeckleScale', 'CaveMossFarGlow',
                    'CaveMossSpeckle', 'CaveMossAlbedo', 'CaveMossAlbedoShare', 'CaveMossColor', 'CaveMossGlow', 'LavaLightColor', 'CaveFloorTint',
                    'CaveFloorBrightness', 'CaveFloorPools', 'CaveFloorPoolScale', 'FloorNoise', 'CaveFloorRiseShade', 'AbyssFadeStart', 'AbyssFadeEnd', 'AbyssDarkness', 'Ambient', 'LevelHeight', 'DeepDepth', 'LavaCliffReach',
-                   'LavaCliffLight', 'LavaCliffGlow', 'LavaCliffTint', 'LavaPool', 'GlowPoolEdge', 'GlowPoolStrength', 'GlowPoolLight'] + CAVE_FLOOR_PARAMETERS
+                   'LavaCliffLight', 'LavaCliffGlow', 'LavaCliffTint', 'GlowPoolStrength', 'GlowPoolLight', 'CaveWallGlowLight',
+                   'CaveWallGlowRise'] + CAVE_FLOOR_PARAMETERS
+# the pool of light of the floor at the sample of a vertex, read in the vertex shader by its fifth UV, the pixel of the sample (exact, as UVs of half
+# floats hold whole numbers up to 2048), so the pixels between two samples blend their pools, where a pixel shader would read the pixel of whatever
+# index lies between theirs, or at the end of a row one of another line
+WALL_GLOW_FETCH_CODE = r'''
+float3 pool = WallGlow.Load(int3((int)round(SampleTexel.x), (int)round(SampleTexel.y), 0)).rgb;
+return pool * pool;
+'''
 WALL_FADE_PARAMETERS = ['CaveWallFadeRadius', 'CaveWallFadeSoftness', 'CaveWallFadeDepth', 'CaveWallFadeKeep', 'WallLodDistance', 'WallLodBand']
 assert WALL_CODE.count(_CAVE_FLOOR_MARK) == 1
 WALL_CODE = WALL_CODE.replace(_CAVE_FLOOR_MARK, CAVE_FLOOR_CODE)
@@ -3683,12 +3736,20 @@ def build_wall_material():
     wall_uv2.set_editor_property('coordinate_index', 2)
     wall_uv3 = library.create_material_expression(material, unreal.MaterialExpressionTextureCoordinate, -1000, 180)
     wall_uv3.set_editor_property('coordinate_index', 3)
+    # the pool of light at the sample of each vertex, read in the vertex shader and blended between the samples
+    wall_uv4 = library.create_material_expression(material, unreal.MaterialExpressionTextureCoordinate, -1400, 1700)
+    wall_uv4.set_editor_property('coordinate_index', 4)
+    glow_fetch = add_custom(library, material, WALL_GLOW_FETCH_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, [('SampleTexel', wall_uv4, ''),
+        ('WallGlow', add_texture(library, material, DEFAULT_MARKS, 'WallGlow', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 1750), '')], 1700)
+    glow_interpolator = library.create_material_expression(material, unreal.MaterialExpressionVertexInterpolator, 0, 1700)
+    library.connect_material_expressions(glow_fetch, '', glow_interpolator, '')
     connections = [('WorldPos', position, ''), ('PosDdx', position_ddx, ''), ('PosDdy', position_ddy, ''),
         ('VertexNormal', library.create_material_expression(material, unreal.MaterialExpressionVertexNormalWS, -1000, 100), ''),
         ('WallUV', library.create_material_expression(material, unreal.MaterialExpressionTextureCoordinate, -1000, 150), ''),
         ('WallUV1', wall_uv1, ''),
         ('WallUV2', wall_uv2, ''),
         ('WallUV3', wall_uv3, ''),
+        ('WallGlowPool', glow_interpolator, ''),
         ('RockLayer', add_scalar(library, material, 'RockLayer', 7.0, 175), ''),
         ('FloorLayer', add_scalar(library, material, 'FloorLayer', 15.0, 185), ''),
         ('CaveWallAltLayer', add_scalar(library, material, 'CaveWallAltLayer', -1.0, 195), ''),
@@ -3714,25 +3775,30 @@ def build_wall_material():
     library.connect_material_property(custom, 'OutNormal', unreal.MaterialProperty.MP_NORMAL)
     library.connect_material_property(custom, 'OutRoughness', unreal.MaterialProperty.MP_ROUGHNESS)
 
-    fade_connections = [('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1100, 1000), ''),
-        ('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1100, 1050), ''),
-        ('WallFadeCenter', add_vector4(library, material, 'WallFadeCenter', unreal.LinearColor(0.0, 0.0, 0.0, 0.0), 1100), ''),
-        ('WallLodSide', add_scalar(library, material, 'WallLodSide', 0.0, 1120), '')
-        ] + add_config_parameters(library, material, unreal.HexPlanetConfig, WALL_FADE_PARAMETERS, 1150)
-    fade = add_custom(library, material, WALL_FADE_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT1, fade_connections, 1000)
-    whole = library.create_material_expression(material, unreal.MaterialExpressionConstant, -200, 1400)
-    whole.set_editor_property('r', 1.0)
-    # whole in ray tracing and in the shadow pass, where the camera of the view is not the camera
-    switch = library.create_material_expression(material, unreal.MaterialExpressionRayTracingQualitySwitch, 0, 1000)
-    library.connect_material_expressions(fade, '', switch, 'Normal')
-    library.connect_material_expressions(whole, '', switch, 'RayTraced')
-    shadow = library.create_material_expression(material, unreal.MaterialExpressionShadowReplace, 200, 1000)
-    library.connect_material_expressions(switch, '', shadow, 'Default')
-    library.connect_material_expressions(whole, '', shadow, 'Shadow')
-    library.connect_material_property(shadow, '', unreal.MaterialProperty.MP_OPACITY_MASK)
+    add_wall_fade(library, material, 1000)
     library.recompile_material(material)
     assets.save_asset(WALL_MATERIAL)
     return material
+
+
+def add_wall_fade(library, material, y):
+    """The mask by which a wall, and what stands on it, dissolves in front of the point under the cursor (WALL_FADE_CODE), whole in ray tracing and
+    in the shadow pass, where the camera of the view is not the camera, so its shadow does not flicker"""
+    fade_connections = [('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1100, y), ''),
+        ('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1100, y + 50), ''),
+        ('WallFadeCenter', add_vector4(library, material, 'WallFadeCenter', unreal.LinearColor(0.0, 0.0, 0.0, 0.0), y + 100), ''),
+        ('WallLodSide', add_scalar(library, material, 'WallLodSide', 0.0, y + 120), '')
+        ] + add_config_parameters(library, material, unreal.HexPlanetConfig, WALL_FADE_PARAMETERS, y + 150)
+    fade = add_custom(library, material, WALL_FADE_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT1, fade_connections, y)
+    whole = library.create_material_expression(material, unreal.MaterialExpressionConstant, -200, y + 400)
+    whole.set_editor_property('r', 1.0)
+    switch = library.create_material_expression(material, unreal.MaterialExpressionRayTracingQualitySwitch, 0, y)
+    library.connect_material_expressions(fade, '', switch, 'Normal')
+    library.connect_material_expressions(whole, '', switch, 'RayTraced')
+    shadow = library.create_material_expression(material, unreal.MaterialExpressionShadowReplace, 200, y)
+    library.connect_material_expressions(switch, '', shadow, 'Default')
+    library.connect_material_expressions(whole, '', shadow, 'Shadow')
+    library.connect_material_property(shadow, '', unreal.MaterialProperty.MP_OPACITY_MASK)
 
 
 # The motes and spores of the underground (UHexPlanetMotes, bMotes of DA_HexUnderground), quads of a plane, additive and unlit. Each vertex is moved
@@ -3792,6 +3858,16 @@ float3 offset = moteCenter + (ViewRight * (UV.x - 0.5) + ViewUp * (0.5 - UV.y)) 
 return offset * min(1.0, MoteWpoBound / max(length(offset), 1e-3));
 '''
 MOTE_CODE = MOTE_COMMON_CODE + r'''
+// away from the light of the hero (HeroLight, where it stands and how far it reaches in alpha, 0 without it) a mote keeps MoteDarkShare of its
+// light, as dust shows in the light, and in it it takes MoteLightTint of the way to its color; a spore glows by itself
+if (MoteAnchored < 0.5 && HeroLight.w > 0.0)
+{
+    float toLight = distance(moteCenter, HeroLight.xyz) / HeroLight.w;
+    float inLight = saturate(1.0 - toLight * toLight);
+    inLight *= inLight;
+    moteColor *= lerp(MoteDarkShare, 1.0, inLight);
+    moteColor = lerp(moteColor, HeroLightColor.rgb * max(max(moteColor.r, moteColor.g), moteColor.b), MoteLightTint * inLight);
+}
 float disc = saturate(1.0 - length(UV - 0.5) * 2.0);
 float twinkle = 1.0 - MoteTwinkle + MoteTwinkle * (0.5 + 0.5 * sin(Time * MoteWobbleSpeed * 6.2831853 * (1.0 + moteSeed) + moteSeed * 17.0));
 float depth = max(LevelHeight - (length(moteCenter) - PlanetRadius), 0.0);
@@ -3802,7 +3878,7 @@ return moteColor * disc * disc * twinkle * moteFade * deep * moteNear * moteFar;
 '''
 MOTE_PARAMETERS = ['LevelHeight', 'MoteBox', 'MoteHeightBelow', 'MoteHeightAbove', 'MoteSize', 'MoteMinPixels', 'MoteColor', 'MoteBrightness', 'MoteDrift',
     'MoteWobble', 'MoteWobbleSpeed', 'MoteTwinkle', 'MoteEdgeFade', 'MoteNearFade', 'MoteFadeStart', 'MoteFadeEnd', 'AbyssDepthHalf', 'SporeSize',
-    'SporeMinPixels', 'SporeBrightness', 'SporeRise', 'SporeLife', 'SporeSwirl']
+    'SporeMinPixels', 'SporeBrightness', 'SporeRise', 'SporeLife', 'SporeSwirl', 'MoteDarkShare', 'MoteLightTint', 'HeroLightColor']
 for _name in MOTE_PARAMETERS:
     assert _name in MOTE_CODE or _name in MOTE_OFFSET_CODE, _name
 
@@ -3878,6 +3954,7 @@ def build_mote_material():
             ('MoteAnchored', add_scalar(library, material, 'MoteAnchored', 0.0, y + 700), ''),
             ('MoteWpoBound', add_scalar(library, material, 'MoteWpoBound', bound, y + 750), ''),
             ('PlanetRadius', add_scalar(library, material, 'PlanetRadius', 11503.0, y + 800), ''),
+            ('HeroLight', add_vector4(library, material, 'HeroLight', unreal.LinearColor(0.0, 0.0, 0.0, 0.0), y + 825), ''),
             ] + add_config_parameters(library, material, unreal.HexPlanetConfig, MOTE_PARAMETERS, y + 850)
 
     custom = add_custom(library, material, MOTE_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, inputs(0, True), 0)
@@ -3896,6 +3973,7 @@ def build_underground(markers=True):
     if markers:
         build_marker_materials()
     build_cave_object_material()
+    build_cave_object_material(CAVE_WALL_OBJECT_MATERIAL, True)
     build_wall_material()
     build_mote_material()
 

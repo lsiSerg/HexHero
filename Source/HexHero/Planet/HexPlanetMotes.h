@@ -41,6 +41,10 @@ public:
 	/** Shows the motes and spores (hex.PlanetMotes) or hides them */
 	void SetShown(bool bInShown);
 
+	/** Gives the motes the light of the hero, where it stands and how far it reaches in alpha (0 without it), in which they show as dust does
+	 *  (MoteDarkShare, MoteLightTint) */
+	void SetHeroLight(const FLinearColor& Sphere);
+
 	/** Returns how many spores stand now, for the log */
 	int32 GetSporeCount() const;
 

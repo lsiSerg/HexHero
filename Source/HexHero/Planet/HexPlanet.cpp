@@ -6,6 +6,7 @@
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Engine/DirectionalLight.h"
 #include "Engine/GameViewportClient.h"
+#include "Components/PointLightComponent.h"
 #include "Components/PostProcessComponent.h"
 #include "Components/SkyLightComponent.h"
 #include "Framework/Application/SlateApplication.h"
@@ -74,6 +75,9 @@ namespace
 
 	TAutoConsoleVariable<bool> CVarHexPlanetMotes(TEXT("hex.PlanetMotes"), true,
 		TEXT("Draws the motes drifting over the passages of the underground and the spores rising from its mushrooms (1), or hides them (0), to see what they cost."));
+
+	TAutoConsoleVariable<int32> CVarHexPlanetHeroLight(TEXT("hex.PlanetHeroLight"), 1,
+		TEXT("The light around the hero underground, for now over the focus of the camera: 1 as DA_HexUnderground has it, 2 without its shadows, 0 none, to see what it costs and what lies in the dark."));
 
 	TAutoConsoleVariable<bool> CVarHexPlanetStreamPieces(TEXT("hex.PlanetStreamPieces"), true,
 		TEXT("Keeps the pieces of only the chunks of the planet near the camera on the GPU (1), building them again as it comes near, or of every chunk (0), to compare."));
@@ -1254,6 +1258,8 @@ void AHexPlanet::SpawnUnderground()
 	Underground->KitConfig = KitConfig;
 	Underground->WireframeMaterialAsset = WireframeMaterialAsset;
 	Underground->FogMaterialAsset = FogMaterialAsset;
+	Underground->WallMaterialAsset = WallMaterialAsset;
+	Underground->WallObjectMaterialAsset = WallObjectMaterialAsset;
 	Underground->ParameterCollection = ParameterCollection;
 	// its own material once the script makes it, else the one of the surface, so it shows before the look of the underground exists
 	Underground->Material = Material;
@@ -1474,6 +1480,10 @@ void AHexPlanet::BuildPlanet()
 		Motes->SetupAttachment(Surface);
 		Motes->RegisterComponent();
 		Motes->Init(this, Settings);
+	}
+	if (Settings->bHeroLight && !HeroLight)
+	{
+		CreateHeroLight();
 	}
 
 	const FString Name = (PlanetFolder.IsEmpty() ? FString(TEXT("(not saved)")) : PlanetFolder) + (bSurface ? TEXT("") : TEXT(" underground"));
@@ -2372,6 +2382,18 @@ void AHexPlanet::Tick(float DeltaTime)
 		Motes->Update(PlayerController, DeltaTime);
 	}
 
+	// the light of the hero, for now over the focus of the camera where it stands in this frame (the view target, as the camera manager has the
+	// frame before, so the light would trail the camera), and the fog of the underground clears around it
+	if (const AActor* ViewTarget = PlayerController ? PlayerController->GetViewTarget() : nullptr)
+	{
+		HeroFocus = FindViewFocus(ViewTarget->GetActorLocation(), ViewTarget->GetActorForwardVector());
+		bHasHeroFocus = true;
+	}
+	if (bHasHeroFocus && Settings->bHeroLight)
+	{
+		UpdateHeroLight(HeroFocus);
+	}
+
 	// the dense middle of the cap lies under the camera, where the water is seen closest
 	if (const AActor* ViewTarget = PlayerController && Settings->bSea ? PlayerController->GetViewTarget() : nullptr)
 	{
@@ -3258,6 +3280,10 @@ void AHexPlanet::SetBiomeLayers(UMaterialInstanceDynamic* Target) const
 	if (CellCanopyTexture)
 	{
 		Target->SetTextureParameterValue(TEXT("CellCanopy"), CellCanopyTexture);
+	}
+	if (CellGlowNearTexture)
+	{
+		Target->SetTextureParameterValue(TEXT("CellGlowNear"), CellGlowNearTexture);
 	}
 	if (Rivers && Rivers->GetTexture() && Rivers->GetSegmentTexture())
 	{
@@ -4368,9 +4394,9 @@ void AHexPlanet::UpdateCanopy()
 
 	if (PlanetLayer == EHexPlanetLayer::Underground)
 	{
-		// the underground has no canopy, so the texture holds the pool of light of each cell (GLOW_POOL_CODE of M_HexUnderground): the glow color of
-		// what stands on it and its strength (UHexPlanetObjects::GetCellGlow), or of a lava void in the color of its light, and a cell that does not
-		// glow takes the mean of its glowing neighbors times their strength, which spills over its sides towards them
+		// the underground has no canopy, so the texture holds the pool of light of each cell (the glow pools of M_HexUnderground): the glow color
+		// of what stands on it and its strength (UHexPlanetObjects::GetCellGlow), or of a lava void in the color of its light, or of an exit, and a
+		// cell that does not glow takes the mean of the colors of its glowing neighbors by their strengths, whose light falls into it
 		const FLinearColor Lava = Settings->LavaLightColor / FMath::Max(Settings->LavaLightColor.GetMax(), 1e-3f);
 		TArray<FLinearColor> Glow;
 		Glow.Init(FLinearColor::Transparent, Cells.Num());
@@ -4389,8 +4415,35 @@ void AHexPlanet::UpdateCanopy()
 				Glow[Cell] = FLinearColor(Color.R, Color.G, Color.B, FMath::Clamp(Strength, 1.0f / 255.0f, 1.0f));
 			}
 		}
-		// the pool of a glowing cell runs on into its glowing neighbors without falling off (GLOW_POOL_CODE), so its strength and color are blended
-		// with theirs by GlowPoolBlend, and a patch of covers of several densities or kinds is one pool without a step at each side
+		// the exits that can be used are lit as what glows is, so in the dark an exit shows its hall: its cell by ExitPoolStrength and the passages
+		// around it by ExitPoolRingShare of that, unless what stands there glows more, a share of the way from ExitPoolColor to the color of its
+		// network, which the networks of the surface give, as the markers and the editor take them
+		const AHexPlanet* SurfacePlanet = GetLayerPlanet(EHexPlanetLayer::Surface);
+		const UHexPlanetConfig* Colors = SurfacePlanet && SurfacePlanet->Settings ? SurfacePlanet->Settings.Get() : Settings.Get();
+		const auto LightExit = [&](int32 Cell, const FLinearColor& Color, float Strength)
+		{
+			if (Glow.IsValidIndex(Cell) && Levels.IsValidIndex(Cell) && HexPlanetUnderground::IsPassage(Levels[Cell]) && Strength > Glow[Cell].A)
+			{
+				Glow[Cell] = FLinearColor(Color.R, Color.G, Color.B, FMath::Clamp(Strength, 1.0f / 255.0f, 1.0f));
+			}
+		};
+		const TArray<FHexEntrance>& Exits = GetEntrances();
+		for (int32 Index = 0; Index < Exits.Num() && Settings->ExitPoolStrength > 0.0f; ++Index)
+		{
+			const int32 Cell = Exits[Index].Cell;
+			if (!Cells.IsValidIndex(Cell) || GetEntranceProblem(Index) != HexPlanetUnderground::EEntranceProblem::None)
+			{
+				continue;
+			}
+			const FLinearColor Color = FMath::Lerp(Settings->ExitPoolColor, Colors->GetNetworkColor(Exits[Index].Network), Settings->ExitPoolNetworkShare);
+			LightExit(Cell, Color, Settings->ExitPoolStrength);
+			for (const int32 Neighbor : Cells[Cell].Neighbors)
+			{
+				LightExit(Neighbor, Color, Settings->ExitPoolStrength * Settings->ExitPoolRingShare);
+			}
+		}
+		// the strength and color of a glowing cell are blended with those of its glowing neighbors by GlowPoolBlend, so a patch of covers of several
+		// densities or kinds is lit about evenly
 		TArray<FLinearColor> Pools = Glow;
 		const float Blend = FMath::Clamp(Settings->GlowPoolBlend, 0.0f, 1.0f);
 		for (int32 Cell = 0; Cell < Cells.Num() && Blend > 0.0f; ++Cell)
@@ -4416,27 +4469,41 @@ void AHexPlanet::UpdateCanopy()
 					FMath::Lerp(Own.B, (Own.B * Own.A + Sum.B) / Total, Blend), FMath::Lerp(Own.A, Total / float(1 + Count), Blend));
 			}
 		}
+		// the strength of each glowing cell in fifteenths, at least one, which the cell holds in the alpha of CellCanopy and its neighbors in
+		// CellGlowNear, so both cells of a side add up the same light there
+		TArray<uint8> Steps;
+		Steps.Init(0, Cells.Num());
 		for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
 		{
-			const FLinearColor& Own = Pools[Cell];
-			if (Own.A > 0.0f)
-			{
-				CanopyPixels[Cell] = FColor(Encode(Own.R), Encode(Own.G), Encode(Own.B), uint8(FMath::Clamp(FMath::RoundToInt32(Own.A * 255.0f), 1, 255)));
-				continue;
-			}
+			Steps[Cell] = Pools[Cell].A > 0.0f ? uint8(FMath::Clamp(FMath::RoundToInt32(Pools[Cell].A * float(GlowStrengthSteps)), 1, GlowStrengthSteps)) : uint8(0);
+		}
+		// kept as they are encoded, for the walls along the passages (UpdateWallGlow): a glowing cell its color and strength, one beside glowing
+		// cells the mean of their colors by their strengths, whose light the material adds up by their strengths
+		CellGlowPools.Init(FLinearColor::Transparent, Cells.Num());
+		GlowNearPixels.Init(FColor(0, 0, 0, 0), CanopyPixels.Num());
+		for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+		{
+			uint32 Near = 0;
 			FLinearColor Sum = FLinearColor::Transparent;
-			int32 Count = 0;
-			for (const int32 Neighbor : Cells[Cell].Neighbors)
+			float Weight = 0.0f;
+			for (int32 Index = 0; Index < Cells[Cell].Neighbors.Num() && Index < 6; ++Index)
 			{
-				if (Pools[Neighbor].A > 0.0f)
-				{
-					Sum += Pools[Neighbor] * Pools[Neighbor].A;
-					++Count;
-				}
+				const int32 Neighbor = Cells[Cell].Neighbors[Index];
+				Near |= uint32(Steps[Neighbor]) << (4 * Index);
+				Sum += Pools[Neighbor] * (float(Steps[Neighbor]) / GlowStrengthSteps);
+				Weight += float(Steps[Neighbor]) / GlowStrengthSteps;
 			}
-			if (Count > 0)
+			GlowNearPixels[Cell] = FColor(uint8(Near & 255u), uint8((Near >> 8) & 255u), uint8((Near >> 16) & 255u), 0);
+			const FLinearColor& Own = Pools[Cell];
+			if (Steps[Cell] > 0)
 			{
-				CanopyPixels[Cell] = FColor(Encode(Sum.R / Count), Encode(Sum.G / Count), Encode(Sum.B / Count), 0);
+				CanopyPixels[Cell] = FColor(Encode(Own.R), Encode(Own.G), Encode(Own.B), uint8(Steps[Cell] * (255 / GlowStrengthSteps)));
+				CellGlowPools[Cell] = FLinearColor(Own.R, Own.G, Own.B, float(Steps[Cell]) / GlowStrengthSteps);
+			}
+			else if (Weight > 0.0f)
+			{
+				CanopyPixels[Cell] = FColor(Encode(Sum.R / Weight), Encode(Sum.G / Weight), Encode(Sum.B / Weight), 0);
+				CellGlowPools[Cell] = FLinearColor(Sum.R / Weight, Sum.G / Weight, Sum.B / Weight, 0.0f);
 			}
 		}
 		// in bits 0 to 5 which neighbors glow, and in bit 6 whether the cell holds objects or is an exit, where the material lays no puddle
@@ -4505,6 +4572,114 @@ void AHexPlanet::UpdateCanopy()
 		UploadPixels(CellCanopyTexture, CanopyPixels, HexPlanetSurface::MarkColumns);
 	}
 	UploadBiomePixels();
+	if (PlanetLayer == EHexPlanetLayer::Underground)
+	{
+		if (!CellGlowNearTexture)
+		{
+			CellGlowNearTexture = UTexture2D::CreateTransient(HexPlanetSurface::MarkColumns, Rows, PF_B8G8R8A8,
+				MakeUniqueObjectName(GetTransientPackage(), UTexture2D::StaticClass(), TEXT("PlanetCellGlowNear")));
+			CellGlowNearTexture->SRGB = false;
+			CellGlowNearTexture->Filter = TF_Nearest;
+			CellGlowNearTexture->NeverStream = true;
+			FTexture2DMipMap& Mip = CellGlowNearTexture->GetPlatformData()->Mips[0];
+			FMemory::Memcpy(Mip.BulkData.Lock(LOCK_READ_WRITE), GlowNearPixels.GetData(), GlowNearPixels.Num() * GlowNearPixels.GetTypeSize());
+			Mip.BulkData.Unlock();
+			CellGlowNearTexture->UpdateResource();
+		}
+		else
+		{
+			UploadPixels(CellGlowNearTexture, GlowNearPixels, HexPlanetSurface::MarkColumns);
+		}
+		// the walls along the passages take the pools of the floor at their foot
+		UpdateWallGlow();
+	}
+}
+
+void AHexPlanet::UpdateWallGlow()
+{
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+	if (!Settings || !Settings->bWalls || CellGlowPools.Num() != Cells.Num())
+	{
+		return;
+	}
+	const HexPlanetWalls::FWalls& Shown = *Walls;
+	const int32 Rows = FMath::Max(FMath::DivideAndRoundUp(Shown.NumSamples, HexPlanetWalls::SampleColumns), 1);
+	WallGlowPixels.Init(FColor(0, 0, 0, 0), HexPlanetWalls::SampleColumns * Rows);
+
+	// the pool of light of the floor of the passage of each sample where it stands, as the glow pools of M_HexUnderground draw it there, without
+	// the noise that moves its edge: a smooth bump of GlowPoolReach cell radii around the middle of the cell if it glows and of each glowing
+	// neighbor, each times its strength, adding up to at most 1, in the color of the cell, or the mean of its glowing neighbors where it does not
+	// glow; the distances on the sphere of the floor in cell radii (HexRadius), as the fourth UV of the floor measures them in a regular cell
+	const double Reach = FMath::Max(double(Settings->GlowPoolReach), 0.5) * FMath::Max(double(Settings->HexRadius), 1.0);
+	const double FloorRadius = Radius + Settings->LevelHeight;
+	const auto Bump = [Reach, FloorRadius](const FVector3d& Point, const FVector3d& Middle)
+	{
+		const double T = FMath::Min(FMath::Acos(FMath::Clamp(FVector3d::DotProduct(Point, Middle), -1.0, 1.0)) * FloorRadius / Reach, 1.0);
+		return float(FMath::Square(1.0 - T * T));
+	};
+	const auto Encode = [](float Value) { return uint8(FMath::RoundToInt32(FMath::Sqrt(FMath::Clamp(Value, 0.0f, 1.0f)) * 255.0f)); };
+	int32 Lit = 0;
+	for (int32 Line = 0; Line < Shown.Lines.Num(); ++Line)
+	{
+		const TArray<HexPlanetWalls::FSample>& Samples = Shown.Lines[Line];
+		for (int32 Index = 0; Index < Samples.Num(); ++Index)
+		{
+			const HexPlanetWalls::FSample& Sample = Samples[Index];
+			const int32 Cell = Sample.Cell;
+			if (!CellGlowPools.IsValidIndex(Cell))
+			{
+				continue;
+			}
+			const FLinearColor& Own = CellGlowPools[Cell];
+			const bool bGlows = Own.A > 0.0f;
+			if (!bGlows && Own.R + Own.G + Own.B <= 0.0f)
+			{
+				continue;
+			}
+			const FHexSphereCell& Hex = Cells[Cell];
+			const FVector3d Point = Sample.Position.GetSafeNormal();
+			float Sum = bGlows ? Own.A * Bump(Point, Hex.Center) : 0.0f;
+			for (const int32 Neighbor : Hex.Neighbors)
+			{
+				const float Strength = CellGlowPools[Neighbor].A;
+				Sum += Strength > 0.0f ? Strength * Bump(Point, Cells[Neighbor].Center) : 0.0f;
+			}
+			const float Shape = FMath::Min(Sum, 1.0f);
+			if (Shape <= 0.0f)
+			{
+				continue;
+			}
+			const int32 Pixel = Shown.GetIndex(FIntPoint(Line, Index));
+			WallGlowPixels[Pixel] = FColor(Encode(Own.R * Shape), Encode(Own.G * Shape), Encode(Own.B * Shape), 255);
+			++Lit;
+		}
+	}
+
+	// a new texture when the walls outgrew it, as a texture keeps its size
+	if (!WallGlowTexture || WallGlowTexture->GetSizeY() != Rows)
+	{
+		WallGlowTexture = UTexture2D::CreateTransient(HexPlanetWalls::SampleColumns, Rows, PF_B8G8R8A8,
+			MakeUniqueObjectName(GetTransientPackage(), UTexture2D::StaticClass(), TEXT("PlanetWallGlow")));
+		WallGlowTexture->SRGB = false;
+		WallGlowTexture->Filter = TF_Nearest;
+		WallGlowTexture->NeverStream = true;
+		FTexture2DMipMap& Mip = WallGlowTexture->GetPlatformData()->Mips[0];
+		FMemory::Memcpy(Mip.BulkData.Lock(LOCK_READ_WRITE), WallGlowPixels.GetData(), WallGlowPixels.Num() * WallGlowPixels.GetTypeSize());
+		Mip.BulkData.Unlock();
+		WallGlowTexture->UpdateResource();
+		for (UMaterialInstanceDynamic* Instance : {WallMaterial.Get(), WallNearMaterial.Get(), WallFarMaterial.Get()})
+		{
+			if (Instance)
+			{
+				Instance->SetTextureParameterValue(TEXT("WallGlow"), WallGlowTexture);
+			}
+		}
+	}
+	else
+	{
+		UploadPixels(WallGlowTexture, WallGlowPixels, HexPlanetWalls::SampleColumns);
+	}
+	UE_LOG(LogHexHero, Verbose, TEXT("Planet: %d of %d samples of the walls take a pool of light"), Lit, Shown.NumSamples);
 }
 
 void AHexPlanet::UpdateBiomePixels(TConstArrayView<int32> ChangedCells)
@@ -4898,8 +5073,8 @@ void AHexPlanet::LogMemory(const FString& FrameTimes, bool bProcess)
 	UE_LOG(LogHexHero, Log, TEXT("Planet memory: pieces 0.0 MB on the CPU in the components, 0.0 MB on the CPU in their scene proxies, %.1f MB of vertices and indices on the GPU; coarse meshes 0.0, 0.0 and %.1f MB; copies of the wireframe %.1f MB on the CPU"),
 		Pieces.GpuBytes / MB, Coarse.GpuBytes / MB, WireBytes / MB);
 
-	// the walls: coarse in every chunk, whole near the camera, about 24 bytes a triangle on the GPU (a vertex of 36 bytes to two triangles, and
-	// indices of 16 bits)
+	// the walls: coarse in every chunk, whole near the camera, about 26 bytes a triangle on the GPU (a vertex of 40 bytes, with the fifth UV, to two
+	// triangles, and indices of 16 bits)
 	int64 WallWholeChunks = 0;
 	int64 WallWholeTotal = 0;
 	int64 WallCoarseTotal = 0;
@@ -4912,7 +5087,7 @@ void AHexPlanet::LogMemory(const FString& FrameTimes, bool bProcess)
 	if (WallCoarseTotal > 0)
 	{
 		UE_LOG(LogHexHero, Log, TEXT("Planet memory: walls whole in %lld chunks near the camera, %lld triangles, about %.1f MB on the GPU; coarse in every chunk, %lld triangles, about %.1f MB"),
-			WallWholeChunks, WallWholeTotal, WallWholeTotal * 24.0 / MB, WallCoarseTotal, WallCoarseTotal * 24.0 / MB);
+			WallWholeChunks, WallWholeTotal, WallWholeTotal * 26.0 / MB, WallCoarseTotal, WallCoarseTotal * 26.0 / MB);
 	}
 
 	if (!bProcess)
@@ -5865,6 +6040,91 @@ void AHexPlanet::SetFadeFocus(bool bOnPlanet, const FVector& Point)
 			Instance->SetVectorParameterValue(TEXT("WallFadeCenter"), Center);
 		}
 	}
+	// and what stands on the walls dissolves with them (M_HexPlanetCaveWall)
+	if (Objects)
+	{
+		Objects->SetFadeFocus(Center);
+	}
+}
+
+UMaterialInterface* AHexPlanet::GetWallObjectMaterial()
+{
+	// once the script has made it, so a planet without it draws what stands on the walls in the material of its set
+	if (!LoadedWallObjectMaterial && !WallObjectMaterialAsset.IsNull() && FPackageName::DoesPackageExist(WallObjectMaterialAsset.ToSoftObjectPath().GetLongPackageName()))
+	{
+		LoadedWallObjectMaterial = WallObjectMaterialAsset.LoadSynchronous();
+	}
+	return LoadedWallObjectMaterial;
+}
+
+FVector3d AHexPlanet::FindViewFocus(const FVector3d& CameraLocation, const FVector3d& CameraForward) const
+{
+	const double ShellRadius = Radius + (Settings ? Settings->LevelHeight : 0.0);
+	const double Along = FVector3d::DotProduct(CameraLocation, CameraForward);
+	const double Disc = Along * Along - (CameraLocation.SizeSquared() - ShellRadius * ShellRadius);
+	if (Disc > 0.0 && -Along - FMath::Sqrt(Disc) > 0.0)
+	{
+		return CameraLocation + CameraForward * (-Along - FMath::Sqrt(Disc));
+	}
+	return CameraLocation.GetSafeNormal() * ShellRadius;
+}
+
+void AHexPlanet::CreateHeroLight()
+{
+	HeroLight = NewObject<UPointLightComponent>(this, TEXT("HeroLight"));
+	HeroLight->SetupAttachment(Surface);
+	HeroLight->SetMobility(EComponentMobility::Movable);
+	// a pool of light that fades out at its reach by HeroLightFalloff, as one day it shows how far the hero can go, and not the falloff of a lamp
+	// by the square of the distance, bright under it and dim soon after
+	HeroLight->bUseInverseSquaredFalloff = false;
+	HeroLight->SetLightFalloffExponent(Settings->HeroLightFalloff);
+	HeroLight->SetIntensityUnits(ELightUnits::Unitless);
+	HeroLight->SetIntensity(Settings->HeroLightIntensity);
+	HeroLight->SetLightColor(Settings->HeroLightColor);
+	// it fades out at its reach on the floor below it, HeroLightHeight under the light
+	const double Reach = Settings->GetHeroLightReach();
+	HeroLight->SetAttenuationRadius(float(FMath::Sqrt(Reach * Reach + FMath::Square(double(Settings->HeroLightHeight)))));
+	HeroLight->SetSourceRadius(Settings->HeroLightSourceRadius);
+	HeroLight->SetCastShadows(Settings->bHeroLightShadows);
+	HeroLight->bCastVolumetricShadow = false;
+	HeroLight->RegisterComponent();
+	UE_LOG(LogHexHero, Log, TEXT("Planet: the light of the hero on the %s reaches %.0f on the floor from %.0f above it, shadows %s"), GetPlanetLayerName(PlanetLayer),
+		Reach, Settings->HeroLightHeight, Settings->bHeroLightShadows ? TEXT("on") : TEXT("off"));
+}
+
+void AHexPlanet::UpdateHeroLight(const FVector3d& Focus)
+{
+	const FVector3d Up = Focus.GetSafeNormal();
+	const FVector3d Light = Focus + Up * Settings->HeroLightHeight;
+	// hex.PlanetHeroLight: 0 none, 2 without shadows
+	const int32 Mode = CVarHexPlanetHeroLight.GetValueOnGameThread();
+	const bool bLit = HeroLight && Mode != 0;
+	if (HeroLight)
+	{
+		if (HeroLight->IsVisible() != bLit)
+		{
+			HeroLight->SetVisibility(bLit);
+		}
+		const bool bShadows = Mode == 1 && Settings->bHeroLightShadows;
+		if (HeroLight->CastShadows != bShadows)
+		{
+			HeroLight->SetCastShadows(bShadows);
+		}
+	}
+	// a light that stands still keeps the shadows cached
+	if (HeroLight && !HeroLight->GetComponentLocation().Equals(FVector(Light), 0.01))
+	{
+		HeroLight->SetWorldLocation(FVector(Light));
+	}
+	// the motes show in it as dust does, and the fog clears around it
+	if (Motes)
+	{
+		Motes->SetHeroLight(FLinearColor(float(Light.X), float(Light.Y), float(Light.Z), bLit ? HeroLight->AttenuationRadius : 0.0f));
+	}
+	if (HazeMaterial && Settings->bFog && !Settings->bHaze)
+	{
+		HazeMaterial->SetVectorParameterValue(TEXT("FogFocus"), FLinearColor(float(Focus.X), float(Focus.Y), float(Focus.Z), bLit ? float(Settings->GetHeroLightReach()) : 0.0f));
+	}
 }
 
 namespace
@@ -5879,6 +6139,7 @@ namespace
 		Source.UVs[1] = Mesh.UV1s;
 		Source.UVs[2] = Mesh.UV2s;
 		Source.UVs[3] = Mesh.UV3s;
+		Source.UVs[4] = Mesh.UV4s;
 		Source.Triangles = Mesh.Triangles;
 		return UHexPlanetMeshComponent::PrepareSection(Source, FName(*FString::Printf(TEXT("%s%d"), Name, Chunk)));
 	}
@@ -5918,6 +6179,11 @@ void AHexPlanet::UpdateWalls(TArray<int32>& Chunks)
 				}
 				Instance->SetScalarParameterValue(TEXT("FloorRadius"), float(Radius + Settings->LevelHeight));
 				Instance->SetScalarParameterValue(TEXT("WallLodSide"), Side);
+				// the pools of light at their foot, which UpdateWallGlow gives again when it makes the texture anew
+				if (WallGlowTexture)
+				{
+					Instance->SetTextureParameterValue(TEXT("WallGlow"), WallGlowTexture);
+				}
 				return Instance;
 			};
 			WallMaterial = Make(0.0f);
@@ -6087,9 +6353,12 @@ void AHexPlanet::UpdateWalls(TArray<int32>& Chunks)
 	{
 		Samples += Line.Num();
 	}
-	UE_LOG(LogHexHero, Log, TEXT("Planet: walls of the %s: %d lines, %d samples, %d chunks built again, %lld coarse triangles and %lld whole ones near the camera, lines in %.1f ms, meshes in %.1f ms"),
+	// the pools of light of the floor at the foot of the new samples
+	const double GlowStart = FPlatformTime::Seconds();
+	UpdateWallGlow();
+	UE_LOG(LogHexHero, Log, TEXT("Planet: walls of the %s: %d lines, %d samples, %d chunks built again, %lld coarse triangles and %lld whole ones near the camera, lines in %.1f ms, meshes in %.1f ms, pools of light in %.1f ms"),
 		GetPlanetLayerName(PlanetLayer), Walls->Lines.Num(), Samples, Changed.Num(), CoarseTotal, WholeTotal, (LineTime - StartTime) * 1000.0,
-		(FPlatformTime::Seconds() - LineTime) * 1000.0);
+		(GlowStart - LineTime) * 1000.0, (FPlatformTime::Seconds() - GlowStart) * 1000.0);
 }
 
 void AHexPlanet::UpdateWallLod(const FVector& CameraLocation)

@@ -111,6 +111,15 @@ void UHexPlanetMotes::SetShown(bool bInShown)
 	bShown = bInShown;
 }
 
+void UHexPlanetMotes::SetHeroLight(const FLinearColor& Sphere)
+{
+	// the spores glow by themselves
+	if (MoteMaterial)
+	{
+		MoteMaterial->SetVectorParameterValue(TEXT("HeroLight"), Sphere);
+	}
+}
+
 int32 UHexPlanetMotes::GetSporeCount() const
 {
 	return Spores ? Spores->GetInstanceCount() : 0;
@@ -126,15 +135,7 @@ void UHexPlanetMotes::Update(const APlayerController* PlayerController, float De
 
 	// the point the view through the middle of the screen meets the shell of the tops of the passages, else the one under the camera
 	const FVector3d Camera = CameraManager->GetCameraLocation();
-	const FVector3d Forward = CameraManager->GetCameraRotation().Vector();
-	const double ShellRadius = Planet->GetRadius() + Settings->LevelHeight;
-	const double Along = FVector3d::DotProduct(Camera, Forward);
-	const double Disc = Along * Along - (Camera.SizeSquared() - ShellRadius * ShellRadius);
-	FVector3d Origin = Camera.GetSafeNormal() * ShellRadius;
-	if (Disc > 0.0 && -Along - FMath::Sqrt(Disc) > 0.0)
-	{
-		Origin = Camera + Forward * (-Along - FMath::Sqrt(Disc));
-	}
+	const FVector3d Origin = Planet->FindViewFocus(Camera, CameraManager->GetCameraRotation().Vector());
 
 	// a close-up effect: far from the place the camera looks at it sees none, and pays nothing
 	const bool bNear = bShown && FVector3d::Distance(Camera, Origin) < Settings->MoteFadeEnd;
