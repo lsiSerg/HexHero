@@ -3270,6 +3270,14 @@ void AHexPlanet::SetBiomeLayers(UMaterialInstanceDynamic* Target) const
 	}
 	// where walls stand on the lips, the moss of the rims grows on their foot (M_HexUndergroundWall) and not on the floor beside them
 	Target->SetScalarParameterValue(TEXT("WallsShown"), Settings && Settings->bWalls ? 1.0f : 0.0f);
+	// the layers of the patches of another ground and of the old flagstones on the floor of the passages, -1 without them, which the foot of the
+	// walls takes too (UpdateWalls); a material without them, as the surface's, ignores them
+	if (Settings)
+	{
+		const UHexTerrainLayersConfig* TerrainLayers = GetDefault<UHexMapSettings>()->LoadTerrainLayers();
+		Target->SetScalarParameterValue(TEXT("CaveFloorAltLayer"), float(TerrainLayers ? TerrainLayers->FindLayer(Settings->CaveFloorAltLayerName) : INDEX_NONE));
+		Target->SetScalarParameterValue(TEXT("CaveSlabLayer"), float(TerrainLayers ? TerrainLayers->FindLayer(Settings->CaveSlabLayerName) : INDEX_NONE));
+	}
 
 	// the beach is a property of the layer of the terrain, so it blends between cells as their layers do: the beach of the first biome with
 	// that layer, else the layer itself, as for the rock of mountains, so a layer without a beach goes down to the water as it is
@@ -5948,6 +5956,9 @@ void AHexPlanet::UpdateWalls(TArray<int32>& Chunks)
 			Instance->SetScalarParameterValue(TEXT("FloorLayer"), float(FMath::Max(BiomeConfigs[FloorBiome]->TerrainLayer, 0)));
 		}
 		Instance->SetScalarParameterValue(TEXT("CaveWallAltLayer"), float(TerrainLayers ? TerrainLayers->FindLayer(Settings->CaveWallAltLayerName) : INDEX_NONE));
+		// the floor at its foot as SetBiomeLayers gives the ground
+		Instance->SetScalarParameterValue(TEXT("CaveFloorAltLayer"), float(TerrainLayers ? TerrainLayers->FindLayer(Settings->CaveFloorAltLayerName) : INDEX_NONE));
+		Instance->SetScalarParameterValue(TEXT("CaveSlabLayer"), float(TerrainLayers ? TerrainLayers->FindLayer(Settings->CaveSlabLayerName) : INDEX_NONE));
 	}
 
 	// the voids of lava and lakes, which light the walls, and the height of the walls along each void, set by hand or by its style

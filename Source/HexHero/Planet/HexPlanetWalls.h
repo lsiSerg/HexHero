@@ -15,9 +15,11 @@ class UHexPlanetConfig;
  *  that reaches FootReach onto the floor and a flat floor where the line cut a corner (FSample::Gap), as the passage has no floor there, leans back
  *  and bulges out at its top into an overhang from which stalactites hang, ribs of a cellular pattern of the place that end at heights of their
  *  own, some reaching the floor as columns, with scooped flutes between them; its crest rises and falls by the stalactites, and its outer face
- *  goes down OuterDepth into the chasm from the line smoothed over OuterSmooth, so a thick wall does not pinch at a corner. Bulged by 3D noises of
- *  the place, so no stretch repeats from any distance. Pure: it reads no UObject, so any thread may build it, and every chunk builds the same rings
- *  where two of them meet
+ *  goes down OuterDepth into the chasm from the line smoothed over OuterSmooth, so a thick wall does not pinch at a corner. Where the wall runs
+ *  straight over a row of hexes its protrusions, the cut corners of the voids, and its hollows, the tips of the hexes between them, alternate every
+ *  cell: each corner takes a cut of its own (CornerCutVariation), and some hollows carry a canopy, the top of the inner face reaching across them
+ *  from one protrusion to the next (BridgeShare) while the foot stays on the sides of the hex. Bulged by 3D noises of the place, so no stretch
+ *  repeats from any distance. Pure: it reads no UObject, so any thread may build it, and every chunk builds the same rings where two of them meet
  */
 namespace HexPlanetWalls
 {
@@ -50,6 +52,16 @@ namespace HexPlanetWalls
 		double Step = 6.0;
 		double CornerCut = 0.5;
 		double CornerRound = 30.0;
+		/** How much the cut of each corner of a void differs from CornerCut either way, by a hash of the corner, never past half a side unless
+		 *  CornerCut is, so the protrusions of a straight wall differ in size */
+		double CornerCutVariation = 0.25;
+		/** Of the hollows of a wall, the tips of the hexes between two cut corners of voids, BridgeShare by a hash of the tip carry a canopy: the
+		 *  top of the inner face reaches from BridgeFillMin to all of the way towards the chord from the protrusion before to the one after, by a
+		 *  hash, its underside going back to the face from under the overhang down to BridgeUnder of the height, while the foot stays on the sides
+		 *  of the hex */
+		double BridgeShare = 0.5;
+		double BridgeFillMin = 0.7;
+		double BridgeUnder = 0.65;
 		double OuterSmooth = 90.0;
 		double Height = 170.0;
 		double HeightNoise = 0.25;
@@ -81,6 +93,24 @@ namespace HexPlanetWalls
 		double PoolHeight = 0.3;
 		double PoolThickness = 0.5;
 		double HeightBlend = 60.0;
+		/** The walls along HeightJitterShare of the voids, by a hash of the void, are higher or lower by up to HeightJitter of their height, the
+		 *  rest as they are, so neighboring walls differ a little; eased from one void to the next as the heights are */
+		double HeightJitter = 0.14;
+		double HeightJitterShare = 0.65;
+		/** The lip in runs along the walls, by a noise of the place LipScale across: below LipPlain the top runs plain, its stalactites,
+		 *  flutes and overhang nearly gone, above LipBold it stands out boldly, its stalactites LipBoldDepth times as deep and jutting out
+		 *  LipBoldOverhang as a ledge even on a parapet, and between them LipBrokenShare of its stalactites are gone at random; each change eases
+		 *  over LipBlend of the noise. The width of the stalactites and the thickness of the wall change by up to RibWidthVariation and
+		 *  ThicknessVariation in runs of their own */
+		double LipScale = 420.0;
+		double LipPlain = -0.12;
+		double LipBold = 0.12;
+		double LipBlend = 0.08;
+		double LipBoldDepth = 1.35;
+		double LipBoldOverhang = 8.0;
+		double LipBrokenShare = 0.5;
+		double RibWidthVariation = 0.35;
+		double ThicknessVariation = 0.2;
 		/** The styles, each holding in regions of a noise of the place StyleScale across, blending where they meet over less the higher
 		 *  StyleSharpness; none keeps the values as they are */
 		TArray<FStyle> Styles;
@@ -110,6 +140,11 @@ namespace HexPlanetWalls
 		/** On the line smoothed over OuterSmooth, and onto the passage from there, from which the outer face and the crest stand */
 		FVector3d OuterPosition = FVector3d::ZeroVector;
 		FVector3d OuterInward = FVector3d::UnitY();
+		/** On the line of the top of the inner face, and onto the passage from there: the line itself, but across a hollow with a canopy
+		 *  (FParams::BridgeShare) towards the chord between the protrusions on both sides of it, Bridge from the line */
+		FVector3d TopPosition = FVector3d::ZeroVector;
+		FVector3d TopInward = FVector3d::UnitY();
+		double Bridge = 0.0;
 		/** World units along its line from its start */
 		double S = 0.0;
 		/** The passage of the side it comes from */
@@ -124,6 +159,9 @@ namespace HexPlanetWalls
 
 		/** The factor on the height of the wall of the void beyond (Build), smoothed along the line: 1 a full wall, PoolHeight a parapet, 0 none */
 		double Height = 1.0;
+		/** The factor of the void beyond on how high its wall stands (FParams::HeightJitter), smoothed along the line, which does not make a
+		 *  wall a parapet as Height does */
+		double Jitter = 1.0;
 
 		/** How far the wall may reach from each line onto the passage and towards the chasm here, about the radius of the turn of that line on
 		 *  that side, so a wall does not fold over itself inside a tight turn */
@@ -131,6 +169,8 @@ namespace HexPlanetWalls
 		double OuterReach = TNumericLimits<double>::Max();
 		double SmoothInnerReach = TNumericLimits<double>::Max();
 		double SmoothOuterReach = TNumericLimits<double>::Max();
+		double TopInnerReach = TNumericLimits<double>::Max();
+		double TopOuterReach = TNumericLimits<double>::Max();
 	};
 
 	struct FWalls

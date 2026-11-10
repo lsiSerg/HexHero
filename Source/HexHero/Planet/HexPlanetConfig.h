@@ -1536,6 +1536,24 @@ public:
 	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
 	float WallCornerRound = 30.0f;
 
+	/** Where a wall runs straight over a row of hexes its protrusions, the cut corners of the voids, and its hollows, the tips of the hexes between
+	 *  them, alternate every cell, so they are made to differ: the cut of each corner differs from WallCornerCut by up to WallCornerCutVariation
+	 *  either way, by a hash of the corner, never past half a side unless WallCornerCut is, and WallBridgeShare of the hollows carry a canopy, the
+	 *  top of the wall reaching from WallBridgeFillMin to all of the way across the hollow towards the line between the protrusions on both sides,
+	 *  by a hash of the tip, its underside going back to the face from under the overhang down to WallBridgeUnder of the height, while the foot
+	 *  stays on the sides of the hex; so seen from above the top of a wall runs on over two or three cells in places */
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=0.5))
+	float WallCornerCutVariation = 0.25f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
+	float WallBridgeShare = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
+	float WallBridgeFillMin = 0.7f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0.3, ClampMax=0.78))
+	float WallBridgeUnder = 0.65f;
+
 	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
 	float WallOuterSmooth = 90.0f;
 
@@ -1634,6 +1652,15 @@ public:
 	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
 	float WallHeightBlend = 60.0f;
 
+	/** The walls along WallHeightJitterShare of the voids, by a hash of the void, stand higher or lower by up to WallHeightJitter of their height,
+	 *  and the rest as they are, so the walls of neighboring voids differ a little; eased from one void to the next over WallHeightBlend as the
+	 *  heights are, and never making a wall a parapet */
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=0.5))
+	float WallHeightJitter = 0.14f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
+	float WallHeightJitterShare = 0.65f;
+
 	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0.01, ClampMax=1))
 	float WallHeightStep = 0.1f;
 
@@ -1650,6 +1677,39 @@ public:
 		const float Low = FMath::Clamp(WallHeightMin, 0.05f, 1.0f);
 		return FMath::RoundToFloat(FMath::Clamp(Height, Low, FMath::Max(WallHeightMax, 1.0f)) * 1000.0f) / 1000.0f;
 	}
+
+	/** The lip of the walls in runs of a few cells along them, by a noise of the place about WallLipScale across (from -0.5 to 0.5 mostly):
+	 *  below WallLipPlain the top runs plain, its stalactites, flutes and overhang nearly gone, above WallLipBold it stands out boldly, its
+	 *  stalactites WallLipBoldDepth times as deep and jutting out WallLipBoldOverhang as a ledge even on a parapet, and between them it is broken,
+	 *  WallLipBrokenShare of its stalactites gone at random; each change eases over WallLipBlend of the noise. The width of the stalactites and
+	 *  the thickness of the wall change by up to WallRibWidthVariation and WallThicknessVariation each way in runs of their own, so a low wall
+	 *  seen from above does not wave alike all along a passage */
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=10))
+	float WallLipScale = 420.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=-1, ClampMax=1))
+	float WallLipPlain = -0.12f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=-1, ClampMax=1))
+	float WallLipBold = 0.12f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0.001, ClampMax=0.5))
+	float WallLipBlend = 0.08f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float WallLipBoldDepth = 1.35f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
+	float WallLipBoldOverhang = 8.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=1))
+	float WallLipBrokenShare = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=0.7))
+	float WallRibWidthVariation = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0, ClampMax=0.7))
+	float WallThicknessVariation = 0.2f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=10))
 	float WallStyleScale = 450.0f;
@@ -1850,10 +1910,10 @@ public:
 	float FloorNoise = 0.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=10))
-	float FloorNoiseScale = 120.0f;
+	float FloorNoiseScale = 95.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=1))
-	float FloorNoiseDetail = 0.5f;
+	float FloorNoiseDetail = 0.8f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=1))
 	float FloorNoiseFade = 20.0f;
@@ -1862,6 +1922,132 @@ public:
 	 *  the walls, so its unevenness shows under the even light of a cave */
 	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=1))
 	float CaveFloorRiseShade = 0.15f;
+
+	/** Lumps of a floor dug and trodden unevenly, too small for the lattice of its cells, which M_HexUnderground draws as a normal bent by a noise
+	 *  CaveFloorBumpScale across, CaveFloorBumps strong, fading out as the moss does where a pixel grows past them */
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=4))
+	float CaveFloorBumps = 1.2f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=1))
+	float CaveFloorBumpScale = 18.0f;
+
+	/** The floor of the passages is not one ground nor one tone (CAVE_FLOOR_CODE of create_planet_assets.py, which the foot of the walls takes
+	 *  too, so they meet without a seam): CaveFloorAltShare of it, in patches of a noise about CaveFloorAltScale across, is the terrain layer named
+	 *  CaveFloorAltLayerName (DA_HexTerrainLayers, none when not found) times CaveFloorAltColor and CaveFloorBrightness, its edge eased over
+	 *  CaveFloorAltEdge of the noise and made ragged by CaveFloorAltRagged of the heights of both layers, the higher covering the lower; and the
+	 *  floor turns warmer or cooler, towards CaveFloorWarmColor and CaveFloorCoolColor, by CaveFloorHue in regions about CaveFloorHueScale across */
+	UPROPERTY(EditAnywhere, Category="Underground|Floor")
+	FName CaveFloorAltLayerName = TEXT("RedScree");
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=1))
+	float CaveFloorAltShare = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=1))
+	float CaveFloorAltScale = 240.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0.001, ClampMax=0.5))
+	float CaveFloorAltEdge = 0.08f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=4))
+	float CaveFloorAltRagged = 1.2f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor")
+	FLinearColor CaveFloorAltColor = FLinearColor(1.6f, 1.75f, 1.75f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=1))
+	float CaveFloorHue = 0.7f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=1))
+	float CaveFloorHueScale = 520.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor")
+	FLinearColor CaveFloorWarmColor = FLinearColor(1.08f, 0.97f, 0.84f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor")
+	FLinearColor CaveFloorCoolColor = FLinearColor(0.88f, 0.92f, 0.98f, 1.0f);
+
+	/** Old flagstones on the floor of the passages, here and there (CAVE_FLOOR_CODE, on the foot of the walls too): a cellular pattern of the place
+	 *  about CaveSlabSize across, its points moved off the middles of their cells by up to CaveSlabJitter, over CaveSlabShare of the floor in
+	 *  patches of a noise about CaveSlabPatchScale across, which sand buries towards their edge over CaveSlabPatchEdge of the noise. Each slab is
+	 *  the terrain layer named CaveSlabLayerName (none when not found) at a place of its own, times CaveSlabColor and CaveFloorBrightness, lighter
+	 *  or darker by up to CaveSlabTone and dusted by about CaveSlabDust of the dirt of the floor, more where the sand drifts thicken, with
+	 *  CaveSlabNormal of the normal of the layer and leaning its own way by CaveSlabTilt, its edges worn round
+	 *  over CaveSlabBevel world units (CaveSlabBevelTilt) and joints CaveSlabJointWidth wide of the dirt of the floor, darker by CaveSlabJointShade;
+	 *  CaveSlabMissing of them are gone and CaveSlabCracked cracked across, the cracks CaveSlabCrackWidth wide and darker by CaveSlabCrackShade.
+	 *  Sand drifts over them in a noise about CaveSlabSandScale across, over CaveSlabSand of them, more in the hollows of the floor
+	 *  (CaveSlabSandHollow), the high parts of the stone showing through by CaveSlabSandRagged, its edge CaveSlabSandSoftness soft. Joints, cracks
+	 *  and bevels fade out where a pixel grows past them */
+	UPROPERTY(EditAnywhere, Category="Underground|Floor")
+	FName CaveSlabLayerName = TEXT("GrayRock");
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=1))
+	float CaveSlabShare = 0.16f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=1))
+	float CaveSlabPatchScale = 360.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0.001, ClampMax=0.5))
+	float CaveSlabPatchEdge = 0.08f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=4))
+	float CaveSlabSize = 34.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=1))
+	float CaveSlabJitter = 0.75f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor")
+	FLinearColor CaveSlabColor = FLinearColor(1.1f, 0.95f, 0.75f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=0.5))
+	float CaveSlabTone = 0.15f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=1))
+	float CaveSlabDust = 0.25f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=2))
+	float CaveSlabNormal = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=1))
+	float CaveSlabTilt = 0.12f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0.1))
+	float CaveSlabBevel = 3.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=2))
+	float CaveSlabBevelTilt = 0.7f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0))
+	float CaveSlabJointWidth = 1.6f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=1))
+	float CaveSlabJointShade = 0.45f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=1))
+	float CaveSlabMissing = 0.12f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=1))
+	float CaveSlabCracked = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0))
+	float CaveSlabCrackWidth = 0.9f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=1))
+	float CaveSlabCrackShade = 0.55f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=1))
+	float CaveSlabSand = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=1))
+	float CaveSlabSandScale = 90.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=1))
+	float CaveSlabSandHollow = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=2))
+	float CaveSlabSandRagged = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0.001, ClampMax=1))
+	float CaveSlabSandSoftness = 0.12f;
 
 	/** Glowing moss: on the floor within CaveMossReach of the cell radius from a side towards a void, and down the top CaveMossWallDepth of the
 	 *  cliffs of a void, in patches where a noise CaveMossPatchScale across lies above CaveMossCover, speckled where a finer one

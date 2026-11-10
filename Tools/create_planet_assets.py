@@ -1497,16 +1497,17 @@ UNDERGROUND_VALUES = {
     # short cliffs wind not at all, as the wobble of a coast would push them under the floor of a void
     'deep_depth': 10.0, 'shallow_depth': 5.0, 'coast_wobble': 0.0,
     # the floor of the passages rises and falls by a noise the cells share (HexPlanetKit::GetFloorRise)
-    'floor_noise': 14.0,
+    'floor_noise': 24.0,
     # a dim, cool light of the sky, a placeholder until the light of the game is designed
     'sky_light_color': unreal.LinearColor(0.32, 0.42, 0.48, 1.0), 'sky_light_intensity': 0.3,
 }
 # values of an existing DA_HexUnderground that a later stage changed, as (property, old value, new value): each is set only while the asset still
 # holds the old value, so tuning by hand is never overwritten. The cave objects are generated on the passages since 2026-11-09, and the motes drift
 # over them since then too. On 2026-11-10 the voids rose to a little below the passages and the floor of the passages took a noise; the values
-# measured down from the passages followed, as defaults of the class too, for an asset that does not hold them
+# measured down from the passages followed, as defaults of the class too, for an asset that does not hold them; the floor rose more, as a cave dug and
+# trodden unevenly
 UNDERGROUND_MIGRATIONS = [('generate_objects', False, True), ('motes', False, True), ('walls', False, True),
-    ('deep_depth', 200.0, 10.0), ('shallow_depth', 22.0, 5.0), ('coast_wobble', 20.0, 0.0), ('floor_noise', 0.0, 14.0),
+    ('deep_depth', 200.0, 10.0), ('shallow_depth', 22.0, 5.0), ('coast_wobble', 20.0, 0.0), ('floor_noise', 0.0, 14.0), ('floor_noise', 14.0, 24.0),
     ('abyss_fade_start', 25.0, 4.0), ('abyss_fade_end', 140.0, 32.0), ('abyss_brightness', 0.55, 0.24), ('abyss_mist_start', 60.0, 8.0),
     ('abyss_mist_end', 190.0, 30.0), ('wall_outer_depth', 160.0, 60.0), ('cave_moss_wall_depth', 60.0, 20.0), ('cave_rune_top', 10.0, 4.0),
     ('cave_rune_size', 48.0, 24.0), ('lava_cliff_reach', 140.0, 40.0), ('void_floor_height', 30.0, 12.0), ('mote_height_below', 150.0, 35.0)]
@@ -2425,7 +2426,8 @@ def build_auroras():
 # The underground (DA_HexUnderground, EdgeRule HigherHolds): M_HexUnderground draws its surface as M_HexPlanet does, from the layers of its cave
 # biomes with the grid lines and the outlines, but without the sea, the beach, rivers, the run-up, the canopy and the shadows of clouds. Every
 # height is measured below the top of the passages, the level 0 that lies LevelHeight above the sea. On the tops of the passages the floor is
-# warm earth (CaveFloor*, a tint of its layer, as the placeholder light is cool) in pools of tone, with small dark pools of water (CavePuddle*,
+# warm earth (CaveFloor*, a tint of its layer, as the placeholder light is cool), not of one ground nor one tone, with old flagstones here and
+# there under sand (CAVE_FLOOR_CODE), in pools of tone, with small dark pools of water (CavePuddle*,
 # never cut by the side of a cell with objects, which they keep off as off the rims), green glowing moss along the rims and down the upper
 # walls (CaveMoss*) and pools of light under what glows and beside lava (GLOW_POOL_CODE, CellCanopy, AHexPlanet::UpdateCanopy). The rock of a
 # cliff darkens down into the abyss (AbyssFadeStart, AbyssFadeEnd), a few walls carry carved runes (CaveRune*), and the floor of a void draws a
@@ -2512,6 +2514,17 @@ struct FCaveNoise
         h ^= h >> 16;
         return (float)(h >> 8) * (1.0 / 16777216.0);
     }
+    // three values of one hash, ten bits each, for a point in each cell of a lattice
+    float3 Hash3(int3 c)
+    {
+        uint h = ((uint)c.x * 73856093u) ^ ((uint)c.y * 19349663u) ^ ((uint)c.z * 83492791u);
+        h ^= h >> 16;
+        h *= 0x7feb352du;
+        h ^= h >> 15;
+        h *= 0x846ca68bu;
+        h ^= h >> 16;
+        return float3(h & 1023u, (h >> 10) & 1023u, (h >> 20) & 1023u) * (1.0 / 1024.0);
+    }
     float Value(float3 p)
     {
         float3 corner = floor(p);
@@ -2524,6 +2537,149 @@ struct FCaveNoise
 };
 FCaveNoise caveNoise;
 '''
+# the variety of the floor of the passages, which M_HexUnderground draws on their tops and M_HexUndergroundWall on the floor at the foot of a wall,
+# so the two meet without a seam: regions warmer or cooler (CaveFloorHue*), patches of another ground whose edge the heights of both decide
+# (CaveFloorAlt*), and old flagstones here and there under drifted sand (CaveSlab*): a cellular pattern of the place in patches, whose points
+# lie one in each cell of a lattice, each slab the stone of CaveSlabLayer at a place of its own, some gone and some cracked, with joints of dirt
+# and edges worn round, the distance to its edge taken along the floor to the nearest of the planes halfway to the points around it. It takes
+# caveFloorColor (the floor with its tint), caveFloorBend (the bend of its normal), caveFloorHeight (the height of its layer), floorRise, caveUp,
+# pixelWorld and the layers as `layers`, whose SampleOne gives a layer with its height, with the scalars CaveFloorAltLayer and CaveSlabLayer (-1
+# without them), and gives back the color and the bend, with caveSlabCover, how much of the floor there is the stone of a slab
+CAVE_FLOOR_CODE = r'''
+// a value noise keeps near its middle, so each is spread over about 0 to 1 (by 2.6 around 0.5), where a share of it is about that share of the floor
+float caveHueNoise = saturate(0.5 + (caveNoise.Value(WorldPos / max(CaveFloorHueScale, 1.0) + 14.2) - 0.5) * 2.6);
+float3 caveHue = lerp((float3)1.0, lerp(CaveFloorCoolColor.rgb, CaveFloorWarmColor.rgb, smoothstep(0.1, 0.9, caveHueNoise)), CaveFloorHue);
+caveFloorColor *= caveHue;
+[branch] if (CaveFloorAltLayer >= 0.0 && CaveFloorAltShare > 0.0)
+{
+    float altNoise = saturate(0.5 + (caveNoise.Value(WorldPos / max(CaveFloorAltScale, 1.0) + 4.4) * 0.7 + caveNoise.Value(WorldPos / max(CaveFloorAltScale * 0.3, 1.0) + 2.6) * 0.3 - 0.5) * 2.6);
+    // from -1 outside the edge of a patch to 1 inside it, moved by how much higher one ground is than the other there
+    float altSide = (altNoise - (1.0 - CaveFloorAltShare)) / max(CaveFloorAltEdge, 1e-3);
+    [branch] if (altSide > -1.0 - CaveFloorAltRagged)
+    {
+        float3 altBend;
+        float4 altGround = layers.SampleOne(Colors, ColorsSampler, Normals, NormalsSampler, LayerParams, round(CaveFloorAltLayer), altBend);
+        float altCover = saturate((altSide + (altGround.a - caveFloorHeight) * CaveFloorAltRagged) * 0.5 + 0.5);
+        caveFloorColor = lerp(caveFloorColor, altGround.rgb * CaveFloorAltColor.rgb * CaveFloorBrightness * caveHue, altCover);
+        caveFloorBend = lerp(caveFloorBend, altBend, altCover);
+        caveFloorHeight = lerp(caveFloorHeight, altGround.a, altCover);
+    }
+}
+[branch] if (CaveSlabLayer >= 0.0 && CaveSlabShare > 0.0)
+{
+    float slabPatchNoise = saturate(0.5 + (caveNoise.Value(WorldPos / max(CaveSlabPatchScale, 1.0) + 11.3) * 0.75 + caveNoise.Value(WorldPos / max(CaveSlabPatchScale * 0.3, 1.0) + 5.9) * 0.25 - 0.5) * 2.6);
+    // above 0 inside a patch, where the sand that buries its edge thins out
+    float slabInside = (slabPatchNoise - (1.0 - CaveSlabShare)) / max(CaveSlabPatchEdge, 1e-3);
+    [branch] if (slabInside > 0.0)
+    {
+        float slabSize = max(CaveSlabSize, 1.0);
+        float3 slabPos = WorldPos / slabSize;
+        float3 slabBase = floor(slabPos);
+        float slabJitter = saturate(CaveSlabJitter);
+        float slabNearest = 1e9;
+        float3 slabCell = slabBase;
+        float3 slabPoint = slabBase + 0.5;
+        for (int sx = -1; sx <= 1; ++sx)
+        for (int sy = -1; sy <= 1; ++sy)
+        for (int sz = -1; sz <= 1; ++sz)
+        {
+            float3 slabEach = slabBase + float3(sx, sy, sz);
+            float3 slabThere = slabEach + 0.5 + (caveNoise.Hash3((int3)slabEach) - 0.5) * slabJitter;
+            float3 slabTo = slabThere - slabPos;
+            float slabDistance = dot(slabTo, slabTo);
+            if (slabDistance < slabNearest)
+            {
+                slabNearest = slabDistance;
+                slabCell = slabEach;
+                slabPoint = slabThere;
+            }
+        }
+        // the edge of the slab along the floor: the nearest of the planes halfway to the points around it, each where it cuts the floor, and the
+        // way to it along the floor
+        float slabEdge = 1e9;
+        float3 slabEdgeWay = 0.0;
+        for (int ex = -1; ex <= 1; ++ex)
+        for (int ey = -1; ey <= 1; ++ey)
+        for (int ez = -1; ez <= 1; ++ez)
+        {
+            float3 slabEach = slabCell + float3(ex, ey, ez);
+            float3 slabThere = slabEach + 0.5 + (caveNoise.Hash3((int3)slabEach) - 0.5) * slabJitter;
+            float3 slabAcross = slabPoint - slabThere;
+            float slabAcrossLength = length(slabAcross);
+            if (slabAcrossLength > 1e-4)
+            {
+                float3 slabWay = slabAcross / slabAcrossLength;
+                float3 slabFlat = slabWay - caveUp * dot(slabWay, caveUp);
+                float slabFlatLength = length(slabFlat);
+                float slabOnFloor = dot(slabPos - (slabPoint + slabThere) * 0.5, slabWay) / max(slabFlatLength, 0.2);
+                if (slabOnFloor < slabEdge)
+                {
+                    slabEdge = slabOnFloor;
+                    slabEdgeWay = -slabFlat / max(slabFlatLength, 1e-4);
+                }
+            }
+        }
+        float slabEdgeWorld = slabEdge * slabSize;
+        int3 slabOwn = (int3)slabCell;
+        float slabSoft = max(pixelWorld, 0.05);
+        // the joints, cracks and worn edges fade out where a pixel grows past them
+        float slabDetail = 1.0 - smoothstep(CaveSlabJointWidth, CaveSlabJointWidth * 4.0 + 1.0, pixelWorld);
+        float slabJoint = (1.0 - smoothstep(CaveSlabJointWidth * 0.5 - slabSoft, CaveSlabJointWidth * 0.5 + slabSoft, slabEdgeWorld)) * slabDetail;
+        float slabBevel = (1.0 - smoothstep(0.0, max(CaveSlabBevel, 0.1), slabEdgeWorld)) * slabDetail;
+        // a crack across a cracked slab, wandering, and in half of them another branching off it
+        float slabCrack = 0.0;
+        [branch] if (caveNoise.Hash(slabOwn + int3(89, 23, 37)) < CaveSlabCracked && slabDetail > 0.001)
+        {
+            float3 crackWay = float3(caveNoise.Hash(slabOwn + int3(2, 97, 11)), caveNoise.Hash(slabOwn + int3(71, 5, 83)), caveNoise.Hash(slabOwn + int3(19, 43, 101))) - 0.5;
+            crackWay -= caveUp * dot(crackWay, caveUp);
+            crackWay /= max(length(crackWay), 1e-4);
+            float3 crackFrom = slabPos - slabPoint;
+            float crackSide = dot(crackFrom, crackWay) + (caveNoise.Value(WorldPos / (slabSize * 0.3) + 31.7) - 0.5) * 0.35;
+            float crackDistance = abs(crackSide) * slabSize;
+            [branch] if (caveNoise.Hash(slabOwn + int3(61, 79, 3)) < 0.5)
+            {
+                float3 branchWay = cross(caveUp, crackWay) + crackWay * (caveNoise.Hash(slabOwn + int3(43, 13, 89)) - 0.5);
+                branchWay /= max(length(branchWay), 1e-4);
+                float branchSide = dot(crackFrom, branchWay) + (caveNoise.Value(WorldPos / (slabSize * 0.3) + 47.3) - 0.5) * 0.35;
+                crackDistance = min(crackDistance, crackSide > 0.0 ? abs(branchSide) * slabSize : 1e9);
+            }
+            slabCrack = (1.0 - smoothstep(CaveSlabCrackWidth * 0.5 - slabSoft, CaveSlabCrackWidth * 0.5 + slabSoft, crackDistance)) * slabDetail;
+        }
+        // the stone of the slab, at a place of the layer of its own, so neighboring slabs differ
+        float3 stoneBend;
+        layers.Pos = WorldPos + float3(caveNoise.Hash(slabOwn + int3(41, 11, 3)), caveNoise.Hash(slabOwn + int3(5, 53, 19)), caveNoise.Hash(slabOwn + int3(23, 7, 61))) * 997.0;
+        float4 stone = layers.SampleOne(Colors, ColorsSampler, Normals, NormalsSampler, LayerParams, round(CaveSlabLayer), stoneBend);
+        layers.Pos = WorldPos;
+        // sand drifts over the stone, more in the hollows of the floor and towards the edge of a patch, which it buries, the high parts of the stone
+        // showing through
+        float sandNoise = saturate(0.5 + (caveNoise.Value(WorldPos / max(CaveSlabSandScale, 1.0) + 3.9) * 0.7 + caveNoise.Value(WorldPos / max(CaveSlabSandScale * 0.3, 1.0) + 8.8) * 0.3 - 0.5) * 2.6);
+        float sandLevel = sandNoise - (1.0 - CaveSlabSand) + (0.5 - floorRise) * 2.0 * CaveSlabSandHollow + (1.0 - saturate(slabInside)) + (0.5 - stone.a) * CaveSlabSandRagged;
+        float slabSand = saturate(sandLevel / max(CaveSlabSandSoftness, 1e-3) + 0.5);
+        float slabShown = caveNoise.Hash(slabOwn + int3(29, 31, 37)) < CaveSlabMissing ? 0.0 : 1.0 - slabSand;
+        float slabTone = 1.0 + (caveNoise.Hash(slabOwn + int3(3, 37, 71)) - 0.5) * 2.0 * CaveSlabTone;
+        float3 slabColor = stone.rgb * CaveSlabColor.rgb * CaveFloorBrightness * slabTone * (1.0 - CaveSlabCrackShade * slabCrack);
+        // dusted by the dirt of the floor, more where the drifts thicken
+        slabColor = lerp(slabColor, caveFloorColor, saturate(CaveSlabDust * (0.5 + sandNoise)));
+        // each slab leans its own way, and its worn edges fall to the joints
+        float3 slabLean = float3(caveNoise.Hash(slabOwn + int3(13, 2, 47)), caveNoise.Hash(slabOwn + int3(31, 59, 7)), caveNoise.Hash(slabOwn + int3(67, 17, 29))) - 0.5;
+        slabLean -= caveUp * dot(slabLean, caveUp);
+        float3 slabBend = stoneBend * CaveSlabNormal + slabLean * 2.0 * CaveSlabTilt + slabEdgeWay * slabBevel * CaveSlabBevelTilt;
+        // the joints hold the dirt of the floor, darker
+        slabColor = lerp(slabColor, caveFloorColor * (1.0 - CaveSlabJointShade), slabJoint);
+        slabBend = lerp(slabBend, caveFloorBend, slabJoint);
+        caveFloorColor = lerp(caveFloorColor, slabColor, slabShown);
+        caveFloorBend = lerp(caveFloorBend, slabBend, slabShown);
+        caveSlabCover = slabShown * (1.0 - slabJoint);
+    }
+}
+'''
+CAVE_FLOOR_PARAMETERS = ['CaveFloorAltShare', 'CaveFloorAltScale', 'CaveFloorAltEdge', 'CaveFloorAltRagged', 'CaveFloorAltColor', 'CaveFloorHue',
+    'CaveFloorHueScale', 'CaveFloorWarmColor', 'CaveFloorCoolColor', 'CaveSlabShare', 'CaveSlabPatchScale', 'CaveSlabPatchEdge', 'CaveSlabSize',
+    'CaveSlabJitter', 'CaveSlabColor', 'CaveSlabTone', 'CaveSlabDust', 'CaveSlabNormal', 'CaveSlabTilt', 'CaveSlabBevel', 'CaveSlabBevelTilt', 'CaveSlabJointWidth',
+    'CaveSlabJointShade', 'CaveSlabMissing', 'CaveSlabCracked', 'CaveSlabCrackWidth', 'CaveSlabCrackShade', 'CaveSlabSand', 'CaveSlabSandScale',
+    'CaveSlabSandHollow', 'CaveSlabSandRagged', 'CaveSlabSandSoftness']
+for _name in CAVE_FLOOR_PARAMETERS:
+    assert _name in CAVE_FLOOR_CODE, _name
 UNDERGROUND_CODE = NOISE_CODE + GRID_LINE_CODE + MARK_CODE.replace('MARK_HOLE_BITS', '0u') + UNDERGROUND_BIOME_CODE + CAVE_RUNES_CODE + r'''
 float depthBelow = LevelHeight - height;
 float3 viewRay = normalize(WorldPos - CameraPos);
@@ -2563,14 +2719,36 @@ float coarseShare = saturate(smoothstep(CoarseDistance - CoarseBand, CoarseDista
     depthBelow = lerp(depthBelow, max(depthBelow, virtualDepth), coarseShare);
 }
 
-// the floor of the passages, on their tops: warm earth in pools of tone
+// the floor of the passages, on their tops: warm earth, not of one ground nor one tone, with old flagstones here and there (CAVE_FLOOR_CODE, which
+// the foot of the walls draws alike), in pools of tone
 float topShare = (1.0 - smoothstep(0.0, max(CaveFloorTopDepth, 0.01), depthBelow)) * notPreview;
-albedo = lerp(albedo, albedo * CaveFloorTint.rgb * CaveFloorBrightness, topShare);
-albedo *= 1.0 + (cloudNoise.Value(WorldPos / max(CaveFloorPoolScale, 1.0) + 2.9) - 0.5) * 2.0 * CaveFloorPools * topShare;
 // the floor that rises by a noise (FloorNoise, HexPlanetKit::GetFloorRise): its hollows a little darker and its swells a little lighter, so its
-// unevenness shows under the even light of a cave, and the puddles below gather in its hollows
+// unevenness shows under the even light of a cave, and sand over the flagstones and the puddles below gather in its hollows
 float floorRise = FloorNoise > 0.0 ? saturate(-depthBelow / FloorNoise) : 0.5;
+float3 caveFloorColor = albedo * CaveFloorTint.rgb * CaveFloorBrightness;
+float3 caveFloorBend = bend;
+float caveFloorHeight = layerColors[0].a;
+float caveSlabCover = 0.0;
+float3 caveUp = surfaceUp;
+[branch] if (topShare > 0.001)
+{
+// @CAVE_FLOOR_CODE
+}
+albedo = lerp(albedo, caveFloorColor, topShare);
+bend = lerp(bend, caveFloorBend, topShare);
+albedo *= 1.0 + (cloudNoise.Value(WorldPos / max(CaveFloorPoolScale, 1.0) + 2.9) - 0.5) * 2.0 * CaveFloorPools * topShare;
 albedo *= 1.0 + (floorRise - 0.5) * 2.0 * CaveFloorRiseShade * topShare;
+// lumps of a floor dug and trodden unevenly, too small for the lattice of its cells, as a normal bent along the ground by the slope of a noise of
+// the place (CaveFloorBumps), fading out as the moss does where a pixel grows past them, and not on the stone of a slab
+[branch] if (CaveFloorBumps > 0.0 && topShare > 0.01)
+{
+    float bumpFade = 1.0 - smoothstep(CaveMossDetailFadeStart, max(CaveMossDetailFadeEnd, CaveMossDetailFadeStart + 1e-3), pixelWorld / max(CaveFloorBumpScale, 1.0));
+    float3 bumpPos = WorldPos / max(CaveFloorBumpScale, 1.0) + 9.1;
+    float bumpHere = cloudNoise.Value(bumpPos);
+    float3 bumpSlope = (float3(cloudNoise.Value(bumpPos + float3(0.25, 0.0, 0.0)), cloudNoise.Value(bumpPos + float3(0.0, 0.25, 0.0)),
+        cloudNoise.Value(bumpPos + float3(0.0, 0.0, 0.25))) - bumpHere) / 0.25;
+    bend -= (bumpSlope - surfaceUp * dot(bumpSlope, surfaceUp)) * 0.25 * CaveFloorBumps * topShare * bumpFade * (1.0 - caveSlabCover);
+}
 
 // small still pools of water, out of the cells with objects or of an exit (bit 6 of the alpha of the second biome pixel), and CavePuddleRimGap of
 // the radius away from the sides towards a void or towards such a cell (bit K of green of the first pixel, neighbor K), so a side never cuts one,
@@ -2840,7 +3018,7 @@ UNDERGROUND_PARAMETERS = ['LevelHeight', 'HexRadius', 'CoarseDistance', 'CoarseB
     'AbyssDetailFadeStart', 'AbyssDetailFadeEnd', 'AbyssSliceDrift', 'AbyssSliceOpacity', 'AbyssDepthHalf', 'AbyssBottomColor', 'AbyssMistThreshold', 'AbyssCliffBand',
     'AbyssFarCliff', 'AbyssFloorHide', 'AbyssLipColor', 'AbyssLipWidth', 'AbyssLipDepth', 'AbyssGridFade', 'Roughness',
     'ProblemColor', 'LinksOrphanColor', 'LinksTint', 'LinksGlow',
-    'CaveFloorTint', 'CaveFloorBrightness', 'CaveFloorPools', 'CaveFloorPoolScale', 'CaveFloorTopDepth', 'FloorNoise', 'CaveFloorRiseShade',
+    'CaveFloorTint', 'CaveFloorBrightness', 'CaveFloorPools', 'CaveFloorPoolScale', 'CaveFloorTopDepth', 'FloorNoise', 'CaveFloorRiseShade', 'CaveFloorBumps', 'CaveFloorBumpScale',
     'CaveMossReach', 'CaveMossWallDepth', 'CaveMossPatchScale', 'CaveMossCover', 'CaveMossSpeckleScale', 'CaveMossSpeckle', 'CaveMossDetailFadeStart',
     'CaveMossDetailFadeEnd', 'CaveMossFarGlow', 'CaveMossAlbedo', 'CaveMossAlbedoShare', 'CaveMossColor', 'CaveMossGlow', 'CaveMossSoftness', 'CaveMossFade',
     'GlowPoolStrength', 'GlowPoolEdge', 'GlowPoolInner', 'GlowPoolNoise', 'GlowPoolNoiseScale', 'GlowPoolSpill', 'GlowPoolDepth', 'GlowPoolLight',
@@ -2851,7 +3029,11 @@ UNDERGROUND_PARAMETERS = ['LevelHeight', 'HexRadius', 'CoarseDistance', 'CoarseB
     'LavaColor', 'LavaBrightness', 'LavaCoreShare', 'LavaCoreBrightness', 'LavaCrustColor', 'LavaCrustScale', 'LavaCrustShare', 'LavaFlowSpeed', 'LavaPulse',
     'LavaPulseSpeed', 'LavaCliffLight', 'LavaCliffGlow', 'LavaCliffReach', 'VoidStyleEdge', 'VoidStyleEdgeNoise', 'VoidStyleEdgeNoiseScale', 'VoidFloorHeight',
     'LavaCoreColor', 'LavaLightColor', 'LavaCrackEdge', 'LavaCliffDaylight', 'LavaCliffTint', 'LavaCrustDetail', 'LavaCrustDetailScale', 'LavaCrustDetailDrift', 'LavaDetailFadeStart', 'LavaDetailFadeEnd', 'LavaFarGlow',
-    'LakeColor', 'LakeShoreColor', 'LakeShoreReach', 'LakeSheenColor', 'LakeSheenBase', 'LakeSheenPower', 'LakeRipple', 'LakeRippleScale', 'LakeRippleSpeed', 'LakeRoughness', 'LakeSpecular', 'LakeMistKeep']
+    'LakeColor', 'LakeShoreColor', 'LakeShoreReach', 'LakeSheenColor', 'LakeSheenBase', 'LakeSheenPower', 'LakeRipple', 'LakeRippleScale', 'LakeRippleSpeed', 'LakeRoughness', 'LakeSpecular', 'LakeMistKeep'
+    ] + CAVE_FLOOR_PARAMETERS
+_CAVE_FLOOR_MARK = '// @CAVE_FLOOR_CODE\n'
+assert UNDERGROUND_CODE.count(_CAVE_FLOOR_MARK) == 1
+UNDERGROUND_CODE = UNDERGROUND_CODE.replace(_CAVE_FLOOR_MARK, CAVE_FLOOR_CODE)
 # a literal of a value the config tunes must not creep into the code: every parameter of the list has to be read by it
 for _name in UNDERGROUND_PARAMETERS:
     assert _name in UNDERGROUND_CODE, _name
@@ -2908,6 +3090,9 @@ def build_underground_material():
         # the pool of light of each cell (GLOW_POOL_CODE), read with Load
         ('CellCanopy', add_texture(library, material, DEFAULT_MARKS, 'CellCanopy', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 3470), ''),
         ('WallsShown', add_scalar(library, material, 'WallsShown', 0.0, 3490), ''),
+        # the layers of the patches of another ground and of the flagstones (CAVE_FLOOR_CODE), -1 without them (AHexPlanet::SetBiomeLayers)
+        ('CaveFloorAltLayer', add_scalar(library, material, 'CaveFloorAltLayer', -1.0, 3493), ''),
+        ('CaveSlabLayer', add_scalar(library, material, 'CaveSlabLayer', -1.0, 3496), ''),
         ('PreviewTile', add_scalar(library, material, 'PreviewTile', 0.0, 3500), ''),
         ('FacetShare', add_uv_channel(library, material, 1, 'r', 3525), ''),
         ('CreviceShare', add_uv_channel(library, material, 1, 'g', 3540), ''),
@@ -3187,7 +3372,8 @@ def build_cave_object_material():
 # by U of the first UV) and towards its crest (CaveWallTopShade from CaveWallTopStart, by the height share in V of the first UV), as the light of a
 # cave comes from its floor, and down its outer face below the floor (FloorRadius) as the cliffs darken into the abyss (AbyssFade*, AbyssDarkness), with Ambient
 # as the ground has. Its rounded foot and the floor before it (U of the second UV) are the floor of the passages, the terrain layer of their biome
-# (FloorLayer) taken as M_HexUnderground takes it, with CaveFloorTint, CaveFloorBrightness and its pools of tone, the edge moved by a noise
+# (FloorLayer) taken as M_HexUnderground takes it, with CaveFloorTint, CaveFloorBrightness, its grounds, tones and flagstones (CAVE_FLOOR_CODE)
+# and its pools of tone, the edge moved by a noise
 # (CaveWallFloorNoise), so the wall rises out of the floor without a seam. Masked: around the line from the camera to the point under the cursor
 # (WallFadeCenter, its alpha 1 while the cursor is on the planet, AHexPlanet::SetFadeFocus) a wall dissolves where it stands in front of that point,
 # keeping CaveWallFadeKeep of its pixels by a noise of the pixel that changes every frame, which the temporal filter blends into a ghost, as a game
@@ -3207,7 +3393,8 @@ struct FWallLayers
     float3 Ddx;
     float3 Ddy;
     float DefaultTile;
-    float3 Sample(Texture2DArray colors, SamplerState colorsSampler, Texture2DArray normals, SamplerState normalsSampler, Texture2D params, float layer, out float3 bend)
+    // a layer with its height in alpha, by the height values of the layer, as FBiomeLayers::SampleOne gives it
+    float4 SampleOne(Texture2DArray colors, SamplerState colorsSampler, Texture2DArray normals, SamplerState normalsSampler, Texture2D params, float layer, out float3 bend)
     {
         float4 look = params.Load(int3(layer, 0, 0));
         float4 shape = params.Load(int3(layer, 1, 0));
@@ -3216,32 +3403,37 @@ struct FWallLayers
         float3 pos = Pos / tile;
         float3 ddx = Ddx / tile;
         float3 ddy = Ddy / tile;
-        float3 color = 0.0;
+        float4 color = 0.0;
         bend = 0.0;
         [branch] if (Planes.x > 0.0)
         {
-            color += colors.SampleGrad(colorsSampler, float3(pos.yz, layer), ddx.yz, ddy.yz).rgb * Planes.x;
+            color += colors.SampleGrad(colorsSampler, float3(pos.yz, layer), ddx.yz, ddy.yz) * Planes.x;
             float2 slope = normals.SampleGrad(normalsSampler, float3(pos.yz, layer), ddx.yz, ddy.yz).xy * 2.0 - 1.0;
             bend += float3(0.0, slope.x, slope.y) * Planes.x;
         }
         [branch] if (Planes.y > 0.0)
         {
-            color += colors.SampleGrad(colorsSampler, float3(pos.xz, layer), ddx.xz, ddy.xz).rgb * Planes.y;
+            color += colors.SampleGrad(colorsSampler, float3(pos.xz, layer), ddx.xz, ddy.xz) * Planes.y;
             float2 slope = normals.SampleGrad(normalsSampler, float3(pos.xz, layer), ddx.xz, ddy.xz).xy * 2.0 - 1.0;
             bend += float3(slope.x, 0.0, slope.y) * Planes.y;
         }
         [branch] if (Planes.z > 0.0)
         {
-            color += colors.SampleGrad(colorsSampler, float3(pos.xy, layer), ddx.xy, ddy.xy).rgb * Planes.z;
+            color += colors.SampleGrad(colorsSampler, float3(pos.xy, layer), ddx.xy, ddy.xy) * Planes.z;
             float2 slope = normals.SampleGrad(normalsSampler, float3(pos.xy, layer), ddx.xy, ddy.xy).xy * 2.0 - 1.0;
             bend += float3(slope.x, slope.y, 0.0) * Planes.z;
         }
         if (known)
         {
-            color *= look.rgb;
+            color.rgb *= look.rgb;
+            color.a = saturate((color.a - 0.5) * shape.y + 0.5 + shape.z);
             bend *= shape.x;
         }
         return color;
+    }
+    float3 Sample(Texture2DArray colors, SamplerState colorsSampler, Texture2DArray normals, SamplerState normalsSampler, Texture2D params, float layer, out float3 bend)
+    {
+        return SampleOne(colors, colorsSampler, normals, normalsSampler, params, layer, bend).rgb;
     }
 };
 float3 n = normalize(VertexNormal);
@@ -3369,9 +3561,18 @@ float3 floorColor = 0.0;
 float floorMix = 0.0;
 [branch] if (floorShare > 0.001)
 {
-    floorColor = layers.Sample(Colors, ColorsSampler, Normals, NormalsSampler, LayerParams, round(FloorLayer), floorBend) * CaveFloorTint.rgb * CaveFloorBrightness;
-    floorColor *= 1.0 + (cloudNoise.Value(WorldPos / max(CaveFloorPoolScale, 1.0) + 2.9) - 0.5) * 2.0 * CaveFloorPools;
+    float4 floorSample = layers.SampleOne(Colors, ColorsSampler, Normals, NormalsSampler, LayerParams, round(FloorLayer), floorBend);
     float floorRise = FloorNoise > 0.0 ? saturate((length(WorldPos) - FloorRadius) / FloorNoise) : 0.5;
+    // its grounds, tones and flagstones as M_HexUnderground draws them on the floor beside the wall (CAVE_FLOOR_CODE)
+    float3 caveFloorColor = floorSample.rgb * CaveFloorTint.rgb * CaveFloorBrightness;
+    float3 caveFloorBend = floorBend;
+    float caveFloorHeight = floorSample.a;
+    float caveSlabCover = 0.0;
+    float3 caveUp = up;
+// @CAVE_FLOOR_CODE
+    floorColor = caveFloorColor;
+    floorBend = caveFloorBend;
+    floorColor *= 1.0 + (cloudNoise.Value(WorldPos / max(CaveFloorPoolScale, 1.0) + 2.9) - 0.5) * 2.0 * CaveFloorPools;
     floorColor *= 1.0 + (floorRise - 0.5) * 2.0 * CaveFloorRiseShade;
     floorMix = smoothstep(0.35, 0.65, floorShare + (caveNoise.Value(WorldPos / 7.0 + 1.7) - 0.5) * CaveWallFloorNoise);
 }
@@ -3452,8 +3653,10 @@ WALL_PARAMETERS = ['BiomeTileSize', 'TriplanarSharpness', 'BiomeNormalStrength',
                    'CaveMossSoftness', 'CaveMossPatchScale', 'CaveMossDetailFadeStart', 'CaveMossDetailFadeEnd', 'CaveMossSpeckleScale', 'CaveMossFarGlow',
                    'CaveMossSpeckle', 'CaveMossAlbedo', 'CaveMossAlbedoShare', 'CaveMossColor', 'CaveMossGlow', 'LavaLightColor', 'CaveFloorTint',
                    'CaveFloorBrightness', 'CaveFloorPools', 'CaveFloorPoolScale', 'FloorNoise', 'CaveFloorRiseShade', 'AbyssFadeStart', 'AbyssFadeEnd', 'AbyssDarkness', 'Ambient', 'LevelHeight', 'DeepDepth', 'LavaCliffReach',
-                   'LavaCliffLight', 'LavaCliffGlow', 'LavaCliffTint', 'LavaPool', 'GlowPoolEdge', 'GlowPoolStrength', 'GlowPoolLight']
+                   'LavaCliffLight', 'LavaCliffGlow', 'LavaCliffTint', 'LavaPool', 'GlowPoolEdge', 'GlowPoolStrength', 'GlowPoolLight'] + CAVE_FLOOR_PARAMETERS
 WALL_FADE_PARAMETERS = ['CaveWallFadeRadius', 'CaveWallFadeSoftness', 'CaveWallFadeDepth', 'CaveWallFadeKeep', 'WallLodDistance', 'WallLodBand']
+assert WALL_CODE.count(_CAVE_FLOOR_MARK) == 1
+WALL_CODE = WALL_CODE.replace(_CAVE_FLOOR_MARK, CAVE_FLOOR_CODE)
 for _name in WALL_PARAMETERS:
     assert _name in WALL_CODE, _name
 for _name in WALL_FADE_PARAMETERS:
@@ -3489,6 +3692,8 @@ def build_wall_material():
         ('RockLayer', add_scalar(library, material, 'RockLayer', 7.0, 175), ''),
         ('FloorLayer', add_scalar(library, material, 'FloorLayer', 15.0, 185), ''),
         ('CaveWallAltLayer', add_scalar(library, material, 'CaveWallAltLayer', -1.0, 195), ''),
+        ('CaveFloorAltLayer', add_scalar(library, material, 'CaveFloorAltLayer', -1.0, 196), ''),
+        ('CaveSlabLayer', add_scalar(library, material, 'CaveSlabLayer', -1.0, 197), ''),
         ('FloorRadius', add_scalar(library, material, 'FloorRadius', 11528.0, 200), ''),
         ('Colors', add_texture(library, material, COLORS, 'Colors', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 250), ''),
         ('Normals', add_texture(library, material, NORMALS, 'Normals', unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL, 275), ''),

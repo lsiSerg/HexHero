@@ -605,6 +605,69 @@ bool FHexPlanetUndergroundWallsTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("The floor goes on from the gap"), Unreached, 0);
 	TestEqual(TEXT("The line keeps out of the floor"), Deep, 0);
 
+	// some hollows of the walls, the tips of hexes between two cut corners of voids, carry a canopy, whose top lies onto the passage from the
+	// line, as the chord between the protrusions does; none without its share (FParams::BridgeShare)
+	int32 Bridged = 0;
+	int32 Behind = 0;
+	double Deepest = 0.0;
+	for (const TArray<HexPlanetWalls::FSample>& Line : Walls.Lines)
+	{
+		for (const HexPlanetWalls::FSample& Sample : Line)
+		{
+			if (Sample.Bridge > 1.0)
+			{
+				++Bridged;
+				Deepest = FMath::Max(Deepest, Sample.Bridge);
+				Behind += FVector3d::DotProduct(Sample.TopPosition - Sample.Position, Sample.Inward) < -0.5 ? 1 : 0;
+			}
+		}
+	}
+	HexPlanetWalls::FParams Unbridged = Params;
+	Unbridged.BridgeShare = 0.0;
+	HexPlanetWalls::FWalls UnbridgedWalls;
+	HexPlanetWalls::Build(Grid, Levels, [&Levels](int32 Cell) { return IsPassage(Levels[Cell]); }, Unbridged, UnbridgedWalls);
+	int32 Stray = 0;
+	for (const TArray<HexPlanetWalls::FSample>& Line : UnbridgedWalls.Lines)
+	{
+		for (const HexPlanetWalls::FSample& Sample : Line)
+		{
+			Stray += Sample.Bridge > 1e-3 ? 1 : 0;
+		}
+	}
+	AddInfo(FString::Printf(TEXT("%d samples under a canopy, reaching up to %.1f from the line, %d of them behind it; %d without a share"), Bridged, Deepest, Behind, Stray));
+	TestTrue(TEXT("Some hollows carry a canopy"), Bridged > 0);
+	TestTrue(TEXT("A canopy reaches a hollow deep"), Deepest > 10.0 && Deepest < 60.0);
+	TestEqual(TEXT("A canopy reaches onto the passage"), Behind, 0);
+	TestEqual(TEXT("No canopy without a share"), Stray, 0);
+
+	// the walls of neighboring voids a little higher or lower than each other, within HeightJitter, and all as they are without a share
+	int32 Jittered = 0;
+	int32 PastJitter = 0;
+	for (const TArray<HexPlanetWalls::FSample>& Line : Walls.Lines)
+	{
+		for (const HexPlanetWalls::FSample& Sample : Line)
+		{
+			Jittered += FMath::Abs(Sample.Jitter - 1.0) > 1e-3 ? 1 : 0;
+			PastJitter += FMath::Abs(Sample.Jitter - 1.0) > Params.HeightJitter + 1e-9 ? 1 : 0;
+		}
+	}
+	HexPlanetWalls::FParams Even = Params;
+	Even.HeightJitterShare = 0.0;
+	HexPlanetWalls::FWalls EvenWalls;
+	HexPlanetWalls::Build(Grid, Levels, [&Levels](int32 Cell) { return IsPassage(Levels[Cell]); }, Even, EvenWalls);
+	int32 StrayJitter = 0;
+	for (const TArray<HexPlanetWalls::FSample>& Line : EvenWalls.Lines)
+	{
+		for (const HexPlanetWalls::FSample& Sample : Line)
+		{
+			StrayJitter += Sample.Jitter != 1.0 ? 1 : 0;
+		}
+	}
+	AddInfo(FString::Printf(TEXT("%d of %d samples on walls higher or lower than their void says, %d past the jitter, %d without a share"), Jittered, Samples, PastJitter, StrayJitter));
+	TestTrue(TEXT("Neighboring walls differ in height"), Jittered * 4 > Samples);
+	TestEqual(TEXT("Within the jitter"), PastJitter, 0);
+	TestEqual(TEXT("No jitter without a share"), StrayJitter, 0);
+
 	// the mesh of every chunk, its triangles of an area and facing out of the wall, and a chunk of no walls empty
 	int64 Triangles = 0;
 	int32 Degenerate = 0;
@@ -641,7 +704,9 @@ bool FHexPlanetUndergroundWallsTest::RunTest(const FString& Parameters)
 	}
 	UE_LOG(LogHexHero, Display, TEXT("Walls test: %lld triangles, %d degenerate, %d facing into the wall, by row of the profile%s"), Triangles, Degenerate, Inward, *ByRow);
 	TestTrue(TEXT("Walls have triangles"), Triangles > 0);
-	// a few at the knobs of the crest, whose top twists a quad between two samples (63 of 898,426 when written)
+	// a few at the knobs of the crest, whose top twists a quad between two samples (63 of 898,426 when written, 253 of 937,488 since the lip
+	// changes in runs and its stalactites in width, 287 of 952,224 since the corners take cuts of their own, hollows carry canopies and the walls of
+	// the voids differ in height)
 	TestTrue(TEXT("Nearly every triangle faces out"), Inward * 2000 < Triangles);
 	TestTrue(TEXT("Few degenerate triangles"), Degenerate * 1000 < Triangles);
 
