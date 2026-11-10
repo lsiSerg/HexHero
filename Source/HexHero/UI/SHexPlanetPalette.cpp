@@ -271,24 +271,88 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 		Objects->AddSlot().AutoHeight()[MakeHeading(Layer == EHexPlanetLayer::Underground ? LOCTEXT("CaveObjects", "Cave objects") : LOCTEXT("Objects", "Objects"), 0.0f)];
 		if (NumSets > 0)
 		{
+			// the kinds of the layer, and below them those of the other layer, which a hand alone places here, so a click on one places by hand
 			TSharedRef<SUniformGridPanel> ObjectGrid = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
+			TSharedRef<SUniformGridPanel> ForeignGrid = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
+			int32 NumOwn = 0;
+			int32 NumForeign = 0;
 			for (int32 Set = 0; Set < NumSets; ++Set)
 			{
 				const bool bCover = Painter->IsObjectSetCover(Layer, Set);
+				const bool bForeign = Painter->IsObjectSetForeign(Layer, Set);
 				const TSharedRef<SButton> Button = MakeButton(
 					MakeSwatch(Painter->GetObjectSetColor(Layer, Set), SwatchSize * 0.75f, SwatchSize * (bCover ? 0.75f : 0.4f), 6.0f, Painter->GetObjectSetName(Layer, Set),
 						Small, FText::GetEmpty()),
 					[Set](UHexPlanetPainter& Each) { Each.SetObjectSet(Set); },
-					[Set, Layer](const UHexPlanetPainter& Each) { return Each.GetTarget() == Layer && Each.GetTool() == EHexPaintTool::Object && Each.GetObjectSet() == Set; });
-				Button->SetToolTipText(bCover
-					? LOCTEXT("CoverTip", "Fills the cells at the density below; a cell holds one cover")
-					: LOCTEXT("DecorTip", "A piece of decor near the middle of the cell; a cell holds one, beside its cover"));
-				ObjectGrid->AddSlot(Set % 2, Set / 2)
+					[Set, Layer](const UHexPlanetPainter& Each)
+					{
+						return Each.GetTarget() == Layer && (Each.GetTool() == EHexPaintTool::Object || Each.IsUsingPlacedTool(EHexPlacedTool::Place)) && Each.GetObjectSet() == Set;
+					});
+				Button->SetToolTipText(bForeign
+					? LOCTEXT("ForeignTip", "A kind of the other layer, which a hand alone places here: a click places one where you click")
+					: bCover
+					? LOCTEXT("CoverTip", "Fills the cells at the density below; a cell holds one cover. By hand, one of it stands where you click")
+					: LOCTEXT("DecorTip", "A piece of decor near the middle of the cell; a cell holds one, beside its cover. By hand, one stands where you click"));
+				int32& Count = bForeign ? NumForeign : NumOwn;
+				(bForeign ? ForeignGrid : ObjectGrid)->AddSlot(Count % 2, Count / 2)
+				[
+					Button
+				];
+				++Count;
+			}
+			Objects->AddSlot().AutoHeight()[ObjectGrid];
+			if (NumForeign > 0)
+			{
+				Objects->AddSlot().AutoHeight()[MakeHeading(Layer == EHexPlanetLayer::Underground
+					? LOCTEXT("ForeignSurface", "From the surface, by hand") : LOCTEXT("ForeignUnderground", "From the underground, by hand"))];
+				Objects->AddSlot().AutoHeight()[ForeignGrid];
+			}
+
+			// the kinds fill cells, or by hand each click places one where it falls, as many as a cell takes
+			TSharedRef<SHorizontalBox> Modes = SNew(SHorizontalBox);
+			const TSharedRef<SButton> OnCells = MakeButton(
+				MakeLabel(LOCTEXT("OnCells", "On cells")),
+				[](UHexPlanetPainter& Each) { Each.SetPlacingByHand(false); },
+				[](const UHexPlanetPainter& Each) { return !Each.IsPlacingByHand(); });
+			OnCells->SetToolTipText(LOCTEXT("OnCellsTip", "A kind fills the cells under the brush, a cover at the density below and a decor near the middle"));
+			const TSharedRef<SButton> ByHand = MakeButton(
+				MakeLabel(LOCTEXT("ByHand", "By hand")),
+				[](UHexPlanetPainter& Each) { Each.SetPlacingByHand(true); },
+				[](const UHexPlanetPainter& Each) { return Each.IsPlacingByHand(); });
+			ByHand->SetToolTipText(LOCTEXT("ByHandTip", "A kind places one object where you click, as many as you like on a cell; Ctrl+click takes away the one nearest"));
+			Modes->AddSlot().FillWidth(1.0f)[OnCells];
+			Modes->AddSlot().FillWidth(1.0f).Padding(3.0f, 0.0f, 0.0f, 0.0f)[ByHand];
+			Objects->AddSlot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 3.0f)[Modes];
+
+			// what a click does with what was placed by hand, the one nearest it
+			struct FPlacedButton
+			{
+				EHexPlacedTool Tool;
+				FText Label;
+				FText Tip;
+			};
+			const FPlacedButton PlacedButtons[] = {
+				{EHexPlacedTool::Place, LOCTEXT("PlacedPlace", "Place"), LOCTEXT("PlacedPlaceTip", "Click to place one of the kind chosen where you click, Ctrl+click to take away the one nearest")},
+				{EHexPlacedTool::Move, LOCTEXT("PlacedMove", "Move"), LOCTEXT("PlacedMoveTip", "Drag the object placed by hand nearest where you press")},
+				{EHexPlacedTool::Turn, LOCTEXT("PlacedTurn", "Turn"), LOCTEXT("PlacedTurnTip", "Click to turn the object placed by hand nearest the click, Ctrl+click to turn it back")},
+				{EHexPlacedTool::Size, LOCTEXT("PlacedSize", "Size"), LOCTEXT("PlacedSizeTip", "Click to make the object placed by hand nearest the click larger, Ctrl+click smaller")},
+				{EHexPlacedTool::Version, LOCTEXT("PlacedVersion", "Version"), LOCTEXT("PlacedVersionTip", "Click to give the object placed by hand nearest the click the next mesh of its kind, Ctrl+click the one before")},
+			};
+			TSharedRef<SUniformGridPanel> PlacedGrid = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
+			for (int32 Index = 0; Index < UE_ARRAY_COUNT(PlacedButtons); ++Index)
+			{
+				const EHexPlacedTool Tool = PlacedButtons[Index].Tool;
+				const TSharedRef<SButton> Button = MakeButton(
+					MakeLabel(PlacedButtons[Index].Label),
+					[Tool](UHexPlanetPainter& Each) { Each.SetPlacedTool(Tool); },
+					[Tool, Layer](const UHexPlanetPainter& Each) { return Each.GetTarget() == Layer && Each.IsUsingPlacedTool(Tool); });
+				Button->SetToolTipText(PlacedButtons[Index].Tip);
+				PlacedGrid->AddSlot(Index % 3, Index / 3)
 				[
 					Button
 				];
 			}
-			Objects->AddSlot().AutoHeight()[ObjectGrid];
+			Objects->AddSlot().AutoHeight()[PlacedGrid];
 
 			TSharedRef<SHorizontalBox> Densities = SNew(SHorizontalBox);
 			for (int32 Density = 1; Density <= 3; ++Density)
@@ -310,8 +374,11 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 				MakeLabel(LOCTEXT("Eraser", "Eraser")),
 				[](UHexPlanetPainter& Each) { Each.SetEraser(); },
 				[](const UHexPlanetPainter& Each) { return Each.IsErasing(); });
-			Eraser->SetToolTipText(LOCTEXT("EraserTip", "Takes the cover and the decor off the cells"));
+			Eraser->SetToolTipText(LOCTEXT("EraserTip", "On cells it takes the cover, the decor and what was placed by hand off the cells under the brush; by hand it takes away the object nearest the cursor, and each one it passes while you drag"));
 			Objects->AddSlot().AutoHeight()[Eraser];
+			Objects->AddSlot().AutoHeight()[MakeHelp(Layer == EHexPlanetLayer::Underground
+				? LOCTEXT("PlacedCaveHelp", "By hand an object may reach over into the next cell, but never over the void nor into a wall, and blocks nothing; a mass that blocks fills its cell and is painted on cells. Touching one of a cell painted on cells turns that cell into objects placed by hand.")
+				: LOCTEXT("PlacedHelp", "By hand an object may reach over into the next cell, but not into a river, and blocks nothing, even a tree of a forest. Touching one of a cell painted on cells turns that cell into objects placed by hand."))];
 
 			if (Layer == EHexPlanetLayer::Underground)
 			{

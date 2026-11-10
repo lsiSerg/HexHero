@@ -26,6 +26,11 @@ struct FHexLayerLighting
 	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=0))
 	float SunIntensity = 0.0f;
 
+	/** Intensity of the sun under the forced light of L (hex.PlanetForcedLight), which lights the layer evenly, in lux, never below the intensity
+	 *  above, so 0 keeps it */
+	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=0))
+	float ForcedSunIntensity = 0.0f;
+
 	/** Direction the sun shines from, as SunAzimuth of the config */
 	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=-360, ClampMax=360))
 	float SunAzimuth = 120.0f;
@@ -42,12 +47,13 @@ struct FHexLayerLighting
 	float ExposureBias = -1.0f;
 
 	/** Returns the light of the underground: a faint, cool key light, by which the maze stays readable in the dark (1.5 lux until 2026-11-10,
-	 *  a placeholder that lit everything evenly) */
+	 *  a placeholder that lit everything evenly, which the forced light of L brings back) */
 	static FHexLayerLighting MakeUnderground()
 	{
 		FHexLayerLighting Lighting;
 		Lighting.SunColor = FLinearColor(0.55f, 0.68f, 0.85f, 1.0f);
 		Lighting.SunIntensity = 0.12f;
+		Lighting.ForcedSunIntensity = 1.5f;
 		Lighting.SunCloseElevation = 55.0f;
 		Lighting.SunFarElevation = 70.0f;
 		Lighting.ExposureBias = 0.5f;

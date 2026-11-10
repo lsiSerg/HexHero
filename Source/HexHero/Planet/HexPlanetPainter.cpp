@@ -46,8 +46,9 @@ void UHexPlanetPainter::Init(AHexPlanet* SurfacePlanet, AHexPlanet* UndergroundP
 		State.PaintPreview->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		State.PaintPreview->RegisterComponent();
 
-		// the kinds of objects of the layer, so the palette shows them before the layer is built, as the planet counts them (FHexCellObjects)
-		State.LayerSets = UHexPlanetObjects::FindLayerSets(EHexPlanetLayer(Layer));
+		// the kinds of objects of the layer and those of the other layer a hand places here, so the palette shows them before the layer is built,
+		// as the planet counts them (FHexCellObjects)
+		State.LayerSets = UHexPlanetObjects::FindPlaceableSets(EHexPlanetLayer(Layer), &State.OwnSets);
 		State.PaintableSets = UHexPlanetObjects::GetPaintableSets(State.LayerSets);
 
 		State.Planet->OnLevelsRebuilt.AddUObject(this, &UHexPlanetPainter::OnLevelsRebuilt, Layer);
@@ -292,6 +293,12 @@ bool UHexPlanetPainter::IsObjectSetCover(EHexPlanetLayer Layer, int32 Set) const
 	return Index != INDEX_NONE && Layers[int32(Layer)].LayerSets[Index]->Layer == EHexObjectLayer::Cover;
 }
 
+bool UHexPlanetPainter::IsObjectSetForeign(EHexPlanetLayer Layer, int32 Set) const
+{
+	const int32 Index = GetPaintableSet(Layer, Set);
+	return Index != INDEX_NONE && Index >= Layers[int32(Layer)].OwnSets;
+}
+
 int32 UHexPlanetPainter::GetObjectSet() const
 {
 	return Layers.IsValidIndex(int32(Target)) ? GetLayerState().ObjectSet : 0;
@@ -304,7 +311,234 @@ void UHexPlanetPainter::SetObjectSet(int32 InSet)
 		return;
 	}
 	GetLayerState().ObjectSet = FMath::Clamp(InSet, 0, FMath::Max(GetLayerState().PaintableSets.Num() - 1, 0));
-	SetTool(EHexPaintTool::Object, GetObjectsTab());
+	// a kind of the other layer is placed by hand alone, and by hand a kind chosen is placed where a click falls
+	if (IsObjectSetForeign(Target, GetLayerState().ObjectSet))
+	{
+		bPlacingByHand = true;
+	}
+	if (bPlacingByHand)
+	{
+		PlacedTool = EHexPlacedTool::Place;
+	}
+	SetTool(bPlacingByHand ? EHexPaintTool::Placed : EHexPaintTool::Object, GetObjectsTab());
+}
+
+void UHexPlanetPainter::SetPlacingByHand(bool bByHand)
+{
+	bPlacingByHand = bByHand;
+	// on cells a kind of the other layer gives way to the first of the layer, as only a hand places it here
+	if (!bByHand && Layers.IsValidIndex(int32(Target)) && IsObjectSetForeign(Target, GetLayerState().ObjectSet))
+	{
+		GetLayerState().ObjectSet = 0;
+	}
+	// the kind chosen goes on with the other, and so does the eraser
+	if (Tool == EHexPaintTool::Object || (Tool == EHexPaintTool::Placed && PlacedTool != EHexPlacedTool::Erase))
+	{
+		if (bByHand)
+		{
+			PlacedTool = EHexPlacedTool::Place;
+		}
+		SetTool(bByHand ? EHexPaintTool::Placed : EHexPaintTool::Object, GetObjectsTab());
+	}
+	else if (IsErasing())
+	{
+		SetEraser();
+	}
+}
+
+void UHexPlanetPainter::SetPlacedTool(EHexPlacedTool InTool)
+{
+	PlacedTool = InTool;
+	bPlacingByHand = true;
+	SetTool(EHexPaintTool::Placed, GetObjectsTab());
+}
+
+void UHexPlanetPainter::SetEraser()
+{
+	// by hand it takes away the object nearest the cursor, else the cover, decor and what was placed by hand of the cells under the brush
+	if (bPlacingByHand)
+	{
+		SetPlacedTool(EHexPlacedTool::Erase);
+		return;
+	}
+	SetTool(EHexPaintTool::Eraser, GetObjectsTab());
+}
+
+void UHexPlanetPainter::ShowPlacedProblem(const FString& Problem)
+{
+	UE_LOG(LogHexHero, Log, TEXT("Painter: %s"), *Problem);
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(INDEX_NONE, 3.0f, FColor(255, 190, 120), Problem);
+	}
+}
+
+void UHexPlanetPainter::SetStrokeObjects(int32 Cell, const FHexCellObjects& Objects)
+{
+	UHexPlanetObjects* Planted = Planet->GetObjects();
+	if (!Stroke.OldObjects.Contains(Cell))
+	{
+		Stroke.OldObjects.Add(Cell, Planted->GetCell(Cell));
+	}
+	Stroke.NewObjects.Add(Cell, Objects);
+	TMap<int32, FHexCellObjects> Changed;
+	Changed.Add(Cell, Objects);
+	Planted->SetCells(Changed);
+	Planet->MarkLevelsEdited(true);
+}
+
+void UHexPlanetPainter::DropHeld()
+{
+	UHexPlanetObjects* Planted = Planet ? Planet->GetObjects() : nullptr;
+	if (!Planted)
+	{
+		HeldCell = INDEX_NONE;
+		return;
+	}
+	Planted->SetDragPreview(INDEX_NONE, nullptr);
+	if (HeldCell == INDEX_NONE)
+	{
+		return;
+	}
+	// where it was last shown, a place it may stand on
+	FHexCellObjects To = Planted->GetCell(HeldCell);
+	To.Placed.Add(HeldObject);
+	SetStrokeObjects(HeldCell, To);
+	UE_LOG(LogHexHero, Log, TEXT("Painter: put down %s on cell %d at %.3f, %.3f"), Planted->GetSets().IsValidIndex(HeldObject.Set - 1) ? *Planted->GetSets()[HeldObject.Set - 1]->DisplayName : TEXT("?"),
+		HeldCell, HeldObject.Offset.X, HeldObject.Offset.Y);
+	HeldCell = INDEX_NONE;
+}
+
+void UHexPlanetPainter::PaintPlaced(int32 Cell, bool bFirst)
+{
+	UHexPlanetObjects* Planted = Planet->GetObjects();
+	if (!Planted)
+	{
+		return;
+	}
+	const FVector3d Point(CursorPoint);
+	const double PickRadius = Settings->PaintObjectPickRadius * Settings->HexRadius;
+	int32 FoundCell = INDEX_NONE;
+	int32 FoundIndex = INDEX_NONE;
+	FHexCellObjects Found;
+
+	// the nearest object, placed by hand or of a cover or decor, whose cell is then unpacked into objects placed by hand
+	const auto FindNear = [&]()
+	{
+		return Planted->FindObjectNear(Point, PickRadius, FoundCell, FoundIndex, Found);
+	};
+
+	// the Eraser of By hand, and Ctrl with Place, take away the one nearest the cursor; the Eraser each one it passes while the button is held
+	if (PlacedTool == EHexPlacedTool::Erase || (PlacedTool == EHexPlacedTool::Place && IsBackwards()))
+	{
+		if ((bFirst || PlacedTool == EHexPlacedTool::Erase) && FindNear())
+		{
+			Found.Placed.RemoveAt(FoundIndex);
+			SetStrokeObjects(FoundCell, Found);
+		}
+		return;
+	}
+
+	if (PlacedTool == EHexPlacedTool::Place)
+	{
+		if (!bFirst)
+		{
+			return;
+		}
+		FHexPlacedObject Object;
+		FString Problem;
+		if (!Planted->MakePlaced(Cell, GetPaintableSet(Target, GetObjectSet()), Point, Object, Problem))
+		{
+			ShowPlacedProblem(FString::Printf(TEXT("Not placed: %s"), *Problem));
+			return;
+		}
+		FHexCellObjects New = Planted->GetCell(Cell);
+		New.Placed.Add(Object);
+		SetStrokeObjects(Cell, New);
+		return;
+	}
+
+	if (PlacedTool == EHexPlacedTool::Move)
+	{
+		// taken out of its cell once, which places that chunk again, and shown apart while it is dragged, so no chunk is placed again every frame
+		if (bFirst)
+		{
+			HeldCell = INDEX_NONE;
+			if (!FindNear())
+			{
+				ShowPlacedProblem(TEXT("No object near the cursor"));
+				return;
+			}
+			HeldObject = Found.Placed[FoundIndex];
+			Found.Placed.RemoveAt(FoundIndex);
+			SetStrokeObjects(FoundCell, Found);
+			HeldCell = FoundCell;
+			Planted->SetDragPreview(HeldCell, &HeldObject);
+			UE_LOG(LogHexHero, Log, TEXT("Painter: took up an object of cell %d at %.3f, %.3f"), HeldCell, HeldObject.Offset.X, HeldObject.Offset.Y);
+			return;
+		}
+		if (HeldCell == INDEX_NONE)
+		{
+			return;
+		}
+		// to the point under the cursor, onto the cell there, if it may stand there; else it stays where it was shown last
+		FHexPlacedObject Moved = HeldObject;
+		Moved.Offset = Planted->GetPlacedOffset(Cell, Point);
+		FString Problem;
+		if (Cell == HeldCell && Moved == HeldObject)
+		{
+			return;
+		}
+		if (!Planted->CanPlace(Cell, Moved, &Problem))
+		{
+			UE_LOG(LogHexHero, Verbose, TEXT("Painter: the object held does not go on cell %d: %s"), Cell, *Problem);
+			return;
+		}
+		HeldObject = Moved;
+		HeldCell = Cell;
+		Planted->SetDragPreview(HeldCell, &HeldObject);
+		return;
+	}
+
+	// Turn, Size and Version change the one nearest the click, once a stroke
+	if (!bFirst)
+	{
+		return;
+	}
+	if (!FindNear())
+	{
+		ShowPlacedProblem(TEXT("No object near the cursor"));
+		return;
+	}
+	FHexPlacedObject& Object = Found.Placed[FoundIndex];
+	const bool bBack = IsBackwards();
+	if (PlacedTool == EHexPlacedTool::Turn)
+	{
+		Object.Yaw = float(FMath::RoundToDouble(FMath::Fmod(double(Object.Yaw) + (bBack ? -1.0 : 1.0) * Settings->PaintObjectTurn + 360.0, 360.0) * 10.0) / 10.0);
+	}
+	else if (PlacedTool == EHexPlacedTool::Size)
+	{
+		const double Factor = bBack ? 1.0 / Settings->PaintObjectScale : Settings->PaintObjectScale;
+		Object.Scale = float(FMath::RoundToDouble(FMath::Clamp(double(Object.Scale) * Factor, 0.05, 20.0) * 1000.0) / 1000.0);
+		// a larger mesh may reach over a void or into a wall
+		FString Problem;
+		if (!Planted->CanPlace(FoundCell, Object, &Problem))
+		{
+			ShowPlacedProblem(FString::Printf(TEXT("Not scaled: %s"), *Problem));
+			return;
+		}
+	}
+	else if (PlacedTool == EHexPlacedTool::Version)
+	{
+		const int32 Count = Planted->GetMeshCount(FoundCell, int32(Object.Set) - 1);
+		if (Count <= 1)
+		{
+			ShowPlacedProblem(TEXT("That kind has one mesh"));
+			return;
+		}
+		Object.Mesh = uint8((int32(Object.Mesh) % Count + (bBack ? Count - 1 : 1)) % Count);
+	}
+	SetStrokeObjects(FoundCell, Found);
 }
 
 FLinearColor UHexPlanetPainter::GetNetworkColor(int32 InNetwork) const
@@ -427,6 +661,7 @@ void UHexPlanetPainter::BeginStroke(int32 Cell)
 	LastCell = INDEX_NONE;
 	LastCorner = INDEX_NONE;
 	CarveFrom = Cell;
+	HeldCell = INDEX_NONE;
 	Stroke = FHexPaintStep();
 	ContinueStroke(Cell);
 }
@@ -441,6 +676,13 @@ void UHexPlanetPainter::ContinueStroke(int32 Cell)
 	if (Tool == EHexPaintTool::River || Tool == EHexPaintTool::Bridge)
 	{
 		PaintRiver(Cell);
+		return;
+	}
+	// an object placed by hand goes where the click falls, and one dragged follows the cursor within a cell too
+	if (Tool == EHexPaintTool::Placed)
+	{
+		PaintPlaced(Cell, LastCell == INDEX_NONE);
+		LastCell = Cell;
 		return;
 	}
 	if (Cell == LastCell)
@@ -539,7 +781,8 @@ void UHexPlanetPainter::PaintAround(int32 Cell)
 			{
 				New = FHexCellObjects();
 			}
-			else if (SetIndex != INDEX_NONE && Objects->IsAllowed(SetIndex, Planet->GetCellLevel(Painted)))
+			// a kind of the layer alone fills cells, as a hand alone places those of the other layer
+			else if (SetIndex != INDEX_NONE && SetIndex < GetLayerState().OwnSets && Objects->IsAllowed(SetIndex, Planet->GetCellLevel(Painted)))
 			{
 				if (bCover)
 				{
@@ -868,6 +1111,8 @@ void UHexPlanetPainter::EndStroke()
 		return;
 	}
 
+	// the object Move drags goes down where it was shown last, as part of the stroke
+	DropHeld();
 	bPainting = false;
 	LastCell = INDEX_NONE;
 	CarveFrom = INDEX_NONE;
@@ -895,6 +1140,15 @@ void UHexPlanetPainter::EndStroke()
 		if (Stroke.OldRivers[It.Key()] == It.Value())
 		{
 			Stroke.OldRivers.Remove(It.Key());
+			It.RemoveCurrent();
+		}
+	}
+	// and an object dragged back to where it stood
+	for (auto It = Stroke.NewObjects.CreateIterator(); It; ++It)
+	{
+		if (Stroke.OldObjects[It.Key()] == It.Value())
+		{
+			Stroke.OldObjects.Remove(It.Key());
 			It.RemoveCurrent();
 		}
 	}
@@ -1062,6 +1316,8 @@ bool UHexPlanetPainter::RegenerateObjects()
 	for (int32 Cell = 0; Cell < Generated.Num(); ++Cell)
 	{
 		const FHexCellObjects Old = Objects->GetCell(Cell);
+		// what was placed by hand stays, as the generation gives only covers and decor
+		Generated[Cell].Placed = Old.Placed;
 		if (!(Old == Generated[Cell]))
 		{
 			Step.OldObjects.Add(Cell, Old);
@@ -1174,7 +1430,12 @@ bool UHexPlanetPainter::MakeRegenerateStep(int32 InNetwork, FHexPaintStep& OutSt
 			for (const TPair<int32, int32>& Each : Step.NewLevels)
 			{
 				const FHexCellObjects Old = Objects->GetCell(Each.Key);
-				const FHexCellObjects New = HexPlanetUnderground::IsPassage(int8(Each.Value)) ? Generated[Each.Key] : FHexCellObjects();
+				FHexCellObjects New = HexPlanetUnderground::IsPassage(int8(Each.Value)) ? Generated[Each.Key] : FHexCellObjects();
+				// a passage keeps what was placed on it by hand, the void loses it with the rest
+				if (HexPlanetUnderground::IsPassage(int8(Each.Value)))
+				{
+					New.Placed = Old.Placed;
+				}
 				if (!(Old == New))
 				{
 					Step.OldObjects.Add(Each.Key, Old);

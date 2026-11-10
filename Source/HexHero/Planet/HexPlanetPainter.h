@@ -25,6 +25,9 @@ enum class EHexPaintTool : uint8
 	Relief,
 	/** Puts the chosen kind of object on the cells (UHexPlanetObjects) */
 	Object,
+	/** Places objects by hand, one at the point clicked, and moves, turns, scales or changes the mesh of the one placed nearest it
+	 *  (EHexPlacedTool) */
+	Placed,
 	/** Takes the cover and decor off the cells */
 	Eraser,
 	/** Lays rivers along the sides of cells, from the corner nearest the cursor to the next (UHexPlanetRivers) */
@@ -56,6 +59,25 @@ enum class EHexReliefTool : uint8
 	Lower,
 	/** Back to the hash */
 	Reset,
+};
+
+/** What a click does with objects placed by hand (EHexPaintTool::Placed), as the developer chose on 2026-11-10: a cell holds as many as it takes,
+ *  each where it was placed, turned, scaled and of the mesh chosen; Ctrl goes the other way. The tools that change an object take the one
+ *  nearest the cursor, and one of the cover or decor of a cell unpacks that cell into objects placed by hand first (UHexPlanetObjects::UnpackCell) */
+enum class EHexPlacedTool : uint8
+{
+	/** Places one object of the kind chosen at the point clicked; Ctrl+click takes away the one nearest it */
+	Place,
+	/** Drags the object nearest the point pressed while the button is held, shown apart from the chunks, and puts it down on release */
+	Move,
+	/** Turns the one nearest the click on by PaintObjectTurn degrees, back with Ctrl */
+	Turn,
+	/** Makes it PaintObjectScale times larger, smaller with Ctrl */
+	Size,
+	/** Gives it the next mesh of its kind, the one before with Ctrl */
+	Version,
+	/** Takes away the one nearest the cursor, and as the button is dragged each one it passes, the Eraser of By hand */
+	Erase,
 };
 
 /** The tabs of the palette: those of the surface, then those of the underground (GetTabLayer). Each keeps the tool chosen in it last */
@@ -140,11 +162,13 @@ struct FHexPainterLayer
 	int32 Level = 0;
 	int32 Biome = 0;
 
-	/** The kinds of objects of the layer (UHexPlanetObjects::FindLayerSets), read once, so the palette has them before the layer is built, and
-	 *  those that can be painted among them (GetPaintableSets), of which ObjectSet is the one the brush puts */
+	/** The kinds of objects of the layer and after them those of the other layer that a hand places here (UHexPlanetObjects::FindPlaceableSets,
+	 *  OwnSets of them of the layer), read once, so the palette has them before the layer is built, and those that can be painted among them
+	 *  (GetPaintableSets), of which ObjectSet is the one the brush puts */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UHexPlanetObjectSet>> LayerSets;
 	TArray<int32> PaintableSets;
+	int32 OwnSets = 0;
 	int32 ObjectSet = 0;
 
 	/** Cells given to the planet whose surface is not rebuilt yet, shown as tiles, with the level the surface still shows (X) and the new one (Y) */
@@ -248,6 +272,9 @@ public:
 	FLinearColor GetObjectSetColor(EHexPlanetLayer Layer, int32 Set) const;
 	bool IsObjectSetCover(EHexPlanetLayer Layer, int32 Set) const;
 
+	/** Returns true if a kind of the palette of a layer is of the other layer, which a hand alone places there; choosing it places by hand */
+	bool IsObjectSetForeign(EHexPlanetLayer Layer, int32 Set) const;
+
 	/** Returns the kind of object the brush puts on the layer painted, by its place on the palette */
 	int32 GetObjectSet() const;
 
@@ -258,9 +285,22 @@ public:
 	int32 GetObjectDensity() const { return ObjectDensity; }
 	void SetObjectDensity(int32 InDensity) { ObjectDensity = FMath::Clamp(InDensity, 1, 3); }
 
-	/** Returns true while the brush takes objects off cells */
-	bool IsErasing() const { return Tool == EHexPaintTool::Eraser; }
-	void SetEraser() { SetTool(EHexPaintTool::Eraser, GetObjectsTab()); }
+	/** Returns true while the kinds of the palette place objects by hand, one at the point clicked, rather than putting them on the cells */
+	bool IsPlacingByHand() const { return bPlacingByHand; }
+
+	/** Places objects by hand or puts them on cells; a kind chosen goes on with the other, and so does its tool */
+	void SetPlacingByHand(bool bByHand);
+
+	/** Returns what a click does with the objects placed by hand, and chooses it, which places by hand */
+	EHexPlacedTool GetPlacedTool() const { return PlacedTool; }
+	void SetPlacedTool(EHexPlacedTool InTool);
+
+	/** Returns true while the brush places by hand with the tool given */
+	bool IsUsingPlacedTool(EHexPlacedTool InTool) const { return Tool == EHexPaintTool::Placed && PlacedTool == InTool; }
+
+	/** Returns true while the brush takes objects off cells, or by hand takes away the one nearest the cursor (EHexPlacedTool::Erase) */
+	bool IsErasing() const { return Tool == EHexPaintTool::Eraser || IsUsingPlacedTool(EHexPlacedTool::Erase); }
+	void SetEraser();
 
 	/** Returns the tab of the objects of the layer painted */
 	EHexPaintTab GetObjectsTab() const { return Target == EHexPlanetLayer::Underground ? EHexPaintTab::CaveObjects : EHexPaintTab::Objects; }
@@ -340,9 +380,12 @@ public:
 	/** Sets the size of the brush */
 	void SetBrushSize(int32 InSize) { BrushSize = FMath::Clamp(InSize, 1, MaxBrushSize); }
 
-	/** Returns true if the tool paints the rings of the brush; an entrance, a carved passage, a river and a bridge take a cell, a way or a side,
-	 *  whatever its size */
-	bool UsesBrushSize() const { return Tool != EHexPaintTool::Entrance && Tool != EHexPaintTool::Carve && Tool != EHexPaintTool::River && Tool != EHexPaintTool::Bridge; }
+	/** Returns true if the tool paints the rings of the brush; an entrance, a carved passage, a river, a bridge and an object placed by hand take a
+	 *  cell, a way, a side or a point, whatever its size */
+	bool UsesBrushSize() const
+	{
+		return Tool != EHexPaintTool::Entrance && Tool != EHexPaintTool::Carve && Tool != EHexPaintTool::River && Tool != EHexPaintTool::Bridge && Tool != EHexPaintTool::Placed;
+	}
 
 	/** Returns how many rings of cells the outline of the brush shows: its size, or one cell for the tools that ignore the size */
 	int32 GetOutlineSize() const { return UsesBrushSize() ? BrushSize : 1; }
@@ -403,6 +446,26 @@ private:
 	bool bBackwards = false;
 	EHexPaintTool Tool = EHexPaintTool::Level;
 	int32 ObjectDensity = 3;
+	bool bPlacingByHand = false;
+	EHexPlacedTool PlacedTool = EHexPlacedTool::Place;
+
+	/** The object that a stroke of Move drags, taken out of its cell while it is held and shown apart (UHexPlanetObjects::SetDragPreview), and the
+	 *  cell it would be put down on, INDEX_NONE while none is held */
+	int32 HeldCell = INDEX_NONE;
+	FHexPlacedObject HeldObject;
+
+	/** Puts down the object Move holds, on release or when the stroke ends otherwise */
+	void DropHeld();
+
+	/** Places, takes away, drags, turns, scales or changes the mesh of an object placed by hand at the point under the cursor, the first time of a
+	 *  stroke, and for Move every frame after it */
+	void PaintPlaced(int32 Cell, bool bFirst);
+
+	/** Puts the objects of a cell, changed, into the stroke and gives them to the planet at once */
+	void SetStrokeObjects(int32 Cell, const FHexCellObjects& Objects);
+
+	/** Shows why an object could not be placed or changed, for a few seconds */
+	static void ShowPlacedProblem(const FString& Problem);
 	EHexReliefTool ReliefTool = EHexReliefTool::Version;
 	int32 BrushSize = 1;
 	int32 Network = 0;

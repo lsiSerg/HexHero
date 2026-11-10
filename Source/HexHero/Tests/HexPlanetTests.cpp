@@ -14,7 +14,11 @@
 #include "HexPlanetSeaField.h"
 #include "HexPlanetSurface.h"
 #include "HexSphereGrid.h"
+#include "HAL/FileManager.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -748,7 +752,7 @@ bool FHexPlanetObjectsSaveLinesTest::RunTest(const FString& Parameters)
 	const TArray<FHexObjectCell> Lines = UHexPlanetObjects::MakeSavedLines(Cells, SetIds, [&](int32 Cell, int32 Set)
 	{
 		return AllowedLevels[Set].Contains(Levels[Cell]) && !KeptEntranceCells.Contains(Cell);
-	});
+	}, [](int32 Cell, int32 Set) { return true; });
 
 	TArray<int32> LineCells;
 	for (const FHexObjectCell& Line : Lines)
@@ -768,8 +772,108 @@ bool FHexPlanetObjectsSaveLinesTest::RunTest(const FString& Parameters)
 	}
 
 	// with no entrance kept, as before the underground has its data, nothing is dropped for them
-	const TArray<FHexObjectCell> NoEntrances = UHexPlanetObjects::MakeSavedLines(Cells, SetIds, [&](int32 Cell, int32 Set) { return AllowedLevels[Set].Contains(Levels[Cell]); });
+	const TArray<FHexObjectCell> NoEntrances = UHexPlanetObjects::MakeSavedLines(Cells, SetIds, [&](int32 Cell, int32 Set) { return AllowedLevels[Set].Contains(Levels[Cell]); },
+		[](int32 Cell, int32 Set) { return true; });
 	TestEqual(TEXT("Without entrances every allowed cell"), NoEntrances.Num(), 5);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHexPlanetObjectsPlacedTest, "HexHero.Planet.Objects.Placed",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FHexPlanetObjectsPlacedTest::RunTest(const FString& Parameters)
+{
+	// objects placed by hand go into the line of their cell on any land, whatever their kind allows on cells, none in the sea nor on a kept
+	// entrance, and come back from objects.json as they were saved, a line per cell, so Git still merges the file
+	const TArray<FName> SetIds = {TEXT("Forest"), TEXT("Rocks"), TEXT("Crystals")};
+	const TArray<TSet<int32>> AllowedLevels = {{0, 1}, {0, 1, 2}, {0}};
+	const auto MakePlaced = [](uint8 Set, float X, float Y, float Yaw, float Scale, uint8 Mesh)
+	{
+		FHexPlacedObject Object;
+		Object.Set = Set;
+		Object.Offset = FVector2f(X, Y);
+		Object.Yaw = Yaw;
+		Object.Scale = Scale;
+		Object.Mesh = Mesh;
+		return Object;
+	};
+	TArray<FHexCellObjects> Cells;
+	Cells.SetNum(5);
+	// 0: placed alone, two kinds, one of them twice
+	Cells[0].Placed = {MakePlaced(2, 0.25f, -0.5f, 30.0f, 1.2f, 1), MakePlaced(2, -0.4f, 0.1f, 182.5f, 0.85f, 0), MakePlaced(1, 0.0f, 0.0f, 0.0f, 1.0f, 2)};
+	// 1: a cover and a crystal on hills, which crystals do not fill but a hand may place them on
+	Cells[1].Cover = 1;
+	Cells[1].Density = 3;
+	Cells[1].Placed = {MakePlaced(3, 0.1f, 0.2f, 90.0f, 1.0f, 0)};
+	// 2: on a kept entrance
+	Cells[2].Placed = {MakePlaced(2, 0.3f, 0.3f, 10.0f, 1.0f, 0)};
+	// 3: a crystal on plains
+	Cells[3].Placed = {MakePlaced(3, -0.123f, 0.456f, 359.9f, 0.777f, 3)};
+	// 4: rocks in the shallows, where nothing placed by hand stands
+	Cells[4].Placed = {MakePlaced(2, 0.0f, 0.1f, 45.0f, 1.0f, 0)};
+	const TArray<int32> Levels = {0, 1, 0, 0, -1};
+	const TSet<int32> KeptEntranceCells = {2};
+
+	const TArray<FHexObjectCell> Lines = UHexPlanetObjects::MakeSavedLines(Cells, SetIds, [&](int32 Cell, int32 Set)
+	{
+		return AllowedLevels[Set].Contains(Levels[Cell]) && !KeptEntranceCells.Contains(Cell);
+	}, [&](int32 Cell, int32 Set)
+	{
+		return UHexPlanetObjects::IsPlacedLevel(Levels[Cell]) && !KeptEntranceCells.Contains(Cell);
+	});
+	TArray<int32> LineCells;
+	for (const FHexObjectCell& Line : Lines)
+	{
+		LineCells.Add(Line.Cell);
+	}
+	TestTrue(TEXT("A cell with only placed objects has a line, a kept entrance and the sea none"), LineCells == TArray<int32>({0, 1, 3}));
+	if (Lines.Num() != 3)
+	{
+		return false;
+	}
+	TestEqual(TEXT("Three placed on cell 0"), Lines[0].Placed.Num(), 3);
+	TestTrue(TEXT("In their order, by Id"), Lines[0].Placed[0].Id == FName(TEXT("Rocks")) && Lines[0].Placed[2].Id == FName(TEXT("Forest")));
+	TestTrue(TEXT("Placed by hand on any land, the cover kept"), Lines[1].Placed.Num() == 1 && Lines[1].Cover == FName(TEXT("Forest")));
+
+	// through the file and back, in a planet folder under Saved, which the paths of the files of a planet find as one of their roots
+	const FString Folder = TEXT("PlacedObjectsTest_DeleteMe");
+	const FString Directory = FPaths::Combine(FPaths::ProjectSavedDir(), HexPlanetFile::SavedFolder, Folder);
+	IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	IFileManager::Get().MakeDirectory(*Directory, true);
+	ON_SCOPE_EXIT
+	{
+		IFileManager::Get().DeleteDirectory(*Directory, false, true);
+	};
+	FString Error;
+	TestTrue(TEXT("Saved"), HexPlanetFile::SaveObjects(Folder, Lines, Error));
+	FString Text;
+	FFileHelper::LoadFileToString(Text, *HexPlanetFile::GetFilePath(Folder, HexPlanetFile::ObjectsFile));
+	TestTrue(TEXT("Written in the planet folder"), FPaths::FileExists(FPaths::Combine(Directory, HexPlanetFile::ObjectsFile)));
+	TArray<FString> FileLines;
+	Text.ParseIntoArrayLines(FileLines);
+	const int32 PlacedLines = FileLines.FilterByPredicate([](const FString& Line) { return Line.Contains(TEXT("\"placed\"")); }).Num();
+	AddInfo(FString::Printf(TEXT("objects.json:\n%s"), *Text));
+	TestEqual(TEXT("The placed objects of a cell on the line of the cell"), PlacedLines, 3);
+	TArray<FHexObjectCell> Loaded;
+	TestTrue(TEXT("Loaded"), HexPlanetFile::LoadObjects(Folder, Loaded, Error));
+	if (Loaded.Num() == 3 && Loaded[0].Placed.Num() == 3 && Loaded[2].Placed.Num() == 1)
+	{
+		const FHexPlacedLine& Back = Loaded[2].Placed[0];
+		TestTrue(TEXT("Where it stands, to a thousandth"), FMath::IsNearlyEqual(Back.X, -0.123f, 1.0e-4f) && FMath::IsNearlyEqual(Back.Y, 0.456f, 1.0e-4f));
+		TestTrue(TEXT("Its turn, scale and mesh"), FMath::IsNearlyEqual(Back.Yaw, 359.9f, 1.0e-3f) && FMath::IsNearlyEqual(Back.Scale, 0.777f, 1.0e-4f) && Back.Mesh == 3);
+		TestTrue(TEXT("Its kind"), Back.Id == FName(TEXT("Crystals")));
+		TestTrue(TEXT("The cover beside placed objects"), Loaded[1].Cover == FName(TEXT("Forest")) && Loaded[1].Density == 3);
+	}
+	else
+	{
+		AddError(TEXT("objects.json did not come back as it was saved"));
+	}
+
+	// a cell that holds only placed objects is not empty, and two cells differ by them
+	FHexCellObjects Copy = Cells[3];
+	TestFalse(TEXT("Not empty"), Copy.IsEmpty());
+	Copy.Placed[0].Yaw += 1.0f;
+	TestFalse(TEXT("A turn is a change"), Copy == Cells[3]);
 	return true;
 }
 

@@ -776,6 +776,18 @@ bool HexPlanetFile::SaveObjects(const FString& Folder, const TArray<FHexObjectCe
 		{
 			Line += FString::Printf(TEXT(", \"decor\": \"%s\""), *Cell.Decor.ToString());
 		}
+		// what was placed by hand, on the same line, where it stands to a thousandth of a cell, its turn to a tenth of a degree
+		if (!Cell.Placed.IsEmpty())
+		{
+			const auto Number = [](float Value, double Step) { return FString::SanitizeFloat(FMath::RoundToDouble(double(Value) / Step) * Step, 0); };
+			TArray<FString> Placed;
+			for (const FHexPlacedLine& Each : Cell.Placed)
+			{
+				Placed.Add(FString::Printf(TEXT("{\"id\": \"%s\", \"x\": %s, \"y\": %s, \"yaw\": %s, \"scale\": %s, \"mesh\": %d}"), *Each.Id.ToString(),
+					*Number(Each.X, 0.001), *Number(Each.Y, 0.001), *Number(Each.Yaw, 0.1), *Number(Each.Scale, 0.001), Each.Mesh));
+			}
+			Line += FString::Printf(TEXT(", \"placed\": [%s]"), *FString::Join(Placed, TEXT(", ")));
+		}
 		Text += FString::Printf(TEXT("%s\n\t\t%s}"), Index == 0 ? TEXT("") : TEXT(","), *Line);
 	}
 	Text += File.Cells.IsEmpty() ? TEXT("]\n}\n") : TEXT("\n\t]\n}\n");

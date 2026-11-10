@@ -251,6 +251,13 @@ public:
 	UPROPERTY(EditAnywhere, Category="Features")
 	bool bHeroLight = false;
 
+	/** The land away from the hero, for now away from the point the camera looks at, lies in shade as if under clouds while around the hero it is
+	 *  day, and the shade lifts around the entrances and the auroras, with the values of the category Light|Hero (AHexPlanet::UpdateHeroShade,
+	 *  UpdateLightField; the haze, the water and the clouds draw it), as the developer decided on 2026-11-10: the surface is lit as the
+	 *  underground is around the hero, but where it is dark much lighter than it, never night. The surface has it, the underground not */
+	UPROPERTY(EditAnywhere, Category="Features")
+	bool bHeroShade = true;
+
 	/** Scale of the largest octave of the noise of levels, on the unit sphere, divided by ContinentSize of a planet; the shares of levels are in planet.json */
 	UPROPERTY(EditAnywhere, Category="Levels", meta=(ClampMin=0.01))
 	float LevelNoiseScale = 1.6f;
@@ -849,6 +856,17 @@ public:
 	UPROPERTY(EditAnywhere, Category="Painting", meta=(ClampMin=1.01))
 	float PaintReliefStep = 1.2f;
 
+	/** The objects placed by hand (EHexPlacedTool): a click takes the one nearest it within PaintObjectPickRadius of a cell radius, Turn turns it by
+	 *  PaintObjectTurn degrees and Size scales it by PaintObjectScale, or back by its inverse with Ctrl */
+	UPROPERTY(EditAnywhere, Category="Painting", meta=(ClampMin=0.05))
+	float PaintObjectPickRadius = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Painting", meta=(ClampMin=1, ClampMax=180))
+	float PaintObjectTurn = 30.0f;
+
+	UPROPERTY(EditAnywhere, Category="Painting", meta=(ClampMin=1.01))
+	float PaintObjectScale = 1.15f;
+
 	/** Height above the sea from which the rock of the biome covers the ground whatever its slope, and where it covers all of it, so a low
 	 *  mountain reads as rock and not grass; hills stay below it */
 	UPROPERTY(EditAnywhere, Category="Colors", meta=(ClampMin=0))
@@ -999,6 +1017,57 @@ public:
 	/** Intensity of the light of the sky */
 	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=0))
 	float SkyLightIntensity = 1.0f;
+
+	/** How far the light of the hero reaches on the ground, in cells (from the middle of one cell to the next), the point light of bHeroLight
+	 *  underground and the day around the hero of bHeroShade on the surface; one day as far as the hero can go in a turn */
+	UPROPERTY(EditAnywhere, Category="Light|Hero", meta=(ClampMin=0.5))
+	float HeroLightReach = 4.0f;
+
+	/** Returns how far the light of the hero reaches on the ground, in world units, HeroLightReach times the distance between the middles of two
+	 *  neighboring cells */
+	double GetHeroLightReach() const { return double(HeroLightReach) * FMath::Sqrt(3.0) * double(HexRadius); }
+
+	/** The shade of the land away from the hero (bHeroShade): day within HeroShadeStart times the reach of the light of the hero, and from
+	 *  HeroShadeEnd times it the land keeps HeroShadeBrightness of its light and HeroShadeSaturation of its colors, the shade of clouds and not
+	 *  the night, so it reads from any distance; what glows by itself, the auroras, keeps its light */
+	UPROPERTY(EditAnywhere, Category="Light|Hero", meta=(ClampMin=0))
+	float HeroShadeStart = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Light|Hero", meta=(ClampMin=0))
+	float HeroShadeEnd = 1.6f;
+
+	UPROPERTY(EditAnywhere, Category="Light|Hero", meta=(ClampMin=0, ClampMax=1))
+	float HeroShadeBrightness = 0.55f;
+
+	UPROPERTY(EditAnywhere, Category="Light|Hero", meta=(ClampMin=0, ClampMax=1))
+	float HeroShadeSaturation = 0.8f;
+
+	/** In the shade the land around each entrance that can be used is lit EntranceLightLift of the way back to day, fading out EntranceLightReach
+	 *  cells from its middle, and around each aurora, over a pentagon, AuroraLightLift within AuroraLightReach cells, from a cubemap by the direction
+	 *  from the center, LightFieldSize texels a side (AHexPlanet::LightField) */
+	UPROPERTY(EditAnywhere, Category="Light|Hero", meta=(ClampMin=0, ClampMax=1))
+	float EntranceLightLift = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Light|Hero", meta=(ClampMin=0.1))
+	float EntranceLightReach = 1.6f;
+
+	UPROPERTY(EditAnywhere, Category="Light|Hero", meta=(ClampMin=0, ClampMax=1))
+	float AuroraLightLift = 0.75f;
+
+	UPROPERTY(EditAnywhere, Category="Light|Hero", meta=(ClampMin=0.1))
+	float AuroraLightReach = 3.0f;
+
+	UPROPERTY(EditAnywhere, Category="Light|Hero", meta=(ClampMin=16, ClampMax=2048))
+	int32 LightFieldSize = 256;
+
+	/** The forced light of L (hex.PlanetForcedLight), which lights the layer evenly, as before the dark: the shade and the light of the hero go,
+	 *  and the light of the sky takes ForcedSkyLightIntensity and the light the ground gives by itself ForcedAmbient (through ForcedLight of
+	 *  MPC_HexPlanet), each never below its own value, so 0 keeps it; the sun takes ForcedSunIntensity of FHexLayerLighting */
+	UPROPERTY(EditAnywhere, Category="Light|Forced", meta=(ClampMin=0))
+	float ForcedSkyLightIntensity = 0.0f;
+
+	UPROPERTY(EditAnywhere, Category="Light|Forced", meta=(ClampMin=0))
+	float ForcedAmbient = 0.0f;
 
 	/** Light the surface gives by itself, so the night side is not black */
 	UPROPERTY(EditAnywhere, Category="Surface", meta=(ClampMin=0))
@@ -1419,16 +1488,13 @@ public:
 	 *  the hero, around what glows and at the exits, the maze dim from any distance and still readable. One day it reaches as far as the hero can
 	 *  go in a turn; for now it stands over the point where the view through the middle of the screen meets the tops of the passages. A point
 	 *  light HeroLightHeight above the floor there that fades out HeroLightReach cells away on the floor (from the middle of one cell to the
-	 *  next), by HeroLightFalloff, in HeroLightColor at HeroLightIntensity; the walls and what stands on the floor cast its shadows while
-	 *  bHeroLightShadows, softened by HeroLightSourceRadius */
+	 *  next, Light|Hero), by HeroLightFalloff, in HeroLightColor at HeroLightIntensity; the walls and what stands on the floor cast its shadows
+	 *  while bHeroLightShadows, softened by HeroLightSourceRadius */
 	UPROPERTY(EditAnywhere, Category="Underground|Light")
 	FLinearColor HeroLightColor = FLinearColor(1.0f, 0.74f, 0.5f, 1.0f);
 
 	UPROPERTY(EditAnywhere, Category="Underground|Light", meta=(ClampMin=0))
 	float HeroLightIntensity = 4.0f;
-
-	UPROPERTY(EditAnywhere, Category="Underground|Light", meta=(ClampMin=0.5))
-	float HeroLightReach = 4.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Light", meta=(ClampMin=10))
 	float HeroLightHeight = 220.0f;
@@ -1442,30 +1508,71 @@ public:
 	UPROPERTY(EditAnywhere, Category="Underground|Light", meta=(ClampMin=0))
 	float HeroLightSourceRadius = 15.0f;
 
-	/** Returns how far the light of the hero reaches on the floor, in world units, HeroLightReach times the distance between the middles of two
-	 *  neighboring cells */
-	double GetHeroLightReach() const { return double(HeroLightReach) * FMath::Sqrt(3.0) * double(HexRadius); }
-
 	/** The colors of the networks of entrances A to H, of the chips of the editor and the markers of entrances and exits; the surface's are used
 	 *  for both layers */
 	UPROPERTY(EditAnywhere, Category="Underground|Entrances")
 	TArray<FLinearColor> NetworkColors = {FLinearColor(1.0f, 0.55f, 0.1f), FLinearColor(0.1f, 0.7f, 1.0f), FLinearColor(0.95f, 0.25f, 0.8f), FLinearColor(0.45f, 0.95f, 0.15f),
 		FLinearColor(0.6f, 0.4f, 1.0f), FLinearColor(1.0f, 0.22f, 0.18f), FLinearColor(0.15f, 0.95f, 0.75f), FLinearColor(1.0f, 0.9f, 0.25f)};
 
-	/** The marker of an entrance on the surface, a cave mouth, and of its exit underground, a ring of rocks with a shaft of light, each drawn with
-	 *  the network color as their glow (M_HexPlanetMarker, M_HexPlanetShaft; Tools/HexPlanetKit/import_planet_markers.py), scaled so their radius
-	 *  is MarkerSize and the shaft ShaftHeight high; their glow is MarkerGlow and that of the shaft ShaftBrightness */
+	/** The markers of the entrances, as the way into a cave the developer chose on 2026-11-10, read from above from any side
+	 *  (Tools/HexPlanetKit/generate_planet_kit.py, import_planet_markers.py): on the surface a pit in the ground, a rim of broken rock with
+	 *  crystals that glow in the color of the network (EntranceMesh, M_HexPlanetMarker) round its mouth (EntranceHoleMesh, M_HexPlanetPit), which
+	 *  draws the shaft below it with stairs winding down into the dark (EntrancePit*); underground stone stairs winding up a rock to a glyph that
+	 *  glows in that color (ExitMesh) under a shaft of daylight falling from above (ShaftMesh, M_HexPlanetShaft, from the top of the rock), which
+	 *  lights the rock and the steps by the red of their vertices (MarkerDaylight). Scaled so their radius is MarkerSize and the shaft ShaftHeight
+	 *  high; their glow is MarkerGlow and that of the shaft ShaftBrightness */
 	UPROPERTY(EditAnywhere, Category="Underground|Entrances")
-	TSoftObjectPtr<UStaticMesh> EntranceMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetCaveMouth.SM_PlanetCaveMouth")));
+	TSoftObjectPtr<UStaticMesh> EntranceMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetEntranceRim.SM_PlanetEntranceRim")));
 
 	UPROPERTY(EditAnywhere, Category="Underground|Entrances")
-	TSoftObjectPtr<UStaticMesh> ExitMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetExitRing.SM_PlanetExitRing")));
+	TSoftObjectPtr<UStaticMesh> EntranceHoleMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetEntranceHole.SM_PlanetEntranceHole")));
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances")
+	TSoftObjectPtr<UStaticMesh> ExitMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetExitStairs.SM_PlanetExitStairs")));
 
 	UPROPERTY(EditAnywhere, Category="Underground|Entrances")
 	TSoftObjectPtr<UStaticMesh> ShaftMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetExitShaft.SM_PlanetExitShaft")));
 
+	/** The shaft below the mouth of a pit (M_HexPlanetPit, by interior mapping, as the ground covers what lies below it): EntrancePitDepth radii of
+	 *  the mouth deep, darker down it, the light halving every 1 / EntrancePitDarkening of its depth, and the color of the network glowing up from
+	 *  its floor by EntrancePitGlow; stairs wind down its wall, EntrancePitStairTurns turns from the mouth to the floor of EntrancePitStairSteps
+	 *  steps a turn, each a block of worked stone (MarkerStoneColor) EntrancePitStairWidth of the radius out from the wall */
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0.1))
+	float EntrancePitDepth = 2.5f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0))
+	float EntrancePitDarkening = 3.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0))
+	float EntrancePitGlow = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0.1))
+	float EntrancePitStairTurns = 1.6f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0.05, ClampMax=0.9))
+	float EntrancePitStairWidth = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=3))
+	float EntrancePitStairSteps = 14.0f;
+
+	/** The color of the daylight of the shaft over an exit, which takes ShaftNetworkTint of the color of its network, and lights the rock and the
+	 *  stairs under it by MarkerDaylight times the red of their vertices, brightest on the top */
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances")
+	FLinearColor ShaftColor = FLinearColor(1.0f, 0.93f, 0.8f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0, ClampMax=1))
+	float ShaftNetworkTint = 0.25f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0))
+	float MarkerDaylight = 0.8f;
+
+	/** The worked stone of the steps of the stairs of a pit and of an exit (the green of their vertices), broken by the grain of the rock of the cell,
+	 *  lighter than the dark rock of the underground so the stairs read */
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances")
+	FLinearColor MarkerStoneColor = FLinearColor(0.3f, 0.27f, 0.23f, 1.0f);
+
 	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=1))
-	float MarkerSize = 55.0f;
+	float MarkerSize = 70.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=1))
 	float ShaftHeight = 150.0f;
@@ -2209,8 +2316,10 @@ public:
 
 	/** Small still pools of water on the passages, drawn by the material: where a noise CavePuddleScale across lies above CavePuddleCover, raised
 	 *  in the hollows of a floor that rises (FloorNoise) and lowered on its swells by up to CavePuddleHollow of the noise, so they gather in the
-	 *  hollows, and further than CavePuddleRimGap of the cell radius from a side towards a void or towards a cell with objects or of an exit, in
-	 *  which none lies, so a side never cuts one; a rim CavePuddleRim of the noise wide around them is wet earth, darker by
+	 *  hollows, and away from a side towards a void or towards a cell with objects or of an exit, in which none lies, so a side never cuts one:
+	 *  their level sinks by CavePuddleRimDepth at such a side, less the square of the way out to CavePuddleRimGap of the cell radius, so a pool
+	 *  near it shrinks and keeps round rather than ending on a line along it (a step there cut them straight until 2026-11-10, when the gap was 0.3
+	 *  and the step all of the noise); a rim CavePuddleRim of the noise wide around them is wet earth, darker by
 	 *  CavePuddleWetDarkening, and inside the water shows that earth at its shore and deepens to CavePuddleColor CavePuddleDepth of the noise in,
 	 *  with CavePuddleRoughness, CavePuddleSpecular, the up of the cell and a faint sheen CavePuddleSheen that does not depend on the view, so it
 	 *  reads as shallow dark water and not as a hole; its shore is at least CavePuddleEdge of the noise soft. No grid line and no pool of light
@@ -2225,7 +2334,10 @@ public:
 	float CavePuddleCover = 0.9f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Puddles", meta=(ClampMin=0, ClampMax=1))
-	float CavePuddleRimGap = 0.3f;
+	float CavePuddleRimGap = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Puddles", meta=(ClampMin=0))
+	float CavePuddleRimDepth = 0.5f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Puddles", meta=(ClampMin=0.001))
 	float CavePuddleRim = 0.04f;

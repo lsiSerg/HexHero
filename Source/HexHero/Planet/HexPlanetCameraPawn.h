@@ -134,14 +134,15 @@ public:
 	/** Gives the camera mode as pairs of name and value. Returns true if it is the mode the camera starts in */
 	bool GetViewStatus(TArray<TPair<FString, FString>>& OutLines) const;
 
-	/** Returns true while the sun follows the camera, the console variable hex.PlanetSun */
+	/** Returns true while the sun follows the camera, the console variable hex.PlanetSun, which no key changes since L became the forced light */
 	static bool IsSunFollowing();
-
-	/** Makes the sun follow the camera, or stay where it is, which sets hex.PlanetSun */
-	static void SetSunFollowing(bool bFollowing);
 
 	/** Gives whether the sun follows the camera as a pair of name and value. Returns true if it does, the usual view */
 	static bool GetSunStatus(TArray<TPair<FString, FString>>& OutLines);
+
+	/** Gives whether the forced light of L is on (AHexPlanet::IsLightForced) as a pair of name and value. Returns true while it is off, the
+	 *  usual view */
+	static bool GetLightStatus(TArray<TPair<FString, FString>>& OutLines);
 
 	/**
 	 *  Goes to a layer of the planet: ends the input held, asks the layer for the pieces around the place, fades to black, puts up the black
@@ -243,7 +244,7 @@ private:
 	double LastClickTime = 0.0;
 	void OnToggleGrid();
 	void OnToggleFreeCamera();
-	void OnToggleSunFollowing();
+	void OnToggleForcedLight();
 	void OnCycleWireframeMode();
 	void OnCycleWireframeScope();
 	void OnCycleWireframeTarget();
@@ -332,6 +333,12 @@ private:
 
 	/** Gives the sun and the camera the light of a layer (UHexPlanetCameraConfig::GetLighting) */
 	void ApplyLighting(EHexPlanetLayer Layer);
+
+	/** Gives the sun the color and intensity of the light of a layer, ForcedSunIntensity under the forced light of L, without moving it */
+	void ApplySunLight(EHexPlanetLayer Layer);
+
+	/** Whether the sun took the forced light, so a change of hex.PlanetForcedLight, by the key or the console, gives it the other */
+	bool bSunLightForced = false;
 
 	/** Steps of a trip: the fade to black, the black screen, while the layer is swapped and its pieces are built, and the fade back */
 	enum class ETravelPhase : uint8

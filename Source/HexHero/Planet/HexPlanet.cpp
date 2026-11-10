@@ -73,11 +73,17 @@ namespace
 	TAutoConsoleVariable<bool> CVarHexPlanetWalls(TEXT("hex.PlanetWalls"), true,
 		TEXT("Draws the walls on the lips of the passages of the underground (1), or hides them (0), to see what they cost."));
 
+	TAutoConsoleVariable<int32> CVarHexPlanetWallLod(TEXT("hex.PlanetWallLod"), 0,
+		TEXT("Draws each chunk of the walls of the underground by its distance (0), or every chunk whole where its whole walls are built (1), in the band where both dissolve into each other (2) or coarse (3)."));
+
 	TAutoConsoleVariable<bool> CVarHexPlanetMotes(TEXT("hex.PlanetMotes"), true,
 		TEXT("Draws the motes drifting over the passages of the underground and the spores rising from its mushrooms (1), or hides them (0), to see what they cost."));
 
 	TAutoConsoleVariable<int32> CVarHexPlanetHeroLight(TEXT("hex.PlanetHeroLight"), 1,
 		TEXT("The light around the hero underground, for now over the focus of the camera: 1 as DA_HexUnderground has it, 2 without its shadows, 0 none, to see what it costs and what lies in the dark."));
+
+	TAutoConsoleVariable<int32> CVarHexPlanetForcedLight(TEXT("hex.PlanetForcedLight"), 0,
+		TEXT("1 lights both layers of the planet evenly, as before the dark (the key L): the shade of the surface away from the hero goes, and underground the light of the hero and the fog around it, while the sun, the sky light and the light the ground gives by itself take their forced values. 0 is the light of the game."));
 
 	TAutoConsoleVariable<bool> CVarHexPlanetStreamPieces(TEXT("hex.PlanetStreamPieces"), true,
 		TEXT("Keeps the pieces of only the chunks of the planet near the camera on the GPU (1), building them again as it comes near, or of every chunk (0), to compare."));
@@ -1104,6 +1110,7 @@ void AHexPlanet::CreateHaze()
 
 	HazeMaterial = UMaterialInstanceDynamic::Create(Base, this);
 	SetCloudParameters(HazeMaterial);
+	SetHeroShadeParameters(HazeMaterial);
 	HazeVolume->Settings.WeightedBlendables.Array.Add(FWeightedBlendable(1.0f, HazeMaterial));
 }
 
@@ -1140,8 +1147,25 @@ void AHexPlanet::CreateSkyLight()
 
 	SkyLight->SetCubemap(SkyCubemap);
 	SkyLight->SetLightColor(Settings->SkyLightColor);
-	SkyLight->SetIntensity(Settings->SkyLightIntensity);
+	ApplySkyLightIntensity();
 	SkyLight->RecaptureSky();
+}
+
+bool AHexPlanet::IsLightForced()
+{
+	return CVarHexPlanetForcedLight.GetValueOnGameThread() != 0;
+}
+
+void AHexPlanet::SetLightForced(bool bForced)
+{
+	CVarHexPlanetForcedLight->Set(bForced ? 1 : 0, ECVF_SetByConsole);
+}
+
+void AHexPlanet::ApplySkyLightIntensity()
+{
+	bAppliedForcedLight = IsLightForced();
+	// the forced light never dims it, so 0 keeps the light of the layer
+	SkyLight->SetIntensity(bAppliedForcedLight ? FMath::Max(Settings->ForcedSkyLightIntensity, Settings->SkyLightIntensity) : Settings->SkyLightIntensity);
 }
 
 void AHexPlanet::BeginPlay()
@@ -2393,6 +2417,18 @@ void AHexPlanet::Tick(float DeltaTime)
 	{
 		UpdateHeroLight(HeroFocus);
 	}
+	// and on the surface the land away from it lies in shade
+	if (bHasHeroFocus && Settings->bHeroShade)
+	{
+		UpdateHeroShade(HeroFocus);
+	}
+	// the forced light of L, by the key or the console, lights the sky of the layer shown; the sun is the camera's, and the materials take it from
+	// ForcedLight of MPC_HexPlanet below
+	if (bAppliedForcedLight != IsLightForced())
+	{
+		ApplySkyLightIntensity();
+		UE_LOG(LogHexHero, Log, TEXT("Planet: the light of the %s is %s"), GetPlanetLayerName(PlanetLayer), bAppliedForcedLight ? TEXT("forced") : TEXT("that of the game"));
+	}
 
 	// the dense middle of the cap lies under the camera, where the water is seen closest
 	if (const AActor* ViewTarget = PlayerController && Settings->bSea ? PlayerController->GetViewTarget() : nullptr)
@@ -2436,11 +2472,12 @@ void AHexPlanet::Tick(float DeltaTime)
 			}
 		}
 
-		// and any material, such as those of the auroras
+		// and any material, such as those of the auroras; the light the ground gives by itself rises to ForcedAmbient under the forced light
 		if (UMaterialParameterCollectionInstance* Parameters = LoadedParameterCollection ? GetWorld()->GetParameterCollectionInstance(LoadedParameterCollection) : nullptr)
 		{
 			Parameters->SetVectorParameterValue(TEXT("SunDirection"), SunDirection);
 			Parameters->SetScalarParameterValue(TEXT("PlanetRadius"), Radius);
+			Parameters->SetScalarParameterValue(TEXT("ForcedLight"), IsLightForced() ? 1.0f : 0.0f);
 		}
 	}
 
@@ -3459,6 +3496,7 @@ void AHexPlanet::BuildWater()
 		SetShoreField(WaterMaterial);
 		HexMaterialConfig::Apply(WaterMaterial, LoadedWaterConfig);
 		SetCloudParameters(WaterMaterial);
+		SetHeroShadeParameters(WaterMaterial);
 		Water->SetMaterial(0, WaterMaterial);
 	}
 	else
@@ -3540,10 +3578,12 @@ void AHexPlanet::BuildClouds()
 	{
 		CloudMaterial = UMaterialInstanceDynamic::Create(BaseMaterial, this);
 		SetCloudParameters(CloudMaterial);
+		SetHeroShadeParameters(CloudMaterial);
 		Clouds->SetMaterial(0, CloudMaterial);
 
 		SkyCloudMaterial = UMaterialInstanceDynamic::Create(BaseMaterial, this);
 		SetCloudParameters(SkyCloudMaterial);
+		SetHeroShadeParameters(SkyCloudMaterial);
 		SkyCloudMaterial->SetScalarParameterValue(TEXT("CloudSkyLayer"), 1.0f);
 		SkyClouds->SetMaterial(0, SkyCloudMaterial);
 	}
@@ -4513,8 +4553,7 @@ void AHexPlanet::UpdateCanopy()
 		TBitArray<> Dry(false, Cells.Num());
 		for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
 		{
-			const FHexCellObjects Held = Objects->GetCell(Cell);
-			Dry[Cell] = Held.Cover != 0 || Held.Decor != 0 || Objects->IsClear(Cell);
+			Dry[Cell] = !Objects->GetCell(Cell).IsEmpty() || Objects->IsClear(Cell);
 		}
 		for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
 		{
@@ -5391,9 +5430,9 @@ void AHexPlanet::UpdateMarkers()
 		return;
 	}
 
-	// a cave mouth on the surface; a ring of rocks and a shaft of light over it underground
+	// a pit on the surface, its rim and its mouth; stairs up a rock and a shaft of daylight over it underground
 	const bool bSurface = PlanetLayer == EHexPlanetLayer::Surface;
-	const TArray<TSoftObjectPtr<UStaticMesh>> Meshes = bSurface ? TArray<TSoftObjectPtr<UStaticMesh>>{Settings->EntranceMesh}
+	const TArray<TSoftObjectPtr<UStaticMesh>> Meshes = bSurface ? TArray<TSoftObjectPtr<UStaticMesh>>{Settings->EntranceMesh, Settings->EntranceHoleMesh}
 		: TArray<TSoftObjectPtr<UStaticMesh>>{Settings->ExitMesh, Settings->ShaftMesh};
 	if (MarkerComponents.IsEmpty())
 	{
@@ -5409,23 +5448,28 @@ void AHexPlanet::UpdateMarkers()
 			UHierarchicalInstancedStaticMeshComponent* Component = NewObject<UHierarchicalInstancedStaticMeshComponent>(this, *FString::Printf(TEXT("Markers%d"), Index));
 			Component->SetupAttachment(Surface);
 			Component->SetStaticMesh(Mesh);
-			// the values of the config the materials take, such as MarkerGlow
+			// the shaft is light alone, and the mouth of a pit draws what lies below it, so neither casts a shadow nor needs anything in ray tracing
+			const bool bShaft = !bSurface && Index == 1;
+			const bool bHole = bSurface && Index == 1;
+			// the values of the config the materials take, such as MarkerGlow, and the radius of the mouth of a pit, in which it draws the shaft
 			for (int32 Slot = 0; Slot < Mesh->GetStaticMaterials().Num(); ++Slot)
 			{
 				if (UMaterialInterface* Parent = Mesh->GetMaterial(Slot))
 				{
 					UMaterialInstanceDynamic* Instance = UMaterialInstanceDynamic::Create(Parent, this);
 					HexMaterialConfig::Apply(Instance, Settings);
+					if (bHole)
+					{
+						Instance->SetScalarParameterValue(TEXT("PitRadius"), float(Mesh->GetBounds().BoxExtent.X * Settings->MarkerSize));
+					}
 					Component->SetMaterial(Slot, Instance);
 				}
 			}
 			// the rock layer and the color of the network
 			Component->NumCustomDataFloats = 4;
 			Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-			// the shaft is light alone, which casts no shadow and needs nothing in ray tracing
-			const bool bShaft = !bSurface && Index == 1;
-			Component->SetCastShadow(!bShaft);
-			Component->SetVisibleInRayTracing(!bShaft);
+			Component->SetCastShadow(!bShaft && !bHole);
+			Component->SetVisibleInRayTracing(!bShaft && !bHole);
 			Component->bAffectDistanceFieldLighting = false;
 			Component->RegisterComponent();
 			MarkerComponents.Add(Component);
@@ -5446,6 +5490,9 @@ void AHexPlanet::UpdateMarkers()
 	const TArray<FHexEntrance>& All = GetEntrances();
 	int32 Placed = 0;
 	int32 Unusable = 0;
+	// the shaft of daylight falls onto the top of the stairs of an exit
+	const UStaticMesh* ExitStairs = !bSurface && MarkerComponents.IsValidIndex(0) && MarkerComponents[0] ? MarkerComponents[0]->GetStaticMesh() : nullptr;
+	const double ShaftLift = ExitStairs ? FMath::Max(ExitStairs->GetBoundingBox().Max.Z, 0.0) * Settings->MarkerSize : 0.0;
 
 	for (int32 Index = 0; Index < All.Num(); ++Index)
 	{
@@ -5477,7 +5524,7 @@ void AHexPlanet::UpdateMarkers()
 			}
 			const bool bShaft = !bSurface && Mesh == 1;
 			const FVector Scale(Settings->MarkerSize, Settings->MarkerSize, bShaft ? Settings->ShaftHeight : Settings->MarkerSize);
-			const int32 Instance = Component->AddInstance(FTransform(Lean * Spin, FVector(Up * Ground), Scale), false);
+			const int32 Instance = Component->AddInstance(FTransform(Lean * Spin, FVector(Up * (Ground + (bShaft ? ShaftLift : 0.0))), Scale), false);
 			Component->SetCustomDataValue(Instance, 0, Rock, false);
 			Component->SetCustomDataValue(Instance, 1, Color.R, false);
 			Component->SetCustomDataValue(Instance, 2, Color.G, false);
@@ -5496,6 +5543,9 @@ void AHexPlanet::UpdateMarkers()
 	}
 	UE_LOG(LogHexHero, Log, TEXT("Planet: %d %s of %d entrances marked on the %s, %d of them cannot be used"), Placed, bSurface ? TEXT("entrances") : TEXT("exits"), All.Num(),
 		GetPlanetLayerName(PlanetLayer), Unusable);
+
+	// the shade of the surface lifts around the entrances that can be used
+	UpdateLightField();
 }
 
 void AHexPlanet::CreateFloeComponents(const UHexPlanetKitConfig* Config)
@@ -6096,9 +6146,9 @@ void AHexPlanet::UpdateHeroLight(const FVector3d& Focus)
 {
 	const FVector3d Up = Focus.GetSafeNormal();
 	const FVector3d Light = Focus + Up * Settings->HeroLightHeight;
-	// hex.PlanetHeroLight: 0 none, 2 without shadows
+	// hex.PlanetHeroLight: 0 none, 2 without shadows; the forced light of L lights everything without it
 	const int32 Mode = CVarHexPlanetHeroLight.GetValueOnGameThread();
-	const bool bLit = HeroLight && Mode != 0;
+	const bool bLit = HeroLight && Mode != 0 && !IsLightForced();
 	if (HeroLight)
 	{
 		if (HeroLight->IsVisible() != bLit)
@@ -6125,6 +6175,139 @@ void AHexPlanet::UpdateHeroLight(const FVector3d& Focus)
 	{
 		HazeMaterial->SetVectorParameterValue(TEXT("FogFocus"), FLinearColor(float(Focus.X), float(Focus.Y), float(Focus.Z), bLit ? float(Settings->GetHeroLightReach()) : 0.0f));
 	}
+}
+
+void AHexPlanet::UpdateHeroShade(const FVector3d& Focus)
+{
+	// a reach of 0 draws no shade, under the forced light of L
+	const FLinearColor Value(float(Focus.X), float(Focus.Y), float(Focus.Z), IsLightForced() ? 0.0f : float(Settings->GetHeroLightReach()));
+	if (Value == AppliedHeroShade)
+	{
+		return;
+	}
+	AppliedHeroShade = Value;
+	for (UMaterialInstanceDynamic* Instance : { HazeMaterial.Get(), WaterMaterial.Get(), CloudMaterial.Get(), SkyCloudMaterial.Get() })
+	{
+		if (Instance)
+		{
+			Instance->SetVectorParameterValue(TEXT("HeroFocus"), Value);
+		}
+	}
+}
+
+void AHexPlanet::SetHeroShadeParameters(UMaterialInstanceDynamic* Target) const
+{
+	if (!Target || !Settings)
+	{
+		return;
+	}
+	// these materials take the configs of the air and the water, so the values of the shade of this one are given by name
+	Target->SetScalarParameterValue(TEXT("HeroShadeStart"), Settings->HeroShadeStart);
+	Target->SetScalarParameterValue(TEXT("HeroShadeEnd"), Settings->HeroShadeEnd);
+	Target->SetScalarParameterValue(TEXT("HeroShadeBrightness"), Settings->HeroShadeBrightness);
+	Target->SetScalarParameterValue(TEXT("HeroShadeSaturation"), Settings->HeroShadeSaturation);
+	if (LightField)
+	{
+		Target->SetTextureParameterValue(TEXT("LightField"), LightField);
+	}
+}
+
+void AHexPlanet::UpdateLightField()
+{
+	if (!Settings || !Settings->bHeroShade || Radius <= 0.0)
+	{
+		return;
+	}
+	const double StartTime = FPlatformTime::Seconds();
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+
+	// each light as its direction from the center, how far it reaches as an angle and how much of the day it brings back at its middle
+	struct FLight
+	{
+		FVector3d Direction;
+		double Reach;
+		double CosReach;
+		float Lift;
+	};
+	TArray<FLight> Lights;
+	const double Step = FMath::Sqrt(3.0) * Settings->HexRadius;
+	const auto AddLight = [&](int32 Cell, double ReachCells, float Lift)
+	{
+		const double Reach = FMath::Min(ReachCells * Step / Radius, UE_DOUBLE_PI * 0.5);
+		if (Cells.IsValidIndex(Cell) && Lift > 0.0f)
+		{
+			Lights.Add({Cells[Cell].Center, Reach, FMath::Cos(Reach), Lift});
+		}
+	};
+	// the entrances that can be used, as the markers stand on them
+	const TArray<FHexEntrance>& All = GetEntrances();
+	int32 EntranceLights = 0;
+	for (int32 Index = 0; Index < All.Num(); ++Index)
+	{
+		if (GetEntranceProblem(Index) == HexPlanetUnderground::EEntranceProblem::None)
+		{
+			AddLight(All[Index].Cell, Settings->EntranceLightReach, Settings->EntranceLightLift);
+			++EntranceLights;
+		}
+	}
+	// and the auroras over the pentagons, the first cells of the grid
+	int32 AuroraLights = 0;
+	if (Settings->bAuroras)
+	{
+		for (int32 Cell = 0; Cell < FMath::Min(12, Cells.Num()); ++Cell)
+		{
+			AddLight(Cell, Settings->AuroraLightReach, Settings->AuroraLightLift);
+			++AuroraLights;
+		}
+	}
+
+	// a smooth bump over each light, the strongest of them where they meet, as the shade lifts towards the brightest light around
+	const int32 Size = FMath::Clamp(Settings->LightFieldSize, 16, 2048);
+	TArray<FColor> Pixels;
+	Pixels.SetNumUninitialized(6 * Size * Size);
+	ParallelFor(6 * Size, [&](int32 Row)
+	{
+		const int32 Face = Row / Size;
+		const int32 Y = Row % Size;
+		for (int32 X = 0; X < Size; ++X)
+		{
+			const FVector3d Direction = HexPlanetSeaField::GetTexelDirection(Face, X, Y, Size);
+			float Lift = 0.0f;
+			for (const FLight& Light : Lights)
+			{
+				const double Cos = FVector3d::DotProduct(Direction, Light.Direction);
+				if (Cos > Light.CosReach)
+				{
+					const double Share = FMath::Acos(FMath::Min(Cos, 1.0)) / Light.Reach;
+					Lift = FMath::Max(Lift, float(FMath::Square(1.0 - Share * Share)) * Light.Lift);
+				}
+			}
+			const uint8 Value = uint8(FMath::RoundToInt(FMath::Clamp(Lift, 0.0f, 1.0f) * 255.0f));
+			Pixels[Row * Size + X] = FColor(Value, Value, Value, 255);
+		}
+	});
+
+	// a new texture each time with a new name, as with the sea field
+	const FName Name = MakeUniqueObjectName(GetTransientPackage(), UTextureCube::StaticClass(), TEXT("PlanetLightField"));
+	UTextureCube* Cube = UTextureCube::CreateTransient(Size, Size, PF_B8G8R8A8, Name);
+	Cube->SRGB = false;
+	Cube->Filter = TF_Bilinear;
+	Cube->NeverStream = true;
+	FTexture2DMipMap& Mip = Cube->GetPlatformData()->Mips[0];
+	FMemory::Memcpy(Mip.BulkData.Lock(LOCK_READ_WRITE), Pixels.GetData(), Pixels.Num() * Pixels.GetTypeSize());
+	Mip.BulkData.Unlock();
+	Cube->UpdateResource();
+	LightField = Cube;
+
+	for (UMaterialInstanceDynamic* Instance : { HazeMaterial.Get(), WaterMaterial.Get(), CloudMaterial.Get(), SkyCloudMaterial.Get() })
+	{
+		if (Instance)
+		{
+			Instance->SetTextureParameterValue(TEXT("LightField"), LightField);
+		}
+	}
+	UE_LOG(LogHexHero, Log, TEXT("Planet: the light field of the %s holds %d entrances and %d auroras, %d texels a side, in %.1f ms"), GetPlanetLayerName(PlanetLayer),
+		EntranceLights, AuroraLights, Size, (FPlatformTime::Seconds() - StartTime) * 1000.0);
 }
 
 namespace
@@ -6399,12 +6582,15 @@ void AHexPlanet::UpdateWallLod(const FVector& CameraLocation)
 		}
 
 		// a chunk whose whole walls are not built yet draws its coarse ones whole
-		const uint8 Band = FarEdge < Near ? 0 : NearEdge > Far ? 2 : 1;
+		const int32 ForcedLod = CVarHexPlanetWallLod.GetValueOnGameThread();
+		const uint8 Band = ForcedLod >= 1 && ForcedLod <= 3 ? uint8(ForcedLod - 1) : FarEdge < Near ? 0 : NearEdge > Far ? 2 : 1;
 		const uint8 State = !bShown ? 4 : !WallWhole[Chunk] ? 3 : Band;
 		if (State == WallLodStates[Chunk])
 		{
 			continue;
 		}
+		UE_LOG(LogHexHero, Verbose, TEXT("Planet: the walls of chunk %d go from state %d to %d (0 whole, 1 band, 2 coarse, 3 coarse waiting, 4 hidden), %.0f to %.0f from the camera, %d triangles whole and %d coarse"),
+			Chunk, WallLodStates[Chunk], State, NearEdge, FarEdge, WallWholeTriangles[Chunk], WallCoarseTriangles[Chunk]);
 		WallLodStates[Chunk] = State;
 		if (UHexPlanetMeshComponent* Whole = WallChunks[Chunk])
 		{
@@ -6413,6 +6599,9 @@ void AHexPlanet::UpdateWallLod(const FVector& CameraLocation)
 		}
 		Coarse->SetVisibility(State >= 1 && State <= 3);
 		Coarse->SetMaterial(0, State == 1 ? WallFarMaterial.Get() : WallMaterial.Get());
+		// the shadow pass draws both of the band whole, so the coarse walls, a little in front of the whole ones in places, shaded them in stripes
+		// and the floor at their foot, a shadow that went as soon as the chunk left the band; there the whole walls alone cast it
+		Coarse->SetCastShadow(State != 1);
 	}
 
 	// the nearest of those that want their whole walls, a few at a time, from the walls of now

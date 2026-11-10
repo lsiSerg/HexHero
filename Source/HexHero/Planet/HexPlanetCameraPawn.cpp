@@ -460,16 +460,26 @@ void AHexPlanetCameraPawn::ApplyLighting(EHexPlanetLayer Layer)
 {
 	const FHexLayerLighting Lighting = Settings()->GetLighting(Layer);
 	Camera->PostProcessSettings.AutoExposureBias = Lighting.ExposureBias;
+	ApplySunLight(Layer);
+
+	// the sun of the new light stands where it should at once
+	SunFrom = FVector::ZeroVector;
+	bSunPlaced = false;
+}
+
+void AHexPlanetCameraPawn::ApplySunLight(EHexPlanetLayer Layer)
+{
+	const FHexLayerLighting Lighting = Settings()->GetLighting(Layer);
+	bSunLightForced = AHexPlanet::IsLightForced();
 
 	if (ULightComponent* Light = Sun ? Sun->GetLightComponent() : nullptr)
 	{
 		const bool bLevel = Lighting.SunIntensity <= 0.0f;
-		Light->SetIntensity(bLevel ? LevelSunIntensity : Lighting.SunIntensity);
+		const float Intensity = bLevel ? LevelSunIntensity : Lighting.SunIntensity;
+		// the forced light never dims it, so 0 keeps the light of the layer
+		Light->SetIntensity(bSunLightForced ? FMath::Max(Lighting.ForcedSunIntensity, Intensity) : Intensity);
 		Light->SetLightColor(bLevel ? LevelSunColor : Lighting.SunColor);
 	}
-	// the sun of the new light stands where it should at once
-	SunFrom = FVector::ZeroVector;
-	bSunPlaced = false;
 }
 
 FVector AHexPlanetCameraPawn::GetCameraLocationFor(const FHexPlanetCameraPlacement& Placement) const
@@ -730,9 +740,9 @@ void AHexPlanetCameraPawn::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 		EnhancedInputComponent->BindAction(InputConfig->WaterViewAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnCycleWaterView);
 
 		// actions added later are missing until Tools/create_input_assets.py has made them
-		if (InputConfig->SunFollowAction)
+		if (InputConfig->ForcedLightAction)
 		{
-			EnhancedInputComponent->BindAction(InputConfig->SunFollowAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnToggleSunFollowing);
+			EnhancedInputComponent->BindAction(InputConfig->ForcedLightAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnToggleForcedLight);
 		}
 		if (InputConfig->LayerAction)
 		{
@@ -807,6 +817,12 @@ void AHexPlanetCameraPawn::Tick(float DeltaTime)
 				TravelTo(SavedLayer, SavedPlacement, true);
 			}
 		}
+	}
+
+	// the forced light of L, by the key or the console, lights the sun of the layer shown, which AHexPlanet does for its sky and ground
+	if (bSunLightForced != AHexPlanet::IsLightForced())
+	{
+		ApplySunLight(Planet->GetLayer());
 	}
 
 	// a trip between the layers holds the camera where it is until it ends
@@ -1696,11 +1712,6 @@ bool AHexPlanetCameraPawn::IsSunFollowing()
 	return CVarHexPlanetSun.GetValueOnGameThread();
 }
 
-void AHexPlanetCameraPawn::SetSunFollowing(bool bFollowing)
-{
-	CVarHexPlanetSun->Set(bFollowing, ECVF_SetByConsole);
-}
-
 bool AHexPlanetCameraPawn::GetSunStatus(TArray<TPair<FString, FString>>& OutLines)
 {
 	const bool bFollowing = IsSunFollowing();
@@ -1709,9 +1720,17 @@ bool AHexPlanetCameraPawn::GetSunStatus(TArray<TPair<FString, FString>>& OutLine
 	return bFollowing;
 }
 
-void AHexPlanetCameraPawn::OnToggleSunFollowing()
+bool AHexPlanetCameraPawn::GetLightStatus(TArray<TPair<FString, FString>>& OutLines)
 {
-	SetSunFollowing(!IsSunFollowing());
+	const bool bForced = AHexPlanet::IsLightForced();
+	OutLines.Reset();
+	OutLines.Emplace(TEXT("Light"), bForced ? TEXT("Forced") : TEXT("Around the hero"));
+	return !bForced;
+}
+
+void AHexPlanetCameraPawn::OnToggleForcedLight()
+{
+	AHexPlanet::SetLightForced(!AHexPlanet::IsLightForced());
 }
 
 void AHexPlanetCameraPawn::OnCycleWireframeMode()

@@ -113,6 +113,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Set")
 	bool bBlocksMovement = false;
 
+	/** Returns true if this kind is a mass of the underground that fills its cell and blocks it, such as a druse of crystals, which is painted on
+	 *  cells and never placed by hand; a tree of a forest or a boulder placed by hand stands alone and blocks nothing, also underground */
+	bool IsCellMass() const { return bBlocksMovement && IsOnLayer(EHexPlanetLayer::Underground); }
+
 	/** Levels it may stand on, 0 plains, 1 hills, 2 mountains; a cell on another level keeps it but draws nothing, and a save drops it */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Set")
 	TArray<int32> AllowedLevels = {0, 1};

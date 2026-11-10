@@ -250,8 +250,9 @@ private:
 	 *  against the triangles of every cell it passes below the highest top around it, from Start to End, and the nearest hit wins */
 	int32 FindHeldCellAlongRay(const FVector& Origin, const FVector& RayDirection, double Start, double End, FVector* OutPoint) const;
 
-	/** The markers of the entrances: a cave mouth on each usable entrance of the surface, a ring of rocks with a shaft of light on each exit
-	 *  underground, tinted by the color of its network (UHexPlanetConfig::NetworkColors of the surface) */
+	/** The markers of the entrances: a pit on each entrance of the surface, its rim and its mouth, which draws the shaft below it, and stone stairs
+	 *  up a rock with a shaft of daylight over it on each exit underground, glowing in the color of its network (UHexPlanetConfig::NetworkColors
+	 *  of the surface) */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> MarkerComponents;
 
@@ -303,6 +304,11 @@ private:
 	 *  run-up on the beach, see HexPlanetSeaField */
 	UPROPERTY(Transient)
 	TObjectPtr<UTextureCube> ShoreField;
+
+	/** Cubemap of how far the shade away from the hero lifts around what lights the land (UHexPlanetConfig::bHeroShade): the entrances that can
+	 *  be used and the auroras over the pentagons, by the direction from the center (UpdateLightField) */
+	UPROPERTY(Transient)
+	TObjectPtr<UTextureCube> LightField;
 
 	/** Where the ground crosses the sea, by chunk (HexPlanetSurface::FBuild::Coasts), for the distance to the real coast of the sea field */
 	TArray<TArray<FVector3f>> ChunkCoasts;
@@ -504,6 +510,14 @@ public:
 	/** Finds the biomes of a layer, those with a PlanetLetter on the surface and with an UndergroundLetter underground, sorted by that letter,
 	 *  which a cell of that layer holds the index of, so the index of a biome is the same in every run */
 	static void FindBiomes(EHexPlanetLayer Layer, TArray<TObjectPtr<UHexBiomeConfig>>& OutConfigs, TArray<TCHAR>& OutLetters);
+
+	/** Returns true while the forced light of L is on (hex.PlanetForcedLight), which lights both layers evenly, as before the dark: the shade of
+	 *  the surface away from the hero goes, and underground the light of the hero and the fog around it, while the sun, the sky light and the
+	 *  light the ground gives by itself take their forced values (ForcedSunIntensity, ForcedSkyLightIntensity, ForcedAmbient) */
+	static bool IsLightForced();
+
+	/** Turns the forced light on or off, which sets hex.PlanetForcedLight */
+	static void SetLightForced(bool bForced);
 
 	/** Returns the biome of a cell, an index into GetBiomes */
 	int32 GetCellBiome(int32 Cell) const { return CellBiomes.IsValidIndex(Cell) ? CellBiomes[Cell] : 0; }
@@ -951,6 +965,24 @@ private:
 	 *  M_HexUndergroundFog), and whether there is one */
 	FVector3d HeroFocus = FVector3d::ZeroVector;
 	bool bHasHeroFocus = false;
+
+	/** The shade of the land away from the hero (UHexPlanetConfig::bHeroShade): gives the haze, the water and the clouds where the hero stands and
+	 *  how far its light reaches (HeroFocus of their materials), 0 under the forced light of L, which takes the shade away */
+	void UpdateHeroShade(const FVector3d& Focus);
+	FLinearColor AppliedHeroShade = FLinearColor(0.0f, 0.0f, 0.0f, -1.0f);
+
+	/** Gives a material that draws the shade the HeroShade values of the config and the light field */
+	void SetHeroShadeParameters(UMaterialInstanceDynamic* Target) const;
+
+	/** Builds LightField from the entrances that can be used and the pentagons with their auroras (EntranceLight*, AuroraLight* of the config),
+	 *  whenever the markers of the entrances are placed again */
+	void UpdateLightField();
+
+	/** The forced light of L as the sky light and the materials of this layer last took it */
+	bool bAppliedForcedLight = false;
+
+	/** Gives the sky light its intensity, ForcedSkyLightIntensity of the config under the forced light, never below its own */
+	void ApplySkyLightIntensity();
 
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInterface> LoadedWallObjectMaterial;

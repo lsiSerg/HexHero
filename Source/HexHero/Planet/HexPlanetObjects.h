@@ -28,6 +28,10 @@ class UStaticMesh;
  *  (HexPlanetUnderground::GenerateObjects), and keeps each mesh off the voids beside a passage (bClipFootprint). The kinds of the rims
  *  (EHexObjectLayer::Rim) are stored nowhere: every side of a passage towards a void takes them as its chunk is placed, rocks and spires on the
  *  lip and stalactites down the cliff below it (HexPlanetUnderground::FindRimSides), so they follow every edit of the levels and the entrances.
+ *  Besides its cover and decor a cell holds the objects placed on it by hand (FHexPlacedObject, the brush By hand, as the developer asked on
+ *  2026-11-10), as many as it takes, one mesh each where it was placed, with its turn, scale and mesh, which may reach over into a neighbor but
+ *  never over a void nor into a wall (CanPlace), and block nothing; a mass of the underground that blocks fills its cell and is not placed by hand.
+ *  They glow and give spores as a decor.
  */
 UCLASS()
 class UHexPlanetObjects : public USceneComponent
@@ -49,8 +53,13 @@ public:
 	bool Save(const FString& Folder, const TSet<int32>& KeptEntranceCells, FString& OutError) const;
 
 	/** Returns the lines of objects.json for the objects of the cells, their sets by index plus one into SetIds, with each cover and decor
-	 *  that IsKept says a save keeps; a cell keeping neither has no line */
-	static TArray<FHexObjectCell> MakeSavedLines(TConstArrayView<FHexCellObjects> Cells, TConstArrayView<FName> SetIds, TFunctionRef<bool(int32 Cell, int32 Set)> IsKept);
+	 *  that IsKept says a save keeps and each object placed by hand that IsPlacedKept does; a cell keeping none has no line */
+	static TArray<FHexObjectCell> MakeSavedLines(TConstArrayView<FHexCellObjects> Cells, TConstArrayView<FName> SetIds, TFunctionRef<bool(int32 Cell, int32 Set)> IsKept,
+		TFunctionRef<bool(int32 Cell, int32 Set)> IsPlacedKept);
+
+	/** Returns true if an object placed by hand stands on a level: any land of the surface and the passages underground, whatever its kind allows,
+	 *  as a hand chooses where it goes */
+	static bool IsPlacedLevel(int32 Level) { return Level >= 0; }
 
 	/** Places the objects of the cells of these chunks again on the surface shown now */
 	void RebuildChunks(TConstArrayView<int32> Chunks);
@@ -62,10 +71,57 @@ public:
 	void SetCells(const TMap<int32, FHexCellObjects>& Changes);
 
 	/** Returns the objects of a cell */
-	FHexCellObjects GetCell(int32 Cell) const { return CellObjects.IsValidIndex(Cell) ? CellObjects[Cell] : FHexCellObjects(); }
+	const FHexCellObjects& GetCell(int32 Cell) const
+	{
+		static const FHexCellObjects None;
+		return CellObjects.IsValidIndex(Cell) ? CellObjects[Cell] : None;
+	}
 
-	/** Returns the kinds of objects, by which FHexCellObjects counts */
+	/** Returns the axes of the frame of a cell, from the direction of its middle, by which an object placed by hand keeps where it stands
+	 *  (FHexPlacedObject::Offset); the ground of the cell is flattened onto them to find the triangle under a point */
+	static void GetCellAxes(const FVector3d& Center, FVector3d& OutX, FVector3d& OutY);
+
+	/** Returns where an object placed by hand on a cell stands, as a point of the plane of its frame in world units */
+	FVector2f GetPlacedFlat(const FHexPlacedObject& Object) const;
+
+	/** Returns where a point stands on a cell as FHexPlacedObject::Offset keeps it, to a thousandth of a cell radius as objects.json does */
+	FVector2f GetPlacedOffset(int32 Cell, const FVector3d& Point) const;
+
+	/** Returns about where an object placed by hand on a cell stands, at a distance from the center, for picking it */
+	FVector3d GetPlacedPoint(int32 Cell, const FHexPlacedObject& Object, double AtRadius) const;
+
+	/** Makes an object of a kind to place by hand at a point of a cell, its turn, scale and mesh from a hash of where it stands, or returns false
+	 *  and why it cannot stand there (CanPlace) */
+	bool MakePlaced(int32 Cell, int32 Set, const FVector3d& Point, FHexPlacedObject& OutObject, FString& OutProblem) const;
+
+	/** Returns true if an object placed by hand may stand where it is on a cell, else false and why: on land or a passage (IsPlacedLevel), not a
+	 *  mass of the underground that blocks and fills its cell, not on an entrance, on the ground and not under the sea, not in a river, and
+	 *  underground its mesh not over a void nor into a wall; what is placed by hand blocks nothing */
+	bool CanPlace(int32 Cell, const FHexPlacedObject& Object, FString* OutProblem = nullptr) const;
+
+	/** Finds the object nearest a point, on the cell there or its neighbors, within MaxDistance, whether placed by hand or of the cover or decor
+	 *  of a cell: then OutObjects are the objects of its cell with that cover and decor unpacked into objects placed by hand (UnpackCell), else
+	 *  as they are, and OutIndex is its index among their Placed; false if there is none */
+	bool FindObjectNear(const FVector3d& Point, double MaxDistance, int32& OutCell, int32& OutIndex, FHexCellObjects& OutObjects) const;
+
+	/** Gives the objects of a cell with its cover and decor turned into objects placed by hand where they stand (PlaceInCell, without their
+	 *  tilt), in front of those placed by hand before, so each can be moved, turned or taken away on its own; false if it has no cover or decor
+	 *  drawn */
+	bool UnpackCell(int32 Cell, FHexCellObjects& OutObjects) const;
+
+	/** Returns how many meshes a kind has over all its variants, which the Version tool cycles through */
+	int32 GetMeshCount(int32 Cell, int32 Set) const;
+
+	/** Shows an object placed by hand where it would stand on a cell, apart from the chunks, as Move drags it, so no chunk is placed again every
+	 *  frame; null hides it */
+	void SetDragPreview(int32 Cell, const FHexPlacedObject* Object);
+
+	/** Returns the kinds of objects, by which FHexCellObjects counts: those of the layer, then those of the other layer that only a hand places
+	 *  here (FindPlaceableSets) */
 	const TArray<TObjectPtr<UHexPlanetObjectSet>>& GetSets() const { return Sets; }
+
+	/** Returns how many of the sets are of the layer itself, first in GetSets: the others are of the other layer, for placing by hand alone */
+	int32 GetNumOwnSets() const { return NumOwnSets; }
 
 	/** Returns true if a kind of object may stand on a level */
 	bool IsAllowed(int32 Set, int32 Level) const;
@@ -113,6 +169,10 @@ public:
 	 *  that layer counts FHexCellObjects by, so the palette, the generation and the files count alike before the layer is built */
 	static TArray<TObjectPtr<UHexPlanetObjectSet>> FindLayerSets(EHexPlanetLayer Layer);
 
+	/** Returns the sets of a layer (FindLayerSets) and after them the covers and decor of the other layer, as the developer asked on 2026-11-10,
+	 *  so a dead tree may stand underground or bones on the surface, placed by hand alone, at most 254; OutOwn is how many are of the layer */
+	static TArray<TObjectPtr<UHexPlanetObjectSet>> FindPlaceableSets(EHexPlanetLayer Layer, int32* OutOwn = nullptr);
+
 	/** Returns the indices of the sets that can be painted and generated, the covers and decor */
 	static TArray<int32> GetPaintableSets(TConstArrayView<TObjectPtr<UHexPlanetObjectSet>> LayerSets);
 
@@ -142,9 +202,16 @@ private:
 		int32 Set = 0;
 		TObjectPtr<UStaticMesh> Mesh;
 
-		/** Farthest the mesh reaches from its pivot across its up, for UHexPlanetObjectSet::bClipFootprint */
+		/** Farthest the mesh reaches from its pivot across its up, for UHexPlanetObjectSet::bClipFootprint and what a hand places underground */
 		float FootprintRadius = 0.0f;
+
+		/** The scale factor and snow of the first variant that has the mesh, which an object placed by hand takes on a biome whose variant has not */
+		float ScaleFactor = 1.0f;
+		float Snow = 0.0f;
 	};
+
+	/** The ground of a cell flattened onto the plane of its frame, in buckets (HexPlanetObjects.cpp) */
+	struct FCellGround;
 
 	/** An object placed in a chunk */
 	struct FInstance
@@ -165,9 +232,19 @@ private:
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UHexPlanetObjectSet>> Sets;
 
-	/** The meshes of every kind, and by kind and variant those of the variant, as indices of Slots */
+	/** The meshes of every kind, and by kind and variant those of the variant, as indices of Slots, and by kind all of its meshes over its variants,
+	 *  which FHexPlacedObject::Mesh counts in */
 	TArray<FSlot> Slots;
 	TArray<TArray<TArray<int32>>> VariantSlots;
+	TArray<TArray<int32>> AllSlots;
+
+	/** How many of Sets are of the layer itself (FindPlaceableSets) */
+	int32 NumOwnSets = 0;
+
+	/** The object Move drags, apart from the chunks (SetDragPreview), and the slot it shows */
+	UPROPERTY(Transient)
+	TObjectPtr<class UInstancedStaticMeshComponent> DragPreview;
+	int32 DragPreviewSlot = INDEX_NONE;
 
 	/** Meshes kept loaded while they are drawn */
 	UPROPERTY(Transient)
@@ -223,6 +300,9 @@ private:
 
 		/** Tries to place a rim that hangs where no cliff was found below the lip */
 		int32 HangMissed = 0;
+
+		/** Objects placed by hand that are not drawn, as their level, biome or ground no longer allows them */
+		int32 PlacedLeftOut = 0;
 	};
 
 	/** Finds how far each cell lies from a cleared cell, for the rims that keep clear of exits */
@@ -245,8 +325,29 @@ private:
 	 *  change while it runs, so chunks run in parallel */
 	TArray<FInstance> PlaceChunk(int32 Chunk, FPlaceStats& OutStats) const;
 
-	/** Adds the objects of one kind on a cell to Out */
-	void PlaceInCell(int32 Cell, int32 Set, int32 Density, bool bDecor, const TArray<FVector3f>& Triangles, TArray<FInstance>& Out) const;
+	/** Adds the objects of one kind on a cell to Out, and to OutPlaced, when given, each as an object placed by hand would stand there (UnpackCell) */
+	void PlaceInCell(int32 Cell, int32 Set, int32 Density, bool bDecor, const TArray<FVector3f>& Triangles, TArray<FInstance>& Out,
+		TArray<FHexPlacedObject>* OutPlaced = nullptr) const;
+
+	/** Adds the objects placed by hand on a cell to Out, each where it stands on the ground of the cell, left out where its mesh would hang over a
+	 *  void or stand in a wall since it was placed, as the maze changed; returns how many it left out */
+	int32 PlacePlaced(int32 Cell, const TArray<FVector3f>& Triangles, TArray<FInstance>& Out) const;
+
+	/** Makes the instance of an object placed by hand on the ground of its cell; false where no ground lies under it or its kind is gone */
+	bool MakePlacedInstance(int32 Cell, const FHexPlacedObject& Object, const FCellGround& Ground, FInstance& Out) const;
+
+	/** Returns the slot of the mesh of an object placed by hand among all the meshes of its kind, or INDEX_NONE */
+	int32 GetPlacedSlot(int32 Cell, const FHexPlacedObject& Object) const;
+
+	/** Gives the scale factor and snow a slot takes on a cell: of the variant of its biome when that variant has the mesh, else of the slot */
+	void GetSlotLook(int32 Cell, int32 Slot, float& OutScaleFactor, float& OutSnow) const;
+
+	/** Gives a component that draws a slot the materials of its kind, as the chunks have them */
+	void SetSlotMaterials(class UStaticMeshComponent* Component, int32 Slot);
+
+	/** Returns false, and why, if the mesh of a slot at a scale on a point of a cell would hang over a void or a cleared cell, or stand in a wall
+	 *  or a river, the rules both placing by hand and drawing what was placed keep */
+	bool IsFootprintFree(int32 Cell, int32 Slot, float Scale, const FVector3d& Position, bool bRivers, FString* OutProblem) const;
 
 	/** Adds the rims of a chunk to Out: along every side of its passages towards a void (HexPlanetUnderground::FindRimSides), RimCountMin to the
 	 *  first of CountByDensity a side, spread along it, on the lip of the passage, or for a kind that hangs down the face of the cliff of the void

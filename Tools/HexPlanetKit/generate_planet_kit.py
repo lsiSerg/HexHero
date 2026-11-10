@@ -417,120 +417,256 @@ class Bridge:
 
 
 # the markers of the entrances of the underground (AHexPlanet::UpdateMarkers), of radius 1 around their foot at the origin, which the planet scales
-# to MarkerSize: the alpha of the color of a vertex is how much it glows in the color of its network (M_HexPlanetMarker), the red how far up the
-# shaft it lies (M_HexPlanetShaft). A normal per face, as on the boulders, so the rock reads as broken stone
+# to MarkerSize: the alpha of the color of a vertex is how much it glows in the color of its network (M_HexPlanetMarker), its red how much of the
+# daylight of the shaft over an exit falls on it, and on the shaft itself how far up it lies (M_HexPlanetShaft). A normal per face, as on the
+# boulders, so the rock reads as broken stone. As the developer chose on 2026-11-10, each reads as the way into a cave from above, from any side: the
+# entrance on the surface is a pit, a rim of broken rock round its mouth, a disc at HOLE_HEIGHT whose material draws the shaft below it with stairs
+# winding down into the dark (M_HexPlanetPit), as the ground hides what lies under it, and the exit underground stone stairs winding up a rock to
+# a glyph on its top, where the shaft of daylight falls
 MARKER_SEGMENTS = 20
+# the mouth of the pit, a disc this wide at this height, which the rim overhangs a little so its edge does not show
+HOLE_RADIUS = 0.42
+HOLE_HEIGHT = 0.12
+# the top of the rock of an exit, where the shaft of daylight begins (AHexPlanet::UpdateMarkers places it at the top of the bounds of the mesh)
+EXIT_TOP = 1.1
 
 
 def ring_noise(index, ring, seed, amount):
     return (hash_unit(index, ring, seed) - 0.5) * 2.0 * amount
 
 
-class CaveMouth:
-    """A mound of broken rock around a dark funnel that glows from deep inside, so the mouth of a cave reads from above and from the side"""
+def oriented(a, b, c, outward):
+    """The corners of a triangle wound to face the outward direction, as a triangle shows where (C - A) x (B - A) points, and its normal, or None if
+    it has no area"""
+    u = [c[axis] - a[axis] for axis in range(3)]
+    v = [b[axis] - a[axis] for axis in range(3)]
+    cross = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]
+    length = math.sqrt(sum(value * value for value in cross))
+    if length < 1e-9:
+        return None
+    if sum(cross[axis] * outward[axis] for axis in range(3)) < 0.0:
+        b, c = c, b
+        cross = [-value for value in cross]
+    return [a, b, c], [value / length for value in cross]
 
-    def __init__(self, seed):
-        # rings from the bottom of the funnel out to the foot of the mound: (radius, height, how much it glows)
-        # the funnel stays above the ground, which would hide what lies below it, and glows from its bottom up its walls
-        rings = [(0.0, 0.05, 1.0), (0.14, 0.07, 1.0), (0.24, 0.2, 0.75), (0.31, 0.44, 0.0), (0.4, 0.52, 0.0), (0.58, 0.38, 0.0),
-                 (0.78, 0.18, 0.0), (1.0, -0.04, 0.0)]
-        self.points = []
-        self.rings = []
-        for ring, (radius, height, glow) in enumerate(rings):
-            row = []
-            count = 1 if radius == 0.0 else MARKER_SEGMENTS
-            for index in range(count):
-                angle = (index + 0.5 * (ring % 2)) / count * 2.0 * math.pi
-                # the rim and the mound are broken, the funnel stays round enough to read as a hole
-                jag = 0.0 if ring < 2 else 0.08 + 0.04 * ring
-                r = radius * (1.0 + ring_noise(index, ring, seed, 0.12 if ring >= 3 else 0.04))
-                h = height + ring_noise(index, ring + 20, seed, jag * 0.6) if radius > 0.0 else height
-                # one side of the mound lower, so the mouth opens towards a side like a cave in a slope
-                h -= 0.12 * max(0.0, math.cos(angle - 0.6)) * (ring >= 3) * (0.5 + radius * 0.5)
-                row.append(len(self.points))
-                self.points.append(((r * math.cos(angle), r * math.sin(angle), h), glow))
-            self.rings.append(row)
-        self.faces = []
-        for ring in range(len(self.rings) - 1):
-            inner, outer = self.rings[ring], self.rings[ring + 1]
-            if len(inner) == 1:
-                for index in range(len(outer)):
-                    self.faces.append((inner[0], outer[index], outer[(index + 1) % len(outer)]))
-                continue
-            for index in range(len(outer)):
-                a, b = inner[index], inner[(index + 1) % len(inner)]
-                c, d = outer[index], outer[(index + 1) % len(outer)]
-                self.faces.append((a, c, d))
-                self.faces.append((a, d, b))
 
-    def get_triangles(self):
-        """Triangles with their corners, a glow each, and a normal facing up and out of the mound, a triangle showing where (C - A) x (B - A) points"""
-        result = []
-        for face in self.faces:
-            corners = [self.points[index][0] for index in face]
-            glows = [self.points[index][1] for index in face]
-            a, b, c = corners
+class MarkerMesh:
+    """Triangles of a marker as (corners, normal, glows, reds, greens), each corner with how much it glows, how much daylight it takes and how much
+    it is worked stone, as the steps of stairs, rather than the rock of the cell"""
+
+    def __init__(self):
+        self.triangles = []
+
+    def add(self, a, b, c, outward, glow=0.0, red=0.0, green=0.0):
+        result = oriented(a, b, c, outward)
+        if result:
+            corners, normal = result
+            channels = [value if isinstance(value, (list, tuple)) else (value, value, value) for value in (glow, red, green)]
+            # the winding swapped the last two corners if it had to
+            if corners[1] is not b:
+                channels = [(value[0], value[2], value[1]) for value in channels]
+            self.triangles.append((corners, normal, list(channels[0]), list(channels[1]), list(channels[2])))
+
+    def add_quad(self, a, b, c, d, outward, glow=0.0, red=0.0, green=0.0):
+        self.add(a, b, c, outward, glow, red, green)
+        self.add(a, c, d, outward, glow, red, green)
+
+    def add_rock(self, seed, size, squash, angle, distance, height, lean=0.0, glow=0.0, red=0.0, stretch=1.0):
+        """A boulder of the kit, size wide, squashed in height, leaning out by lean, standing at a distance from the middle in a direction"""
+        cos, sin = math.cos(angle), math.sin(angle)
+        for corners, normal in Boulder(seed).get_triangles():
+            placed = []
+            for x, y, z in corners:
+                x, y, z = x * size, y * size * stretch, (z + 0.35) * size * squash
+                x += lean * z
+                placed.append((x * cos - y * sin + distance * cos, x * sin + y * cos + distance * sin, z + height))
+            # the normal of the face as it stands now, from its corners
+            a, b, c = placed
             u = [c[axis] - a[axis] for axis in range(3)]
             v = [b[axis] - a[axis] for axis in range(3)]
-            cross = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]
-            length = math.sqrt(sum(value * value for value in cross))
-            if length < 1e-9:
-                continue
-            # every face of the mound and the funnel is seen from above, so it faces up
-            if cross[2] < 0.0:
-                corners = [a, c, b]
-                glows = [glows[0], glows[2], glows[1]]
-                cross = [-value for value in cross]
-            result.append((corners, [value / length for value in cross], glows))
-        return result
+            cross = (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0])
+            self.add(a, b, c, cross, glow, red)
+
+    def add_crystal(self, angle, distance, height, size, tall, lean, turn, glow):
+        """A crystal of six sides with a pointed tip, leaning out from the middle, which glows"""
+        cos, sin = math.cos(angle), math.sin(angle)
+        tip_height = tall * 1.25
+
+        def place(x, y, z):
+            # leaning out along the direction from the middle, then turned there
+            x, z = x * math.cos(lean) + z * math.sin(lean), -x * math.sin(lean) + z * math.cos(lean)
+            return (x * cos - y * sin + distance * cos, x * sin + y * cos + distance * sin, z + height)
+
+        ring_low = [place(size * math.cos(turn + k * math.pi / 3.0), size * math.sin(turn + k * math.pi / 3.0), -0.02) for k in range(6)]
+        ring_high = [place(size * 0.85 * math.cos(turn + k * math.pi / 3.0), size * 0.85 * math.sin(turn + k * math.pi / 3.0), tall) for k in range(6)]
+        tip = place(0.0, 0.0, tip_height)
+        axis_low = place(0.0, 0.0, 0.0)
+        for k in range(6):
+            n = (k + 1) % 6
+            middle = [(ring_low[k][axis] + ring_high[n][axis]) * 0.5 - axis_low[axis] for axis in range(3)]
+            self.add_quad(ring_low[k], ring_low[n], ring_high[n], ring_high[k], middle, glow)
+            top = [(ring_high[k][axis] + ring_high[n][axis] + tip[axis]) / 3.0 - axis_low[axis] for axis in range(3)]
+            self.add(ring_high[k], ring_high[n], tip, top, glow)
+
+    def get_triangles(self):
+        return self.triangles
 
 
-class ExitRing:
-    """A ring of standing stones around a glowing glyph on the floor, where a hero comes out of an entrance underground"""
+class EntranceRim(MarkerMesh):
+    """The rim of a pit on the surface: a low ring of broken rock round its mouth, its inner edge overhanging the mouth so its edge does not show and
+    dropping below it, boulders on its crest and two clusters of crystals that glow in the color of the network"""
 
     def __init__(self, seed):
-        self.triangles = []
-        stones = 7
-        for stone in range(stones):
-            angle = (stone + (hash_unit(stone, 1, seed) - 0.5) * 0.4) / stones * 2.0 * math.pi
-            distance = 0.78 + 0.1 * hash_unit(stone, 2, seed)
-            size = 0.13 + 0.06 * hash_unit(stone, 3, seed)
-            tall = 1.8 + 1.4 * hash_unit(stone, 4, seed)
-            lean = (hash_unit(stone, 5, seed) - 0.5) * 0.25
-            for corners, normal in Boulder(seed * 13 + stone * 7 + 1).get_triangles():
-                placed = []
-                for x, y, z in corners:
-                    x, y, z = x * size, y * size, (z + 0.45) * size * tall
-                    x += lean * z
-                    cos, sin = math.cos(angle), math.sin(angle)
-                    placed.append((x * cos - y * sin + distance * cos, x * sin + y * cos + distance * sin, z - 0.03))
-                nx, ny, nz = normal
-                nx, ny, nz = nx / size, ny / size, nz / (size * tall)
-                nx, ny = nx * math.cos(angle) - ny * math.sin(angle), nx * math.sin(angle) + ny * math.cos(angle)
-                length = math.sqrt(nx * nx + ny * ny + nz * nz)
-                self.triangles.append((placed, (nx / length, ny / length, nz / length), (0.0, 0.0, 0.0)))
-        # the glyph: a flat ring and a disc a little above the floor, which glow
+        super().__init__()
+        count = MARKER_SEGMENTS * 2
+        # rings from below the edge of the mouth, up its inner edge and over the crest, out to the foot: (radius, height)
+        rings = [(HOLE_RADIUS - 0.05, HOLE_HEIGHT - 0.06), (HOLE_RADIUS - 0.05, HOLE_HEIGHT + 0.025), (HOLE_RADIUS + 0.03, HOLE_HEIGHT + 0.09),
+                 (0.56, HOLE_HEIGHT + 0.1), (0.7, 0.12), (0.84, 0.05), (1.0, -0.04)]
+        points = []
+        for ring, (radius, height) in enumerate(rings):
+            row = []
+            for index in range(count):
+                angle = (index + 0.5 * (ring % 2)) / count * 2.0 * math.pi
+                # the inner edge stays round enough to cover the edge of the mouth, the crest and the slope are broken
+                r = radius * (1.0 + ring_noise(index, ring if ring > 0 else 1, seed, 0.015 if ring < 2 else 0.07))
+                h = height + ring_noise(index, ring + 20, seed, 0.01 if ring < 2 else 0.035)
+                row.append((r * math.cos(angle), r * math.sin(angle), h))
+            points.append(row)
+        for ring in range(len(points) - 1):
+            inner, outer = points[ring], points[ring + 1]
+            for index in range(count):
+                a, b = inner[index], inner[(index + 1) % count]
+                c, d = outer[index], outer[(index + 1) % count]
+                middle = [(a[axis] + d[axis]) * 0.5 for axis in range(3)]
+                # the inner edge faces the middle of the mouth, the rest up and out
+                outward = (-middle[0], -middle[1], 0.0) if ring == 0 else (middle[0] * 0.3, middle[1] * 0.3, 1.0)
+                self.add(a, c, d, outward)
+                self.add(a, d, b, outward)
+        # boulders on the crest, some leaning in over the mouth, and smaller stones down the slope
+        for stone in range(9):
+            angle = (stone + (hash_unit(stone, 1, seed) - 0.5) * 0.6) / 9 * 2.0 * math.pi
+            distance = 0.47 + 0.14 * hash_unit(stone, 2, seed)
+            size = 0.06 + 0.06 * hash_unit(stone, 3, seed)
+            self.add_rock(seed * 13 + stone * 7 + 1, size, 0.7 + 0.5 * hash_unit(stone, 4, seed), angle, distance, HOLE_HEIGHT + 0.06,
+                          lean=-0.3 * hash_unit(stone, 5, seed))
+        for stone in range(7):
+            angle = hash_unit(stone, 11, seed) * 2.0 * math.pi
+            distance = 0.7 + 0.22 * hash_unit(stone, 12, seed)
+            size = 0.03 + 0.03 * hash_unit(stone, 13, seed)
+            self.add_rock(seed * 17 + stone * 5 + 3, size, 0.6, angle, distance, 0.1 - 0.12 * (distance - 0.7) / 0.22)
+        # the crystals, which glow in the color of the network, two clusters on the crest
+        for cluster in range(2):
+            base = (cluster + 0.25 * hash_unit(cluster, 21, seed)) * math.pi
+            for crystal in range(3):
+                angle = base + (hash_unit(cluster * 3 + crystal, 22, seed) - 0.5) * 0.35
+                self.add_crystal(angle, 0.5 + 0.06 * hash_unit(cluster * 3 + crystal, 23, seed), HOLE_HEIGHT + 0.08,
+                                 0.018 + 0.01 * hash_unit(cluster * 3 + crystal, 24, seed), 0.07 + 0.08 * hash_unit(cluster * 3 + crystal, 25, seed),
+                                 0.35 + 0.35 * hash_unit(cluster * 3 + crystal, 26, seed), hash_unit(cluster * 3 + crystal, 27, seed), 1.0)
+
+
+class EntranceHole(MarkerMesh):
+    """The mouth of a pit, a flat disc HOLE_RADIUS wide at HOLE_HEIGHT facing up, whose material draws the shaft below it"""
+
+    def __init__(self):
+        super().__init__()
+        count = MARKER_SEGMENTS * 3
+        center = (0.0, 0.0, HOLE_HEIGHT)
+        for index in range(count):
+            a0, a1 = index / count * 2.0 * math.pi, (index + 1) / count * 2.0 * math.pi
+            self.add(center, (HOLE_RADIUS * math.cos(a0), HOLE_RADIUS * math.sin(a0), HOLE_HEIGHT),
+                     (HOLE_RADIUS * math.cos(a1), HOLE_RADIUS * math.sin(a1), HOLE_HEIGHT), (0.0, 0.0, 1.0))
+
+
+class ExitStairs(MarkerMesh):
+    """The exit of a network underground: stone stairs winding up a rock in its hall to a glyph on its flat top that glows in the color of the
+    network, where the shaft of daylight falls; the red of a vertex is how much of that daylight it takes, all of it on the top"""
+
+    def __init__(self, seed):
+        super().__init__()
+        count = MARKER_SEGMENTS * 2
+        top = EXIT_TOP
+        # the rock, rings up from its foot to the edge of its top: (radius, height)
+        rings = [(0.72, -0.04), (0.69, 0.12), (0.64, 0.34), (0.57, 0.58), (0.51, 0.8), (0.47, 0.98), (0.44, top)]
+
+        def daylight(height):
+            return 0.6 * smoothstep(0.5, top, height)
+
+        points = []
+        for ring, (radius, height) in enumerate(rings):
+            row = []
+            last = ring == len(rings) - 1
+            for index in range(count):
+                angle = (index + 0.5 * (ring % 2)) / count * 2.0 * math.pi
+                r = radius * (1.0 + ring_noise(index, ring, seed, 0.02 if last else 0.07))
+                h = height if last or ring == 0 else height + ring_noise(index, ring + 20, seed, 0.03)
+                row.append((r * math.cos(angle), r * math.sin(angle), h))
+            points.append(row)
+        for ring in range(len(points) - 1):
+            inner, outer = points[ring], points[ring + 1]
+            for index in range(count):
+                a, b = inner[index], inner[(index + 1) % count]
+                c, d = outer[index], outer[(index + 1) % count]
+                middle = [(a[axis] + d[axis]) * 0.5 for axis in range(3)]
+                outward = (middle[0], middle[1], 0.25)
+                self.add(a, c, d, outward, red=(daylight(a[2]), daylight(c[2]), daylight(d[2])))
+                self.add(a, d, b, outward, red=(daylight(a[2]), daylight(d[2]), daylight(b[2])))
+        # its flat top, worked stone in the daylight
+        edge = points[-1]
+        for index in range(count):
+            self.add((0.0, 0.0, top), edge[index], edge[(index + 1) % count], (0.0, 0.0, 1.0), red=1.0, green=0.7)
+
+        # the stairs: steps of worked stone up along a helix from the foot to the top, each a block standing out of the rock down to the step below,
+        # more of the daylight on the higher ones
+        steps = 15
+        sweep = 1.15 * 2.0 * math.pi
+        start = hash_unit(1, 31, seed) * 2.0 * math.pi
+        rise = top / steps
+
+        def rock_radius(height):
+            for (r0, h0), (r1, h1) in zip(rings, rings[1:]):
+                if height <= h1:
+                    return r0 + (r1 - r0) * (height - h0) / max(h1 - h0, 1e-6)
+            return rings[-1][0]
+
+        for step in range(steps):
+            z1 = (step + 1) * rise * (1.0 + ring_noise(step, 32, seed, 0.04) if step < steps - 1 else 1.0)
+            z0 = max(z1 - 2.0 * rise, -0.04)
+            angle = start + (step + 0.5) / steps * sweep
+            half = 0.5 * sweep / steps * 0.92
+            r_in = rock_radius(z1) - 0.05
+            r_out = rock_radius(z1) + 0.2 + ring_noise(step, 33, seed, 0.02)
+            light = 0.35 + 0.65 * ((step + 1) / steps) ** 2
+            # each step its own tone of the stone
+            stone = 0.7 + 0.3 * hash_unit(step, 34, seed)
+
+            def corner(radius, turn, height):
+                return (radius * math.cos(turn), radius * math.sin(turn), height)
+
+            lo, hi = angle - half, angle + half
+            top_face = [corner(r_in, lo, z1), corner(r_out, lo, z1), corner(r_out, hi, z1), corner(r_in, hi, z1)]
+            self.add_quad(*top_face, (0.0, 0.0, 1.0), red=light, green=stone)
+            # its front, out from the rock, and its two ends along the helix
+            self.add_quad(corner(r_out, lo, z0), corner(r_out, hi, z0), corner(r_out, hi, z1), corner(r_out, lo, z1),
+                          (math.cos(angle), math.sin(angle), 0.0), red=light * 0.5, green=stone)
+            for turn, sign in ((lo, -1.0), (hi, 1.0)):
+                self.add_quad(corner(r_in, turn, z0), corner(r_out, turn, z0), corner(r_out, turn, z1), corner(r_in, turn, z1),
+                              (-math.sin(turn) * sign, math.cos(turn) * sign, 0.0), red=light * 0.4, green=stone)
+
+        # the glyph on the top: a flat ring and a disc a little above it, which glow
         glyph = MARKER_SEGMENTS * 2
         for index in range(glyph):
             a0, a1 = index / glyph * 2.0 * math.pi, (index + 1) / glyph * 2.0 * math.pi
-            for inner, outer, glow in ((0.46, 0.56, 1.0), (0.0, 0.3, 0.7)):
-                p = [(inner * math.cos(a0), inner * math.sin(a0), 0.02), (outer * math.cos(a0), outer * math.sin(a0), 0.02),
-                     (outer * math.cos(a1), outer * math.sin(a1), 0.02), (inner * math.cos(a1), inner * math.sin(a1), 0.02)]
-                for corners in ((p[0], p[2], p[1]), (p[0], p[3], p[2])):
-                    self.triangles.append((list(corners), (0.0, 0.0, 1.0), (glow, glow, glow)))
+            for inner, outer, glow in ((0.2, 0.27, 1.0), (0.0, 0.1, 0.7)):
+                p = [(inner * math.cos(a0), inner * math.sin(a0), top + 0.012), (outer * math.cos(a0), outer * math.sin(a0), top + 0.012),
+                     (outer * math.cos(a1), outer * math.sin(a1), top + 0.012), (inner * math.cos(a1), inner * math.sin(a1), top + 0.012)]
+                self.add_quad(p[0], p[1], p[2], p[3], (0.0, 0.0, 1.0), glow, 1.0, 0.7)
 
-    def get_triangles(self):
-        result = []
-        for corners, normal, glows in self.triangles:
-            a, b, c = corners
-            u = [c[axis] - a[axis] for axis in range(3)]
-            v = [b[axis] - a[axis] for axis in range(3)]
-            cross = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]
-            if sum(cross[axis] * normal[axis] for axis in range(3)) < 0.0:
-                corners = [a, c, b]
-                glows = (glows[0], glows[2], glows[1])
-            result.append((list(corners), list(normal), list(glows)))
-        return result
+        # stones fallen at the foot of the rock
+        for stone in range(7):
+            angle = hash_unit(stone, 41, seed) * 2.0 * math.pi
+            distance = 0.78 + 0.16 * hash_unit(stone, 42, seed)
+            size = 0.05 + 0.06 * hash_unit(stone, 43, seed)
+            self.add_rock(seed * 19 + stone * 3 + 5, size, 0.7, angle, distance, -0.02)
 
 
 class Shaft:
@@ -567,13 +703,14 @@ class Shaft:
 
 
 def write_marker(triangles, path, name):
-    """Writes triangles of (corners, normal, glows) as a binary glTF in meters, a radius of 1 world unit, with the glow in the alpha of the colors"""
+    """Writes triangles of (corners, normal, glows, reds, greens) as a binary glTF in meters, a radius of 1 world unit, with the glow in the
+    alpha of the colors, the daylight in their red and the worked stone in their green"""
     positions, normals, colors = [], [], []
-    for corners, normal, glows in triangles:
-        for corner, glow in zip(corners, glows):
+    for corners, normal, glows, reds, greens in triangles:
+        for corner, glow, red, green in zip(corners, glows, reds, greens):
             positions.append(to_file_axes(*(value * 0.01 for value in corner)))
             normals.append(to_file_axes(*normal))
-            colors.append((0.0, 0.0, 0.0, glow))
+            colors.append((red, green, 0.0, glow))
     write_glb_arrays(path, name, positions, normals, list(range(len(positions))), colors)
 
 
@@ -701,8 +838,9 @@ def main():
     # the markers of the entrances of the underground, in a folder of their own too, imported by import_planet_markers.py
     marker_folder = os.path.join(os.path.dirname(os.path.abspath(OUTPUT_FOLDER)), 'HexPlanetMarkers')
     os.makedirs(marker_folder, exist_ok=True)
-    write_marker(CaveMouth(7).get_triangles(), os.path.join(marker_folder, 'SM_PlanetCaveMouth.glb'), 'SM_PlanetCaveMouth')
-    write_marker(ExitRing(19).get_triangles(), os.path.join(marker_folder, 'SM_PlanetExitRing.glb'), 'SM_PlanetExitRing')
+    write_marker(EntranceRim(7).get_triangles(), os.path.join(marker_folder, 'SM_PlanetEntranceRim.glb'), 'SM_PlanetEntranceRim')
+    write_marker(EntranceHole().get_triangles(), os.path.join(marker_folder, 'SM_PlanetEntranceHole.glb'), 'SM_PlanetEntranceHole')
+    write_marker(ExitStairs(19).get_triangles(), os.path.join(marker_folder, 'SM_PlanetExitStairs.glb'), 'SM_PlanetExitStairs')
     write_shaft(Shaft(), os.path.join(marker_folder, 'SM_PlanetExitShaft.glb'), 'SM_PlanetExitShaft')
 
     with open(os.path.join(OUTPUT_FOLDER, 'kit.json'), 'w', encoding='utf-8') as file:

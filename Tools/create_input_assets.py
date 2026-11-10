@@ -57,8 +57,9 @@ ACTIONS = [
     ("wireframe_scope_action", "IA_HexWireframeScope", "Wireframe hexes", BOOLEAN, [("F", False, False, "IA_HexShift")]),
     ("wireframe_target_action", "IA_HexWireframeTarget", "Wireframe geometry", BOOLEAN, [("F", False, False, "IA_HexCtrl")]),
     ("water_view_action", "IA_HexWaterView", "Water", BOOLEAN, [("V", False, False)]),
-    # the sun of the planet follows the camera or stays where it is (hex.PlanetSun)
-    ("sun_follow_action", "IA_HexSunFollow", "Sun follows camera", BOOLEAN, [("L", False, False)]),
+    # the forced light of the planet, which lights both layers evenly (hex.PlanetForcedLight); until 2026-11-10 L made the sun follow the camera or
+    # stay, which only hex.PlanetSun does now (REPLACED_ACTIONS)
+    ("forced_light_action", "IA_HexForcedLight", "Forced light", BOOLEAN, [("L", False, False)]),
     # the planet goes between its surface and its underground, through the entrance under the mouse (AHexPlanetCameraPawn::TravelTo)
     ("layer_action", "IA_HexLayer", "Underground and back", BOOLEAN, [("U", False, False)]),
     ("key_legend_action", "IA_HexKeyLegend", "This legend", BOOLEAN, [("H", False, False)]),
@@ -85,7 +86,7 @@ LEGEND_CATEGORIES = {
     "IA_HexZoom": "Camera",
     "IA_HexToggleGrid": "View",
     "IA_HexWaterView": "View",
-    "IA_HexSunFollow": "View",
+    "IA_HexForcedLight": "View",
     "IA_HexLayer": "View",
     "IA_HexWireframeMode": "Wireframe",
     "IA_HexWireframeScope": "Wireframe",
@@ -101,8 +102,12 @@ LEGEND_CATEGORIES = {
 
 
 # actions added after the legend was made, whose lines an existing legend gets if it lacks them
-ADDED_LEGEND_ACTIONS = {"IA_HexPaintMode", "IA_HexPaintLevel", "IA_HexBrushSize", "IA_HexUndo", "IA_HexRedo", "IA_HexSunFollow", "IA_HexLayer",
+ADDED_LEGEND_ACTIONS = {"IA_HexPaintMode", "IA_HexPaintLevel", "IA_HexBrushSize", "IA_HexUndo", "IA_HexRedo", "IA_HexForcedLight", "IA_HexLayer",
                         "IA_HexSaveBookmark", "IA_HexJumpBookmark"}
+
+# actions that another took the place of, as (old action, new action): the line of the old one in an existing legend becomes the line of the new
+# one where it stands, with the description of the new one as its label, and the old asset is deleted once nothing in the legend holds it
+REPLACED_ACTIONS = [("IA_HexSunFollow", "IA_HexForcedLight")]
 
 
 def load_or_create(name, asset_class, factory):
@@ -208,9 +213,23 @@ if not unreal.EditorAssetLibrary.does_asset_exist(f"{FOLDER}/{LEGEND_NAME}"):
     unreal.EditorAssetLibrary.save_loaded_asset(legend, only_if_is_dirty=False)
     unreal.log(f"Hex input: created {LEGEND_NAME} with {len(lines)} lines")
 else:
-    # the lines of an existing legend are edited by hand, so it only gets those of the actions it lacks of ADDED_LEGEND_ACTIONS
+    # the lines of an existing legend are edited by hand, so it only gets those of the actions it lacks of ADDED_LEGEND_ACTIONS, and those of
+    # REPLACED_ACTIONS become the lines of the actions that took their place
     legend = unreal.EditorAssetLibrary.load_asset(f"{FOLDER}/{LEGEND_NAME}")
     lines = list(legend.get_editor_property("lines"))
+    descriptions = {action_name: description for _, action_name, description, _, _ in ACTIONS}
+    replaced = 0
+
+    for index, line in enumerate(lines):
+        action = line.get_editor_property("action")
+        for old_name, new_name in REPLACED_ACTIONS:
+            if action and action.get_name() == old_name:
+                line.set_editor_property("action", actions[new_name])
+                line.set_editor_property("label", descriptions[new_name])
+                lines[index] = line
+                replaced += 1
+                unreal.log(f"Hex input: the line of {old_name} in {LEGEND_NAME} is now that of {new_name}")
+
     listed = {line.get_editor_property("action").get_name() for line in lines if line.get_editor_property("action")}
     added = 0
 
@@ -223,10 +242,19 @@ else:
             lines.append(line)
             added += 1
 
-    if added:
+    if added or replaced:
         legend.set_editor_property("lines", lines)
         unreal.EditorAssetLibrary.save_loaded_asset(legend, only_if_is_dirty=False)
-        unreal.log(f"Hex input: added {added} lines to {LEGEND_NAME}")
+        unreal.log(f"Hex input: added {added} lines to {LEGEND_NAME} and gave {replaced} to the actions that replaced theirs")
+
+# the actions replaced are mapped to no key any more, as the context was unmapped above, and DA_HexInput no longer has their property
+for old_name, new_name in REPLACED_ACTIONS:
+    old_path = f"{FOLDER}/{old_name}"
+    if unreal.EditorAssetLibrary.does_asset_exist(old_path):
+        if unreal.EditorAssetLibrary.delete_asset(old_path):
+            unreal.log(f"Hex input: deleted {old_name}, replaced by {new_name}")
+        else:
+            unreal.log_warning(f"Hex input: could not delete {old_name}, replaced by {new_name}")
 
 for mapping in context.get_editor_property("default_key_mappings").get_editor_property("mappings"):
     modifiers = [type(modifier).__name__ for modifier in mapping.get_editor_property("modifiers")]

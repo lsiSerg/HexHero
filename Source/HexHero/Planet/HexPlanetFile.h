@@ -237,7 +237,35 @@ struct FHexWallsFile
 	TArray<FHexWallCell> Cells;
 };
 
-/** The objects of one cell, a line of objects.json: its cover and decor by the Id of their UHexPlanetObjectSet, None for none */
+/** An object placed on a cell by hand, in the list placed of the line of its cell in objects.json: the Id of its UHexPlanetObjectSet, where it
+ *  stands as X and Y in the frame of the cell (from its middle in radii of a cell along the axes of UHexPlanetObjects::GetCellAxes), its turn
+ *  around the up in degrees, its scale before the ScaleFactor of the variant of its biome and which mesh of that variant it is */
+USTRUCT()
+struct FHexPlacedLine
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FName Id;
+
+	UPROPERTY()
+	float X = 0.0f;
+
+	UPROPERTY()
+	float Y = 0.0f;
+
+	UPROPERTY()
+	float Yaw = 0.0f;
+
+	UPROPERTY()
+	float Scale = 1.0f;
+
+	UPROPERTY()
+	int32 Mesh = 0;
+};
+
+/** The objects of one cell, a line of objects.json: its cover and decor by the Id of their UHexPlanetObjectSet, None for none, and the objects
+ *  placed on it by hand */
 USTRUCT()
 struct FHexObjectCell
 {
@@ -255,18 +283,45 @@ struct FHexObjectCell
 
 	UPROPERTY()
 	FName Decor;
+
+	UPROPERTY()
+	TArray<FHexPlacedLine> Placed;
 };
 
-/** The objects of a cell: its cover and decor as an index into the sets of its layer (UHexPlanetObjects::GetSets) plus one, 0 for none, and the
- *  density of the cover, 1 to 3. Here, beside the lines of objects.json, so the pure generation of the underground (HexPlanetUnderground) uses it */
+/** An object placed on a cell by hand (FHexPlacedLine), its kind as an index into the sets of its layer plus one */
+struct FHexPlacedObject
+{
+	uint8 Set = 0;
+	uint8 Mesh = 0;
+
+	/** Where it stands from the middle of the cell, in radii of a cell, along the axes of UHexPlanetObjects::GetCellAxes */
+	FVector2f Offset = FVector2f::ZeroVector;
+
+	/** Its turn around the up, in degrees, and its scale before the ScaleFactor of the variant of the biome */
+	float Yaw = 0.0f;
+	float Scale = 1.0f;
+
+	bool operator==(const FHexPlacedObject& Other) const
+	{
+		return Set == Other.Set && Mesh == Other.Mesh && Offset == Other.Offset && Yaw == Other.Yaw && Scale == Other.Scale;
+	}
+};
+
+/** The objects of a cell: its cover and decor as an index into the sets of its layer (UHexPlanetObjects::GetSets) plus one, 0 for none, the
+ *  density of the cover, 1 to 3, and the objects placed on it by hand, which a cell may hold many of besides them. Here, beside the lines of
+ *  objects.json, so the pure generation of the underground (HexPlanetUnderground) uses it */
 struct FHexCellObjects
 {
 	uint8 Cover = 0;
 	uint8 Density = 0;
 	uint8 Decor = 0;
+	TArray<FHexPlacedObject> Placed;
 
-	bool IsEmpty() const { return Cover == 0 && Decor == 0; }
-	bool operator==(const FHexCellObjects& Other) const { return Cover == Other.Cover && Density == Other.Density && Decor == Other.Decor; }
+	bool IsEmpty() const { return Cover == 0 && Decor == 0 && Placed.IsEmpty(); }
+	bool operator==(const FHexCellObjects& Other) const
+	{
+		return Cover == Other.Cover && Density == Other.Density && Decor == Other.Decor && Placed == Other.Placed;
+	}
 };
 
 /**

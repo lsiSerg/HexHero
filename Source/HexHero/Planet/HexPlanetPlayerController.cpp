@@ -67,6 +67,7 @@ void AHexPlanetPlayerController::BeginPlay()
 			return !CameraPawn || CameraPawn->GetViewStatus(OutLines);
 		});
 		DebugOverlay->AddViewStatus(&AHexPlanetCameraPawn::GetSunStatus);
+		DebugOverlay->AddViewStatus(&AHexPlanetCameraPawn::GetLightStatus);
 	}
 }
 
@@ -874,6 +875,66 @@ void AHexPlanetPlayerController::RunPaintCommand(const TArray<FString>& Args)
 	{
 		Brush->NewLayout();
 	}
+	else if (Action == TEXT("byhand") && Args.IsValidIndex(1))
+	{
+		Brush->SetPlacingByHand(Args[1].Equals(TEXT("on"), ESearchCase::IgnoreCase));
+	}
+	else if (Action == TEXT("placed") && Args.IsValidIndex(1))
+	{
+		const TCHAR* Names[] = {TEXT("Place"), TEXT("Move"), TEXT("Turn"), TEXT("Size"), TEXT("Version"), TEXT("Erase")};
+		for (int32 Index = 0; Index < UE_ARRAY_COUNT(Names); ++Index)
+		{
+			if (Args[1].Equals(Names[Index], ESearchCase::IgnoreCase))
+			{
+				Brush->SetPlacedTool(EHexPlacedTool(Index));
+			}
+		}
+	}
+	else if ((Action == TEXT("place") || Action == TEXT("drag")) && Args.IsValidIndex(1))
+	{
+		// a click at a point, or a press there dragged to a second point and released, as @Latitude:Longitude in degrees or a cell for its middle
+		TArray<FVector> Points;
+		for (int32 Index = 1; Index < Args.Num(); ++Index)
+		{
+			FString Latitude;
+			FString Longitude;
+			double LatitudeValue = 0.0;
+			double LongitudeValue = 0.0;
+			int32 Cell = INDEX_NONE;
+			if (LexTryParseString(Cell, *Args[Index]) && Planet->GetGrid().GetCells().IsValidIndex(Cell))
+			{
+				Points.Add(FVector(Planet->GetGrid().GetCells()[Cell].Center * Planet->GetRadius()));
+			}
+			else if (Args[Index].StartsWith(TEXT("@")) && Args[Index].Mid(1).Split(TEXT(":"), &Latitude, &Longitude) && LexTryParseString(LatitudeValue, *Latitude)
+				&& LexTryParseString(LongitudeValue, *Longitude))
+			{
+				const double Phi = FMath::DegreesToRadians(LatitudeValue);
+				const double Lambda = FMath::DegreesToRadians(LongitudeValue);
+				Points.Add(FVector(FMath::Cos(Phi) * FMath::Cos(Lambda), FMath::Cos(Phi) * FMath::Sin(Lambda), FMath::Sin(Phi)) * Planet->GetRadius());
+			}
+		}
+		if (Points.IsEmpty() || !Brush->IsActive() || !Brush->HasTool() || Brush->GetTarget() != Planet->GetLayer())
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("hex.PlanetPaint %s: needs @Latitude:Longitude, painting on with a tool, and the layer it paints shown"), *Action);
+			return;
+		}
+		Brush->SetBackwards(bCtrl);
+		for (int32 Index = 0; Index < (Action == TEXT("place") ? 1 : Points.Num()); ++Index)
+		{
+			const int32 Cell = Planet->GetGrid().FindCell(FVector3d(Points[Index]).GetSafeNormal(), 0);
+			Brush->SetCursorPoint(Points[Index]);
+			if (Index == 0)
+			{
+				Brush->BeginStroke(Cell);
+			}
+			else
+			{
+				Brush->ContinueStroke(Cell);
+			}
+		}
+		Brush->EndStroke();
+		Brush->SetBackwards(false);
+	}
 	else if (Action == TEXT("undo"))
 	{
 		Brush->Undo();
@@ -896,9 +957,10 @@ void AHexPlanetPlayerController::RunPaintCommand(const TArray<FString>& Args)
 	}
 
 	const HexPlanetUnderground::FReport* Report = Planet->GetUndergroundReport();
-	UE_LOG(LogHexHero, Log, TEXT("hex.PlanetPaint %s: painting %s on the %s, tab %s, tool %d, level %d, network %c, undo %s, unsaved %s, underground %s"), *FString::Join(Args, TEXT(" ")),
+	UE_LOG(LogHexHero, Log, TEXT("hex.PlanetPaint %s: painting %s on the %s, tab %s, tool %d, level %d, network %c, object %s%s, undo %s, unsaved %s, underground %s"), *FString::Join(Args, TEXT(" ")),
 		Brush->IsActive() ? TEXT("on") : TEXT("off"), GetPlanetLayerName(Brush->GetTarget()), *UHexPlanetPainter::GetTabName(Brush->GetTab()).ToString(), int32(Brush->GetTool()),
-		Brush->GetLevel(), HexPlanetFile::GetNetworkLetter(Brush->GetNetwork()), Brush->CanUndo() ? TEXT("yes") : TEXT("no"), Planet->HasUnsavedChanges() ? TEXT("yes") : TEXT("no"),
+		Brush->GetLevel(), HexPlanetFile::GetNetworkLetter(Brush->GetNetwork()), *Brush->GetObjectSetName(Brush->GetTarget(), Brush->GetObjectSet()).ToString(),
+		Brush->IsPlacingByHand() ? TEXT(" by hand") : TEXT(""), Brush->CanUndo() ? TEXT("yes") : TEXT("no"), Planet->HasUnsavedChanges() ? TEXT("yes") : TEXT("no"),
 		Report ? *Report->ToString() : TEXT("none"));
 }
 
@@ -915,7 +977,8 @@ namespace
 	FAutoConsoleCommandWithWorldAndArgs PlanetPaintConsoleCommand(TEXT("hex.PlanetPaint"),
 		TEXT("Drives the brush of the planet as the palette and the mouse would, for tests: on | off | tab <Ground|Relief|Objects|Rivers|Entrances|Maze|Links> (Objects of the layer shown) | ")
 		TEXT("key <1-5> | biome <Index> | size <1-3> | network <A-H> | entrance | carve | walls <Height|Auto> | object <Index on the palette of the layer> | eraser | river | bridge | relief <Version|Turn|Mirror|Higher|Lower|Auto> | none | ")
+		TEXT("byhand <on|off> | placed <Place|Move|Turn|Size|Version|Erase> | place @Latitude:Longitude [ctrl] | drag @Latitude:Longitude @Latitude:Longitude | ")
 		TEXT("stroke <Cell or @Latitude:Longitude> [...] [ctrl] | press <Cell> | release | regenerate [all|objects] | newlayout | undo | redo | save. A stroke presses on the first cell, passes the others and releases on the last; ctrl makes it take away; ")
-		TEXT("press holds a stroke, which follows the mouse as the held left button does, until release"),
+		TEXT("press holds a stroke, which follows the mouse as the held left button does, until release; place clicks at a point, as the tools of objects placed by hand need, and drag presses at one and releases at the other"),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&PlanetPaintCommand));
 }

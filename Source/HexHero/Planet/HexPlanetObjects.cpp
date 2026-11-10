@@ -29,9 +29,10 @@ namespace
 	{
 		return int64(Chunk) * 65536 + Slot;
 	}
+}
 
 	/** The triangles of the ground of a cell, flattened onto the plane of its center, in buckets, so a point finds its triangle at once */
-	struct FCellGround
+	struct UHexPlanetObjects::FCellGround
 	{
 		static constexpr int32 Buckets = 10;
 
@@ -155,6 +156,8 @@ namespace
 		}
 	};
 
+namespace
+{
 	/** Returns true if a point of the plane lies inside a convex polygon, whose corners go either way round */
 	bool IsInside(const FVector2f& Point, const TArray<FVector2f, TInlineAllocator<6>>& Polygon)
 	{
@@ -231,6 +234,28 @@ TArray<TObjectPtr<UHexPlanetObjectSet>> UHexPlanetObjects::FindLayerSets(EHexPla
 	if (Found.Num() > 254)
 	{
 		Found.SetNum(254);
+	}
+	return Found;
+}
+
+TArray<TObjectPtr<UHexPlanetObjectSet>> UHexPlanetObjects::FindPlaceableSets(EHexPlanetLayer Layer, int32* OutOwn)
+{
+	TArray<TObjectPtr<UHexPlanetObjectSet>> Found = FindLayerSets(Layer);
+	const int32 Own = Found.Num();
+	// after them, so the indices of the sets of the layer stay as the generation and the palette count them, the covers and decor of the other
+	// layer that this one has not, which a hand alone places here, but no mass that fills a cell, which is never placed by hand
+	const EHexPlanetLayer Other = Layer == EHexPlanetLayer::Surface ? EHexPlanetLayer::Underground : EHexPlanetLayer::Surface;
+	for (const TObjectPtr<UHexPlanetObjectSet>& Set : FindLayerSets(Other))
+	{
+		if ((Set->Layer == EHexObjectLayer::Cover || Set->Layer == EHexObjectLayer::Decor) && !Set->IsCellMass() && Found.Num() < 254
+			&& !Found.ContainsByPredicate([&Set](const UHexPlanetObjectSet* Each) { return Each->Id == Set->Id; }))
+		{
+			Found.Add(Set);
+		}
+	}
+	if (OutOwn)
+	{
+		*OutOwn = Own;
 	}
 	return Found;
 }
@@ -317,6 +342,9 @@ bool UHexPlanetObjects::SaveCells(const FString& Folder, TConstArrayView<FHexCel
 	const TArray<FHexObjectCell> Lines = MakeSavedLines(Cells, SetIds, [&LayerSets, &Levels](int32 Cell, int32 Set)
 	{
 		return LayerSets.IsValidIndex(Set) && Levels.IsValidIndex(Cell) && LayerSets[Set]->AllowedLevels.Contains(int32(Levels[Cell]));
+	}, [&Levels](int32 Cell, int32 Set)
+	{
+		return Levels.IsValidIndex(Cell) && IsPlacedLevel(Levels[Cell]);
 	});
 	return HexPlanetFile::SaveObjects(Folder, Lines, OutError);
 }
@@ -334,7 +362,8 @@ bool UHexPlanetObjects::GenerateCells(TConstArrayView<int8> Levels, TConstArrayV
 	{
 		CellLetters[Cell] = Letters.IsValidIndex(Biomes[Cell]) ? Letters[Biomes[Cell]] : TEXT('\0');
 	}
-	GenerateUndergroundObjects(Planet->GetGrid(), Levels, CellLetters, Planet->GetEntrances(), Planet->GetManifest(), Sets, OutObjects);
+	// by the kinds of the layer alone, whose indices come first in Sets
+	GenerateUndergroundObjects(Planet->GetGrid(), Levels, CellLetters, Planet->GetEntrances(), Planet->GetManifest(), MakeArrayView(Sets.GetData(), NumOwnSets), OutObjects);
 	return true;
 }
 
@@ -342,9 +371,11 @@ void UHexPlanetObjects::Init(AHexPlanet* InPlanet, const UHexPlanetConfig* InSet
 {
 	Planet = InPlanet;
 	Settings = InSettings;
-	Sets = FindLayerSets(Planet->GetLayer());
+	// the kinds of the layer, then those of the other layer that a hand places here
+	Sets = FindPlaceableSets(Planet->GetLayer(), &NumOwnSets);
 
 	VariantSlots.SetNum(Sets.Num());
+	AllSlots.SetNum(Sets.Num());
 	for (int32 SetIndex = 0; SetIndex < Sets.Num(); ++SetIndex)
 	{
 		for (const FHexObjectVariant& Variant : Sets[SetIndex]->Variants)
@@ -361,15 +392,17 @@ void UHexPlanetObjects::Init(AHexPlanet* InPlanet, const UHexPlanetConfig* InSet
 				int32 Slot = Slots.IndexOfByPredicate([SetIndex, Mesh](const FSlot& Each) { return Each.Set == SetIndex && Each.Mesh == Mesh; });
 				if (Slot == INDEX_NONE)
 				{
-					// a rim keeps off the cell of an exit beside its side by its footprint too
-					const bool bFootprint = Sets[SetIndex]->bClipFootprint || Sets[SetIndex]->Layer == EHexObjectLayer::Rim;
-					Slot = Slots.Add(FSlot{SetIndex, Mesh, bFootprint ? GetFootprintRadius(Mesh) : 0.0f});
+					// a rim keeps off the cell of an exit beside its side by its footprint too, and what a hand places underground off the void
+					const bool bFootprint = Sets[SetIndex]->bClipFootprint || Sets[SetIndex]->Layer == EHexObjectLayer::Rim || Planet->GetLayer() == EHexPlanetLayer::Underground;
+					Slot = Slots.Add(FSlot{SetIndex, Mesh, bFootprint ? GetFootprintRadius(Mesh) : 0.0f, Variant.ScaleFactor, Variant.Snow});
 					LoadedMeshes.AddUnique(Mesh);
+					AllSlots[SetIndex].Add(Slot);
 				}
 				Found.Add(Slot);
 			}
 		}
-		if (Sets[SetIndex]->Layer == EHexObjectLayer::Rim)
+		// only a kind of the layer stands on its rims
+		if (Sets[SetIndex]->Layer == EHexObjectLayer::Rim && SetIndex < NumOwnSets)
 		{
 			RimSets.Add(SetIndex);
 			RimClearRings = FMath::Max(RimClearRings, FMath::Clamp(Sets[SetIndex]->ExitClearRings, 0, 3));
@@ -423,9 +456,26 @@ void UHexPlanetObjects::Load()
 			continue;
 		}
 		FHexCellObjects& Objects = CellObjects[Line.Cell];
+		// what was placed by hand, a cover or decor of the layer each
+		for (const FHexPlacedLine& Each : Line.Placed)
+		{
+			const int32 Set = FindSet(Each.Id);
+			if (Set == INDEX_NONE || Sets[Set]->Layer == EHexObjectLayer::Rim)
+			{
+				Unknown.Add(Each.Id);
+				continue;
+			}
+			FHexPlacedObject& Object = Objects.Placed.AddDefaulted_GetRef();
+			Object.Set = uint8(Set + 1);
+			Object.Mesh = uint8(FMath::Clamp(Each.Mesh, 0, 255));
+			Object.Offset = FVector2f(Each.X, Each.Y);
+			Object.Yaw = Each.Yaw;
+			Object.Scale = FMath::Max(Each.Scale, 0.01f);
+		}
+		// a cover and a decor of the layer alone, as only a hand places the kinds of the other layer
 		const int32 Cover = FindSet(Line.Cover);
 		const int32 Decor = FindSet(Line.Decor);
-		if (Cover != INDEX_NONE && Sets[Cover]->Layer == EHexObjectLayer::Cover)
+		if (Cover != INDEX_NONE && Cover < NumOwnSets && Sets[Cover]->Layer == EHexObjectLayer::Cover)
 		{
 			Objects.Cover = uint8(Cover + 1);
 			Objects.Density = uint8(FMath::Clamp(Line.Density, 1, 3));
@@ -434,7 +484,7 @@ void UHexPlanetObjects::Load()
 		{
 			Unknown.Add(Line.Cover);
 		}
-		if (Decor != INDEX_NONE && Sets[Decor]->Layer == EHexObjectLayer::Decor)
+		if (Decor != INDEX_NONE && Decor < NumOwnSets && Sets[Decor]->Layer == EHexObjectLayer::Decor)
 		{
 			Objects.Decor = uint8(Decor + 1);
 		}
@@ -468,7 +518,7 @@ void UHexPlanetObjects::Generate()
 	const double Scale = Settings->ObjectNoiseScale * Settings->GetSizeRatio(Manifest.Frequency);
 	int32 Placed = 0;
 
-	for (int32 SetIndex = 0; SetIndex < Sets.Num(); ++SetIndex)
+	for (int32 SetIndex = 0; SetIndex < NumOwnSets; ++SetIndex)
 	{
 		const UHexPlanetObjectSet& Set = *Sets[SetIndex];
 		// the rims stand along the sides by themselves and are never stored in a cell
@@ -535,11 +585,15 @@ bool UHexPlanetObjects::Save(const FString& Folder, const TSet<int32>& KeptEntra
 	const TArray<FHexObjectCell> Lines = MakeSavedLines(CellObjects, SetIds, [this, &KeptEntranceCells](int32 Cell, int32 Set)
 	{
 		return IsAllowed(Set, Planet->GetCellLevel(Cell)) && !KeptEntranceCells.Contains(Cell);
+	}, [this, &KeptEntranceCells](int32 Cell, int32 Set)
+	{
+		return IsPlacedLevel(Planet->GetCellLevel(Cell)) && !KeptEntranceCells.Contains(Cell);
 	});
 	return HexPlanetFile::SaveObjects(Folder, Lines, OutError);
 }
 
-TArray<FHexObjectCell> UHexPlanetObjects::MakeSavedLines(TConstArrayView<FHexCellObjects> Cells, TConstArrayView<FName> SetIds, TFunctionRef<bool(int32 Cell, int32 Set)> IsKept)
+TArray<FHexObjectCell> UHexPlanetObjects::MakeSavedLines(TConstArrayView<FHexCellObjects> Cells, TConstArrayView<FName> SetIds, TFunctionRef<bool(int32 Cell, int32 Set)> IsKept,
+	TFunctionRef<bool(int32 Cell, int32 Set)> IsPlacedKept)
 {
 	TArray<FHexObjectCell> Lines;
 	for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
@@ -547,7 +601,21 @@ TArray<FHexObjectCell> UHexPlanetObjects::MakeSavedLines(TConstArrayView<FHexCel
 		const FHexCellObjects& Objects = Cells[Cell];
 		const bool bCover = Objects.Cover != 0 && SetIds.IsValidIndex(Objects.Cover - 1) && IsKept(Cell, Objects.Cover - 1);
 		const bool bDecor = Objects.Decor != 0 && SetIds.IsValidIndex(Objects.Decor - 1) && IsKept(Cell, Objects.Decor - 1);
-		if (!bCover && !bDecor)
+		TArray<FHexPlacedLine> Placed;
+		for (const FHexPlacedObject& Object : Objects.Placed)
+		{
+			if (Object.Set != 0 && SetIds.IsValidIndex(Object.Set - 1) && IsPlacedKept(Cell, Object.Set - 1))
+			{
+				FHexPlacedLine& Each = Placed.AddDefaulted_GetRef();
+				Each.Id = SetIds[Object.Set - 1];
+				Each.X = Object.Offset.X;
+				Each.Y = Object.Offset.Y;
+				Each.Yaw = Object.Yaw;
+				Each.Scale = Object.Scale;
+				Each.Mesh = Object.Mesh;
+			}
+		}
+		if (!bCover && !bDecor && Placed.IsEmpty())
 		{
 			continue;
 		}
@@ -556,6 +624,7 @@ TArray<FHexObjectCell> UHexPlanetObjects::MakeSavedLines(TConstArrayView<FHexCel
 		Line.Cover = bCover ? SetIds[Objects.Cover - 1] : NAME_None;
 		Line.Density = bCover ? Objects.Density : 0;
 		Line.Decor = bDecor ? SetIds[Objects.Decor - 1] : NAME_None;
+		Line.Placed = MoveTemp(Placed);
 	}
 	return Lines;
 }
@@ -567,8 +636,35 @@ bool UHexPlanetObjects::IsAllowed(int32 Set, int32 Level) const
 
 bool UHexPlanetObjects::GetCellCanopy(int32 Cell, FLinearColor& OutColor, float& OutCover) const
 {
-	const FHexCellObjects Objects = GetCell(Cell);
+	const FHexCellObjects& Objects = GetCell(Cell);
 	const int32 Set = int32(Objects.Cover) - 1;
+	if (Set < 0 && !Objects.Placed.IsEmpty() && !IsClear(Cell) && IsPlacedLevel(Planet->GetCellLevel(Cell)))
+	{
+		// a cell whose cover was unpacked, or trees placed by hand, tints its ground by how many of a kind of cover stand on it against a dense cover
+		TMap<int32, int32> Counts;
+		for (const FHexPlacedObject& Object : Objects.Placed)
+		{
+			const int32 Kind = int32(Object.Set) - 1;
+			if (Kind >= 0 && Kind < NumOwnSets && Sets[Kind]->Layer == EHexObjectLayer::Cover && Sets[Kind]->FarCover > 0.0f && !Sets[Kind]->CountByDensity.IsEmpty())
+			{
+				++Counts.FindOrAdd(Kind);
+			}
+		}
+		int32 Most = INDEX_NONE;
+		for (const TPair<int32, int32>& Each : Counts)
+		{
+			Most = Most == INDEX_NONE || Each.Value > Counts[Most] ? Each.Key : Most;
+		}
+		if (Most == INDEX_NONE)
+		{
+			return false;
+		}
+		const UHexPlanetObjectSet& Kind = *Sets[Most];
+		const FHexObjectVariant* Variant = Kind.FindVariant(Planet->GetCellBiomeLetter(Cell));
+		OutCover = Kind.FarCover * FMath::Clamp(float(Counts[Most]) / float(FMath::Max(Kind.CountByDensity.Last(), 1)), 0.0f, 1.0f);
+		OutColor = FMath::Lerp(Kind.FarColor, FLinearColor::White, FMath::Clamp(Variant ? Variant->Snow : 0.0f, 0.0f, 1.0f) * Kind.FarSnowShare);
+		return OutCover > 0.0f;
+	}
 	if (Set < 0 || IsClear(Cell) || !IsAllowed(Set, Planet->GetCellLevel(Cell)) || Sets[Set]->FarCover <= 0.0f)
 	{
 		return false;
@@ -596,7 +692,7 @@ bool UHexPlanetObjects::GetCellGlow(int32 Cell, FLinearColor& OutColor, float& O
 	{
 		return false;
 	}
-	const FHexCellObjects Objects = GetCell(Cell);
+	const FHexCellObjects& Objects = GetCell(Cell);
 	const int32 Level = Planet->GetCellLevel(Cell);
 	const TCHAR Letter = Planet->GetCellBiomeLetter(Cell);
 	const auto Consider = [&](int32 Stored, float Factor)
@@ -620,6 +716,19 @@ bool UHexPlanetObjects::GetCellGlow(int32 Cell, FLinearColor& OutColor, float& O
 	const int32 Density = FMath::Clamp(int32(Objects.Density), 1, 3) - 1;
 	Consider(Objects.Cover, ByDensity && ByDensity->IsValidIndex(Density) ? (*ByDensity)[Density] : 1.0f);
 	Consider(Objects.Decor, 1.0f);
+	// and what was placed by hand, as a decor of its kind, on any land and whatever the biome, as a hand placed it
+	if (IsPlacedLevel(Level))
+	{
+		for (const FHexPlacedObject& Object : Objects.Placed)
+		{
+			const int32 Set = int32(Object.Set) - 1;
+			if (Sets.IsValidIndex(Set) && Sets[Set]->GlowStrength > 0.0f && Sets[Set]->GlowPool > OutStrength)
+			{
+				OutStrength = Sets[Set]->GlowPool;
+				OutColor = Sets[Set]->GlowColor;
+			}
+		}
+	}
 	return OutStrength > 0.0f;
 }
 
@@ -629,11 +738,11 @@ int32 UHexPlanetObjects::GetCellSpores(int32 Cell, FLinearColor& OutColor) const
 	{
 		return 0;
 	}
-	const FHexCellObjects Objects = GetCell(Cell);
+	const FHexCellObjects& Objects = GetCell(Cell);
 	const int32 Level = Planet->GetCellLevel(Cell);
 	const TCHAR Letter = Planet->GetCellBiomeLetter(Cell);
 	int32 Most = 0;
-	for (const int32 Stored : {int32(Objects.Cover), int32(Objects.Decor)})
+	const auto Consider = [&](int32 Stored)
 	{
 		const int32 Set = Stored - 1;
 		if (Set >= 0 && IsAllowed(Set, Level) && Sets[Set]->Spores > Most && Sets[Set]->FindVariant(Letter))
@@ -641,13 +750,27 @@ int32 UHexPlanetObjects::GetCellSpores(int32 Cell, FLinearColor& OutColor) const
 			Most = Sets[Set]->Spores;
 			OutColor = Sets[Set]->GlowColor;
 		}
+	};
+	Consider(Objects.Cover);
+	Consider(Objects.Decor);
+	if (IsPlacedLevel(Level))
+	{
+		for (const FHexPlacedObject& Object : Objects.Placed)
+		{
+			const int32 Set = int32(Object.Set) - 1;
+			if (Sets.IsValidIndex(Set) && Sets[Set]->Spores > Most)
+			{
+				Most = Sets[Set]->Spores;
+				OutColor = Sets[Set]->GlowColor;
+			}
+		}
 	}
 	return Most;
 }
 
 bool UHexPlanetObjects::BlocksMovement(int32 Cell) const
 {
-	const FHexCellObjects Objects = GetCell(Cell);
+	const FHexCellObjects& Objects = GetCell(Cell);
 	const int32 Level = Planet->GetCellLevel(Cell);
 	const auto Blocks = [&](int32 Set) { return Set > 0 && IsAllowed(Set - 1, Level) && Sets[Set - 1]->bBlocksMovement; };
 	return !IsClear(Cell) && (Blocks(Objects.Cover) || Blocks(Objects.Decor));
@@ -655,7 +778,7 @@ bool UHexPlanetObjects::BlocksMovement(int32 Cell) const
 
 FString UHexPlanetObjects::GetCellText(int32 Cell) const
 {
-	const FHexCellObjects Objects = GetCell(Cell);
+	const FHexCellObjects& Objects = GetCell(Cell);
 	const int32 Level = Planet->GetCellLevel(Cell);
 	TArray<FString> Parts;
 	if (Objects.Cover != 0)
@@ -666,6 +789,23 @@ FString UHexPlanetObjects::GetCellText(int32 Cell) const
 	if (Objects.Decor != 0)
 	{
 		Parts.Add(FString::Printf(TEXT("%s%s"), *Sets[Objects.Decor - 1]->DisplayName, IsAllowed(Objects.Decor - 1, Level) ? TEXT("") : TEXT(", not on this level")));
+	}
+	// what was placed by hand, by kind
+	if (!Objects.Placed.IsEmpty())
+	{
+		TMap<int32, int32> ByKind;
+		for (const FHexPlacedObject& Object : Objects.Placed)
+		{
+			++ByKind.FindOrAdd(Object.Set);
+		}
+		TArray<FString> Kinds;
+		for (const TPair<int32, int32>& Each : ByKind)
+		{
+			const bool bKnown = Sets.IsValidIndex(Each.Key - 1);
+			Kinds.Add(FString::Printf(TEXT("%d %s%s"), Each.Value, bKnown ? *Sets[Each.Key - 1]->DisplayName : TEXT("unknown"),
+				bKnown && IsPlacedLevel(Level) ? TEXT("") : TEXT(" not on this level")));
+		}
+		Parts.Add(FString::Printf(TEXT("placed by hand: %s"), *FString::Join(Kinds, TEXT(", "))));
 	}
 	if (Parts.IsEmpty())
 	{
@@ -884,10 +1024,16 @@ void UHexPlanetObjects::RebuildChunks(TConstArrayView<int32> Chunks)
 	const double ApplyTime = FPlatformTime::Seconds();
 
 	int32 Total = 0;
+	int32 PlacedLeftOut = 0;
 	for (int32 Index = 0; Index < Chunks.Num(); ++Index)
 	{
 		ApplyChunk(Chunks[Index], Placed[Index]);
 		Total += Placed[Index].Num();
+		PlacedLeftOut += Stats[Index].PlacedLeftOut;
+	}
+	if (PlacedLeftOut > 0)
+	{
+		UE_LOG(LogHexHero, Log, TEXT("Planet: %d objects placed by hand in %d chunks are not drawn, as their level, biome or ground no longer allows them"), PlacedLeftOut, Chunks.Num());
 	}
 
 	if (Chunks.Num() > 1)
@@ -959,7 +1105,8 @@ TArray<UHexPlanetObjects::FInstance> UHexPlanetObjects::PlaceChunk(int32 Chunk, 
 		const FHexCellObjects& Objects = CellObjects[Cell];
 		const int32 Level = Planet->GetCellLevel(Cell);
 		// an entrance keeps its cell free, so trees do not cover its cave mouth
-		if (!Objects.IsEmpty() && !IsClear(Cell) && ((Objects.Cover != 0 && IsAllowed(Objects.Cover - 1, Level)) || (Objects.Decor != 0 && IsAllowed(Objects.Decor - 1, Level))))
+		if (!Objects.IsEmpty() && !IsClear(Cell) && ((Objects.Cover != 0 && IsAllowed(Objects.Cover - 1, Level)) || (Objects.Decor != 0 && IsAllowed(Objects.Decor - 1, Level))
+			|| !Objects.Placed.IsEmpty()))
 		{
 			Placed.Add(Cell);
 		}
@@ -990,8 +1137,434 @@ TArray<UHexPlanetObjects::FInstance> UHexPlanetObjects::PlaceChunk(int32 Chunk, 
 			OutEmptyCells[Objects.Decor - 1] += Instances.Num() == Before ? 1 : 0;
 		}
 	}
+	// what was placed by hand after all the covers and decor of the chunk, as an instance takes its random (its tint, the phase of its sway) by its
+	// place among those of its mesh, so placing, moving or taking away one by hand leaves those of the forests as they were
+	for (int32 Index = 0; Index < Placed.Num(); ++Index)
+	{
+		OutStats.PlacedLeftOut += PlacePlaced(Placed[Index], Grounds[Index], Instances);
+	}
 	PlaceRims(Chunk, Instances, OutStats);
 	return Instances;
+}
+
+void UHexPlanetObjects::GetCellAxes(const FVector3d& Center, FVector3d& OutX, FVector3d& OutY)
+{
+	// as FCellGround flattens the ground of the cell
+	OutX = FVector3d::CrossProduct(FMath::Abs(Center.Z) < 0.9 ? FVector3d::UnitZ() : FVector3d::UnitX(), Center).GetSafeNormal();
+	OutY = FVector3d::CrossProduct(Center, OutX);
+}
+
+FVector2f UHexPlanetObjects::GetPlacedFlat(const FHexPlacedObject& Object) const
+{
+	// the middle of a cell flattens to the origin of its plane, as its axes are across its direction
+	return Object.Offset * Settings->HexRadius;
+}
+
+FVector2f UHexPlanetObjects::GetPlacedOffset(int32 Cell, const FVector3d& Point) const
+{
+	FVector3d AxisX;
+	FVector3d AxisY;
+	GetCellAxes(Planet->GetGrid().GetCells()[Cell].Center, AxisX, AxisY);
+	// as objects.json keeps it, so a save and a load put an object back where it was
+	const auto Round = [](double Value) { return float(FMath::RoundToDouble(Value * 1000.0) / 1000.0); };
+	return FVector2f(Round(FVector3d::DotProduct(Point, AxisX) / Settings->HexRadius), Round(FVector3d::DotProduct(Point, AxisY) / Settings->HexRadius));
+}
+
+FVector3d UHexPlanetObjects::GetPlacedPoint(int32 Cell, const FHexPlacedObject& Object, double AtRadius) const
+{
+	const FVector3d Center = Planet->GetGrid().GetCells()[Cell].Center;
+	FVector3d AxisX;
+	FVector3d AxisY;
+	GetCellAxes(Center, AxisX, AxisY);
+	const FVector2f Flat = GetPlacedFlat(Object);
+	return (Center * AtRadius + AxisX * Flat.X + AxisY * Flat.Y).GetSafeNormal() * AtRadius;
+}
+
+int32 UHexPlanetObjects::GetMeshCount(int32 Cell, int32 Set) const
+{
+	return AllSlots.IsValidIndex(Set) ? AllSlots[Set].Num() : 0;
+}
+
+int32 UHexPlanetObjects::GetPlacedSlot(int32 Cell, const FHexPlacedObject& Object) const
+{
+	// among all the meshes of its kind, so a change of the biome keeps the object, and a kind of the other layer has its meshes here too
+	const int32 Set = int32(Object.Set) - 1;
+	if (!AllSlots.IsValidIndex(Set) || AllSlots[Set].IsEmpty())
+	{
+		return INDEX_NONE;
+	}
+	return AllSlots[Set][int32(Object.Mesh) % AllSlots[Set].Num()];
+}
+
+void UHexPlanetObjects::GetSlotLook(int32 Cell, int32 Slot, float& OutScaleFactor, float& OutSnow) const
+{
+	// as the variant of the biome draws the mesh, so an object unpacked from a cover stands as it stood, else as the first variant that has it
+	const int32 Set = Slots[Slot].Set;
+	const FHexObjectVariant* Variant = Sets[Set]->FindVariant(Planet->GetCellBiomeLetter(Cell));
+	const int32 VariantIndex = Variant ? int32(Variant - Sets[Set]->Variants.GetData()) : INDEX_NONE;
+	if (VariantSlots[Set].IsValidIndex(VariantIndex) && VariantSlots[Set][VariantIndex].Contains(Slot))
+	{
+		OutScaleFactor = Variant->ScaleFactor;
+		OutSnow = Variant->Snow;
+		return;
+	}
+	OutScaleFactor = Slots[Slot].ScaleFactor;
+	OutSnow = Slots[Slot].Snow;
+}
+
+bool UHexPlanetObjects::IsFootprintFree(int32 Cell, int32 Slot, float Scale, const FVector3d& Position, bool bRivers, FString* OutProblem) const
+{
+	const UHexPlanetObjectSet& Kind = *Sets[Slots[Slot].Set];
+	const FHexSphereGrid& Grid = Planet->GetGrid();
+	const FHexSphereCell& Each = Grid.GetCells()[Cell];
+	const double Radius = Planet->GetRadius();
+	const double Reach = Slots[Slot].FootprintRadius * Scale + Settings->ObjectFootprintMargin;
+	const auto Refuse = [OutProblem](const TCHAR* Why)
+	{
+		if (OutProblem)
+		{
+			*OutProblem = Why;
+		}
+		return false;
+	};
+	// underground every mesh keeps off the void, as a tree of the surface there would hang over it as much as a stalagmite
+	if (Kind.bClipFootprint || Planet->GetLayer() == EHexPlanetLayer::Underground)
+	{
+		// off the sides towards a void, whose cliff the ground of the void carries, and towards a cleared cell, an exit, as PlaceInCell keeps them
+		FVector3d AxisX;
+		FVector3d AxisY;
+		GetCellAxes(Each.Center, AxisX, AxisY);
+		const auto Flatten = [&AxisX, &AxisY](const FVector3d& Point) { return FVector2f(float(FVector3d::DotProduct(Point, AxisX)), float(FVector3d::DotProduct(Point, AxisY))); };
+		uint8 ClipSides = 0;
+		TArray<FVector2f, TInlineAllocator<6>> FlatCorners;
+		const int32 Level = Planet->GetCellLevel(Cell);
+		for (int32 Side = 0; Side < Each.Neighbors.Num(); ++Side)
+		{
+			const int32 Neighbor = Each.Neighbors[Side];
+			if (Planet->GetCellLevel(Neighbor) <= Level - 2 || IsClear(Neighbor))
+			{
+				ClipSides |= uint8(1u << Side);
+			}
+		}
+		for (const int32 Corner : Each.Corners)
+		{
+			FlatCorners.Add(Flatten(Grid.GetCorners()[Corner] * Radius));
+		}
+		if (ClipSides != 0 && !HexPlanetUnderground::IsFootprintClear(Flatten(Position), float(Reach), FlatCorners, ClipSides))
+		{
+			return Refuse(TEXT("it would hang over the void or stand on an exit"));
+		}
+		// nor in a wall on a lip or on its foot
+		if (Planet->HasWalls() && HexPlanetWalls::GetDistanceToLine(Planet->GetWalls(), Cell, Position) < HexPlanetWalls::GetFootReach(Planet->GetWallParams()) + Reach)
+		{
+			return Refuse(TEXT("it would stand in a wall"));
+		}
+	}
+	// not in a river, nor on its banks
+	if (bRivers && Planet->GetRivers() && !Planet->GetRivers()->GetShownNet().IsEmpty()
+		&& Planet->GetRivers()->GetRiverDistance(Cell, Position) < Settings->RiverWidth * 0.5 + Settings->RiverMeander + Settings->RiverBankWidth + Kind.Spacing * Scale * 0.5)
+	{
+		return Refuse(TEXT("it would stand in a river"));
+	}
+	return true;
+}
+
+bool UHexPlanetObjects::CanPlace(int32 Cell, const FHexPlacedObject& Object, FString* OutProblem) const
+{
+	const auto Refuse = [OutProblem](const FString& Why)
+	{
+		if (OutProblem)
+		{
+			*OutProblem = Why;
+		}
+		return false;
+	};
+	const int32 Set = int32(Object.Set) - 1;
+	if (!Sets.IsValidIndex(Set) || !CellObjects.IsValidIndex(Cell) || Sets[Set]->Layer == EHexObjectLayer::Rim)
+	{
+		return Refuse(TEXT("there is no such kind of object"));
+	}
+	const UHexPlanetObjectSet& Kind = *Sets[Set];
+	// a mass of the underground fills its cell, which would stand in the way of a passage it does not close; a tree of a forest or a boulder may
+	// stand alone on either layer, and nothing placed by hand blocks
+	if (Kind.IsCellMass())
+	{
+		return Refuse(FString::Printf(TEXT("%s fills and blocks its cell, so it is painted on cells and not placed by hand"), *Kind.DisplayName));
+	}
+	if (!IsPlacedLevel(Planet->GetCellLevel(Cell)))
+	{
+		return Refuse(Planet->GetLayer() == EHexPlanetLayer::Underground ? TEXT("nothing stands in the void") : TEXT("nothing stands in the sea"));
+	}
+	if (IsClear(Cell))
+	{
+		return Refuse(TEXT("nothing stands on an entrance"));
+	}
+	const int32 Slot = GetPlacedSlot(Cell, Object);
+	if (Slot == INDEX_NONE)
+	{
+		return Refuse(FString::Printf(TEXT("%s has no mesh"), *Kind.DisplayName));
+	}
+
+	// on the ground of the cell, not under the sea
+	TArray<FVector3f> Triangles;
+	Planet->GetCellTriangles(Cell, Triangles);
+	FCellGround Ground;
+	Ground.Build(FVector3f(Planet->GetGrid().GetCells()[Cell].Center), Triangles);
+	FVector3f Position;
+	FVector3f Normal;
+	if (!Ground.Find(GetPlacedFlat(Object), Position, Normal))
+	{
+		return Refuse(TEXT("there is no ground there"));
+	}
+	if (Settings->bSea && Position.Length() - Planet->GetRadius() < 0.5)
+	{
+		return Refuse(TEXT("it would stand under the sea"));
+	}
+	float ScaleFactor = 1.0f;
+	float Snow = 0.0f;
+	GetSlotLook(Cell, Slot, ScaleFactor, Snow);
+	FString Problem;
+	if (!IsFootprintFree(Cell, Slot, Object.Scale * ScaleFactor, FVector3d(Position), true, &Problem))
+	{
+		return Refuse(Problem);
+	}
+	return true;
+}
+
+bool UHexPlanetObjects::MakePlaced(int32 Cell, int32 Set, const FVector3d& Point, FHexPlacedObject& OutObject, FString& OutProblem) const
+{
+	if (!Sets.IsValidIndex(Set) || !CellObjects.IsValidIndex(Cell))
+	{
+		OutProblem = TEXT("there is no such kind of object");
+		return false;
+	}
+	const UHexPlanetObjectSet& Kind = *Sets[Set];
+	const auto Round = [](double Value, double Step) { return float(FMath::RoundToDouble(Value / Step) * Step); };
+	OutObject = FHexPlacedObject();
+	OutObject.Set = uint8(Set + 1);
+	OutObject.Offset = GetPlacedOffset(Cell, Point);
+
+	// its turn, scale and mesh by a hash of where it stands and its kind, the Id as text, as the hash of an FName changes between runs; a mesh of
+	// the variant of the biome where the kind has one, else any of its meshes
+	const FIntPoint Spot(FMath::RoundToInt32(OutObject.Offset.X * 1000.0f), FMath::RoundToInt32(OutObject.Offset.Y * 1000.0f));
+	FRandomStream Random(int32(HashCombine(HashCombine(GetTypeHash(Cell), GetTypeHash(Spot)), FCrc::StrCrc32(*Kind.Id.ToString()))));
+	OutObject.Yaw = Round(Random.FRandRange(0.0f, 360.0f), 0.1);
+	OutObject.Scale = Round(Random.FRandRange(Kind.ScaleMin, FMath::Max(Kind.ScaleMin, Kind.ScaleMax)), 0.001);
+	const FHexObjectVariant* Variant = Kind.FindVariant(Planet->GetCellBiomeLetter(Cell));
+	const TArray<int32>* VariantMeshes = Variant ? &VariantSlots[Set][int32(Variant - Kind.Variants.GetData())] : nullptr;
+	if (VariantMeshes && !VariantMeshes->IsEmpty())
+	{
+		OutObject.Mesh = uint8(FMath::Max(AllSlots[Set].IndexOfByKey((*VariantMeshes)[Random.RandHelper(VariantMeshes->Num())]), 0));
+	}
+	else if (!AllSlots[Set].IsEmpty())
+	{
+		OutObject.Mesh = uint8(Random.RandHelper(AllSlots[Set].Num()));
+	}
+	return CanPlace(Cell, OutObject, &OutProblem);
+}
+
+bool UHexPlanetObjects::UnpackCell(int32 Cell, FHexCellObjects& OutObjects) const
+{
+	if (!CellObjects.IsValidIndex(Cell) || IsClear(Cell))
+	{
+		return false;
+	}
+	const FHexCellObjects& Objects = CellObjects[Cell];
+	const int32 Level = Planet->GetCellLevel(Cell);
+	const bool bCover = Objects.Cover != 0 && IsAllowed(Objects.Cover - 1, Level);
+	const bool bDecor = Objects.Decor != 0 && IsAllowed(Objects.Decor - 1, Level);
+	if (!bCover && !bDecor)
+	{
+		return false;
+	}
+	// each of its objects where PlaceInCell stands it, in front of what was placed by hand, as they are drawn first
+	TArray<FVector3f> Triangles;
+	Planet->GetCellTriangles(Cell, Triangles);
+	TArray<FInstance> Ignored;
+	TArray<FHexPlacedObject> Unpacked;
+	if (bCover)
+	{
+		PlaceInCell(Cell, Objects.Cover - 1, Objects.Density, false, Triangles, Ignored, &Unpacked);
+	}
+	if (bDecor)
+	{
+		PlaceInCell(Cell, Objects.Decor - 1, 1, true, Triangles, Ignored, &Unpacked);
+	}
+	OutObjects = Objects;
+	if (bCover)
+	{
+		OutObjects.Cover = 0;
+		OutObjects.Density = 0;
+	}
+	if (bDecor)
+	{
+		OutObjects.Decor = 0;
+	}
+	Unpacked.Append(Objects.Placed);
+	OutObjects.Placed = MoveTemp(Unpacked);
+	return true;
+}
+
+bool UHexPlanetObjects::FindObjectNear(const FVector3d& Point, double MaxDistance, int32& OutCell, int32& OutIndex, FHexCellObjects& OutObjects) const
+{
+	OutCell = INDEX_NONE;
+	OutIndex = INDEX_NONE;
+	const TArray<FHexSphereCell>& Cells = Planet->GetGrid().GetCells();
+	const int32 Middle = Planet->GetGrid().FindCell(Point.GetSafeNormal(), 0);
+	if (!Cells.IsValidIndex(Middle))
+	{
+		return false;
+	}
+	TArray<int32, TInlineAllocator<7>> Near{Middle};
+	Near.Append(Cells[Middle].Neighbors);
+	double Best = MaxDistance;
+	for (const int32 Cell : Near)
+	{
+		// what a cover or decor stands there as, unpacked, and what was placed by hand, as nothing stands on an entrance
+		if (IsClear(Cell))
+		{
+			continue;
+		}
+		FHexCellObjects Objects;
+		if (!UnpackCell(Cell, Objects))
+		{
+			Objects = CellObjects[Cell];
+		}
+		for (int32 Index = 0; Index < Objects.Placed.Num(); ++Index)
+		{
+			const double Distance = FVector3d::Dist(GetPlacedPoint(Cell, Objects.Placed[Index], Point.Size()), Point);
+			if (Distance <= Best)
+			{
+				Best = Distance;
+				OutCell = Cell;
+				OutIndex = Index;
+				OutObjects = Objects;
+			}
+		}
+	}
+	return OutCell != INDEX_NONE;
+}
+
+bool UHexPlanetObjects::MakePlacedInstance(int32 Cell, const FHexPlacedObject& Object, const FCellGround& Ground, FInstance& Out) const
+{
+	const int32 Set = int32(Object.Set) - 1;
+	const int32 Slot = GetPlacedSlot(Cell, Object);
+	FVector3f Position;
+	FVector3f Normal;
+	if (Slot == INDEX_NONE || !Ground.Find(GetPlacedFlat(Object), Position, Normal))
+	{
+		return false;
+	}
+	const UHexPlanetObjectSet& Kind = *Sets[Set];
+	float ScaleFactor = 1.0f;
+	float Snow = 0.0f;
+	GetSlotLook(Cell, Slot, ScaleFactor, Snow);
+	const float Scale = Object.Scale * ScaleFactor;
+
+	// up the planet, leaning with the ground by SlopeAlign as PlaceInCell stands them, and turned by the yaw placed
+	const FVector3f Up = Position.GetSafeNormal();
+	const FVector3f Axis = FMath::Lerp(Up, Normal, Kind.SlopeAlign).GetSafeNormal();
+	const FVector3f Side = FVector3f::CrossProduct(Axis, FMath::Abs(Axis.Z) < 0.9f ? FVector3f::UnitZ() : FVector3f::UnitX()).GetSafeNormal();
+	const FQuat4f Base = FRotationMatrix44f::MakeFromZX(Axis, Side).ToQuat();
+	const FQuat4f Rotation = FQuat4f(Axis, FMath::DegreesToRadians(Object.Yaw)) * Base;
+	Out.Slot = Slot;
+	Out.Transform = FTransform(FQuat(Rotation), FVector(Position - Axis * Kind.Sink * Scale), FVector(Scale));
+	Out.Rock = float(Planet->GetCellRockLayer(Cell));
+	Out.Snow = Snow;
+	return true;
+}
+
+int32 UHexPlanetObjects::PlacePlaced(int32 Cell, const TArray<FVector3f>& Triangles, TArray<FInstance>& Out) const
+{
+	const TArray<FHexPlacedObject>& Placed = CellObjects[Cell].Placed;
+	if (Placed.IsEmpty())
+	{
+		return 0;
+	}
+	if (Triangles.IsEmpty() || !IsPlacedLevel(Planet->GetCellLevel(Cell)))
+	{
+		return Placed.Num();
+	}
+	FCellGround Ground;
+	Ground.Build(FVector3f(Planet->GetGrid().GetCells()[Cell].Center), Triangles);
+	int32 LeftOut = 0;
+	for (const FHexPlacedObject& Object : Placed)
+	{
+		FInstance Instance;
+		// underground a mesh does not hang over a void that the maze opened beside it since it was placed
+		if (!MakePlacedInstance(Cell, Object, Ground, Instance)
+			|| ((Sets[Object.Set - 1]->bClipFootprint || Planet->GetLayer() == EHexPlanetLayer::Underground)
+				&& !IsFootprintFree(Cell, Instance.Slot, float(Instance.Transform.GetScale3D().X), Instance.Transform.GetLocation(), false, nullptr)))
+		{
+			++LeftOut;
+			continue;
+		}
+		Out.Add(Instance);
+	}
+	return LeftOut;
+}
+
+void UHexPlanetObjects::SetDragPreview(int32 Cell, const FHexPlacedObject* Object)
+{
+	FInstance Instance;
+	bool bShown = false;
+	if (Object && CellObjects.IsValidIndex(Cell))
+	{
+		TArray<FVector3f> Triangles;
+		Planet->GetCellTriangles(Cell, Triangles);
+		FCellGround Ground;
+		Ground.Build(FVector3f(Planet->GetGrid().GetCells()[Cell].Center), Triangles);
+		bShown = !Triangles.IsEmpty() && MakePlacedInstance(Cell, *Object, Ground, Instance);
+	}
+	if (!bShown)
+	{
+		if (DragPreview)
+		{
+			DragPreview->SetVisibility(false);
+		}
+		return;
+	}
+	if (!DragPreview)
+	{
+		DragPreview = NewObject<UInstancedStaticMeshComponent>(this, TEXT("DragPreview"));
+		DragPreview->SetupAttachment(this);
+		DragPreview->NumCustomDataFloats = 2;
+		DragPreview->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		DragPreview->SetCanEverAffectNavigation(false);
+		DragPreview->bAffectDistanceFieldLighting = false;
+		DragPreview->RegisterComponent();
+	}
+	// a mesh of its own, and its one instance moved, which keeps the shadows and the motion of the frames before
+	if (DragPreviewSlot != Instance.Slot || DragPreview->GetInstanceCount() != 1)
+	{
+		DragPreview->ClearInstances();
+		DragPreview->SetStaticMesh(Slots[Instance.Slot].Mesh);
+		SetSlotMaterials(DragPreview, Instance.Slot);
+		DragPreview->SetCastShadow(Sets[Slots[Instance.Slot].Set]->bCastShadow);
+		DragPreview->AddInstance(Instance.Transform, true);
+		DragPreviewSlot = Instance.Slot;
+	}
+	else
+	{
+		DragPreview->UpdateInstanceTransform(0, Instance.Transform, true, true);
+	}
+	DragPreview->SetCustomDataValue(0, 0, Instance.Rock, false);
+	DragPreview->SetCustomDataValue(0, 1, Instance.Snow, true);
+	DragPreview->SetVisibility(bObjectsShown);
+}
+
+void UHexPlanetObjects::SetSlotMaterials(UStaticMeshComponent* Component, int32 Slot)
+{
+	const UHexPlanetObjectSet& Set = *Sets[Slots[Slot].Set];
+	// what stands on the walls takes their material for objects, which dissolves with them in front of the point under the cursor
+	UMaterialInterface* WallObjectMaterial = Set.Layer == EHexObjectLayer::Rim && Set.RimSeat != EHexRimSeat::Lip && Planet->HasWalls()
+		? Planet->GetWallObjectMaterial() : nullptr;
+	UMaterialInterface* SetMaterial = WallObjectMaterial ? nullptr : Set.Material.LoadSynchronous();
+	for (int32 Element = 0; Element < Slots[Slot].Mesh->GetStaticMaterials().Num(); ++Element)
+	{
+		UMaterialInterface* Parent = WallObjectMaterial ? WallObjectMaterial : SetMaterial ? SetMaterial : Slots[Slot].Mesh->GetMaterial(Element);
+		Component->SetMaterial(Element, GetMaterial(Parent, &Set));
+	}
 }
 
 void UHexPlanetObjects::PlaceRims(int32 Chunk, TArray<FInstance>& Out, FPlaceStats& Stats) const
@@ -1382,7 +1955,8 @@ void UHexPlanetObjects::PlaceOnWalls(int32 Chunk, TArray<FInstance>& Out, FPlace
 	}
 }
 
-void UHexPlanetObjects::PlaceInCell(int32 Cell, int32 SetIndex, int32 Density, bool bDecor, const TArray<FVector3f>& Triangles, TArray<FInstance>& Out) const
+void UHexPlanetObjects::PlaceInCell(int32 Cell, int32 SetIndex, int32 Density, bool bDecor, const TArray<FVector3f>& Triangles, TArray<FInstance>& Out,
+	TArray<FHexPlacedObject>* OutPlaced) const
 {
 	const UHexPlanetObjectSet& Set = *Sets[SetIndex];
 	const FHexObjectVariant* Variant = Set.FindVariant(Planet->GetCellBiomeLetter(Cell));
@@ -1525,6 +2099,18 @@ void UHexPlanetObjects::PlaceInCell(int32 Cell, int32 SetIndex, int32 Density, b
 		Instance.Transform = FTransform(FQuat(Rotation), FVector(Position - Axis * Set.Sink * Scale), FVector(Scale));
 		Instance.Rock = Rock;
 		Instance.Snow = Variant->Snow;
+
+		// and as an object placed by hand would stand there, its scale before the factor of its variant, which it takes again on this biome
+		if (OutPlaced)
+		{
+			const auto Round = [](double Value, double Step) { return float(FMath::RoundToDouble(Value / Step) * Step); };
+			FHexPlacedObject& Placed = OutPlaced->AddDefaulted_GetRef();
+			Placed.Set = uint8(SetIndex + 1);
+			Placed.Mesh = uint8(FMath::Max(AllSlots[SetIndex].IndexOfByKey(Slot), 0));
+			Placed.Offset = FVector2f(Round(Point.X / Settings->HexRadius, 0.001), Round(Point.Y / Settings->HexRadius, 0.001));
+			Placed.Yaw = Round(FMath::Fmod(double(FMath::RadiansToDegrees(Yaw)) + 360.0, 360.0), 0.1);
+			Placed.Scale = Round(Scale / FMath::Max(Variant->ScaleFactor, 0.01f), 0.001);
+		}
 	}
 }
 
@@ -1597,30 +2183,7 @@ void UHexPlanetObjects::ApplyChunk(int32 Chunk, const TArray<FInstance>& Instanc
 			Component = NewObject<UHierarchicalInstancedStaticMeshComponent>(this, *FString::Printf(TEXT("Objects_%d_%d"), Chunk, Slot));
 			Component->SetupAttachment(this);
 			Component->SetStaticMesh(Slots[Slot].Mesh);
-			// what stands on the walls takes their material for objects, which dissolves with them in front of the point under the cursor
-			UMaterialInterface* WallObjectMaterial = Set.Layer == EHexObjectLayer::Rim && Set.RimSeat != EHexRimSeat::Lip && Planet->HasWalls()
-				? Planet->GetWallObjectMaterial() : nullptr;
-			if (WallObjectMaterial)
-			{
-				for (int32 Element = 0; Element < Slots[Slot].Mesh->GetStaticMaterials().Num(); ++Element)
-				{
-					Component->SetMaterial(Element, GetMaterial(WallObjectMaterial, &Set));
-				}
-			}
-			else if (UMaterialInterface* SetMaterial = Set.Material.LoadSynchronous())
-			{
-				for (int32 Element = 0; Element < Slots[Slot].Mesh->GetStaticMaterials().Num(); ++Element)
-				{
-					Component->SetMaterial(Element, GetMaterial(SetMaterial, &Set));
-				}
-			}
-			else
-			{
-				for (int32 Element = 0; Element < Slots[Slot].Mesh->GetStaticMaterials().Num(); ++Element)
-				{
-					Component->SetMaterial(Element, GetMaterial(Slots[Slot].Mesh->GetMaterial(Element), &Set));
-				}
-			}
+			SetSlotMaterials(Component, Slot);
 			Component->NumCustomDataFloats = 2;
 			Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 			Component->SetCanEverAffectNavigation(false);

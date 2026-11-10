@@ -115,9 +115,10 @@ public:
 	UPROPERTY(EditAnywhere, Category="Input|Painting")
 	TObjectPtr<UInputAction> RedoAction;
 
-	/** Makes the sun of the planet follow the camera or stay where it is, as the console variable hex.PlanetSun does */
+	/** Turns the forced light of the planet on and off, which lights both layers evenly, as the console variable hex.PlanetForcedLight does
+	 *  (until 2026-11-10 the key made the sun follow the camera or stay where it is, which hex.PlanetSun still does) */
 	UPROPERTY(EditAnywhere, Category="Input")
-	TObjectPtr<UInputAction> SunFollowAction;
+	TObjectPtr<UInputAction> ForcedLightAction;
 
 	/** Goes between the surface of the planet and its underground: through the entrance under the mouse to its exit, from an exit up to
 	 *  its entrance, else at the same place */
