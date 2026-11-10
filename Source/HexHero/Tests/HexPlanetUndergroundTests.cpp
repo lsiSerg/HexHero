@@ -650,6 +650,91 @@ bool FHexPlanetUndergroundWallsTest::RunTest(const FString& Parameters)
 	const HexPlanetWalls::FSample& Sample = Walls.Get(First);
 	TestTrue(TEXT("At the line"), HexPlanetWalls::GetDistanceToLine(Walls, Sample.Cell, Sample.Position + Sample.Inward * 1.0) < 2.0);
 	TestEqual(TEXT("Beyond the line"), HexPlanetWalls::GetDistanceToLine(Walls, Sample.Cell, Sample.Position - Sample.Inward * 5.0), 0.0);
+
+	// the heights of the walls along the voids (AHexPlanet::SetWallHeights): twice as high at 2, and at 0, which the planet never gives them
+	// (WallHeightMin) but the walls take, gone, nothing above the floor, with a normal at every vertex though the rows fall together
+	TArray<float> Heights;
+	const auto BuildWithHeights = [&](HexPlanetWalls::FWalls& Out)
+	{
+		HexPlanetWalls::Build(Grid, Levels, [&Levels](int32 Cell) { return IsPassage(Levels[Cell]); }, Params, Out, {}, Heights);
+	};
+	Heights.Init(2.0f, Cells.Num());
+	HexPlanetWalls::FWalls Tall;
+	BuildWithHeights(Tall);
+	Heights.Init(0.0f, Cells.Num());
+	HexPlanetWalls::FWalls Gone;
+	BuildWithHeights(Gone);
+	bool bTwice = Tall.Lines.Num() == Walls.Lines.Num() && Gone.Lines.Num() == Walls.Lines.Num();
+	int32 Present = 0;
+	for (int32 LineIndex = 0; LineIndex < Walls.Lines.Num() && bTwice; ++LineIndex)
+	{
+		for (int32 Index = 0; Index < Walls.Lines[LineIndex].Num(); ++Index)
+		{
+			const FIntPoint At(LineIndex, Index);
+			bTwice &= FMath::IsNearlyEqual(HexPlanetWalls::GetHeight(Tall.Get(At), Params), 2.0 * HexPlanetWalls::GetHeight(Walls.Get(At), Params), 1e-6);
+			Present += HexPlanetWalls::GetPresence(Gone.Get(At), Params) > 0.0 ? 1 : 0;
+		}
+	}
+	TestTrue(TEXT("Twice as high at 2"), bTwice);
+	TestEqual(TEXT("Nothing of a wall at 0"), Present, 0);
+	double Highest = 0.0;
+	int32 BadNormals = 0;
+	for (int32 Chunk = 0; Chunk < Grid.GetNumChunks(); ++Chunk)
+	{
+		for (const bool bCoarse : {false, true})
+		{
+			HexPlanetWalls::FMesh Mesh;
+			HexPlanetWalls::BuildChunk(Gone, Chunk, Params, Mesh, bCoarse);
+			for (int32 Vertex = 0; Vertex < Mesh.Positions.Num(); ++Vertex)
+			{
+				Highest = FMath::Max(Highest, double(Mesh.Positions[Vertex].Size()) - Params.FloorRadius);
+				BadNormals += FMath::IsNearlyEqual(Mesh.Normals[Vertex].Size(), 1.0f, 1e-3f) ? 0 : 1;
+			}
+		}
+	}
+	AddInfo(FString::Printf(TEXT("Walls of height 0: the highest point %.2f above the floor, %d normals of no direction"), Highest, BadNormals));
+	TestTrue(TEXT("Nothing above the floor at 0"), Highest < 1.0);
+	TestEqual(TEXT("A normal at every vertex at 0"), BadNormals, 0);
+
+	// a single void at 0 among full walls: its walls sink to nothing at the middles of its sides towards a passage, so the heights of the walls
+	// along a void are those of its own sides there and not of the next void, which a sample on the second half of a side took before
+	int32 Breach = INDEX_NONE;
+	for (int32 Cell = 0; Cell < Cells.Num() && Breach == INDEX_NONE; ++Cell)
+	{
+		if (!IsPassage(Levels[Cell]) && Cells[Cell].Neighbors.ContainsByPredicate([&Levels](int32 Neighbor) { return IsPassage(Levels[Neighbor]); }))
+		{
+			Breach = Cell;
+		}
+	}
+	Heights.Init(1.0f, Cells.Num());
+	if (TestTrue(TEXT("A void beside a passage"), Breach != INDEX_NONE))
+	{
+		Heights[Breach] = 0.0f;
+		HexPlanetWalls::FWalls Breached;
+		BuildWithHeights(Breached);
+		double Tallest = 0.0;
+		const int32 Count = Cells[Breach].Corners.Num();
+		for (int32 Side = 0; Side < Count; ++Side)
+		{
+			const int32 Passage = Cells[Breach].Neighbors[Side];
+			if (!IsPassage(Levels[Passage]))
+			{
+				continue;
+			}
+			const FVector3d Middle = (Corners[Cells[Breach].Corners[(Side + Count - 1) % Count]] + Corners[Cells[Breach].Corners[Side]]).GetSafeNormal() * Params.FloorRadius;
+			const HexPlanetWalls::FSample* Nearest = nullptr;
+			for (const FIntPoint& At : Breached.CellSamples[Passage])
+			{
+				if (!Nearest || FVector3d::Distance(Breached.Get(At).Position, Middle) < FVector3d::Distance(Nearest->Position, Middle))
+				{
+					Nearest = &Breached.Get(At);
+				}
+			}
+			Tallest = Nearest ? FMath::Max(Tallest, Nearest->Height) : Tallest;
+		}
+		AddInfo(FString::Printf(TEXT("Void %d at 0: the walls along it as high as %.3f at the middles of its sides"), Breach, Tallest));
+		TestTrue(TEXT("A breach in the walls at a void of height 0"), Tallest < 0.05);
+	}
 	return true;
 }
 

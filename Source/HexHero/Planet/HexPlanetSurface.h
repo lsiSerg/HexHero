@@ -178,6 +178,12 @@ namespace HexPlanetSurface
 		double CoastWobble = 0.0;
 		double CoastWobbleScale = 100.0;
 		double CoastWobbleDetail = 0.0;
+		/** The rise of the floor of the passages (UHexPlanetConfig::FloorNoise), 0 for none, which also builds the cells of level 0 and the
+		 *  pentagons as a fine lattice (AddLattice in HexPlanetSurface.cpp) */
+		double FloorNoise = 0.0;
+		double FloorNoiseScale = 150.0;
+		double FloorNoiseDetail = 0.4;
+		double FloorNoiseFade = 20.0;
 		/** By level from -2: the radii where the faces of high ground begin and are full */
 		double FacetLow[5] = {};
 		double FacetHigh[5] = {};

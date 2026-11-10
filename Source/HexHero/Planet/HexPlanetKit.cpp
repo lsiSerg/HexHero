@@ -148,7 +148,7 @@ FVector3d HexPlanetKit::PlaceVertex(const FHexSphereGrid& Grid, int32 Cell, cons
 	}
 	if (bOnSide && bEdge)
 	{
-		return Direction * ApplyWobble(Placement, Direction, Ground);
+		return Direction * ApplyFloorRise(Placement, Direction, ApplyWobble(Placement, Direction, Ground));
 	}
 
 	// a value of the frame at this point: from the center towards the side, and along the side from its middle to its corners, which both cells
@@ -339,7 +339,7 @@ FVector3d HexPlanetKit::PlaceVertex(const FHexSphereGrid& Grid, int32 Cell, cons
 		Height += Placement.JaggedHeight * Facets * Ridged;
 	}
 
-	return Direction * ApplyWobble(Placement, Direction, Height);
+	return Direction * ApplyFloorRise(Placement, Direction, ApplyWobble(Placement, Direction, Height));
 }
 
 double HexPlanetKit::GetFacetShare(const FPlacement& Placement, double Height)
@@ -364,6 +364,31 @@ double HexPlanetKit::ApplyWobble(const FPlacement& Placement, const FVector3d& D
 	const double Noise = FMath::PerlinNoise3D(Point) + FMath::PerlinNoise3D(Point * 3.1f + FVector(17.3f, 5.1f, 9.7f)) * Placement.WobbleDetail;
 	// it stays within its slope, so it never lifts a point above the top it rises to nor sinks one below the floor it falls from
 	return FMath::Clamp(Height + Placement.Wobble * Weight * Noise, Low, High);
+}
+
+double HexPlanetKit::GetFloorRise(const FVector3d& Direction, double FloorTop, double Height, double Scale, double Detail)
+{
+	if (Height <= 0.0)
+	{
+		return 0.0;
+	}
+	// a noise of the place on the sphere of the floor, and a finer one, from 0 to Height, as the floor of the passages is the top of their level
+	const FVector Point(Direction * (FloorTop / FMath::Max(Scale, 1.0)));
+	const double Noise = FMath::PerlinNoise3D(Point + FVector(31.7f, 12.9f, 47.3f)) + FMath::PerlinNoise3D(Point * 2.7f + FVector(5.9f, 63.1f, 21.4f)) * Detail;
+	return Height * FMath::Clamp(0.5 + 0.5 * Noise / (1.0 + Detail), 0.0, 1.0);
+}
+
+double HexPlanetKit::ApplyFloorRise(const FPlacement& Placement, const FVector3d& Direction, double Height)
+{
+	const double Low = Placement.FloorTop - FMath::Max(Placement.FloorRiseFade, 1.0);
+	if (Placement.FloorRise <= 0.0 || Height <= Low)
+	{
+		return Height;
+	}
+	// all of it on the top of the floor, fading out below it, so the cliffs of the voids keep their feet; a pure function of the point, so the
+	// cells that share a point raise it alike
+	const double Weight = Height >= Placement.FloorTop ? 1.0 : FMath::SmoothStep(Low, Placement.FloorTop, Height);
+	return Height + Weight * GetFloorRise(Direction, Placement.FloorTop, Placement.FloorRise, Placement.FloorRiseScale, Placement.FloorRiseDetail);
 }
 
 namespace

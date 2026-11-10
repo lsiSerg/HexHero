@@ -764,6 +764,10 @@ void AHexPlanetPlayerController::RunPaintCommand(const TArray<FString>& Args)
 	{
 		Brush->SetCarveTool();
 	}
+	else if (Action == TEXT("walls") && Args.IsValidIndex(1))
+	{
+		Brush->SetWallTool(Args[1].Equals(TEXT("Auto"), ESearchCase::IgnoreCase) ? EHexPaintTool::WallAuto : EHexPaintTool::WallHeight);
+	}
 	else if (Action == TEXT("object"))
 	{
 		Brush->SetObjectSet(GetInt(1, 0));
@@ -910,7 +914,7 @@ namespace
 
 	FAutoConsoleCommandWithWorldAndArgs PlanetPaintConsoleCommand(TEXT("hex.PlanetPaint"),
 		TEXT("Drives the brush of the planet as the palette and the mouse would, for tests: on | off | tab <Ground|Relief|Objects|Rivers|Entrances|Maze|Links> (Objects of the layer shown) | ")
-		TEXT("key <1-5> | biome <Index> | size <1-3> | network <A-H> | entrance | carve | object <Index on the palette of the layer> | eraser | river | bridge | relief <Version|Turn|Mirror|Higher|Lower|Auto> | none | ")
+		TEXT("key <1-5> | biome <Index> | size <1-3> | network <A-H> | entrance | carve | walls <Height|Auto> | object <Index on the palette of the layer> | eraser | river | bridge | relief <Version|Turn|Mirror|Higher|Lower|Auto> | none | ")
 		TEXT("stroke <Cell or @Latitude:Longitude> [...] [ctrl] | press <Cell> | release | regenerate [all|objects] | newlayout | undo | redo | save. A stroke presses on the first cell, passes the others and releases on the last; ctrl makes it take away; ")
 		TEXT("press holds a stroke, which follows the mouse as the held left button does, until release"),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&PlanetPaintCommand));

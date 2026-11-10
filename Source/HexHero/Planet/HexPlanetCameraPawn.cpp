@@ -664,21 +664,34 @@ void AHexPlanetCameraPawn::OnLayer()
 	{
 		return;
 	}
+	// an entrance under the mouse leads down to its exit, the same cell below, and an exit up to its entrance, else the other layer at the same place
+	if (!TravelThroughEntrance(PlayerController ? PlayerController->GetMouseCell() : INDEX_NONE))
+	{
+		TravelTo(Planet->GetLayer() == EHexPlanetLayer::Surface ? EHexPlanetLayer::Underground : EHexPlanetLayer::Surface, GetPlacement());
+	}
+}
+
+bool AHexPlanetCameraPawn::TravelThroughEntrance(int32 Cell)
+{
+	if (IsTravelling() || !Planet || !Planet->IsBuilt())
+	{
+		return false;
+	}
+	const int32 Entrance = Planet->FindEntrance(Cell);
+	if (Entrance == INDEX_NONE || Planet->GetEntranceProblem(Entrance) != HexPlanetUnderground::EEntranceProblem::None)
+	{
+		return false;
+	}
+
+	// the camera then looks at the exit or the entrance from where it stood
 	const EHexPlanetLayer Target = Planet->GetLayer() == EHexPlanetLayer::Surface ? EHexPlanetLayer::Underground : EHexPlanetLayer::Surface;
 	FHexPlanetCameraPlacement Placement = GetPlacement();
-
-	// an entrance under the mouse leads down to its exit, the same cell below, and an exit up to its entrance, which the camera then looks at
-	const int32 Cell = PlayerController ? PlayerController->GetMouseCell() : INDEX_NONE;
-	const int32 Entrance = Planet->FindEntrance(Cell);
-	if (Entrance != INDEX_NONE && Planet->GetEntranceProblem(Entrance) == HexPlanetUnderground::EEntranceProblem::None)
-	{
-		const FVector3d Center = Planet->GetGrid().GetCells()[Cell].Center;
-		Placement.Latitude = FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(Center.Z, -1.0, 1.0)));
-		Placement.Longitude = FMath::RadiansToDegrees(FMath::Atan2(Center.Y, Center.X));
-		UE_LOG(LogHexHero, Log, TEXT("Through the %s %c at cell %d"), Target == EHexPlanetLayer::Underground ? TEXT("entrance") : TEXT("exit"),
-			HexPlanetFile::GetNetworkLetter(Planet->GetEntrances()[Entrance].Network), Cell);
-	}
-	TravelTo(Target, Placement);
+	const FVector3d Center = Planet->GetGrid().GetCells()[Cell].Center;
+	Placement.Latitude = FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(Center.Z, -1.0, 1.0)));
+	Placement.Longitude = FMath::RadiansToDegrees(FMath::Atan2(Center.Y, Center.X));
+	UE_LOG(LogHexHero, Log, TEXT("Through the %s %c at cell %d"), Target == EHexPlanetLayer::Underground ? TEXT("entrance") : TEXT("exit"),
+		HexPlanetFile::GetNetworkLetter(Planet->GetEntrances()[Entrance].Network), Cell);
+	return TravelTo(Target, Placement);
 }
 
 void AHexPlanetCameraPawn::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -724,6 +737,11 @@ void AHexPlanetCameraPawn::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 		if (InputConfig->LayerAction)
 		{
 			EnhancedInputComponent->BindAction(InputConfig->LayerAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnLayer);
+		}
+		if (InputConfig->SaveBookmarkAction && InputConfig->JumpBookmarkAction)
+		{
+			EnhancedInputComponent->BindAction(InputConfig->SaveBookmarkAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnSaveBookmark);
+			EnhancedInputComponent->BindAction(InputConfig->JumpBookmarkAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnJumpBookmark);
 		}
 
 		// painting the levels, whose actions are missing until Tools/create_input_assets.py has made them
@@ -1160,11 +1178,19 @@ void AHexPlanetCameraPawn::OnDragStarted()
 	}
 
 	// while a tool of the brush is chosen the left button paints, and the camera moves with the keys, the edges of the screen and the other buttons
-	if (AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController()); PlayerController && PlayerController->IsBrushArmed())
+	AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController());
+	if (PlayerController && PlayerController->IsBrushArmed())
 	{
+		bLeftDown = false;
 		PlayerController->BeginPaintStroke();
 		return;
 	}
+
+	// a press that the release finds about where it was is a click, two of them on the same cell a double click
+	float MouseX = 0.0f;
+	float MouseY = 0.0f;
+	bLeftDown = PlayerController && PlayerController->GetMousePosition(MouseX, MouseY);
+	LeftStart = FVector2D(MouseX, MouseY);
 
 	bDragging = GetMouseDirection(DragDirection);
 
@@ -1177,13 +1203,36 @@ void AHexPlanetCameraPawn::OnDragStarted()
 
 void AHexPlanetCameraPawn::OnDragCompleted()
 {
-	if (AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController()))
+	AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController());
+	if (PlayerController)
 	{
 		PlayerController->EndPaintStroke();
 	}
 
 	bDragging = false;
 	MoveInertia = CameraConfig ? CameraConfig->DragInertia : 0.6f;
+
+	// a double click on an entrance or exit goes through it to the other layer
+	float MouseX = 0.0f;
+	float MouseY = 0.0f;
+	const bool bClick = bLeftDown && PlayerController && PlayerController->GetMousePosition(MouseX, MouseY)
+		&& FVector2D::Distance(LeftStart, FVector2D(MouseX, MouseY)) <= Settings()->ClickTolerance;
+	bLeftDown = false;
+	if (!bClick || IsTravelling())
+	{
+		return;
+	}
+	const double Now = FPlatformTime::Seconds();
+	const int32 Cell = PlayerController->GetMouseCell();
+	if (Cell != INDEX_NONE && Cell == LastClickCell && Now - LastClickTime <= Settings()->DoubleClickTime)
+	{
+		LastClickCell = INDEX_NONE;
+		AngularVelocity = FVector::ZeroVector;
+		TravelThroughEntrance(Cell);
+		return;
+	}
+	LastClickCell = Cell;
+	LastClickTime = Now;
 }
 
 void AHexPlanetCameraPawn::OnMiddleStarted()
@@ -1411,6 +1460,98 @@ void AHexPlanetCameraPawn::OnToggleKeyLegend()
 	}
 }
 
+void AHexPlanetCameraPawn::OnSaveBookmark(const FInputActionValue& Value)
+{
+	SaveBookmark(FMath::RoundToInt32(Value.Get<float>()));
+}
+
+void AHexPlanetCameraPawn::OnJumpBookmark(const FInputActionValue& Value)
+{
+	JumpToBookmark(FMath::RoundToInt32(Value.Get<float>()));
+}
+
+bool AHexPlanetCameraPawn::SaveBookmark(int32 Slot)
+{
+	if (!Planet || !Planet->IsBuilt() || IsTravelling() || Slot < 1 || Slot > HexCameraBookmarks::NumSlots)
+	{
+		return false;
+	}
+
+	// rounded as the last view keeps it
+	const FHexPlanetCameraPlacement Placement = RoundPlacement(GetPlacement());
+	FHexPlanetBookmark Bookmark;
+	Bookmark.Slot = Slot;
+	Bookmark.Latitude = Placement.Latitude;
+	Bookmark.Longitude = Placement.Longitude;
+	Bookmark.Heading = Placement.Heading;
+	Bookmark.Distance = Placement.Distance;
+	Bookmark.Layer = GetShownLayer();
+	const int32 Key = HexCameraBookmarks::GetSlotKey(Slot);
+
+	// a planet not saved has no folder to file them under yet
+	FString Text;
+	bool bSaved = true;
+	if (!Planet->IsSaved())
+	{
+		UnsavedBookmarks.Add(Slot, Bookmark);
+		Text = FString::Printf(TEXT("Camera kept in slot %d (Ctrl+%d) until the planet is saved"), Key, Key);
+	}
+	else
+	{
+		FHexCameraBookmarks Bookmarks;
+		HexCameraBookmarks::Load(Bookmarks);
+		HexCameraBookmarks::SetPlanet(Bookmarks, Planet->GetPlanetFolder(), Bookmark);
+		bSaved = HexCameraBookmarks::Save(Bookmarks);
+		Text = bSaved ? FString::Printf(TEXT("Camera saved to slot %d of %s; Ctrl+%d goes back there"), Key, *Planet->GetPlanetFolder(), Key)
+			: FString::Printf(TEXT("Could not write %s"), *HexCameraBookmarks::GetFilePath());
+	}
+	UE_LOG(LogHexHero, Log, TEXT("Bookmarks: %s, at %.4f %.4f, heading %.1f at %.0f on the %s"), *Text, Bookmark.Latitude, Bookmark.Longitude, Bookmark.Heading,
+		Bookmark.Distance, GetPlanetLayerName(Bookmark.Layer));
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(INDEX_NONE, 3.0f, bSaved ? FColor::Green : FColor::Red, Text);
+	}
+	return bSaved;
+}
+
+bool AHexPlanetCameraPawn::JumpToBookmark(int32 Slot)
+{
+	if (!Planet || !Planet->IsBuilt() || IsTravelling() || Slot < 1 || Slot > HexCameraBookmarks::NumSlots)
+	{
+		return false;
+	}
+
+	FHexCameraBookmarks Bookmarks;
+	const FHexPlanetBookmark* Bookmark = UnsavedBookmarks.Find(Slot);
+	if (!Bookmark && Planet->IsSaved())
+	{
+		HexCameraBookmarks::Load(Bookmarks);
+		Bookmark = HexCameraBookmarks::FindPlanet(Bookmarks, Planet->GetPlanetFolder(), Slot);
+	}
+	const int32 Key = HexCameraBookmarks::GetSlotKey(Slot);
+	if (!Bookmark)
+	{
+		const FString Text = FString::Printf(TEXT("Slot %d is empty: Ctrl+Shift+%d saves the camera there"), Key, Key);
+		UE_LOG(LogHexHero, Log, TEXT("Bookmarks: %s"), *Text);
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(INDEX_NONE, 3.0f, FColor::White, Text);
+		}
+		return false;
+	}
+
+	// as hex.PlanetSetCamera does: the camera waits for the pieces around the place, or travels to the other layer
+	FHexPlanetCameraPlacement Placement;
+	Placement.Latitude = Bookmark->Latitude;
+	Placement.Longitude = Bookmark->Longitude;
+	Placement.Heading = Bookmark->Heading;
+	Placement.Distance = Bookmark->Distance;
+	PendingPlanetPlacement = Placement;
+	PendingPlanetLayer = Bookmark->Layer;
+	UE_LOG(LogHexHero, Log, TEXT("Bookmarks: the camera goes to slot %d, %.4f %.4f on the %s"), Key, Placement.Latitude, Placement.Longitude, GetPlanetLayerName(Bookmark->Layer));
+	return true;
+}
+
 FHexPlanetCameraPlacement AHexPlanetCameraPawn::RoundPlacement(const FHexPlanetCameraPlacement& Placement)
 {
 	FHexPlanetCameraPlacement Rounded;
@@ -1494,6 +1635,22 @@ void AHexPlanetCameraPawn::SaveView()
 		if (GEngine)
 		{
 			GEngine->AddOnScreenDebugMessage(INDEX_NONE, 2.0f, FColor::Green, FString::Printf(TEXT("Saved the view to %s"), *HexLastView::GetFilePath()));
+		}
+	}
+
+	// the bookmarks of a new planet go under the folder it was saved to
+	if (!UnsavedBookmarks.IsEmpty() && Planet && Planet->IsSaved())
+	{
+		FHexCameraBookmarks Bookmarks;
+		HexCameraBookmarks::Load(Bookmarks);
+		for (const TPair<int32, FHexPlanetBookmark>& Each : UnsavedBookmarks)
+		{
+			HexCameraBookmarks::SetPlanet(Bookmarks, Planet->GetPlanetFolder(), Each.Value);
+		}
+		if (HexCameraBookmarks::Save(Bookmarks))
+		{
+			UE_LOG(LogHexHero, Log, TEXT("Bookmarks: wrote the %d slots of the new planet under %s"), UnsavedBookmarks.Num(), *Planet->GetPlanetFolder());
+			UnsavedBookmarks.Reset();
 		}
 	}
 }

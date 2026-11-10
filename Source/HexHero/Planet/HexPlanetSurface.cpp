@@ -181,6 +181,86 @@ namespace
 		}
 	}
 
+	/** Steps from the center of a cell to its sides of the lattice of AddLattice: those of the slopes of the kits (KITS of generate_planet_kit.py),
+	 *  so its sides hold the points of the pieces of its neighbors and meet them without a crack wherever the floor rises */
+	constexpr int32 FloorLatticeSteps = 6;
+
+	/**
+	 *  Adds a cell as a lattice of triangles, FloorLatticeSteps from its center to its sides in each of its sectors, at height 0 of a piece, so
+	 *  on the top of its level and, on a side towards another level, on the line of the side, as a flat tile. For the floor of the passages that
+	 *  rises by a noise (FParams::FloorNoise), which the few points of the flat piece of a kit would show as a bump in the middle of each cell
+	 */
+	void AddLattice(const FContext& Context, int32 Cell, const HexPlanetKit::FCellFrame& Frame, const HexPlanetKit::FPlacement& Placement, uint8 Look,
+		const FTarget& Target)
+	{
+		const FHexSphereGrid& Grid = Context.Grid;
+		const FHexSphereCell& Each = Grid.GetCells()[Cell];
+		const int32 NumSides = Each.Neighbors.Num();
+		FRawSection& Section = *Target.Section;
+		constexpr int32 Steps = FloorLatticeSteps;
+
+		// a point of sector Side by its steps towards corner Side - 1 (From) and corner Side (To)
+		const auto AddVertex = [&](int32 Side, int32 From, int32 To)
+		{
+			const double WFrom = double(From) / Steps;
+			const double WTo = double(To) / Steps;
+			const double WCenter = From + To == Steps ? 0.0 : 1.0 - WFrom - WTo;
+			const FVector3d Position = CarveRiver(Context, Cell, HexPlanetKit::PlaceVertex(Grid, Cell, Frame, Placement, Side, WCenter, WFrom, WTo, 0.0));
+			if (From + To == Steps)
+			{
+				Target.Shared->Add({Target.Tag, Section.Positions.Num(), GetKey(Position)});
+			}
+			Section.NormalSums.Add(FVector3d::ZeroVector);
+			Section.GridUVs.Add(FVector2f(float(1.0 - WCenter), 0.0f));
+			Section.MeshUVs.Add(FVector2f::ZeroVector);
+			Section.CellUVs.Add(FVector2f(HexPlanetSurface::GetCellUV(Cell)));
+			Section.LocalUVs.Add(FVector2f(HexPlanetSurface::GetLocalUV(NumSides, Side, WFrom, WTo)));
+			Section.Looks.Add(Look);
+			return Section.Positions.Add(FVector(Position));
+		};
+
+		// sector K keeps its points with a step towards corner K - 1, so the ray to that corner is its own and the ray to corner K is that of
+		// sector K + 1, and the center comes once
+		const int32 Center = AddVertex(0, 0, 0);
+		const auto Slot = [](int32 Side, int32 From, int32 To) { return (Side * (Steps + 1) + From) * (Steps + 1) + To; };
+		TArray<int32> Points;
+		Points.Init(INDEX_NONE, NumSides * (Steps + 1) * (Steps + 1));
+		for (int32 Side = 0; Side < NumSides; ++Side)
+		{
+			for (int32 From = 1; From <= Steps; ++From)
+			{
+				for (int32 To = 0; From + To <= Steps; ++To)
+				{
+					Points[Slot(Side, From, To)] = AddVertex(Side, From, To);
+				}
+			}
+		}
+		const auto Point = [&](int32 Side, int32 From, int32 To)
+		{
+			if (From == 0)
+			{
+				return To == 0 ? Center : Points[Slot((Side + 1) % NumSides, To, 0)];
+			}
+			return Points[Slot(Side, From, To)];
+		};
+
+		// the triangles of each sector, two to a step but along its side, facing out of the planet (AddTriangle)
+		for (int32 Side = 0; Side < NumSides; ++Side)
+		{
+			for (int32 From = 0; From < Steps; ++From)
+			{
+				for (int32 To = 0; From + To < Steps; ++To)
+				{
+					AddTriangle(Section, Point(Side, From, To), Point(Side, From + 1, To), Point(Side, From, To + 1), Each.Center);
+					if (From + To + 2 <= Steps)
+					{
+						AddTriangle(Section, Point(Side, From + 1, To), Point(Side, From + 1, To + 1), Point(Side, From, To + 1), Each.Center);
+					}
+				}
+			}
+		}
+	}
+
 	/** Returns the heights of a piece at the points of the coarse mesh */
 	HexPlanetSurface::FCoarsePiece MakeCoarsePiece(const HexPlanetKit::FPiece& Piece)
 	{
@@ -399,6 +479,18 @@ namespace
 				}
 			}
 
+			// the floor of the passages that rises by a noise is a fine lattice, as the flat piece of the kit has too few points for it; flat on its
+			// level anyway, as a passage holds its sides
+			if (Context.Params.FloorNoise > 0.0 && Level == 0)
+			{
+				AddLattice(Context, Cell, Frame, Placement, Look, {&Section, SectionTag, &Shared});
+				if (Coarse.Section)
+				{
+					AddTile(Context, Cell, Frame, Placement, &Context.Kit.CoarsePieces[PieceIndex], Turns, bMirrored, Look, Coarse);
+				}
+				return Finish();
+			}
+
 			const int32 First = Section.Positions.Num();
 			for (const HexPlanetKit::FPieceVertex& Vertex : Piece.Vertices)
 			{
@@ -455,7 +547,15 @@ namespace
 		Flat.FootDepth = Context.Params.LevelHeight;
 		Flat.FadeHeight = Context.Params.LevelHeight;
 		Context.Params.SetWobble(Flat);
-		AddTile(Context, Cell, Frame, Flat, nullptr, 0, false, Look, {&Section, SectionTag, &Shared});
+		// with a floor that rises, a lattice as fine as the slopes of the pieces around, so their sides meet
+		if (Context.Params.FloorNoise > 0.0)
+		{
+			AddLattice(Context, Cell, Frame, Flat, Look, {&Section, SectionTag, &Shared});
+		}
+		else
+		{
+			AddTile(Context, Cell, Frame, Flat, nullptr, 0, false, Look, {&Section, SectionTag, &Shared});
+		}
 
 		if (Coarse.Section)
 		{
@@ -614,6 +714,10 @@ HexPlanetSurface::FParams HexPlanetSurface::FParams::Make(const UHexPlanetConfig
 	Params.CoastWobble = Config.CoastWobble;
 	Params.CoastWobbleScale = Config.CoastWobbleScale;
 	Params.CoastWobbleDetail = Config.CoastWobbleDetail;
+	Params.FloorNoise = FMath::Max(Config.FloorNoise, 0.0f);
+	Params.FloorNoiseScale = FMath::Max(Config.FloorNoiseScale, 10.0f);
+	Params.FloorNoiseDetail = FMath::Clamp(Config.FloorNoiseDetail, 0.0f, 1.0f);
+	Params.FloorNoiseFade = FMath::Max(Config.FloorNoiseFade, 1.0f);
 	for (int32 Level = -2; Level <= 2; ++Level)
 	{
 		const FKitLevel* Loaded = Kit.Levels.Find(Level);
@@ -631,6 +735,11 @@ void HexPlanetSurface::FParams::SetWobble(HexPlanetKit::FPlacement& Placement) c
 	Placement.WobbleTops[0] = GetTop(-2);
 	Placement.WobbleTops[1] = GetTop(-1);
 	Placement.WobbleTops[2] = GetTop(0);
+	Placement.FloorRise = FloorNoise;
+	Placement.FloorRiseScale = FloorNoiseScale;
+	Placement.FloorRiseDetail = FloorNoiseDetail;
+	Placement.FloorRiseFade = FloorNoiseFade;
+	Placement.FloorTop = GetTop(0);
 	// the faces of high ground, from heights above the sea to radii
 	if (Placement.FacetHigh > Placement.FacetLow && Placement.FacetHigh < Radius * 0.5)
 	{

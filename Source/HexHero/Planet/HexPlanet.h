@@ -483,9 +483,9 @@ public:
 	 *  Sets the levels of cells, then their biomes (cell -> index in GetBiomes), where a biome its level does not allow is left out. A cell whose
 	 *  level changed and whose biome it does not allow takes the biome most of its neighbors have that it allows, else the default of its level.
 	 *  Biomes show at once, as M_HexPlanet reads them from CellBiomeTexture; a cell of the sea that freezes or thaws rebuilds the sea field
-	 *  in the background, as a change of levels does
+	 *  in the background, as a change of levels does. NewWallHeights are those of SetWallHeights, so a stroke that changes both builds the walls once
 	 */
-	void SetCells(const TMap<int32, int32>& NewLevels, const TMap<int32, int32>& NewBiomes);
+	void SetCells(const TMap<int32, int32>& NewLevels, const TMap<int32, int32>& NewBiomes, const TMap<int32, float>& NewWallHeights = {});
 
 	/** Returns the biomes a planet can have, those with a PlanetLetter, by their letter; a cell holds an index into it */
 	const TArray<TObjectPtr<UHexBiomeConfig>>& GetBiomes() const { return BiomeConfigs; }
@@ -529,6 +529,24 @@ public:
 	const HexPlanetWalls::FWalls& GetWalls() const { return *Walls; }
 	const HexPlanetWalls::FParams& GetWallParams() const { return WallParams; }
 	bool HasWalls() const { return !Walls->Lines.IsEmpty(); }
+
+	/** Sets by hand the heights of the walls along voids, cell -> a factor on WallHeight from WallHeightMin, a low curb, to WallHeightMax, a
+	 *  negative height going back to the height the style of the void gives them (GetStyleWallHeight), and builds the walls again, or leaves that
+	 *  to a rebuild of the levels that waits, which builds them; bByStep as for MarkLevelsEdited. Saved in underground/walls.json */
+	void SetWallHeights(const TMap<int32, float>& Changes, bool bByStep = false);
+
+	/** Returns the height of the walls along a void as set by hand, or -1 where the style of the void gives it */
+	float GetWallHeightOverride(int32 Cell) const;
+
+	/** Returns the height of the walls along a void, as set by hand, else as its style gives it */
+	float GetWallHeight(int32 Cell) const;
+
+	/** Returns the height the style of the void of a biome gives the walls along it (EHexVoidStyle): WallPoolHeight beside lava and lakes, else 1 */
+	float GetStyleWallHeight(int32 Biome) const;
+
+	/** Returns what a cell of a level and a biome is to the walls: -1 a passage, else the EHexVoidStyle of the void, so a step of the brush that
+	 *  changes it lets the walls along it go back to the height of its style */
+	int32 GetWallStyle(int32 Level, int32 Biome) const;
 
 	/** Gives the walls the point under the cursor, around which they dissolve where they stand in front of it (WallFadeCenter of
 	 *  M_HexUndergroundWall), or none while the cursor is off the planet */
@@ -956,6 +974,9 @@ private:
 	HexPlanetSurface::FReliefOverrides ReliefOverrides;
 	HexPlanetSurface::FReliefOverrides ShownReliefOverrides;
 
+	/** The heights of the walls along voids set by hand, by cell (underground/walls.json, SetWallHeights) */
+	TMap<int32, float> WallHeightOverrides;
+
 	/** Factor of the height of each cell, see HexPlanetSurface::FindRelief */
 	TArray<float> CellRelief;
 
@@ -1065,6 +1086,10 @@ private:
 
 	/** Writes ReliefOverrides to relief.json of a folder */
 	bool SaveRelief(const FString& Folder, FString& OutError) const;
+
+	/** Reads walls.json of the layer into WallHeightOverrides, and writes them to walls.json of a folder, those of voids alone */
+	void LoadWallHeights();
+	bool SaveWallHeights(const FString& Folder, FString& OutError) const;
 
 	/** Makes a component per mesh of the boulders of the kit */
 	void CreateBoulderComponents(const UHexPlanetKitConfig* Config);

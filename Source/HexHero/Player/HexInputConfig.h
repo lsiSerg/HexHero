@@ -63,6 +63,14 @@ public:
 	UPROPERTY(EditAnywhere, Category="Input")
 	TObjectPtr<UInputAction> SaveViewAction;
 
+	/** Saves the camera in a slot of the bookmarks of the planet or map open (CameraBookmarks.json), a value of 1 to 9, and 10 for the key 0 */
+	UPROPERTY(EditAnywhere, Category="Input")
+	TObjectPtr<UInputAction> SaveBookmarkAction;
+
+	/** Puts the camera back where a slot of the bookmarks saved it, travelling to its layer, a value as SaveBookmarkAction gives */
+	UPROPERTY(EditAnywhere, Category="Input")
+	TObjectPtr<UInputAction> JumpBookmarkAction;
+
 	/** Opens the map menu. Its keys also close the menu */
 	UPROPERTY(EditAnywhere, Category="Input")
 	TObjectPtr<UInputAction> MapMenuAction;

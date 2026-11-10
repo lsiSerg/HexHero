@@ -682,6 +682,59 @@ bool HexPlanetFile::SaveRelief(const FString& Folder, const TArray<FHexReliefCel
 	return true;
 }
 
+bool HexPlanetFile::LoadWalls(const FString& Folder, TArray<FHexWallCell>& OutCells, FString& OutError)
+{
+	OutCells.Reset();
+	const FString FilePath = GetFilePath(Folder, WallsFile);
+	if (!FPaths::FileExists(FilePath))
+	{
+		return true;
+	}
+
+	FString Text;
+	FHexWallsFile File;
+	if (!FFileHelper::LoadFileToString(Text, *FilePath) || !FJsonObjectConverter::JsonObjectStringToUStruct(Text, &File))
+	{
+		OutError = FString::Printf(TEXT("could not read %s"), *FilePath);
+		return false;
+	}
+	OutCells = MoveTemp(File.Cells);
+	return true;
+}
+
+bool HexPlanetFile::SaveWalls(const FString& Folder, const TArray<FHexWallCell>& Cells, FString& OutError)
+{
+	const FString FilePath = GetFilePath(Folder, WallsFile);
+	if (Cells.IsEmpty())
+	{
+		if (FPaths::FileExists(FilePath) && !IFileManager::Get().Delete(*FilePath))
+		{
+			OutError = FString::Printf(TEXT("could not delete %s"), *FilePath);
+			return false;
+		}
+		return true;
+	}
+
+	TArray<FHexWallCell> Sorted = Cells;
+	Sorted.Sort([](const FHexWallCell& A, const FHexWallCell& B) { return A.Cell < B.Cell; });
+
+	// a line per cell, its height to a thousandth without trailing zeros, so an edit changes only the lines of its cells and Git merges them
+	FString Text = FString::Printf(TEXT("{\n\t\"version\": %d,\n\t\"cells\": ["), FHexWallsFile().Version);
+	for (int32 Index = 0; Index < Sorted.Num(); ++Index)
+	{
+		const FString Height = FString::SanitizeFloat(FMath::RoundToDouble(double(Sorted[Index].Height) * 1000.0) / 1000.0, 0);
+		Text += FString::Printf(TEXT("%s\n\t\t{\"cell\": %d, \"height\": %s}"), Index == 0 ? TEXT("") : TEXT(","), Sorted[Index].Cell, *Height);
+	}
+	Text += TEXT("\n\t]\n}\n");
+
+	if (!FFileHelper::SaveStringToFile(Text, *FilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+	{
+		OutError = FString::Printf(TEXT("could not write %s"), *FilePath);
+		return false;
+	}
+	return true;
+}
+
 bool HexPlanetFile::HasObjects(const FString& Folder)
 {
 	return IFileManager::Get().FileExists(*GetFilePath(Folder, ObjectsFile));

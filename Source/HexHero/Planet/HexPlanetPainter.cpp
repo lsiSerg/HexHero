@@ -567,6 +567,12 @@ void UHexPlanetPainter::PaintAround(int32 Cell)
 		return;
 	}
 
+	if (IsSettingWalls())
+	{
+		PaintWalls(Brush);
+		return;
+	}
+
 	// relief goes to the planet at once, once per cell and stroke, only to cells with a piece the tool can change
 	if (Tool == EHexPaintTool::Relief)
 	{
@@ -590,25 +596,29 @@ void UHexPlanetPainter::PaintAround(int32 Cell)
 		return;
 	}
 
-	// biomes go to the planet at once, only to the cells whose level allows them
+	// biomes go to the planet at once, only to the cells whose level allows them; a void painted another style, as a lake, gives its walls the
+	// height of that style, in the same build of the walls
 	if (Tool == EHexPaintTool::Biome)
 	{
 		const int32 Biome = GetBiome();
 		TMap<int32, int32> Changed;
+		TMap<int32, float> Walls;
 		for (const int32 Painted : Brush)
 		{
 			const int32 Current = Planet->GetCellBiome(Painted);
-			if (Current != Biome && Planet->IsBiomeAllowed(Biome, Planet->GetCellLevel(Painted)))
+			const int32 CellLevel = Planet->GetCellLevel(Painted);
+			if (Current != Biome && Planet->IsBiomeAllowed(Biome, CellLevel))
 			{
 				Stroke.OldBiomes.FindOrAdd(Painted, Current);
 				Stroke.NewBiomes.Add(Painted, Biome);
 				Changed.Add(Painted, Biome);
+				ClearWallHeight(Stroke, Painted, CellLevel, Current, CellLevel, Biome, &Walls);
 			}
 		}
 
 		if (!Changed.IsEmpty())
 		{
-			Planet->SetCells({}, Changed);
+			Planet->SetCells({}, Changed, Walls);
 			Planet->MarkLevelsEdited(true);
 		}
 		return;
@@ -910,6 +920,15 @@ void UHexPlanetPainter::EndStroke()
 		{
 			Stroke.NewBiomes.Add(Each.Key, Planet->GetCellBiome(Each.Key));
 		}
+
+		// a passage made void, or a void made passage, has walls along it of the height of its style again, which the rebuild of the levels
+		// builds
+		TMap<int32, float> Walls;
+		for (const TPair<int32, int32>& Each : Stroke.NewLevels)
+		{
+			ClearWallHeight(Stroke, Each.Key, Stroke.OldLevels[Each.Key], Stroke.OldBiomes[Each.Key], Planet->GetCellLevel(Each.Key), Stroke.NewBiomes[Each.Key], &Walls);
+		}
+		Planet->SetWallHeights(Walls, true);
 	}
 	AddStep(MoveTemp(Stroke));
 	Stroke = FHexPaintStep();
@@ -984,7 +1003,7 @@ void UHexPlanetPainter::Undo()
 
 	FHexPaintStep Step = GetLayerState().UndoSteps.Pop();
 	Apply(Step.OldLevels, Step.OldBiomes, Step.OldRelief, Step.OldObjects, Step.OldRivers, Step.bEntrances ? &Step.OldEntrances : nullptr,
-		Step.bSeedOffset ? &Step.OldSeedOffset : nullptr);
+		Step.bSeedOffset ? &Step.OldSeedOffset : nullptr, Step.OldWalls);
 	GetLayerState().RedoSteps.Add(MoveTemp(Step));
 	UpdateSavedState();
 }
@@ -998,7 +1017,7 @@ void UHexPlanetPainter::Redo()
 
 	FHexPaintStep Step = GetLayerState().RedoSteps.Pop();
 	Apply(Step.NewLevels, Step.NewBiomes, Step.NewRelief, Step.NewObjects, Step.NewRivers, Step.bEntrances ? &Step.NewEntrances : nullptr,
-		Step.bSeedOffset ? &Step.NewSeedOffset : nullptr);
+		Step.bSeedOffset ? &Step.NewSeedOffset : nullptr, Step.NewWalls);
 	GetLayerState().UndoSteps.Add(MoveTemp(Step));
 	UpdateSavedState();
 }
@@ -1020,7 +1039,7 @@ bool UHexPlanetPainter::Regenerate(int32 InNetwork)
 		return false;
 	}
 
-	Apply(Step.NewLevels, Step.NewBiomes, {}, Step.NewObjects);
+	Apply(Step.NewLevels, Step.NewBiomes, {}, Step.NewObjects, {}, nullptr, nullptr, Step.NewWalls);
 	AddStep(MoveTemp(Step));
 	return true;
 }
@@ -1087,7 +1106,7 @@ bool UHexPlanetPainter::NewLayout()
 	Step.NewSeedOffset = NewOffset;
 	UE_LOG(LogHexHero, Log, TEXT("Painter: new layout of the underground, seed offset %d to %d, %d cells changed"), OldOffset, NewOffset, Step.NewLevels.Num());
 
-	Apply(Step.NewLevels, Step.NewBiomes, {}, Step.NewObjects, {}, nullptr, &NewOffset);
+	Apply(Step.NewLevels, Step.NewBiomes, {}, Step.NewObjects, {}, nullptr, &NewOffset, Step.NewWalls);
 	AddStep(MoveTemp(Step));
 	return true;
 }
@@ -1130,6 +1149,8 @@ bool UHexPlanetPainter::MakeRegenerateStep(int32 InNetwork, FHexPaintStep& OutSt
 			Step.OldBiomes.Add(Cell, Planet->GetCellBiome(Cell));
 			Step.NewBiomes.Add(Cell, Biome);
 		}
+		// a void that became a passage or the other way round has walls along it of the height of its style again
+		ClearWallHeight(Step, Cell, Planet->GetCellLevel(Cell), Planet->GetCellBiome(Cell), Result.Levels[Cell], Biome != INDEX_NONE ? Biome : Planet->GetCellBiome(Cell));
 	}
 
 	// the cells that became passages take the objects a generation on the new levels gives them, and those that became void lose theirs, so the
@@ -1227,8 +1248,93 @@ bool UHexPlanetPainter::GetToolRelief(int32 Cell, HexPlanetSurface::FReliefOverr
 	}
 }
 
+void UHexPlanetPainter::ClearWallHeight(FHexPaintStep& Step, int32 Cell, int32 OldLevel, int32 OldBiome, int32 NewLevel, int32 NewBiome, TMap<int32, float>* Changed) const
+{
+	if (!Planet || Step.NewWalls.Contains(Cell) || Planet->GetWallStyle(OldLevel, OldBiome) == Planet->GetWallStyle(NewLevel, NewBiome))
+	{
+		return;
+	}
+	const float Override = Planet->GetWallHeightOverride(Cell);
+	if (Override < 0.0f)
+	{
+		return;
+	}
+	Step.OldWalls.Add(Cell, Override);
+	Step.NewWalls.Add(Cell, -1.0f);
+	if (Changed)
+	{
+		Changed->Add(Cell, -1.0f);
+	}
+}
+
+void UHexPlanetPainter::PaintWalls(TConstArrayView<int32> Brush)
+{
+	// the voids of the brush, and the voids beside its passages, so a click on the floor before a wall reaches it too; only those with a passage
+	// beside them, which have walls along them
+	const TArray<FHexSphereCell>& Cells = Planet->GetGrid().GetCells();
+	const auto IsVoid = [this](int32 Cell) { return !HexPlanetUnderground::IsPassage(int8(Planet->GetCellLevel(Cell))); };
+	TArray<int32, TInlineAllocator<64>> Voids;
+	for (const int32 Painted : Brush)
+	{
+		if (IsVoid(Painted))
+		{
+			Voids.AddUnique(Painted);
+			continue;
+		}
+		for (const int32 Neighbor : Cells[Painted].Neighbors)
+		{
+			if (IsVoid(Neighbor))
+			{
+				Voids.AddUnique(Neighbor);
+			}
+		}
+	}
+
+	const float Step = Settings ? FMath::Max(Settings->WallHeightStep, 0.01f) : 0.1f;
+	TMap<int32, float> Changed;
+	for (const int32 Void : Voids)
+	{
+		if (Stroke.NewWalls.Contains(Void) || !Cells[Void].Neighbors.ContainsByPredicate([&IsVoid](int32 Neighbor) { return !IsVoid(Neighbor); }))
+		{
+			continue;
+		}
+		const float Old = Planet->GetWallHeightOverride(Void);
+		float New = -1.0f;
+		if (Tool == EHexPaintTool::WallAuto)
+		{
+			if (Old < 0.0f)
+			{
+				continue;
+			}
+		}
+		else
+		{
+			// from the height shown, whether set by hand or by the style, within WallHeightMin and WallHeightMax; nothing at a limit
+			const float Current = Planet->GetWallHeight(Void);
+			New = Settings ? Settings->ClampWallHeight(Current + (IsBackwards() ? -Step : Step)) : Current;
+			if (FMath::IsNearlyEqual(New, Current, 1e-4f))
+			{
+				continue;
+			}
+		}
+		Stroke.OldWalls.Add(Void, Old);
+		Stroke.NewWalls.Add(Void, New);
+		Changed.Add(Void, New);
+	}
+
+	if (!Changed.IsEmpty())
+	{
+		UE_LOG(LogHexHero, Log, TEXT("Painter: the walls along %d voids to %s"), Changed.Num(), *FString::JoinBy(Changed, TEXT(", "), [](const TPair<int32, float>& Each)
+		{
+			return Each.Value < 0.0f ? FString::Printf(TEXT("%d by its style"), Each.Key) : FString::Printf(TEXT("%d x%.2f"), Each.Key, Each.Value);
+		}));
+		Planet->SetWallHeights(Changed, true);
+	}
+}
+
 void UHexPlanetPainter::Apply(const TMap<int32, int32>& Levels, const TMap<int32, int32>& Biomes, const HexPlanetSurface::FReliefOverrides& Relief,
-	const TMap<int32, FHexCellObjects>& Objects, const TMap<uint64, uint8>& Rivers, const TArray<FHexEntrance>* Entrances, const int32* SeedOffset)
+	const TMap<int32, FHexCellObjects>& Objects, const TMap<uint64, uint8>& Rivers, const TArray<FHexEntrance>* Entrances, const int32* SeedOffset,
+	const TMap<int32, float>& Walls)
 {
 	// every change here comes from a step of Undo, so going back to the step of the last save brings the saved state back
 	if (SeedOffset)
@@ -1263,9 +1369,9 @@ void UHexPlanetPainter::Apply(const TMap<int32, int32>& Levels, const TMap<int32
 		}
 	}
 
-	if (!Levels.IsEmpty() || !Biomes.IsEmpty())
+	if (!Levels.IsEmpty() || !Biomes.IsEmpty() || !Walls.IsEmpty())
 	{
-		Planet->SetCells(Levels, Biomes);
+		Planet->SetCells(Levels, Biomes, Walls);
 	}
 
 	// the entrances mark themselves as edited, and a step of them alone changes no cell
@@ -1273,7 +1379,7 @@ void UHexPlanetPainter::Apply(const TMap<int32, int32>& Levels, const TMap<int32
 	{
 		Planet->SetEntrances(*Entrances, true);
 	}
-	if (!Entrances || !Levels.IsEmpty() || !Biomes.IsEmpty() || !Relief.IsEmpty() || !Objects.IsEmpty() || !Rivers.IsEmpty())
+	if (!Entrances || !Levels.IsEmpty() || !Biomes.IsEmpty() || !Relief.IsEmpty() || !Objects.IsEmpty() || !Rivers.IsEmpty() || !Walls.IsEmpty())
 	{
 		Planet->MarkLevelsEdited(true);
 	}

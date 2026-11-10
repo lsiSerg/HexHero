@@ -75,16 +75,23 @@ namespace HexPlanetWalls
 		double ColumnShare = 0.12;
 		double FluteDepth = 7.0;
 		double FluteWidth = 0.3;
-		/** Along a void of lava or a lake the wall sinks to PoolHeight of its height and PoolThickness of its thickness, without an overhang, so
-		 *  they show over it, easing in over PoolBlend world units each way along the line */
+		/** A wall as high as PoolHeight of its height (FSample::Height), as along a void of lava or a lake, is a parapet of PoolThickness of its
+		 *  thickness, without an overhang, so they show over it; between that and its full height it blends towards one, and below it narrows to
+		 *  its line. The heights ease from one void to the next over HeightBlend world units each way along the line */
 		double PoolHeight = 0.3;
 		double PoolThickness = 0.5;
-		double PoolBlend = 60.0;
+		double HeightBlend = 60.0;
 		/** The styles, each holding in regions of a noise of the place StyleScale across, blending where they meet over less the higher
 		 *  StyleSharpness; none keeps the values as they are */
 		TArray<FStyle> Styles;
 		double StyleScale = 450.0;
 		double StyleSharpness = 5.0;
+		/** The rise of the floor of the passages (UHexPlanetConfig::FloorNoise, HexPlanetKit::GetFloorRise), which the walls take, so they stand
+		 *  on it: its height, 0 for none, the size of its noise and the share of its finer noise */
+		double FloorRise = 0.0;
+		double FloorRiseScale = 150.0;
+		double FloorRiseDetail = 0.0;
+
 		/** Moves the noises, so another planet has other walls */
 		int32 Seed = 0;
 
@@ -111,9 +118,12 @@ namespace HexPlanetWalls
 		 *  across a corner of a void, which the foot of the wall covers with floor */
 		double Gap = 0.0;
 
-		/** How much of the void beyond is lava and how much a lake (0 to 1, smoothed along the line), where the wall sinks to a parapet */
+		/** How much of the void beyond is lava and how much a lake (0 to 1, smoothed along the line), which light the wall */
 		double Lava = 0.0;
 		double Lake = 0.0;
+
+		/** The factor on the height of the wall of the void beyond (Build), smoothed along the line: 1 a full wall, PoolHeight a parapet, 0 none */
+		double Height = 1.0;
 
 		/** How far the wall may reach from each line onto the passage and towards the chasm here, about the radius of the turn of that line on
 		 *  that side, so a wall does not fold over itself inside a tight turn */
@@ -139,15 +149,23 @@ namespace HexPlanetWalls
 	};
 
 	/** Builds the lines of the walls along every side of a cell that CanHold towards a neighbor at least MinDrop levels lower; VoidStyles, a value
-	 *  per cell, says which voids are lava (1) or a lake (2), along which the wall sinks to a parapet */
+	 *  per cell, says which voids are lava (1) or a lake (2), which light the wall, and VoidHeights, a value per cell, the factor on the height of
+	 *  the walls along each void (FSample::Height), 1 for all without it */
 	void Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Levels, TFunctionRef<bool(int32)> CanHold, const FParams& Params, FWalls& Out,
-		TConstArrayView<uint8> VoidStyles = {});
+		TConstArrayView<uint8> VoidStyles = {}, TConstArrayView<float> VoidHeights = {});
 
 	/** Returns the height of a wall at a sample, without the rise and fall of its crest by the stalactites */
 	double GetHeight(const FSample& Sample, const FParams& Params);
 
+	/** Returns how much of its width a wall keeps at a sample: 1 down to a parapet (FParams::PoolHeight), less below it as it narrows to its line,
+	 *  0 where it is gone */
+	double GetPresence(const FSample& Sample, const FParams& Params);
+
 	/** Returns how far the foot of a wall reaches onto the floor of a passage from its line, where the floor is clear again */
 	double GetFootReach(const FParams& Params);
+
+	/** Returns the radius of the floor of the passages in a direction, risen by its noise, on which the walls stand */
+	double GetFloorRadius(const FParams& Params, const FVector3d& Direction);
 
 	/** Gives a point of the inner face of a wall at a sample, Height above the floor, and the way out of the face there */
 	void GetInnerFace(const FWalls& Walls, const FIntPoint& At, double Height, const FParams& Params, FVector3d& OutPosition, FVector3d& OutNormal);

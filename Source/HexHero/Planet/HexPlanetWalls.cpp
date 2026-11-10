@@ -3,6 +3,7 @@
 #include "HexPlanetWalls.h"
 #include "Async/ParallelFor.h"
 #include "HexPlanetConfig.h"
+#include "HexPlanetKit.h"
 #include "HexSphereGrid.h"
 #include "Math/RandomStream.h"
 
@@ -137,6 +138,9 @@ namespace
 		double Tip = 1.0;
 		double Strength = 0.0;
 
+		/** How much of its width the wall keeps, 1 down to a parapet, less as a lower wall narrows to its line (GetPresenceOf) */
+		double Presence = 1.0;
+
 		/** The values of the walls here, by the styles that hold where the sample lies (FParams::Styles), and how much its stone is flowstone
 		 *  and how much it shows its joints, for the material */
 		double Thickness = 0.0;
@@ -196,6 +200,20 @@ namespace
 		return Sum;
 	}
 
+	/** How far a wall of a height (FSample::Height) has gone towards a parapet: 0 at its full height and above, 1 at PoolHeight and below */
+	double GetParapet(double Height, const FParams& Params)
+	{
+		return FMath::Clamp((1.0 - Height) / FMath::Max(1.0 - Params.PoolHeight, 0.05), 0.0, 1.0);
+	}
+
+	/** How much of its width a wall of a height keeps: 1 down to PoolHeight, then less as it narrows to its line, and nothing just above 0, as
+	 *  the heights eased along a line stay a little above it in the middle of a single void without a wall */
+	double GetPresenceOf(double Height, const FParams& Params)
+	{
+		constexpr double Gone = 0.03;
+		return FMath::Clamp((Height - Gone) / FMath::Max(Params.PoolHeight - Gone, 0.02), 0.0, 1.0);
+	}
+
 	FWallFrame GetFrame(const FSample& Sample, const FParams& Params, const FOffsets& Offsets)
 	{
 		FWallFrame Frame;
@@ -214,16 +232,19 @@ namespace
 			+ Params.CrestJag * Style.CrestJag * Rise * Rib - Params.CrestNotch * Style.CrestNotch * (1.0 - Rib), MinCrest);
 		uint32 OuterHash = 0;
 		GetCells(Sample.Position, Params.RibSize * Style.RibSize * 1.3, Offsets.OuterRibs, Frame.OuterEdge, OuterHash);
-		// along lava and lakes a low and thinner parapet, without an overhang, so they show over it
-		const double Pool = FMath::Max(Sample.Lava, Sample.Lake);
-		Frame.Base *= FMath::Lerp(1.0, Params.PoolHeight, Pool);
-		Frame.Crest *= FMath::Lerp(1.0, Params.PoolHeight, Pool);
-		Frame.Thickness = Params.Thickness * Style.Thickness * FMath::Lerp(1.0, Params.PoolThickness, Pool);
+		// a lower wall, as along lava and lakes, is thinner, with less of an overhang and smaller stalactites, a parapet at PoolHeight, so they
+		// show over it, and below that it narrows to its line until nothing of it is left
+		const double Height = FMath::Max(Sample.Height, 0.0);
+		const double Parapet = GetParapet(Height, Params);
+		Frame.Presence = GetPresenceOf(Height, Params);
+		Frame.Base *= Height;
+		Frame.Crest *= Height;
+		Frame.Thickness = Params.Thickness * Style.Thickness * FMath::Lerp(1.0, Params.PoolThickness, Parapet) * Frame.Presence;
 		Frame.Lean = Params.Lean * Style.Lean;
-		Frame.Overhang = Params.Overhang * Style.Overhang * (1.0 - Pool);
-		Frame.Bulge = Style.Bulge;
-		Frame.RibDepth = Params.RibDepth * Style.RibDepth * FMath::Lerp(1.0, 0.5, Pool);
-		Frame.FluteDepth = Params.FluteDepth * Style.FluteDepth;
+		Frame.Overhang = Params.Overhang * Style.Overhang * (1.0 - Parapet);
+		Frame.Bulge = Style.Bulge * Frame.Presence;
+		Frame.RibDepth = Params.RibDepth * Style.RibDepth * FMath::Lerp(1.0, 0.5, Parapet) * Frame.Presence;
+		Frame.FluteDepth = Params.FluteDepth * Style.FluteDepth * Frame.Presence;
 		Frame.Flowstone = FMath::Clamp(Style.Flowstone, 0.0, 1.0);
 		Frame.Fracture = FMath::Clamp(Style.Fracture, 0.0, 1.0);
 		return Frame;
@@ -248,7 +269,9 @@ namespace
 	}
 
 	/** A row of a sample: across the line (onto the passage) and above the floor, from the line itself or, by Smooth, from the smoothed line, with
-	 *  how deep in a hollow it lies, how much of a stalactite stands out there and how much it is floor */
+	 *  how deep in a hollow it lies, how much of a stalactite stands out there and how much it is floor. FromSmooth is how far towards the smoothed
+	 *  line it stands: Smooth, less where a wall lower than a parapet narrows to the line itself, while Smooth still marks the outer face for the
+	 *  material */
 	struct FLocal
 	{
 		double Across = 0.0;
@@ -257,18 +280,20 @@ namespace
 		double Cavity = 0.0;
 		double Rib = 0.0;
 		double Floor = 0.0;
+		double FromSmooth = 0.0;
 	};
 
 	FLocal GetLocal(const FSample& Sample, const FWallFrame& Frame, int32 Row, const FParams& Params, const FOffsets& Offsets)
 	{
 		const double Height = FMath::Max(Frame.Base, 1.0);
-		const double Fillet = Params.Fillet;
-		const double Foot = Params.FootReach;
+		// a wall lower than a parapet narrows to its line, its foot too
+		const double Fillet = Params.Fillet * Frame.Presence;
+		const double Foot = Params.FootReach * Frame.Presence;
 		// the inner face rises from the top of the rounded foot, leaning back as it goes up
 		const double FaceBase = Foot - Fillet;
 		const auto Face = [&](double Up) { return FaceBase - Frame.Lean * Up; };
 		const double Thickness = Frame.Thickness;
-		const double Flare = Params.OuterFlare;
+		const double Flare = Params.OuterFlare * Frame.Presence;
 		const auto At = [&Frame](double Share) { return GetRowHeight(Frame, Share); };
 
 		FLocal Local;
@@ -313,7 +338,7 @@ namespace
 
 		// lumps of a 3D noise where the row lies, so the wall is no extruded profile
 		const FVector3d Place = Sample.Position + Sample.Inward * Local.Across + Sample.Up * Local.Up;
-		const double Bulge = Params.Bulge * Frame.Bulge * Noise(Place, Params.BulgeScale, Offsets.Bulge) + Params.Detail * Noise(Place, Params.DetailScale, Offsets.Detail);
+		const double Bulge = Params.Bulge * Frame.Bulge * Noise(Place, Params.BulgeScale, Offsets.Bulge) + Params.Detail * Frame.Presence * Noise(Place, Params.DetailScale, Offsets.Detail);
 		const double OuterRib = Frame.RibDepth * 0.6 * FMath::Sqrt(Frame.OuterEdge);
 		switch (Kind)
 		{
@@ -355,6 +380,7 @@ namespace
 			Local.Floor = 1.0;
 			break;
 		}
+		Local.FromSmooth = Local.Smooth * Frame.Presence;
 		return Local;
 	}
 
@@ -377,11 +403,12 @@ namespace
 	/** Where a row of a sample lies in the world, its offset eased towards the reach of the turn on its side of the line it stands from */
 	FVector3d ToWorld(const FSample& Sample, const FLocal& Local, const FParams& Params)
 	{
-		const bool bSmooth = Local.Smooth >= 0.5;
+		const bool bSmooth = Local.FromSmooth >= 0.5;
 		const double Reach = Local.Across > 0.0 ? (bSmooth ? Sample.SmoothInnerReach : Sample.InnerReach) : (bSmooth ? Sample.SmoothOuterReach : Sample.OuterReach);
-		const FVector3d Base = FMath::Lerp(Sample.Position, Sample.OuterPosition, Local.Smooth);
-		const FVector3d Inward = FMath::Lerp(Sample.Inward, Sample.OuterInward, Local.Smooth).GetSafeNormal();
-		return (Base + Inward * Ease(Local.Across, Reach)).GetSafeNormal() * (Params.FloorRadius + Local.Up);
+		const FVector3d Base = FMath::Lerp(Sample.Position, Sample.OuterPosition, Local.FromSmooth);
+		const FVector3d Inward = FMath::Lerp(Sample.Inward, Sample.OuterInward, Local.FromSmooth).GetSafeNormal();
+		const FVector3d Direction = (Base + Inward * Ease(Local.Across, Reach)).GetSafeNormal();
+		return Direction * (GetFloorRadius(Params, Direction) + Local.Up);
 	}
 
 	/** The way out of the wall at a row, by which a normal is turned */
@@ -528,9 +555,10 @@ namespace
 				OutPoints[Row] = ToWorld(Sample, OutLocals[Row], Params);
 			}
 		}
-		// never below its shoulders, so the top does not fold in where its knobs dip
-		OutLocals[CrestTop].Up = FMath::Max(OutLocals[CrestTop].Up, FMath::Max(OutLocals[CrestInner].Up, OutLocals[CrestOuter].Up) + 1.0);
-		OutPoints[CrestTop] = FMath::Lerp(OutPoints[CrestInner], OutPoints[CrestOuter], 0.45).GetSafeNormal() * (Params.FloorRadius + OutLocals[CrestTop].Up);
+		// never below its shoulders, so the top does not fold in where its knobs dip, nor above the floor where the wall is gone
+		OutLocals[CrestTop].Up = FMath::Max(OutLocals[CrestTop].Up, FMath::Max(OutLocals[CrestInner].Up, OutLocals[CrestOuter].Up) + Frame.Presence);
+		const FVector3d TopDirection = FMath::Lerp(OutPoints[CrestInner], OutPoints[CrestOuter], 0.45).GetSafeNormal();
+		OutPoints[CrestTop] = TopDirection * (GetFloorRadius(Params, TopDirection) + OutLocals[CrestTop].Up);
 	}
 }
 
@@ -569,7 +597,10 @@ HexPlanetWalls::FParams HexPlanetWalls::FParams::FromConfig(const UHexPlanetConf
 	Params.FluteWidth = Config.WallFluteWidth;
 	Params.PoolHeight = FMath::Clamp(Config.WallPoolHeight, 0.1f, 1.0f);
 	Params.PoolThickness = FMath::Clamp(Config.WallPoolThickness, 0.1f, 1.0f);
-	Params.PoolBlend = FMath::Max(Config.WallPoolBlend, 0.0f);
+	Params.HeightBlend = FMath::Max(Config.WallHeightBlend, 0.0f);
+	Params.FloorRise = FMath::Max(Config.FloorNoise, 0.0f);
+	Params.FloorRiseScale = FMath::Max(Config.FloorNoiseScale, 10.0f);
+	Params.FloorRiseDetail = FMath::Clamp(Config.FloorNoiseDetail, 0.0f, 1.0f);
 	Params.StyleScale = FMath::Max(Config.WallStyleScale, 10.0f);
 	Params.StyleSharpness = FMath::Max(Config.WallStyleSharpness, 0.0f);
 	for (const FHexWallStyle& Style : Config.WallStyles)
@@ -598,7 +629,12 @@ double HexPlanetWalls::GetHeight(const FSample& Sample, const FParams& Params)
 {
 	const FOffsets Offsets(Params.Seed);
 	return Params.Height * GetStyle(Sample.Position, Params).Height * FMath::Max(1.0 + Params.HeightNoise * Noise(Sample.Position, Params.HeightNoiseScale, Offsets.Height), 0.2)
-		* FMath::Lerp(1.0, Params.PoolHeight, FMath::Max(Sample.Lava, Sample.Lake));
+		* FMath::Max(Sample.Height, 0.0);
+}
+
+double HexPlanetWalls::GetPresence(const FSample& Sample, const FParams& Params)
+{
+	return GetPresenceOf(Sample.Height, Params);
 }
 
 double HexPlanetWalls::GetFootReach(const FParams& Params)
@@ -606,8 +642,13 @@ double HexPlanetWalls::GetFootReach(const FParams& Params)
 	return Params.FootReach;
 }
 
+double HexPlanetWalls::GetFloorRadius(const FParams& Params, const FVector3d& Direction)
+{
+	return Params.FloorRadius + HexPlanetKit::GetFloorRise(Direction, Params.FloorRadius, Params.FloorRise, Params.FloorRiseScale, Params.FloorRiseDetail);
+}
+
 void HexPlanetWalls::Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Levels, TFunctionRef<bool(int32)> CanHold, const FParams& Params, FWalls& Out,
-	TConstArrayView<uint8> VoidStyles)
+	TConstArrayView<uint8> VoidStyles, TConstArrayView<float> VoidHeights)
 {
 	Out = FWalls();
 	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
@@ -713,7 +754,8 @@ void HexPlanetWalls::Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Lev
 			}
 		}
 
-		// every corner rounded by a quadratic curve within CornerRound of it
+		// every corner rounded by a quadratic curve within CornerRound of it. Each point holds the passage and void of the stretch that starts at
+		// it, so the first half of a curve, still on the stretch that comes in, holds those of the point before
 		TArray<FVector3d> Rounded;
 		TArray<int32> RoundedCells;
 		TArray<int32> RoundedVoids;
@@ -721,7 +763,8 @@ void HexPlanetWalls::Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Lev
 		for (int32 Index = 0; Index < NumPoints; ++Index)
 		{
 			const FVector3d& Here = Points[Index];
-			const FVector3d& Before = Points[(Index + NumPoints - 1) % NumPoints];
+			const int32 Previous = (Index + NumPoints - 1) % NumPoints;
+			const FVector3d& Before = Points[Previous];
 			const FVector3d& After = Points[(Index + 1) % NumPoints];
 			const double In = FVector3d::Distance(Before, Here);
 			const double Onward = FVector3d::Distance(Here, After);
@@ -743,8 +786,8 @@ void HexPlanetWalls::Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Lev
 			{
 				const double U = double(Step) / Steps;
 				Rounded.Add(Start * FMath::Square(1.0 - U) + Here * (2.0 * U * (1.0 - U)) + End * FMath::Square(U));
-				RoundedCells.Add(PointCells[Index]);
-				RoundedVoids.Add(PointVoids[Index]);
+				RoundedCells.Add(PointCells[U < 0.5 ? Previous : Index]);
+				RoundedVoids.Add(PointVoids[U < 0.5 ? Previous : Index]);
 			}
 		}
 
@@ -775,12 +818,15 @@ void HexPlanetWalls::Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Lev
 			Sample.Up = FMath::Lerp(Rounded[Segment], Rounded[(Segment + 1) % NumRounded], Share).GetSafeNormal();
 			Sample.Position = Sample.Up * Radius;
 			Sample.S = S;
-			Sample.Cell = RoundedCells[Share < 0.5 ? Segment : (Segment + 1) % NumRounded];
-			// how much of the void beyond is lava or a lake, before it is smoothed along the line
-			const int32 Void = RoundedVoids[Share < 0.5 ? Segment : (Segment + 1) % NumRounded];
+			// the passage and void of the stretch the sample lies on, which starts at the point before it; the nearer point held the next side
+			// for the second half of each side, which moved the parapets along lava and lakes half a side on
+			Sample.Cell = RoundedCells[Segment];
+			// how much of the void beyond is lava or a lake and how high its wall is, before they are eased along the line
+			const int32 Void = RoundedVoids[Segment];
 			const uint8 Style = VoidStyles.IsValidIndex(Void) ? VoidStyles[Void] : 0;
 			Sample.Lava = Style == 1 ? 1.0 : 0.0;
 			Sample.Lake = Style == 2 ? 1.0 : 0.0;
+			Sample.Height = VoidHeights.IsValidIndex(Void) ? FMath::Max(double(VoidHeights[Void]), 0.0) : 1.0;
 		}
 
 		// the line smoothed over OuterSmooth each way, twice, from which the outer face and the crest stand
@@ -847,28 +893,35 @@ void HexPlanetWalls::Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Lev
 		SetReaches(Line, false);
 		SetReaches(Line, true);
 
-		// along lava and lakes the wall sinks to a low parapet, so they show over it, easing in over PoolBlend each way
-		const int32 PoolHalf = FMath::Clamp(FMath::RoundToInt32(Params.PoolBlend / Spacing), 0, (Count - 1) / 2);
-		if (PoolHalf > 0)
+		// the heights of the walls and the lava and lakes that light them ease from one void to the next over HeightBlend each way, as an S
+		// between the lowest and highest of them around, so a wall still sinks to nothing in the middle of a single void without one
+		const int32 BlendHalf = FMath::Clamp(FMath::RoundToInt32(Params.HeightBlend / Spacing), 0, (Count - 1) / 2);
+		if (BlendHalf > 0)
 		{
-			TArray<FVector2d> Raw;
+			TArray<FVector3d> Raw;
 			Raw.SetNum(Count);
 			for (int32 Index = 0; Index < Count; ++Index)
 			{
-				Raw[Index] = FVector2d(Line[Index].Lava, Line[Index].Lake);
+				Raw[Index] = FVector3d(Line[Index].Lava, Line[Index].Lake, Line[Index].Height);
 			}
 			for (int32 Index = 0; Index < Count; ++Index)
 			{
-				FVector2d Sum = FVector2d::ZeroVector;
+				FVector3d Sum = FVector3d::ZeroVector;
 				double Weights = 0.0;
-				for (int32 Offset = -PoolHalf; Offset <= PoolHalf; ++Offset)
+				double Low = TNumericLimits<double>::Max();
+				double High = -TNumericLimits<double>::Max();
+				for (int32 Offset = -BlendHalf; Offset <= BlendHalf; ++Offset)
 				{
-					const double Weight = 1.0 - FMath::Abs(double(Offset)) / (PoolHalf + 1);
-					Sum += Raw[(Index + Offset + Count * 2) % Count] * Weight;
+					const FVector3d& Each = Raw[(Index + Offset + Count * 2) % Count];
+					const double Weight = 1.0 - FMath::Abs(double(Offset)) / (BlendHalf + 1);
+					Sum += Each * Weight;
 					Weights += Weight;
+					Low = FMath::Min(Low, Each.Z);
+					High = FMath::Max(High, Each.Z);
 				}
 				Line[Index].Lava = FMath::SmoothStep(0.0, 1.0, Sum.X / Weights);
 				Line[Index].Lake = FMath::SmoothStep(0.0, 1.0, Sum.Y / Weights);
+				Line[Index].Height = High - Low > 1e-6 ? Low + (High - Low) * FMath::SmoothStep(0.0, 1.0, (Sum.Z / Weights - Low) / (High - Low)) : Low;
 			}
 		}
 
@@ -1026,6 +1079,11 @@ namespace
 				const FVector3d AcrossLine = After.Points[Row] - Before.Points[Row];
 				const FVector3d DownProfile = Ring.Points[Kept[FMath::Min(Index + 1, NumKept - 1)]] - Ring.Points[Kept[FMath::Max(Index - 1, 0)]];
 				FVector3d Normal = FVector3d::CrossProduct(DownProfile, AcrossLine).GetSafeNormal();
+				// where a wall is gone its rows fall together, so the way out of the row stands in
+				if (Normal.IsNearlyZero())
+				{
+					Normal = GetRowOutside(Sample, Row);
+				}
 				if (FVector3d::DotProduct(Normal, GetRowOutside(Sample, Row)) < 0.0)
 				{
 					Normal = -Normal;
@@ -1129,7 +1187,7 @@ uint32 HexPlanetWalls::HashChunk(const FWalls& Walls, int32 Chunk)
 			Hash = HashCombine(Hash, GetTypeHash(Round(Sample.Position)));
 			Hash = HashCombine(Hash, GetTypeHash(Round(Sample.OuterPosition)));
 			Hash = HashCombine(Hash, GetTypeHash(FMath::RoundToInt32(Sample.Gap * 16.0)));
-			Hash = HashCombine(Hash, GetTypeHash(FIntPoint(FMath::RoundToInt32(Sample.Lava * 256.0), FMath::RoundToInt32(Sample.Lake * 256.0))));
+			Hash = HashCombine(Hash, GetTypeHash(FIntVector(FMath::RoundToInt32(Sample.Lava * 256.0), FMath::RoundToInt32(Sample.Lake * 256.0), FMath::RoundToInt32(Sample.Height * 1024.0))));
 			for (const double Reach : {Sample.InnerReach, Sample.OuterReach, Sample.SmoothInnerReach, Sample.SmoothOuterReach})
 			{
 				Hash = HashCombine(Hash, GetTypeHash(FMath::RoundToInt32(FMath::Min(Reach, 1e6) * 4.0)));

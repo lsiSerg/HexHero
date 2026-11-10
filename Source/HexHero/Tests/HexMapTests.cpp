@@ -642,6 +642,18 @@ bool FHexConfigInputTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("A chord shows its modifier"), Config->GetKeysText(Config->WireframeScopeAction), FString(TEXT("Shift+F")));
 	TestEqual(TEXT("The camera is copied with Ctrl+C"), Config->GetKeysText(Config->CopyCameraAction), FString(TEXT("Ctrl+C")));
 	TestEqual(TEXT("The view is saved with Ctrl+S"), Config->GetKeysText(Config->SaveViewAction), FString(TEXT("Ctrl+S")));
+	TestEqual(TEXT("The levels of the brush are the number keys"), Config->GetKeysText(Config->PaintLevelAction), FString(TEXT("12345")));
+
+	// the bookmarks of the camera: ten number keys held with two chords and with one, the mappings with both first, so the context evaluates them
+	// before those of Ctrl alone, whose chord blockers then keep Ctrl+Shift and a key from jumping too
+	TestEqual(TEXT("Bookmarks are saved with Ctrl+Shift"), Config->GetKeysText(Config->SaveBookmarkAction), FString(TEXT("Ctrl+Shift+0-9")));
+	TestEqual(TEXT("Bookmarks are jumped to with Ctrl"), Config->GetKeysText(Config->JumpBookmarkAction), FString(TEXT("Ctrl+0-9")));
+	TestEqual(TEXT("Save keys"), CountKeys(Config->SaveBookmarkAction), 10);
+	TestEqual(TEXT("Jump keys"), CountKeys(Config->JumpBookmarkAction), 10);
+	const TArray<FEnhancedActionKeyMapping>& AllMappings = Config->MappingContext->GetMappings();
+	const int32 FirstJump = AllMappings.IndexOfByPredicate([&Config](const FEnhancedActionKeyMapping& Mapping) { return Mapping.Action == Config->JumpBookmarkAction; });
+	const int32 LastSave = AllMappings.FindLastByPredicate([&Config](const FEnhancedActionKeyMapping& Mapping) { return Mapping.Action == Config->SaveBookmarkAction; });
+	TestTrue(TEXT("The keys held with Ctrl+Shift come before those held with Ctrl"), LastSave != INDEX_NONE && FirstJump != INDEX_NONE && LastSave < FirstJump);
 
 	const UHexKeyLegendConfig* KeyLegend = GetDefault<UHexMapSettings>()->LoadKeyLegend();
 	const TArray<FHexLegendSection> Sections = KeyLegend->GetSections(*Config);

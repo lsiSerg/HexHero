@@ -144,6 +144,12 @@ public:
 	/** Copies to the clipboard the console commands hex.LoadMap and hex.SetCamera, which open this map and put the camera where it is now */
 	void CopyCameraToClipboard() const;
 
+	/** Saves the camera in a slot of the bookmarks of this map (HexCameraBookmarks), 1 to NumSlots. Returns false before the map has loaded */
+	bool SaveBookmark(int32 Slot);
+
+	/** Puts the camera back at once where a slot of the bookmarks of this map saved it. Returns false for an empty slot */
+	bool JumpToBookmark(int32 Slot);
+
 	/** Writes the map and the camera to LastView.json, where the next run starts. Returns false before the map has loaded or if the file could not be written */
 	bool SaveLastView();
 
@@ -213,6 +219,10 @@ private:
 
 	/** Copies the commands that bring the camera back here */
 	void OnCopyCamera();
+
+	/** The bookmarks of the camera, the slot as the value of the action, 1 to 9 and 10 for the key 0 */
+	void OnSaveBookmark(const FInputActionValue& Value);
+	void OnJumpBookmark(const FInputActionValue& Value);
 
 	/** Returns the camera location that puts the focus point in the center of the screen at the current turn and distance */
 	FVector GetFocusLocation() const;

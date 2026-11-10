@@ -1261,10 +1261,10 @@ public:
 	/** The voids of the underground in M_HexUnderground, all measured in world units below the top of the passages: the rock of a cliff darkens
 	 *  from AbyssFadeStart to AbyssFadeEnd, where it keeps AbyssDarkness of its color, so a cliff falls into the dark */
 	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0))
-	float AbyssFadeStart = 25.0f;
+	float AbyssFadeStart = 4.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0))
-	float AbyssFadeEnd = 140.0f;
+	float AbyssFadeEnd = 32.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0, ClampMax=1))
 	float AbyssDarkness = 0.025f;
@@ -1279,7 +1279,7 @@ public:
 	FLinearColor AbyssColor = FLinearColor(0.05f, 0.09f, 0.095f, 1.0f);
 
 	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0))
-	float AbyssBrightness = 0.55f;
+	float AbyssBrightness = 0.24f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0, ClampMax=1))
 	float AbyssSliceOpacity = 0.3f;
@@ -1302,10 +1302,10 @@ public:
 	float AbyssFarCliff = 1.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0))
-	float AbyssMistStart = 60.0f;
+	float AbyssMistStart = 8.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=0))
-	float AbyssMistEnd = 190.0f;
+	float AbyssMistEnd = 30.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Abyss", meta=(ClampMin=1))
 	float AbyssScale = 150.0f;
@@ -1567,7 +1567,7 @@ public:
 	float WallOverhang = 12.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
-	float WallOuterDepth = 160.0f;
+	float WallOuterDepth = 60.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
 	float WallOuterFlare = 25.0f;
@@ -1619,8 +1619,12 @@ public:
 	UPROPERTY(EditAnywhere, Category="Underground|Walls")
 	TArray<FHexWallStyle> WallStyles = MakeDefaultWallStyles();
 
-	/** Along a void of lava or a lake (EHexVoidStyle) the wall sinks to WallPoolHeight of its height and WallPoolThickness of its thickness,
-	 *  without an overhang, so the pool shows over it from above, easing in over WallPoolBlend world units each way along the wall */
+	/** The height of the walls beside a void, a factor on WallHeight: set by hand for the void (AHexPlanet::SetWallHeights, underground/walls.json),
+	 *  else given by its style (EHexVoidStyle), WallPoolHeight beside lava and lakes, so the pool shows over a low parapet from above, and 1 beside
+	 *  the mist. A lower wall is thinner, with less of an overhang and smaller stalactites, down to a parapet of WallPoolThickness of its thickness
+	 *  without an overhang at WallPoolHeight; below that it narrows towards its line, into a low curb at WallHeightMin, below which no wall goes,
+	 *  so a passage never opens onto the abyss. The heights ease from one void to the next over WallHeightBlend world units each way along the
+	 *  wall. A click of the brush of walls raises or lowers the height of a void by WallHeightStep, from WallHeightMin to WallHeightMax */
 	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0.1, ClampMax=1))
 	float WallPoolHeight = 0.3f;
 
@@ -1628,7 +1632,24 @@ public:
 	float WallPoolThickness = 0.5f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0))
-	float WallPoolBlend = 60.0f;
+	float WallHeightBlend = 60.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0.01, ClampMax=1))
+	float WallHeightStep = 0.1f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=0.05, ClampMax=1))
+	float WallHeightMin = 0.2f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=1, ClampMax=4))
+	float WallHeightMax = 2.0f;
+
+	/** Returns a height of the walls along a void as the planet keeps it: within WallHeightMin and WallHeightMax, in thousandths, as walls.json
+	 *  writes it */
+	float ClampWallHeight(float Height) const
+	{
+		const float Low = FMath::Clamp(WallHeightMin, 0.05f, 1.0f);
+		return FMath::RoundToFloat(FMath::Clamp(Height, Low, FMath::Max(WallHeightMax, 1.0f)) * 1000.0f) / 1000.0f;
+	}
 
 	UPROPERTY(EditAnywhere, Category="Underground|Walls", meta=(ClampMin=10))
 	float WallStyleScale = 450.0f;
@@ -1819,49 +1840,28 @@ public:
 	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0.01))
 	float CaveFloorTopDepth = 4.0f;
 
-	/** Paths of flagstones on the passages: the texture layer of this name in DA_HexTerrainLayers (AHexPlanet::SetBiomeLayers gives the material
-	 *  its index as CaveFlagLayer, -1 without it, which turns them off), from CaveFlagRimStart to CaveFlagRimEnd of the cell radius from a side
-	 *  towards a void, so in a corridor two cells wide they run down its middle, where a noise CaveFlagNoiseScale across lies above CaveFlagCover
-	 *  (CaveFlagSoftness), so they break into worn stretches; the heights of both decide where dirt fills the joints (CaveFlagHeightBlend,
-	 *  CaveFlagBlendDepth), and the stones take CaveFlagTint */
-	UPROPERTY(EditAnywhere, Category="Underground|Flagstones")
-	FName CaveFlagLayerName = TEXT("CaveFlagstones");
+	/** The floor of the passages rises by up to FloorNoise world units, 0 for a flat floor (the surface): a noise of the place FloorNoiseScale
+	 *  across with FloorNoiseDetail of one finer, which the cells that share a point see alike, so the unevenness runs on across their sides
+	 *  (HexPlanetKit::GetFloorRise). It only rises, so the floor stays on the top of its level (CaveFloorTopDepth), and fades out over
+	 *  FloorNoiseFade below that top, so the cliffs of the voids keep their feet. The walls rise with it (HexPlanetWalls::FParams), and the cells
+	 *  of the passages are built of a lattice as fine as the slopes of the kit, as its flat piece has too few points and would show a bump in the
+	 *  middle of each cell */
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0))
+	float FloorNoise = 0.0f;
 
-	UPROPERTY(EditAnywhere, Category="Underground|Flagstones", meta=(ClampMin=0, ClampMax=1))
-	float CaveFlagRimStart = 0.45f;
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=10))
+	float FloorNoiseScale = 120.0f;
 
-	/** At most 0.85: the distance to the sides towards a void of a cell sees only its own sides, and on the side shared by two passages a void
-	 *  side that does not touch it lies 0.866 or more from it while the other cell may have none (1), so the mask must be full from 0.866 on or it
-	 *  would jump at that side */
-	UPROPERTY(EditAnywhere, Category="Underground|Flagstones", meta=(ClampMin=0, ClampMax=0.85))
-	float CaveFlagRimEnd = 0.75f;
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=1))
+	float FloorNoiseDetail = 0.5f;
 
-	UPROPERTY(EditAnywhere, Category="Underground|Flagstones", meta=(ClampMin=0, ClampMax=1))
-	float CaveFlagCover = 0.55f;
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=1))
+	float FloorNoiseFade = 20.0f;
 
-	UPROPERTY(EditAnywhere, Category="Underground|Flagstones", meta=(ClampMin=0.001))
-	float CaveFlagSoftness = 0.08f;
-
-	UPROPERTY(EditAnywhere, Category="Underground|Flagstones", meta=(ClampMin=1))
-	float CaveFlagNoiseScale = 260.0f;
-
-	UPROPERTY(EditAnywhere, Category="Underground|Flagstones", meta=(ClampMin=0))
-	float CaveFlagHeightBlend = 0.5f;
-
-	UPROPERTY(EditAnywhere, Category="Underground|Flagstones", meta=(ClampMin=0.01))
-	float CaveFlagBlendDepth = 0.15f;
-
-	UPROPERTY(EditAnywhere, Category="Underground|Flagstones")
-	FLinearColor CaveFlagTint = FLinearColor(1.2f, 1.02f, 0.82f, 1.0f);
-
-	/** Power of the normal by which the planes of the world blend for the flagstones, much sharper than TriplanarSharpness, as two projections of
-	 *  a pattern of stones laid over each other show it twice */
-	UPROPERTY(EditAnywhere, Category="Underground|Flagstones", meta=(ClampMin=1))
-	float CaveFlagSharpness = 32.0f;
-
-	/** Weight of a plane of the world below which the flagstones leave it out altogether, so a faint second projection draws no ghost of them */
-	UPROPERTY(EditAnywhere, Category="Underground|Flagstones", meta=(ClampMin=0, ClampMax=0.3))
-	float CaveFlagPlaneCut = 0.04f;
+	/** How much darker the hollows of the floor that rises (FloorNoise) are and how much lighter its swells, in M_HexUnderground and on the foot of
+	 *  the walls, so its unevenness shows under the even light of a cave */
+	UPROPERTY(EditAnywhere, Category="Underground|Floor", meta=(ClampMin=0, ClampMax=1))
+	float CaveFloorRiseShade = 0.15f;
 
 	/** Glowing moss: on the floor within CaveMossReach of the cell radius from a side towards a void, and down the top CaveMossWallDepth of the
 	 *  cliffs of a void, in patches where a noise CaveMossPatchScale across lies above CaveMossCover, speckled where a finer one
@@ -1872,7 +1872,7 @@ public:
 	float CaveMossReach = 0.3f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Moss", meta=(ClampMin=1))
-	float CaveMossWallDepth = 60.0f;
+	float CaveMossWallDepth = 20.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Moss", meta=(ClampMin=1))
 	float CaveMossPatchScale = 90.0f;
@@ -1953,14 +1953,19 @@ public:
 	UPROPERTY(EditAnywhere, Category="Underground|Glow pools", meta=(ClampMin=0, ClampMax=1))
 	float LavaPool = 1.0f;
 
-	/** Small still pools of water on the passages, drawn by the material: where a noise CavePuddleScale across lies above CavePuddleCover, further
-	 *  than CavePuddleRimGap of the cell radius from a side towards a void and off the flagstones; a rim CavePuddleRim of the noise wide around
-	 *  them is wet earth, darker by CavePuddleWetDarkening, and inside the water shows that earth at its shore and deepens to CavePuddleColor
-	 *  CavePuddleDepth of the noise in, with CavePuddleRoughness, CavePuddleSpecular, the up of the cell and a faint sheen CavePuddleSheen that does
-	 *  not depend on the view, so it reads as shallow dark water and not as a hole; its shore is at least CavePuddleEdge of the noise soft. No
-	 *  grid line and no pool of light lie on it, and none lies in a cell with objects or of an exit. They fade as the moss does */
+	/** Small still pools of water on the passages, drawn by the material: where a noise CavePuddleScale across lies above CavePuddleCover, raised
+	 *  in the hollows of a floor that rises (FloorNoise) and lowered on its swells by up to CavePuddleHollow of the noise, so they gather in the
+	 *  hollows, and further than CavePuddleRimGap of the cell radius from a side towards a void or towards a cell with objects or of an exit, in
+	 *  which none lies, so a side never cuts one; a rim CavePuddleRim of the noise wide around them is wet earth, darker by
+	 *  CavePuddleWetDarkening, and inside the water shows that earth at its shore and deepens to CavePuddleColor CavePuddleDepth of the noise in,
+	 *  with CavePuddleRoughness, CavePuddleSpecular, the up of the cell and a faint sheen CavePuddleSheen that does not depend on the view, so it
+	 *  reads as shallow dark water and not as a hole; its shore is at least CavePuddleEdge of the noise soft. No grid line and no pool of light
+	 *  lie on it. They fade as the moss does */
 	UPROPERTY(EditAnywhere, Category="Underground|Puddles", meta=(ClampMin=1))
 	float CavePuddleScale = 70.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Puddles", meta=(ClampMin=0, ClampMax=1))
+	float CavePuddleHollow = 0.2f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Puddles", meta=(ClampMin=0, ClampMax=1))
 	float CavePuddleCover = 0.9f;
@@ -2001,10 +2006,10 @@ public:
 	float CaveRuneShare = 0.04f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Runes", meta=(ClampMin=0))
-	float CaveRuneTop = 10.0f;
+	float CaveRuneTop = 4.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Runes", meta=(ClampMin=1))
-	float CaveRuneSize = 48.0f;
+	float CaveRuneSize = 24.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Runes", meta=(ClampMin=0.1))
 	float CaveRuneStroke = 4.0f;
@@ -2111,7 +2116,7 @@ public:
 	float LavaCliffGlow = 0.04f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=1))
-	float LavaCliffReach = 140.0f;
+	float LavaCliffReach = 40.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=0.01, ClampMax=0.85))
 	float VoidStyleEdge = 0.35f;
@@ -2125,7 +2130,7 @@ public:
 
 	/** Height above the floor of a void up to which its lava or lake lies, fading out over it, so the cliffs above show their rock, lit by the lava */
 	UPROPERTY(EditAnywhere, Category="Underground|Lava", meta=(ClampMin=1))
-	float VoidFloorHeight = 30.0f;
+	float VoidFloorHeight = 12.0f;
 
 	/** A void of the lake style: its floor is LakeColor, deep and dark, lighter towards LakeShoreColor within LakeShoreReach of the cell radius of
 	 *  its shore (the sides towards a passage or a void of another style), LakeRoughness, with a sheen LakeSheenColor, LakeSheenBase of it from any
@@ -2180,7 +2185,7 @@ public:
 	float MoteBox = 2400.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Motes", meta=(ClampMin=0))
-	float MoteHeightBelow = 150.0f;
+	float MoteHeightBelow = 35.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Motes", meta=(ClampMin=0))
 	float MoteHeightAbove = 90.0f;

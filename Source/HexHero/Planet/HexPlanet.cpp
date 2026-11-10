@@ -666,6 +666,20 @@ namespace
 					UE_LOG(LogHexHero, Warning, TEXT("Underground of %s: %s"), *Folder, *Error);
 				}
 			}
+			// the heights of the walls set by hand were for the voids of the old maze
+			if (Options.bNewMaze || Options.bNewEntrances)
+			{
+				const FString WallsPath = HexPlanetFile::GetFilePath(DataFolder, HexPlanetFile::WallsFile);
+				const bool bHadWalls = FPaths::FileExists(WallsPath);
+				if (!HexPlanetFile::SaveWalls(DataFolder, {}, Error))
+				{
+					UE_LOG(LogHexHero, Warning, TEXT("Underground of %s: %s"), *Folder, *Error);
+				}
+				else if (bHadWalls)
+				{
+					UE_LOG(LogHexHero, Log, TEXT("Underground: deleted %s, the heights of the walls of the old maze"), *WallsPath);
+				}
+			}
 			if (bImage)
 			{
 				WriteUndergroundImage(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Underground"), Folder + TEXT(".png")), Grid, Surface, Loaded);
@@ -674,7 +688,7 @@ namespace
 	}
 
 	FAutoConsoleCommand UndergroundConsoleCommand(TEXT("hex.PlanetUnderground"),
-		TEXT("hex.PlanetUnderground <Folder|all> [maze|entrances|objects|biomes] [image]: reads the underground of a planet folder and writes what it lacks, generated, as a planet does at its start; maze generates the maze again for its entrances, entrances places them again too, objects generates underground/objects.json again (maze and entrances do too, as a new maze needs new objects), biomes generates underground/biomes.txt again (the floor, the abyss, lava and lakes) and leaves levels.txt and entrances.json as they are, image writes a map of it to Saved/Underground, and the log tells how the networks fit together"),
+		TEXT("hex.PlanetUnderground <Folder|all> [maze|entrances|objects|biomes] [image]: reads the underground of a planet folder and writes what it lacks, generated, as a planet does at its start; maze generates the maze again for its entrances, entrances places them again too, objects generates underground/objects.json again (maze and entrances do too, as a new maze needs new objects, and delete underground/walls.json, the heights of its walls set by hand), biomes generates underground/biomes.txt again (the floor, the abyss, lava and lakes) and leaves levels.txt and entrances.json as they are, image writes a map of it to Saved/Underground, and the log tells how the networks fit together"),
 		FConsoleCommandWithArgsDelegate::CreateStatic(&UndergroundCommand));
 
 	FAutoConsoleCommandWithWorldAndArgs RiverShapeConsoleCommand(TEXT("hex.PlanetRiverShape"),
@@ -1544,8 +1558,9 @@ void AHexPlanet::FinishUndergroundData()
 	const double BackgroundMs = Work.Ms;
 	UndergroundData.Reset();
 	bDataLoaded = true;
-	// read with the data, as a save writes every layer that has it, even one never shown, and would delete relief.json without it
+	// read with the data, as a save writes every layer that has it, even one never shown, and would delete relief.json and walls.json without it
 	LoadRelief();
+	LoadWallHeights();
 
 	// a biome its level does not allow, as after levels.txt was edited by hand, takes a fitting one
 	int32 Fitted = 0;
@@ -1957,10 +1972,33 @@ void AHexPlanet::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
-void AHexPlanet::SetCells(const TMap<int32, int32>& NewLevels, const TMap<int32, int32>& NewBiomes)
+void AHexPlanet::SetCells(const TMap<int32, int32>& NewLevels, const TMap<int32, int32>& NewBiomes, const TMap<int32, float>& NewWallHeights)
 {
 	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
 	int32 NumChanged = 0;
+
+	// the heights of the walls set by hand, a negative one going back to that of the style of the void, never below WallHeightMin, in
+	// thousandths, as they are written
+	bool bWallHeightsChanged = false;
+	for (const TPair<int32, float>& Each : NewWallHeights)
+	{
+		if (!Cells.IsValidIndex(Each.Key) || !Settings)
+		{
+			continue;
+		}
+		if (Each.Value < 0.0f)
+		{
+			bWallHeightsChanged |= WallHeightOverrides.Remove(Each.Key) > 0;
+			continue;
+		}
+		const float Height = Settings->ClampWallHeight(Each.Value);
+		const float* Old = WallHeightOverrides.Find(Each.Key);
+		if (!Old || *Old != Height)
+		{
+			WallHeightOverrides.Add(Each.Key, Height);
+			bWallHeightsChanged = true;
+		}
+	}
 	TArray<int32> LevelCells;
 	TArray<int32> BiomeCells;
 
@@ -2031,9 +2069,9 @@ void AHexPlanet::SetCells(const TMap<int32, int32>& NewLevels, const TMap<int32,
 		Objects->RebuildCells(BiomeCells);
 	}
 
-	// the walls sink to a parapet along lava and lakes, so they follow the style of a void painted beside them at once; a change of the levels
-	// builds them again with its rebuild
-	if (bVoidStyleChanged && NumChanged == 0 && Settings->bWalls && !Walls->Lines.IsEmpty())
+	// the walls take the height of a void and are lit by its lava, so they follow its style and the height set for it at once; a change of the
+	// levels builds them again with its rebuild, as does a rebuild that waits, which reads the heights and biomes of then
+	if ((bVoidStyleChanged || bWallHeightsChanged) && NumChanged == 0 && !IsRebuilding() && Settings->bWalls && !Walls->Lines.IsEmpty())
 	{
 		TArray<int32> WallChunksChanged;
 		UpdateWalls(WallChunksChanged);
@@ -3303,15 +3341,6 @@ void AHexPlanet::SetBiomeLayers(UMaterialInstanceDynamic* Target) const
 		Target->SetVectorParameterValue(*FString::Printf(TEXT("SeabedLayers%d"), Group),
 			FLinearColor(Seabeds[Group * 4], Seabeds[Group * 4 + 1], Seabeds[Group * 4 + 2], Seabeds[Group * 4 + 3]));
 	}
-
-	// the flagstones of the passages underground are a layer found by name, as the four bits of a layer in CellBiomes cannot name one past 15;
-	// -1 turns them off
-	if (PlanetLayer == EHexPlanetLayer::Underground)
-	{
-		const UHexTerrainLayersConfig* TerrainLayers = GetDefault<UHexMapSettings>()->LoadTerrainLayers();
-		const int32 FlagLayer = TerrainLayers ? TerrainLayers->FindLayer(Settings->CaveFlagLayerName) : INDEX_NONE;
-		Target->SetScalarParameterValue(TEXT("CaveFlagLayer"), float(FlagLayer));
-	}
 }
 
 void AHexPlanet::BuildWater()
@@ -3685,6 +3714,10 @@ bool AHexPlanet::SaveLayerFiles(const FString& Folder, const TSet<int32>& KeptEn
 	{
 		return false;
 	}
+	if (Settings->bWalls && !SaveWallHeights(DataFolder, OutError))
+	{
+		return false;
+	}
 	if (Settings->bRivers && !Rivers->Save(DataFolder, OutError))
 	{
 		return false;
@@ -3915,6 +3948,83 @@ HexPlanetSurface::FReliefOverride AHexPlanet::GetReliefOverride(int32 Cell) cons
 {
 	const HexPlanetSurface::FReliefOverride* Found = ReliefOverrides.Find(Cell);
 	return Found ? *Found : HexPlanetSurface::FReliefOverride();
+}
+
+void AHexPlanet::SetWallHeights(const TMap<int32, float>& Changes, bool bByStep)
+{
+	if (Changes.IsEmpty())
+	{
+		return;
+	}
+	SetCells({}, {}, Changes);
+	MarkLevelsEdited(bByStep);
+}
+
+float AHexPlanet::GetWallHeightOverride(int32 Cell) const
+{
+	const float* Found = WallHeightOverrides.Find(Cell);
+	return Found ? *Found : -1.0f;
+}
+
+float AHexPlanet::GetWallHeight(int32 Cell) const
+{
+	const float* Found = WallHeightOverrides.Find(Cell);
+	return Found ? *Found : GetStyleWallHeight(GetCellBiome(Cell));
+}
+
+float AHexPlanet::GetStyleWallHeight(int32 Biome) const
+{
+	const UHexBiomeConfig* Config = BiomeConfigs.IsValidIndex(Biome) ? BiomeConfigs[Biome].Get() : nullptr;
+	const bool bPool = Config && (Config->VoidStyle == EHexVoidStyle::Lava || Config->VoidStyle == EHexVoidStyle::Lake);
+	return !Settings ? 1.0f : Settings->ClampWallHeight(bPool ? FMath::Clamp(Settings->WallPoolHeight, 0.1f, 1.0f) : 1.0f);
+}
+
+int32 AHexPlanet::GetWallStyle(int32 Level, int32 Biome) const
+{
+	if (Level >= 0)
+	{
+		return INDEX_NONE;
+	}
+	const UHexBiomeConfig* Config = BiomeConfigs.IsValidIndex(Biome) ? BiomeConfigs[Biome].Get() : nullptr;
+	return Config ? int32(Config->VoidStyle) : 0;
+}
+
+void AHexPlanet::LoadWallHeights()
+{
+	WallHeightOverrides.Reset();
+	TArray<FHexWallCell> Lines;
+	FString Error;
+	if (!Settings || !Settings->bWalls || !IsSaved() || !HexPlanetFile::LoadWalls(GetDataFolder(), Lines, Error))
+	{
+		if (!Error.IsEmpty())
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("Planet: %s"), *Error);
+		}
+		return;
+	}
+	for (const FHexWallCell& Line : Lines)
+	{
+		if (Grid.GetCells().IsValidIndex(Line.Cell))
+		{
+			WallHeightOverrides.Add(Line.Cell, Settings->ClampWallHeight(Line.Height));
+		}
+	}
+}
+
+bool AHexPlanet::SaveWallHeights(const FString& Folder, FString& OutError) const
+{
+	// a void that became a passage keeps the height of its walls until the next save, which leaves it out
+	TArray<FHexWallCell> Lines;
+	for (const TPair<int32, float>& Each : WallHeightOverrides)
+	{
+		if (Levels.IsValidIndex(Each.Key) && Levels[Each.Key] < 0)
+		{
+			FHexWallCell& Line = Lines.AddDefaulted_GetRef();
+			Line.Cell = Each.Key;
+			Line.Height = Each.Value;
+		}
+	}
+	return HexPlanetFile::SaveWalls(Folder, Lines, OutError);
 }
 
 bool AHexPlanet::SaveLevels(FString& OutError)
@@ -4202,7 +4312,10 @@ void AHexPlanet::WriteBiomePixels(int32 Cell)
 			}
 		}
 	}
-	BiomePixels[Pixel] = FColor(uint8(Terrain), uint8(Rock), Mountains, Seas);
+	// green, the rock layer, which no material reads, holds underground which neighbors lay no puddle (UpdateCanopy), as alpha of the second pixel
+	// holds what lies on the cell and its neighbors, both kept as they are here
+	const uint8 Green = PlanetLayer == EHexPlanetLayer::Underground ? BiomePixels[Pixel].G : uint8(Rock);
+	BiomePixels[Pixel] = FColor(uint8(Terrain), Green, Mountains, Seas);
 	BiomePixels[Pixel + 1] = FColor(Near[0], Near[1], Near[2], BiomePixels[Pixel + 1].A);
 }
 
@@ -4319,21 +4432,28 @@ void AHexPlanet::UpdateCanopy()
 			}
 		}
 		// in bits 0 to 5 which neighbors glow, and in bit 6 whether the cell holds objects or is an exit, where the material lays no puddle
-		// (CavePuddle*), so none lies under a stone or a mushroom nor in the middle of the hall of an exit
+		// (CavePuddle*), so none lies under a stone or a mushroom nor in the middle of the hall of an exit; green of the first pixel, which the
+		// material reads nothing else from underground, holds in bit K whether neighbor K is such a cell, so a puddle fades out before that side
+		// as before the rim of a void and is never cut by it
+		TBitArray<> Dry(false, Cells.Num());
 		for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
 		{
-			uint8 Bits = 0;
+			const FHexCellObjects Held = Objects->GetCell(Cell);
+			Dry[Cell] = Held.Cover != 0 || Held.Decor != 0 || Objects->IsClear(Cell);
+		}
+		for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+		{
+			uint8 Bits = Dry[Cell] ? uint8(1 << 6) : uint8(0);
+			uint8 DryNear = 0;
 			for (int32 Index = 0; Index < Cells[Cell].Neighbors.Num() && Index < 6; ++Index)
 			{
-				Bits |= Glow[Cells[Cell].Neighbors[Index]].A > 0.0f ? uint8(1 << Index) : uint8(0);
-			}
-			const FHexCellObjects Held = Objects->GetCell(Cell);
-			if (Held.Cover != 0 || Held.Decor != 0 || Objects->IsClear(Cell))
-			{
-				Bits |= uint8(1 << 6);
+				const int32 Neighbor = Cells[Cell].Neighbors[Index];
+				Bits |= Glow[Neighbor].A > 0.0f ? uint8(1 << Index) : uint8(0);
+				DryNear |= Dry[Neighbor] ? uint8(1 << Index) : uint8(0);
 			}
 			const int32 Pixel = (Cell / HexPlanetSurface::MarkColumns) * HexPlanetSurface::MarkColumns * 2 + (Cell % HexPlanetSurface::MarkColumns) * 2;
 			BiomePixels[Pixel + 1].A = Bits;
+			BiomePixels[Pixel].G = DryNear;
 		}
 	}
 	else
@@ -4893,7 +5013,8 @@ int32 AHexPlanet::FindCellAlongRay(const FVector& Origin, const FVector& Directi
 
 int32 AHexPlanet::FindHeldCellAlongRay(const FVector& Origin, const FVector& RayDirection, double Start, double End, FVector* OutPoint) const
 {
-	// the highest a cell reaches is the highest top among it and its neighbors, as its sides lie at the higher of two tops
+	// the highest a cell reaches is the highest top among it and its neighbors, as its sides lie at the higher of two tops, and the floor of the
+	// passages rises above its top by up to FloorNoise
 	const auto GetHighest = [this](int32 Cell)
 	{
 		double Highest = GetCellTopRadius(Cell);
@@ -4901,7 +5022,7 @@ int32 AHexPlanet::FindHeldCellAlongRay(const FVector& Origin, const FVector& Ray
 		{
 			Highest = FMath::Max(Highest, GetCellTopRadius(Neighbor));
 		}
-		return Highest;
+		return Highest + FMath::Max(Settings->FloorNoise, 0.0f);
 	};
 
 	// the nearest of the triangles that face the ray, in doubles, as the planet is large against its cells
@@ -5829,19 +5950,25 @@ void AHexPlanet::UpdateWalls(TArray<int32>& Chunks)
 		Instance->SetScalarParameterValue(TEXT("CaveWallAltLayer"), float(TerrainLayers ? TerrainLayers->FindLayer(Settings->CaveWallAltLayerName) : INDEX_NONE));
 	}
 
-	// the voids of lava and lakes, along which the walls sink to a parapet
+	// the voids of lava and lakes, which light the walls, and the height of the walls along each void, set by hand or by its style
 	TArray<uint8> VoidStyles;
 	VoidStyles.SetNumZeroed(ShownLevels.Num());
+	TArray<float> VoidHeights;
+	VoidHeights.Init(1.0f, ShownLevels.Num());
 	for (int32 Cell = 0; Cell < ShownLevels.Num() && Cell < CellBiomes.Num(); ++Cell)
 	{
 		const UHexBiomeConfig* Biome = ShownLevels[Cell] < 0 && BiomeConfigs.IsValidIndex(CellBiomes[Cell]) ? BiomeConfigs[CellBiomes[Cell]].Get() : nullptr;
 		VoidStyles[Cell] = !Biome ? 0 : Biome->VoidStyle == EHexVoidStyle::Lava ? 1 : Biome->VoidStyle == EHexVoidStyle::Lake ? 2 : 0;
+		if (ShownLevels[Cell] < 0)
+		{
+			VoidHeights[Cell] = GetWallHeight(Cell);
+		}
 	}
 
 	// new walls, so a stream still building whole walls from the old ones keeps them and its result is dropped
 	WallParams = HexPlanetWalls::FParams::FromConfig(*Settings, Radius + Settings->LevelHeight, HexPlanetUnderground::GetSeed(GetManifest()));
 	const TSharedRef<HexPlanetWalls::FWalls> NewWalls = MakeShared<HexPlanetWalls::FWalls>();
-	HexPlanetWalls::Build(Grid, ShownLevels, [this](int32 Cell) { return ShownLevels[Cell] >= 0; }, WallParams, *NewWalls, VoidStyles);
+	HexPlanetWalls::Build(Grid, ShownLevels, [this](int32 Cell) { return ShownLevels[Cell] >= 0; }, WallParams, *NewWalls, VoidStyles, VoidHeights);
 	Walls = NewWalls;
 	++WallGeneration;
 	const double LineTime = FPlatformTime::Seconds();
@@ -6240,6 +6367,11 @@ FString AHexPlanet::GetCellDebugText(int32 Cell) const
 			: Network == HexPlanetUnderground::MergedNetwork ? FString(TEXT("passage where networks join"))
 			: FString(TEXT("passage no exit reaches"));
 		LayerText += FString::Printf(TEXT(", %s"), *Kind);
+		if (Settings->bWalls && !HexPlanetUnderground::IsPassage(int8(GetCellLevel(Cell))))
+		{
+			LayerText += FString::Printf(TEXT("\nWalls along it: height x%.2f, %s"), GetWallHeight(Cell),
+				WallHeightOverrides.Contains(Cell) ? TEXT("set by hand") : TEXT("by its style"));
+		}
 	}
 	if (EntranceIndex != INDEX_NONE)
 	{

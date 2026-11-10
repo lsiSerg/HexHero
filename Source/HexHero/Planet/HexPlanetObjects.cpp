@@ -1276,6 +1276,12 @@ void UHexPlanetObjects::PlaceOnWalls(int32 Chunk, TArray<FInstance>& Out, FPlace
 			// a sample takes the kind by a hash of where it lies and the Id, so a rebuild that moves the start of its line keeps the objects
 			// where they stood, and no pattern repeats along the walls
 			const HexPlanetWalls::FSample& Sample = Walls.Get(At);
+			// a wall lower than a parapet keeps nothing on its face, and one that is nearly gone nothing at its foot either
+			const double Presence = HexPlanetWalls::GetPresence(Sample, WallParams);
+			if (Presence < (Set.RimSeat == EHexRimSeat::WallFoot ? 0.5 : 0.999))
+			{
+				continue;
+			}
 			const FIntVector Key(FMath::RoundToInt32(Sample.Position.X * 0.5), FMath::RoundToInt32(Sample.Position.Y * 0.5), FMath::RoundToInt32(Sample.Position.Z * 0.5));
 			FRandomStream Random(int32(HashCombine(GetTypeHash(Key), IdHash)));
 			// more at the foot of an inside corner, where the line turns onto the passage about as tightly as its corners are rounded
@@ -1311,9 +1317,11 @@ void UHexPlanetObjects::PlaceOnWalls(int32 Chunk, TArray<FInstance>& Out, FPlace
 			if (Set.RimSeat == EHexRimSeat::WallFoot)
 			{
 				// upright on the rounded foot, from its upper half to the floor before it, where the line cut a corner the floor the foot lays
-				const double FootEnd = FMath::Max(WallParams.FootReach, Sample.Gap);
-				const double Reach = FMath::Lerp(WallParams.FootReach - WallParams.Fillet * 0.6, FootEnd + 3.0, double(Random.FRand()));
-				Position = (Sample.Position + Sample.Inward * Reach + Slide).GetSafeNormal() * WallParams.FloorRadius;
+				const double FootReach = WallParams.FootReach * Presence;
+				const double FootEnd = FMath::Max(FootReach, Sample.Gap);
+				const double Reach = FMath::Lerp(FootReach - WallParams.Fillet * Presence * 0.6, FootEnd + 3.0, double(Random.FRand()));
+				const FVector3d FootDirection = (Sample.Position + Sample.Inward * Reach + Slide).GetSafeNormal();
+				Position = FootDirection * HexPlanetWalls::GetFloorRadius(WallParams, FootDirection);
 				const FVector3f Up = FVector3f(Planet->GetUpAt(Position));
 				const FVector3f X = FQuat4f(Up, Turn).RotateVector(FVector3f(Sample.Along));
 				const FQuat4f Base = FRotationMatrix44f::MakeFromZX(Up, X).ToQuat();

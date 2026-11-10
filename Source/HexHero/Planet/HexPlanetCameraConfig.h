@@ -82,6 +82,12 @@ public:
 	UPROPERTY(EditAnywhere, Category="Camera", meta=(ClampMin=0))
 	float ClickTolerance = 6.0f;
 
+	/** Seconds within which two clicks of the left button on the same cell, each within ClickTolerance, are a double click, which goes through an
+	 *  entrance or exit there to the other layer, as the key of the layer does over it; only while no tool of the brush is chosen, as its clicks
+	 *  paint (the engine's own DoubleClickTime of the input settings is 0.2, too short for many players) */
+	UPROPERTY(EditAnywhere, Category="Camera", meta=(ClampMin=0.1, ClampMax=1))
+	float DoubleClickTime = 0.4f;
+
 	/** Farthest distance, as a multiple of the radius of the planet, where all of the half it sees fits on the screen */
 	UPROPERTY(EditAnywhere, Category="Camera", meta=(ClampMin=0.5))
 	float MaxDistanceRadii = 1.8f;

@@ -15,9 +15,18 @@ BOOLEAN = unreal.InputActionValueType.BOOLEAN
 AXIS1D = unreal.InputActionValueType.AXIS1D
 AXIS2D = unreal.InputActionValueType.AXIS2D
 
-# config property, action asset, description, value type, keys as (key name, swizzle to the Y axis, negate) and optionally an action held with it
-# and a scalar the value is multiplied by.
-# A key held with another action is a chord, and the same key without it then stops firing while that action is held.
+# the number keys of the slots of the bookmarks of the camera, 1 to 9 and 0, which the key gives through a scalar as slot 10
+NUMBER_KEYS = ["One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Zero"]
+
+
+def bookmark_keys(*chords):
+    return [(key, False, False, float(slot), *chords) for slot, key in enumerate(NUMBER_KEYS, start=1)]
+
+
+# config property, action asset, description, value type, keys as (key name, swizzle to the Y axis, negate) and optionally the actions held with
+# it and a scalar the value is multiplied by.
+# A key held with another action is a chord, and the same key without it then stops firing while that action is held; a key held with two
+# needs both, and must come before the same key held with one of them, which its chords then block, as the context evaluates them in order.
 # A new DA_HexKeyLegend gets a line for each action the game binds, labelled by its description, in this order
 ACTIONS = [
     # held keys that other actions are chorded with, which the game does not bind
@@ -35,6 +44,10 @@ ACTIONS = [
     ("focus_hex_action", "IA_HexFocusHex", "Center hex", BOOLEAN, [("MiddleMouseButton", False, False)]),
     ("copy_camera_action", "IA_HexCopyCamera", "Copy camera", BOOLEAN, [("C", False, False, "IA_HexCtrl")]),
     ("save_view_action", "IA_HexSaveView", "Save view", BOOLEAN, [("S", False, False, "IA_HexCtrl")]),
+    # the bookmarks of the camera, each planet and flat map its own (CameraBookmarks.json): Ctrl+Shift and a number key save the camera in its
+    # slot, Ctrl and the key go back there; plain 1 to 5 still choose the level of the brush
+    ("save_bookmark_action", "IA_HexSaveBookmark", "Save camera to a slot", AXIS1D, bookmark_keys("IA_HexCtrl", "IA_HexShift")),
+    ("jump_bookmark_action", "IA_HexJumpBookmark", "Camera from a slot", AXIS1D, bookmark_keys("IA_HexCtrl")),
     ("zoom_action", "IA_HexZoom", "Zoom", AXIS1D, [("MouseWheelAxis", False, False)]),
     ("toggle_grid_action", "IA_HexToggleGrid", "Grid", BOOLEAN, [("G", False, False)]),
     # Escape stops a play session in the editor before the game gets it, so there is a second key
@@ -67,6 +80,8 @@ LEGEND_CATEGORIES = {
     "IA_HexFocusHex": "Camera",
     "IA_HexCopyCamera": "Camera",
     "IA_HexSaveView": "Camera",
+    "IA_HexSaveBookmark": "Camera",
+    "IA_HexJumpBookmark": "Camera",
     "IA_HexZoom": "Camera",
     "IA_HexToggleGrid": "View",
     "IA_HexWaterView": "View",
@@ -86,7 +101,8 @@ LEGEND_CATEGORIES = {
 
 
 # actions added after the legend was made, whose lines an existing legend gets if it lacks them
-ADDED_LEGEND_ACTIONS = {"IA_HexPaintMode", "IA_HexPaintLevel", "IA_HexBrushSize", "IA_HexUndo", "IA_HexRedo", "IA_HexSunFollow", "IA_HexLayer"}
+ADDED_LEGEND_ACTIONS = {"IA_HexPaintMode", "IA_HexPaintLevel", "IA_HexBrushSize", "IA_HexUndo", "IA_HexRedo", "IA_HexSunFollow", "IA_HexLayer",
+                        "IA_HexSaveBookmark", "IA_HexJumpBookmark"}
 
 
 def load_or_create(name, asset_class, factory):
@@ -133,9 +149,9 @@ for config_property, action_name, description, value_type, keys in ACTIONS:
         scalar = [value for value in extra if isinstance(value, float)]
         triggers = []
 
-        if chord:
+        for chord_action in chord:
             trigger = unreal.new_object(unreal.InputTriggerChordAction, outer=context)
-            trigger.set_editor_property("chord_action", actions[chord[0]])
+            trigger.set_editor_property("chord_action", actions[chord_action])
             triggers.append(trigger)
 
         key_triggers.append(triggers)

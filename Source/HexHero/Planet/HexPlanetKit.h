@@ -110,6 +110,13 @@ namespace HexPlanetKit
 		double WobbleScale = 100.0;
 		double WobbleDetail = 0.0;
 		double WobbleTops[3] = {};
+		/** The rise of the floor of the passages (UHexPlanetConfig::FloorNoise, GetFloorRise): its height, 0 for none, the size of its noise, the
+		 *  share of its finer noise, how far below the top of the floor it fades out, and that top, the radius of the top of level 0 */
+		double FloorRise = 0.0;
+		double FloorRiseScale = 150.0;
+		double FloorRiseDetail = 0.0;
+		double FloorRiseFade = 20.0;
+		double FloorTop = 0.0;
 		/** The shape of the inside of a cell (FHexPlanetKit, Shape), in world units, off with a ShapeHeight of 0 */
 		double ShapeHeight = 0.0;
 		double CragHeight = 0.0;
@@ -190,6 +197,13 @@ namespace HexPlanetKit
 
 	/** Moves a height on a slope below the plains by the wobble of the coast: a pure function of the place, so cells that share a point agree */
 	double ApplyWobble(const FPlacement& Placement, const FVector3d& Direction, double Height);
+
+	/** Returns how far the floor of the passages rises in a direction, 0 to Height, by a noise of the place on the sphere of radius FloorTop
+	 *  Scale across with Detail of a finer one; the walls of the underground take it too, so they stand on the floor */
+	double GetFloorRise(const FVector3d& Direction, double FloorTop, double Height, double Scale, double Detail);
+
+	/** Raises a height by the rise of the floor (FPlacement::FloorRise): all of it on the top of level 0 and fading out below it */
+	double ApplyFloorRise(const FPlacement& Placement, const FVector3d& Direction, double Height);
 
 	/** Height of a side: Middle in its middle, bending linearly to From at S = 0 and To at S = 1 */
 	double GetSideHeight(double Middle, double From, double To, double S);

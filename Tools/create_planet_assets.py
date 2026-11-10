@@ -1493,14 +1493,30 @@ UNDERGROUND_VALUES = {
     'sea': False, 'clouds': False, 'haze': False, 'auroras': False, 'rivers': False, 'generate_objects': True, 'fog': True, 'walls': True,
     # a passage holds its sides and a void carries its whole cliff, so passages stay flat ledges over the voids
     'edge_rule': unreal.HexEdgeRule.HIGHER_HOLDS,
-    'deep_depth': 200.0,
+    # the voids lie a little below the passages (since 2026-11-10; 200 before), their mist drawing the depth of the abyss under them, and their
+    # short cliffs wind not at all, as the wobble of a coast would push them under the floor of a void
+    'deep_depth': 10.0, 'shallow_depth': 5.0, 'coast_wobble': 0.0,
+    # the floor of the passages rises and falls by a noise the cells share (HexPlanetKit::GetFloorRise)
+    'floor_noise': 14.0,
     # a dim, cool light of the sky, a placeholder until the light of the game is designed
     'sky_light_color': unreal.LinearColor(0.32, 0.42, 0.48, 1.0), 'sky_light_intensity': 0.3,
 }
 # values of an existing DA_HexUnderground that a later stage changed, as (property, old value, new value): each is set only while the asset still
 # holds the old value, so tuning by hand is never overwritten. The cave objects are generated on the passages since 2026-11-09, and the motes drift
-# over them since then too
-UNDERGROUND_MIGRATIONS = [('generate_objects', False, True), ('motes', False, True), ('walls', False, True)]
+# over them since then too. On 2026-11-10 the voids rose to a little below the passages and the floor of the passages took a noise; the values
+# measured down from the passages followed, as defaults of the class too, for an asset that does not hold them
+UNDERGROUND_MIGRATIONS = [('generate_objects', False, True), ('motes', False, True), ('walls', False, True),
+    ('deep_depth', 200.0, 10.0), ('shallow_depth', 22.0, 5.0), ('coast_wobble', 20.0, 0.0), ('floor_noise', 0.0, 14.0),
+    ('abyss_fade_start', 25.0, 4.0), ('abyss_fade_end', 140.0, 32.0), ('abyss_brightness', 0.55, 0.24), ('abyss_mist_start', 60.0, 8.0),
+    ('abyss_mist_end', 190.0, 30.0), ('wall_outer_depth', 160.0, 60.0), ('cave_moss_wall_depth', 60.0, 20.0), ('cave_rune_top', 10.0, 4.0),
+    ('cave_rune_size', 48.0, 24.0), ('lava_cliff_reach', 140.0, 40.0), ('void_floor_height', 30.0, 12.0), ('mote_height_below', 150.0, 35.0)]
+
+
+def holds(value, old):
+    """Returns true if a property holds an old value, a float to a few digits, as the asset keeps it in single precision"""
+    if isinstance(old, float) and isinstance(value, float):
+        return abs(value - old) <= 1e-4 * max(1.0, abs(old))
+    return value == old
 
 
 def clear_expressions(material):
@@ -1583,7 +1599,7 @@ def build_underground_config():
         config = unreal.load_asset(UNDERGROUND_CONFIG)
         changed = False
         for name, old, new in UNDERGROUND_MIGRATIONS:
-            if config.get_editor_property(name) == old:
+            if holds(config.get_editor_property(name), old):
                 config.set_editor_property(name, new)
                 changed = True
                 unreal.log('PLANET %s: %s from %s to %s' % (UNDERGROUND_CONFIG, name, old, new))
@@ -2409,8 +2425,8 @@ def build_auroras():
 # The underground (DA_HexUnderground, EdgeRule HigherHolds): M_HexUnderground draws its surface as M_HexPlanet does, from the layers of its cave
 # biomes with the grid lines and the outlines, but without the sea, the beach, rivers, the run-up, the canopy and the shadows of clouds. Every
 # height is measured below the top of the passages, the level 0 that lies LevelHeight above the sea. On the tops of the passages the floor is
-# warm earth (CaveFloor*, a tint of its layer, as the placeholder light is cool) in pools of tone, with paths of flagstones down the middle of
-# the corridors (CaveFlag*, a layer found by name), small dark pools of water (CavePuddle*), green glowing moss along the rims and down the upper
+# warm earth (CaveFloor*, a tint of its layer, as the placeholder light is cool) in pools of tone, with small dark pools of water (CavePuddle*,
+# never cut by the side of a cell with objects, which they keep off as off the rims), green glowing moss along the rims and down the upper
 # walls (CaveMoss*) and pools of light under what glows and beside lava (GLOW_POOL_CODE, CellCanopy, AHexPlanet::UpdateCanopy). The rock of a
 # cliff darkens down into the abyss (AbyssFadeStart, AbyssFadeEnd), a few walls carry carved runes (CaveRune*), and the floor of a void draws a
 # teal grey mist as its light, a noise taken in AbyssSlices slices under the floor along the view and laid front to back, so deeper ones are
@@ -2551,41 +2567,29 @@ float coarseShare = saturate(smoothstep(CoarseDistance - CoarseBand, CoarseDista
 float topShare = (1.0 - smoothstep(0.0, max(CaveFloorTopDepth, 0.01), depthBelow)) * notPreview;
 albedo = lerp(albedo, albedo * CaveFloorTint.rgb * CaveFloorBrightness, topShare);
 albedo *= 1.0 + (cloudNoise.Value(WorldPos / max(CaveFloorPoolScale, 1.0) + 2.9) - 0.5) * 2.0 * CaveFloorPools * topShare;
+// the floor that rises by a noise (FloorNoise, HexPlanetKit::GetFloorRise): its hollows a little darker and its swells a little lighter, so its
+// unevenness shows under the even light of a cave, and the puddles below gather in its hollows
+float floorRise = FloorNoise > 0.0 ? saturate(-depthBelow / FloorNoise) : 0.5;
+albedo *= 1.0 + (floorRise - 0.5) * 2.0 * CaveFloorRiseShade * topShare;
 
-// paths of flagstones down the middle of the corridors and over the middle of halls, broken into worn stretches, dirt in their joints
-float flagMask = 0.0;
-[branch] if (topShare > 0.01 && CaveFlagLayer >= 0.0)
-{
-    flagMask = smoothstep(CaveFlagRimStart, max(CaveFlagRimEnd, CaveFlagRimStart + 1e-3), lipDistance)
-        * smoothstep(CaveFlagCover - CaveFlagSoftness, CaveFlagCover + CaveFlagSoftness, cloudNoise.Value(WorldPos / max(CaveFlagNoiseScale, 1.0) + 4.4)) * topShare;
-    [branch] if (flagMask > 0.01)
-    {
-        // the slabs are drawn from the planes of the world sharper than the other layers blend them, as two projections of a pattern of stones
-        // laid over each other show it twice
-        float3 flagPlanes = pow(abs(vertexNormal), max(CaveFlagSharpness, 1.0));
-        flagPlanes /= flagPlanes.x + flagPlanes.y + flagPlanes.z;
-        flagPlanes = saturate((flagPlanes - CaveFlagPlaneCut) / max(1.0 - CaveFlagPlaneCut, 1e-3));
-        flagPlanes /= flagPlanes.x + flagPlanes.y + flagPlanes.z;
-        FBiomeLayers flagLayers = layers;
-        flagLayers.Planes = flagPlanes;
-        float3 flagBend;
-        float4 flag = flagLayers.Sample(Colors, ColorsSampler, Normals, NormalsSampler, LayerParams, round(CaveFlagLayer), flagBend);
-        float floorHeight = dot(covers, float4(layerColors[0].a, layerColors[1].a, layerColors[2].a, layerColors[3].a));
-        float flagCover = saturate(((flagMask + flag.a * CaveFlagHeightBlend) - (1.0 - flagMask + floorHeight * CaveFlagHeightBlend)) / (2.0 * max(CaveFlagBlendDepth, 0.01)) + 0.5);
-        albedo = lerp(albedo, flag.rgb * CaveFlagTint.rgb, flagCover);
-        bend = lerp(bend, flagBend, flagCover);
-        flagMask = flagCover;
-    }
-}
-
-// small still pools of water, away from the rims, off the flagstones and out of the cells with objects (bit 6 of the alpha of the second biome
-// pixel), with a rim of wet earth; the water shows that earth at its shore and deepens to CavePuddleColor, and they fade out as the moss does
+// small still pools of water, out of the cells with objects or of an exit (bit 6 of the alpha of the second biome pixel), and CavePuddleRimGap of
+// the radius away from the sides towards a void or towards such a cell (bit K of green of the first pixel, neighbor K), so a side never cuts one,
+// with a rim of wet earth; the water shows that earth at its shore and deepens to CavePuddleColor, and they fade out as the moss does
 float puddle = 0.0;
 [branch] if (topShare > 0.01 && ((biomeNear.a >> 6) & 1u) == 0u)
 {
+    uint dryBits = biomeOwn.g & 63u;
+    float dryDistance = lipDistance;
+    [unroll] for (int drySide = 0; drySide < 6; ++drySide)
+    {
+        if (drySide < biomeSides && ((dryBits >> drySide) & 1u) != 0u)
+        {
+            dryDistance = min(dryDistance, apothem - dot(LocalUV, float2(cos(drySide * biomeTurn), sin(drySide * biomeTurn))));
+        }
+    }
     float puddleDetail = 1.0 - smoothstep(CaveMossDetailFadeStart, max(CaveMossDetailFadeEnd, CaveMossDetailFadeStart + 1e-3), pixelWorld / max(CavePuddleScale, 1.0));
-    float puddleLevel = cloudNoise.Value(WorldPos / max(CavePuddleScale, 1.0) + 6.6) - CavePuddleCover
-        - (1.0 - smoothstep(0.0, max(CavePuddleRimGap, 1e-3), lipDistance)) - flagMask;
+    float puddleLevel = cloudNoise.Value(WorldPos / max(CavePuddleScale, 1.0) + 6.6) - CavePuddleCover + (0.5 - floorRise) * 2.0 * CavePuddleHollow
+        - (1.0 - smoothstep(0.0, max(CavePuddleRimGap, 1e-3), dryDistance));
     float puddleSoft = max(pixelWorld / max(CavePuddleScale, 1.0), CavePuddleEdge);
     puddle = saturate(puddleLevel / max(puddleSoft, 1e-4) + 0.5) * puddleDetail * topShare;
     float puddleWet = saturate((puddleLevel + CavePuddleRim) / max(CavePuddleRim, 1e-4)) * puddleDetail * topShare;
@@ -2620,7 +2624,7 @@ float puddle = 0.0;
     }
 }
 
-// the normal again, with the flagstones, and flat on the water of a pool
+// the normal again, flat on the water of a pool
 OutNormal = normalize(shadedNormal + (bend - shadedNormal * dot(bend, shadedNormal)) * BiomeNormalStrength);
 OutNormal = normalize(lerp(OutNormal, surfaceUp, puddle));
 
@@ -2836,14 +2840,12 @@ UNDERGROUND_PARAMETERS = ['LevelHeight', 'HexRadius', 'CoarseDistance', 'CoarseB
     'AbyssDetailFadeStart', 'AbyssDetailFadeEnd', 'AbyssSliceDrift', 'AbyssSliceOpacity', 'AbyssDepthHalf', 'AbyssBottomColor', 'AbyssMistThreshold', 'AbyssCliffBand',
     'AbyssFarCliff', 'AbyssFloorHide', 'AbyssLipColor', 'AbyssLipWidth', 'AbyssLipDepth', 'AbyssGridFade', 'Roughness',
     'ProblemColor', 'LinksOrphanColor', 'LinksTint', 'LinksGlow',
-    'CaveFloorTint', 'CaveFloorBrightness', 'CaveFloorPools', 'CaveFloorPoolScale', 'CaveFloorTopDepth',
-    'CaveFlagRimStart', 'CaveFlagRimEnd', 'CaveFlagCover', 'CaveFlagSoftness', 'CaveFlagNoiseScale', 'CaveFlagHeightBlend', 'CaveFlagBlendDepth', 'CaveFlagTint',
-    'CaveFlagSharpness', 'CaveFlagPlaneCut',
+    'CaveFloorTint', 'CaveFloorBrightness', 'CaveFloorPools', 'CaveFloorPoolScale', 'CaveFloorTopDepth', 'FloorNoise', 'CaveFloorRiseShade',
     'CaveMossReach', 'CaveMossWallDepth', 'CaveMossPatchScale', 'CaveMossCover', 'CaveMossSpeckleScale', 'CaveMossSpeckle', 'CaveMossDetailFadeStart',
     'CaveMossDetailFadeEnd', 'CaveMossFarGlow', 'CaveMossAlbedo', 'CaveMossAlbedoShare', 'CaveMossColor', 'CaveMossGlow', 'CaveMossSoftness', 'CaveMossFade',
     'GlowPoolStrength', 'GlowPoolEdge', 'GlowPoolInner', 'GlowPoolNoise', 'GlowPoolNoiseScale', 'GlowPoolSpill', 'GlowPoolDepth', 'GlowPoolLight',
     'CavePuddleScale', 'CavePuddleCover', 'CavePuddleRimGap', 'CavePuddleRim', 'CavePuddleWetDarkening', 'CavePuddleColor', 'CavePuddleRoughness', 'CavePuddleSheen',
-    'CavePuddleSpecular', 'CavePuddleDepth', 'CavePuddleEdge',
+    'CavePuddleSpecular', 'CavePuddleDepth', 'CavePuddleEdge', 'CavePuddleHollow',
     'CaveRuneShare', 'CaveRuneTop', 'CaveRuneSize', 'CaveRuneStroke', 'CaveRuneDarkening', 'CaveRuneBevel', 'CaveRuneColor', 'CaveRuneGlow', 'CaveRuneFadeStart',
     'CaveRuneFadeEnd',
     'LavaColor', 'LavaBrightness', 'LavaCoreShare', 'LavaCoreBrightness', 'LavaCrustColor', 'LavaCrustScale', 'LavaCrustShare', 'LavaFlowSpeed', 'LavaPulse',
@@ -2903,9 +2905,8 @@ def build_underground_material():
         ('Colors', add_texture(library, material, COLORS, 'Colors', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 3400), ''),
         ('Normals', add_texture(library, material, NORMALS, 'Normals', unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL, 3450), ''),
         ('LayerParams', add_texture(library, material, DEFAULT_MARKS, 'LayerParams', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 3460), ''),
-        # the pool of light of each cell (GLOW_POOL_CODE), read with Load, and the layer of the flagstones, found by name (AHexPlanet::SetBiomeLayers)
+        # the pool of light of each cell (GLOW_POOL_CODE), read with Load
         ('CellCanopy', add_texture(library, material, DEFAULT_MARKS, 'CellCanopy', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 3470), ''),
-        ('CaveFlagLayer', add_scalar(library, material, 'CaveFlagLayer', -1.0, 3480), ''),
         ('WallsShown', add_scalar(library, material, 'WallsShown', 0.0, 3490), ''),
         ('PreviewTile', add_scalar(library, material, 'PreviewTile', 0.0, 3500), ''),
         ('FacetShare', add_uv_channel(library, material, 1, 'r', 3525), ''),
@@ -3370,6 +3371,8 @@ float floorMix = 0.0;
 {
     floorColor = layers.Sample(Colors, ColorsSampler, Normals, NormalsSampler, LayerParams, round(FloorLayer), floorBend) * CaveFloorTint.rgb * CaveFloorBrightness;
     floorColor *= 1.0 + (cloudNoise.Value(WorldPos / max(CaveFloorPoolScale, 1.0) + 2.9) - 0.5) * 2.0 * CaveFloorPools;
+    float floorRise = FloorNoise > 0.0 ? saturate((length(WorldPos) - FloorRadius) / FloorNoise) : 0.5;
+    floorColor *= 1.0 + (floorRise - 0.5) * 2.0 * CaveFloorRiseShade;
     floorMix = smoothstep(0.35, 0.65, floorShare + (caveNoise.Value(WorldPos / 7.0 + 1.7) - 0.5) * CaveWallFloorNoise);
 }
 albedo = lerp(albedo, floorColor, floorMix);
@@ -3448,7 +3451,7 @@ WALL_PARAMETERS = ['BiomeTileSize', 'TriplanarSharpness', 'BiomeNormalStrength',
                    'CaveWallVeinColor', 'CaveWallStains', 'CaveWallStainColor', 'CaveWallMoss', 'CaveWallMossTop', 'CaveWallLavaGlow', 'CaveMossCover',
                    'CaveMossSoftness', 'CaveMossPatchScale', 'CaveMossDetailFadeStart', 'CaveMossDetailFadeEnd', 'CaveMossSpeckleScale', 'CaveMossFarGlow',
                    'CaveMossSpeckle', 'CaveMossAlbedo', 'CaveMossAlbedoShare', 'CaveMossColor', 'CaveMossGlow', 'LavaLightColor', 'CaveFloorTint',
-                   'CaveFloorBrightness', 'CaveFloorPools', 'CaveFloorPoolScale', 'AbyssFadeStart', 'AbyssFadeEnd', 'AbyssDarkness', 'Ambient', 'LevelHeight', 'DeepDepth', 'LavaCliffReach',
+                   'CaveFloorBrightness', 'CaveFloorPools', 'CaveFloorPoolScale', 'FloorNoise', 'CaveFloorRiseShade', 'AbyssFadeStart', 'AbyssFadeEnd', 'AbyssDarkness', 'Ambient', 'LevelHeight', 'DeepDepth', 'LavaCliffReach',
                    'LavaCliffLight', 'LavaCliffGlow', 'LavaCliffTint', 'LavaPool', 'GlowPoolEdge', 'GlowPoolStrength', 'GlowPoolLight']
 WALL_FADE_PARAMETERS = ['CaveWallFadeRadius', 'CaveWallFadeSoftness', 'CaveWallFadeDepth', 'CaveWallFadeKeep', 'WallLodDistance', 'WallLodBand']
 for _name in WALL_PARAMETERS:

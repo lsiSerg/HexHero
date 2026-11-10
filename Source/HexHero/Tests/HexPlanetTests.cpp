@@ -1089,6 +1089,79 @@ bool FHexPlanetSurfaceRebuildTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("HigherHolds: every vertex of a passage lies at its top"), BentPassages, 0);
 	TestEqual(TEXT("HigherHolds: every corner of a void next to a passage lies at the top of the passage"), LowSides, 0);
 	TestEqual(TEXT("HigherHolds: every vertex of a void lies between its floor and the top of the passages"), OutsideVoids, 0);
+
+	// a floor of the passages that rises by a noise (FloorNoise), over voids a little below them: the passages are built as a lattice whose points
+	// on each side are those of the neighbor across it, so no crack opens where the floor rises, and the floor rises from its top by at most
+	// FloorNoise, which a cell built on its own gives alike
+	HexPlanetSurface::FParams Floor = Under;
+	Floor.DeepDepth = 10.0;
+	Floor.ShallowDepth = 5.0;
+	Floor.CoastWobble = 0.0;
+	Floor.FloorNoise = 8.0;
+	const HexPlanetSurface::FBuild FloorBuild = HexPlanetSurface::Build(Grid, *Kit, Floor, NewMaze, NewMazeMassif, AllChunks, Old.MeanPeak);
+	TestEqual(TEXT("Floor: every cell built again on its own has the triangles of the full build"),
+		CountCellsBuiltOtherwise(Grid, *Kit, Floor, NewMaze, NewMazeMassif, FloorBuild, nullptr, nullptr), 0);
+	const TArray<FVector3d>& GridCorners = Grid.GetCorners();
+	// the points of a cell on one of its sides, which lie on the great circle through its corners
+	const auto GetSidePoints = [&](int32 Cell, int32 Side)
+	{
+		TArray<FVector3d> Points;
+		const HexPlanetSurface::FCellMesh& Range = FloorBuild.CellMeshes[Cell];
+		const HexPlanetSurface::FSection& Section = FloorBuild.Sections[Range.Section];
+		const int32 Count = Cells[Cell].Corners.Num();
+		const FVector3d From = GridCorners[Cells[Cell].Corners[(Side + Count - 1) % Count]];
+		const FVector3d To = GridCorners[Cells[Cell].Corners[Side]];
+		const FVector3d Normal = FVector3d::CrossProduct(From, To).GetSafeNormal();
+		for (int32 Index = Range.FirstVertex; Index < Range.FirstVertex + Range.NumVertices; ++Index)
+		{
+			const FVector3d Position(Section.Positions[Index]);
+			const FVector3d Direction = Position.GetSafeNormal();
+			if (FMath::Abs(FVector3d::DotProduct(Direction, Normal)) < 1.0e-5 && FVector3d::DotProduct(FVector3d::CrossProduct(From, Direction), Normal) > -1.0e-6
+				&& FVector3d::DotProduct(FVector3d::CrossProduct(Direction, To), Normal) > -1.0e-6)
+			{
+				Points.Add(Position);
+			}
+		}
+		return Points;
+	};
+	int32 FloorSidePoints = 0;
+	int32 UnmatchedFloorPoints = 0;
+	int32 RisenPoints = 0;
+	int32 TooHigh = 0;
+	const double FloorTop = Floor.GetTop(0);
+	for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+	{
+		if (NewMaze[Cell] != 0)
+		{
+			continue;
+		}
+		const HexPlanetSurface::FCellMesh& Range = FloorBuild.CellMeshes[Cell];
+		const HexPlanetSurface::FSection& Section = FloorBuild.Sections[Range.Section];
+		for (int32 Index = Range.FirstVertex; Index < Range.FirstVertex + Range.NumVertices; ++Index)
+		{
+			const double Height = FVector3d(Section.Positions[Index]).Length();
+			RisenPoints += Height > FloorTop + 0.5 ? 1 : 0;
+			TooHigh += Height > FloorTop + Floor.FloorNoise + 0.01 || Height < FloorTop - 0.01 ? 1 : 0;
+		}
+		for (int32 Side = 0; Side < Cells[Cell].Neighbors.Num(); ++Side)
+		{
+			const int32 Neighbor = Cells[Cell].Neighbors[Side];
+			const int32 Back = Cells[Neighbor].Neighbors.IndexOfByKey(Cell);
+			const TArray<FVector3d> Own = GetSidePoints(Cell, Side);
+			const TArray<FVector3d> Across = GetSidePoints(Neighbor, Back);
+			for (const FVector3d& Point : Own)
+			{
+				++FloorSidePoints;
+				UnmatchedFloorPoints += Across.ContainsByPredicate([&Point](const FVector3d& Other) { return FVector3d::Distance(Point, Other) < 0.01; }) ? 0 : 1;
+			}
+		}
+	}
+	AddInfo(FString::Printf(TEXT("Floor: %d points on the sides of passages, %d of them without the same point across, %d points of passages risen"),
+		FloorSidePoints, UnmatchedFloorPoints, RisenPoints));
+	TestTrue(TEXT("Floor: the passages have points on their sides"), FloorSidePoints > 100);
+	TestEqual(TEXT("Floor: every point on a side of a passage is built by the cell across it too"), UnmatchedFloorPoints, 0);
+	TestTrue(TEXT("Floor: the floor rises"), RisenPoints > 100);
+	TestEqual(TEXT("Floor: the floor rises from its top by at most FloorNoise"), TooHigh, 0);
 	return true;
 }
 

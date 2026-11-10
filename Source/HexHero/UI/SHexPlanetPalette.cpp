@@ -390,9 +390,38 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 		Carve->SetToolTipText(LOCTEXT("CarveTip", "Drag from one cell to another to carve a passage along the shortest way between them"));
 		Maze->AddSlot().AutoHeight()[Carve];
 		AddBiomes(Maze, EHexPlanetLayer::Underground, LOCTEXT("CaveBiomes", "Cave biomes, where the level allows"));
+
+		// the walls along the voids, a height for each void: a click raises it, Ctrl+click lowers it, Auto gives it back to the style of the void
+		const TSharedRef<SButton> WallHeight = MakeButton(
+			MakeLabel(LOCTEXT("WallHeight", "Height")),
+			[](UHexPlanetPainter& Each) { Each.SetWallTool(EHexPaintTool::WallHeight); },
+			[](const UHexPlanetPainter& Each) { return Each.GetTool() == EHexPaintTool::WallHeight; });
+		WallHeight->SetToolTipText(LOCTEXT("WallHeightTip", "Click a void, or a passage beside it, to raise the walls along it; Ctrl+click lowers them, down to a low curb"));
+		const TSharedRef<SButton> WallAuto = MakeButton(
+			MakeLabel(LOCTEXT("WallAuto", "Auto")),
+			[](UHexPlanetPainter& Each) { Each.SetWallTool(EHexPaintTool::WallAuto); },
+			[](const UHexPlanetPainter& Each) { return Each.GetTool() == EHexPaintTool::WallAuto; });
+		WallAuto->SetToolTipText(LOCTEXT("WallAutoTip", "Click a void, or a passage beside it, to give the walls along it the height of its style: low beside lava and lakes, full beside the mist"));
+		Maze->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("Walls", "Walls along the voids"))];
+		Maze->AddSlot()
+		.AutoHeight()
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.FillWidth(1.0f)
+			[
+				WallHeight
+			]
+			+ SHorizontalBox::Slot()
+			.FillWidth(1.0f)
+			.Padding(3.0f, 0.0f, 0.0f, 0.0f)
+			[
+				WallAuto
+			]
+		];
 		Maze->AddSlot().AutoHeight()[MakeHelp(TAttribute<FText>::CreateLambda([WeakPainter]()
 		{
-			return FText::Format(LOCTEXT("MazeHelp", "Void and Passage paint with the brush. Carve makes a passage {0} cells wide along the shortest way from the cell pressed to the cell released."),
+			return FText::Format(LOCTEXT("MazeHelp", "Void and Passage paint with the brush. Carve makes a passage {0} cells wide along the shortest way from the cell pressed to the cell released. Each void has a height of the walls along it: painting it lava or a lake gives it a low one, which Height then tunes; the info at the cursor shows it."),
 				FText::AsNumber(WeakPainter.IsValid() ? WeakPainter->GetPassageWidth() : 2));
 		}))];
 	}
@@ -636,10 +665,11 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 			}))
 		];
 
-	// a palette taller than the screen scrolls
+	// anchored to the top left corner, so it stays put as a tab or a tool changes its height, and a palette taller than the screen scrolls, as
+	// the slot clamps it to the height it has
 	ChildSlot
 	.HAlign(HAlign_Left)
-	.VAlign(VAlign_Center)
+	.VAlign(VAlign_Top)
 	.Padding(16.0f, 16.0f, 0.0f, 16.0f)
 	[
 		SNew(SBorder)

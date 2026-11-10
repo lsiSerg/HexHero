@@ -211,6 +211,32 @@ struct FHexReliefFile
 	TArray<FHexReliefCell> Cells;
 };
 
+/** The height of the walls along a void set by hand, a line of walls.json of the underground: a factor on WallHeight, 0 for no wall */
+USTRUCT()
+struct FHexWallCell
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	int32 Cell = 0;
+
+	UPROPERTY()
+	float Height = 1.0f;
+};
+
+/** walls.json of the underground: the voids whose walls were given a height by hand, few, so a line each that Git can merge */
+USTRUCT()
+struct FHexWallsFile
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	int32 Version = 1;
+
+	UPROPERTY()
+	TArray<FHexWallCell> Cells;
+};
+
 /** The objects of one cell, a line of objects.json: its cover and decor by the Id of their UHexPlanetObjectSet, None for none */
 USTRUCT()
 struct FHexObjectCell
@@ -584,6 +610,15 @@ namespace HexPlanetFile
 
 	/** Reads relief.json of a folder; no file is no cells */
 	bool LoadRelief(const FString& Folder, TArray<FHexReliefCell>& OutCells, FString& OutError);
+
+	/** walls.json holds the voids of the underground whose walls were given a height by hand */
+	constexpr const TCHAR* WallsFile = TEXT("walls.json");
+
+	/** Reads walls.json of a folder; no file is no cells */
+	bool LoadWalls(const FString& Folder, TArray<FHexWallCell>& OutCells, FString& OutError);
+
+	/** Writes walls.json of a folder, a line per cell sorted by cell, or deletes it when there are no cells */
+	bool SaveWalls(const FString& Folder, const TArray<FHexWallCell>& Cells, FString& OutError);
 
 	/** objects.json holds the forests, bushes, stones and decor of the cells; a planet without it generates them and writes it, even empty */
 	constexpr const TCHAR* ObjectsFile = TEXT("objects.json");

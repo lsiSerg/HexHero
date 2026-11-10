@@ -13,6 +13,7 @@
 #include "EnhancedInputSubsystems.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
+#include "HexCameraBookmarks.h"
 #include "HexCameraConfig.h"
 #include "HexCoord.h"
 #include "HexHero.h"
@@ -138,6 +139,38 @@ namespace
 	FAutoConsoleCommandWithWorld CopyCameraConsoleCommand(TEXT("hex.CopyCamera"),
 		TEXT("Copies to the clipboard the console commands that open the current map and put the camera where it is now."),
 		FConsoleCommandWithWorldDelegate::CreateStatic(&CopyCameraCommand));
+
+	/** Saves the camera in a slot of the bookmarks of the planet or flat map open, or goes back to one, as Ctrl+Shift and Ctrl with a number key do */
+	void BookmarkCommand(const TArray<FString>& Args, UWorld* World)
+	{
+		int32 Key = 0;
+		const bool bSave = Args.Num() == 2 && Args[0].Equals(TEXT("save"), ESearchCase::IgnoreCase);
+		const bool bJump = Args.Num() == 2 && Args[0].Equals(TEXT("jump"), ESearchCase::IgnoreCase);
+		if ((!bSave && !bJump) || !LexTryParseString(Key, *Args[1]) || Key < 0 || Key > 9)
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("Usage: hex.Bookmark <save|jump> <0-9>, the number key of the slot"));
+			return;
+		}
+		const int32 Slot = Key == 0 ? HexCameraBookmarks::NumSlots : Key;
+		const APlayerController* PlayerController = World ? World->GetFirstPlayerController() : nullptr;
+		if (AHexCameraPawn* CameraPawn = PlayerController ? Cast<AHexCameraPawn>(PlayerController->GetPawn()) : nullptr)
+		{
+			bSave ? CameraPawn->SaveBookmark(Slot) : CameraPawn->JumpToBookmark(Slot);
+		}
+		else if (AHexPlanetCameraPawn* PlanetCameraPawn = PlayerController ? Cast<AHexPlanetCameraPawn>(PlayerController->GetPawn()) : nullptr)
+		{
+			bSave ? PlanetCameraPawn->SaveBookmark(Slot) : PlanetCameraPawn->JumpToBookmark(Slot);
+		}
+		else
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("hex.Bookmark: no hex camera"));
+		}
+	}
+
+	FAutoConsoleCommandWithWorldAndArgs BookmarkConsoleCommand(TEXT("hex.Bookmark"),
+		TEXT("hex.Bookmark <save|jump> <0-9>: saves the camera in the slot of a number key of the bookmarks of the planet or map open (Saved/CameraBookmarks.json), ")
+		TEXT("as Ctrl+Shift and the key do, or puts it back there, as Ctrl and the key do"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&BookmarkCommand));
 
 	/** Returns true while the level is about to open again, so a camera of it would be gone at once */
 	bool IsTravelPending(const UWorld* World)
@@ -320,6 +353,13 @@ void AHexCameraPawn::SetupPlayerInputComponent(UInputComponent* PlayerInputCompo
 		EnhancedInputComponent->BindAction(InputConfig->WireframeTargetAction, ETriggerEvent::Started, this, &AHexCameraPawn::OnCycleWireframeTarget);
 		EnhancedInputComponent->BindAction(InputConfig->WaterViewAction, ETriggerEvent::Started, this, &AHexCameraPawn::OnCycleWaterView);
 		EnhancedInputComponent->BindAction(InputConfig->KeyLegendAction, ETriggerEvent::Started, this, &AHexCameraPawn::OnToggleKeyLegend);
+
+		// actions added later are missing until Tools/create_input_assets.py has made them
+		if (InputConfig->SaveBookmarkAction && InputConfig->JumpBookmarkAction)
+		{
+			EnhancedInputComponent->BindAction(InputConfig->SaveBookmarkAction, ETriggerEvent::Started, this, &AHexCameraPawn::OnSaveBookmark);
+			EnhancedInputComponent->BindAction(InputConfig->JumpBookmarkAction, ETriggerEvent::Started, this, &AHexCameraPawn::OnJumpBookmark);
+		}
 	}
 
 	if (const APlayerController* PlayerController = Cast<APlayerController>(GetController()))
@@ -513,6 +553,73 @@ void AHexCameraPawn::CopyCameraToClipboard() const
 void AHexCameraPawn::OnCopyCamera()
 {
 	CopyCameraToClipboard();
+}
+
+void AHexCameraPawn::OnSaveBookmark(const FInputActionValue& Value)
+{
+	SaveBookmark(FMath::RoundToInt32(Value.Get<float>()));
+}
+
+void AHexCameraPawn::OnJumpBookmark(const FInputActionValue& Value)
+{
+	JumpToBookmark(FMath::RoundToInt32(Value.Get<float>()));
+}
+
+bool AHexCameraPawn::SaveBookmark(int32 Slot)
+{
+	// rounded as the last view keeps it
+	const TOptional<FHexLastView> View = GetLastView();
+	if (!View.IsSet() || Slot < 1 || Slot > HexCameraBookmarks::NumSlots)
+	{
+		return false;
+	}
+	FHexMapBookmark Bookmark;
+	Bookmark.Slot = Slot;
+	Bookmark.X = View->FlatMap.X;
+	Bookmark.Y = View->FlatMap.Y;
+	Bookmark.Yaw = View->FlatMap.Yaw;
+	Bookmark.Zoom = View->FlatMap.Zoom;
+	Bookmark.bFreeCamera = View->FlatMap.bFreeCamera;
+
+	FHexCameraBookmarks Bookmarks;
+	HexCameraBookmarks::Load(Bookmarks);
+	HexCameraBookmarks::SetMap(Bookmarks, View->FlatMap.Map, Bookmark);
+	const bool bSaved = HexCameraBookmarks::Save(Bookmarks);
+	const int32 Key = HexCameraBookmarks::GetSlotKey(Slot);
+	const FString Text = bSaved ? FString::Printf(TEXT("Camera saved to slot %d of %s; Ctrl+%d goes back there"), Key, *View->FlatMap.Map, Key)
+		: FString::Printf(TEXT("Could not write %s"), *HexCameraBookmarks::GetFilePath());
+	UE_LOG(LogHexHero, Log, TEXT("Bookmarks: %s, at %.0f %.0f, turned %.1f at %.0f"), *Text, Bookmark.X, Bookmark.Y, Bookmark.Yaw, Bookmark.Zoom);
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(INDEX_NONE, 3.0f, bSaved ? FColor::Green : FColor::Red, Text);
+	}
+	return bSaved;
+}
+
+bool AHexCameraPawn::JumpToBookmark(int32 Slot)
+{
+	if (!WorldMap || WorldMap->GetMapFolder().IsEmpty() || Slot < 1 || Slot > HexCameraBookmarks::NumSlots)
+	{
+		return false;
+	}
+	FHexCameraBookmarks Bookmarks;
+	HexCameraBookmarks::Load(Bookmarks);
+	const FHexMapBookmark* Bookmark = HexCameraBookmarks::FindMap(Bookmarks, WorldMap->GetMapFolder(), Slot);
+	const int32 Key = HexCameraBookmarks::GetSlotKey(Slot);
+	if (!Bookmark)
+	{
+		const FString Text = FString::Printf(TEXT("Slot %d is empty: Ctrl+Shift+%d saves the camera there"), Key, Key);
+		UE_LOG(LogHexHero, Log, TEXT("Bookmarks: %s"), *Text);
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(INDEX_NONE, 3.0f, FColor::White, Text);
+		}
+		return false;
+	}
+	SetFreeCamera(Bookmark->bFreeCamera);
+	SetCamera(FVector2D(Bookmark->X, Bookmark->Y), Bookmark->Yaw, Bookmark->Zoom);
+	UE_LOG(LogHexHero, Log, TEXT("Bookmarks: the camera went to slot %d"), Key);
+	return true;
 }
 
 void AHexCameraPawn::OnSaveView()

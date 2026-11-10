@@ -35,6 +35,11 @@ enum class EHexPaintTool : uint8
 	Entrance,
 	/** Carves a passage underground along the shortest way from the cell pressed to the cell released, as wide as the passages of the planet */
 	Carve,
+	/** Raises the walls along the voids under the brush, and along the voids beside its passages, by WallHeightStep, or lowers them with Ctrl,
+	 *  down to the low curb of WallHeightMin (AHexPlanet::SetWallHeights) */
+	WallHeight,
+	/** Gives the walls along those voids back the height of their style */
+	WallAuto,
 };
 
 /** What a click of the brush in relief mode does to the mountains and hills under it, once per cell and stroke */
@@ -88,6 +93,10 @@ struct FHexPaintStep
 	/** What stood on the sides of rivers before and after, by HexPlanetRivers::GetEdgeKey (UHexPlanetRivers::GetEdge) */
 	TMap<uint64, uint8> OldRivers;
 	TMap<uint64, uint8> NewRivers;
+	/** The heights of the walls along voids set by hand before and after (AHexPlanet::SetWallHeights), -1 where the style of the void gives it */
+	TMap<int32, float> OldWalls;
+	TMap<int32, float> NewWalls;
+
 	/** All the entrances before and after, when the step changed them (AHexPlanet::SetEntrances) */
 	bool bEntrances = false;
 	TArray<FHexEntrance> OldEntrances;
@@ -105,8 +114,8 @@ struct FHexPaintStep
 	/** Returns true if the step changes nothing */
 	bool IsEmpty() const
 	{
-		return NewLevels.IsEmpty() && NewBiomes.IsEmpty() && NewRelief.IsEmpty() && NewObjects.IsEmpty() && NewRivers.IsEmpty() && !(bEntrances && OldEntrances != NewEntrances)
-			&& !(bSeedOffset && OldSeedOffset != NewSeedOffset);
+		return NewLevels.IsEmpty() && NewBiomes.IsEmpty() && NewRelief.IsEmpty() && NewObjects.IsEmpty() && NewRivers.IsEmpty() && NewWalls.IsEmpty()
+			&& !(bEntrances && OldEntrances != NewEntrances) && !(bSeedOffset && OldSeedOffset != NewSeedOffset);
 	}
 };
 
@@ -273,6 +282,10 @@ public:
 	/** Returns true while the brush carves passages underground */
 	bool IsCarving() const { return Tool == EHexPaintTool::Carve; }
 	void SetCarveTool() { SetTool(EHexPaintTool::Carve, EHexPaintTab::Maze); }
+
+	/** Returns true while the brush sets the heights of the walls along the voids underground, and chooses WallHeight or WallAuto */
+	bool IsSettingWalls() const { return Tool == EHexPaintTool::WallHeight || Tool == EHexPaintTool::WallAuto; }
+	void SetWallTool(EHexPaintTool InTool) { SetTool(InTool == EHexPaintTool::WallAuto ? EHexPaintTool::WallAuto : EHexPaintTool::WallHeight, EHexPaintTab::Maze); }
 
 	/** Returns the network of the chips of the palette, 0 to 7 for A to H, which new entrances take and which Regenerate network makes again */
 	int32 GetNetwork() const { return Network; }
@@ -452,7 +465,15 @@ private:
 	/** Gives the planet painted the levels, biomes and the rest of a step and shows the levels as tiles until it is rebuilt */
 	void Apply(const TMap<int32, int32>& Levels, const TMap<int32, int32>& Biomes, const HexPlanetSurface::FReliefOverrides& Relief = {},
 		const TMap<int32, FHexCellObjects>& Objects = {}, const TMap<uint64, uint8>& Rivers = {}, const TArray<FHexEntrance>* Entrances = nullptr,
-		const int32* SeedOffset = nullptr);
+		const int32* SeedOffset = nullptr, const TMap<int32, float>& Walls = {});
+
+	/** Puts into a step that the walls along a cell go back to the height of its style, where the step changes what the cell is to the walls (a
+	 *  passage, or a void of another style, AHexPlanet::GetWallStyle) and a height set by hand stands for them, so painting a lake or lava lowers
+	 *  them again; also into Changed, for the planet */
+	void ClearWallHeight(FHexPaintStep& Step, int32 Cell, int32 OldLevel, int32 OldBiome, int32 NewLevel, int32 NewBiome, TMap<int32, float>* Changed = nullptr) const;
+
+	/** Raises, lowers or gives back to their style the walls along the voids of the brush and those beside its passages, once per void and stroke */
+	void PaintWalls(TConstArrayView<int32> Brush);
 
 	/** Generates the maze of the underground again from the manifest of the surface, all networks or one, into a step of the cells that changed,
 	 *  with the objects the generation gives the cells that became passages and none on those that became void */

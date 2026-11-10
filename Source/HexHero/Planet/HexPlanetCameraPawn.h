@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Pawn.h"
+#include "HexCameraBookmarks.h"
 #include "HexPlanetLayers.h"
 #include "HexPlanetCameraPawn.generated.h"
 
@@ -115,6 +116,14 @@ public:
 	/** Copies to the clipboard the console commands hex.LoadPlanet and hex.PlanetSetCamera, which open the planet and put the camera where it is now */
 	void CopyCameraToClipboard() const;
 
+	/** Saves the camera and its layer in a slot of the bookmarks of this planet (HexCameraBookmarks), 1 to NumSlots; a planet not saved keeps
+	 *  them until it is saved, which writes them under its folder. Returns false before the planet is built or during a trip */
+	bool SaveBookmark(int32 Slot);
+
+	/** Puts the camera back where a slot of the bookmarks of this planet saved it, as hex.PlanetSetCamera does: once the pieces around that place
+	 *  are built, through a trip when the slot is of the other layer. Returns false for an empty slot */
+	bool JumpToBookmark(int32 Slot);
+
 	/** Saves what the save key saves: a new planet under a name the player gives, painted levels and biomes, and the camera to the last view;
 	 *  then runs OnSaved, which a cancelled name dialog or a failed write never runs */
 	void SavePlanet(TFunction<void()> OnSaved);
@@ -225,6 +234,13 @@ private:
 	/** Where the middle button went down, in pixels of the viewport */
 	FVector2D MiddleStart = FVector2D::ZeroVector;
 	bool bMiddleDown = false;
+
+	/** Where the left button went down to drag the planet, and the cell and time of its last click, by which two clicks on a cell within
+	 *  DoubleClickTime are a double click */
+	FVector2D LeftStart = FVector2D::ZeroVector;
+	bool bLeftDown = false;
+	int32 LastClickCell = INDEX_NONE;
+	double LastClickTime = 0.0;
 	void OnToggleGrid();
 	void OnToggleFreeCamera();
 	void OnToggleSunFollowing();
@@ -237,6 +253,13 @@ private:
 	void OnBackToWorldMap();
 	void OnCopyCamera();
 	void OnToggleKeyLegend();
+
+	/** The bookmarks of the camera, the slot as the value of the action, 1 to 9 and 10 for the key 0 */
+	void OnSaveBookmark(const FInputActionValue& Value);
+	void OnJumpBookmark(const FInputActionValue& Value);
+
+	/** Bookmarks saved on a planet that is not saved yet, by slot, which SaveView writes under its folder once it is */
+	TMap<int32, FHexPlanetBookmark> UnsavedBookmarks;
 
 	/** Painting the levels, which the player controller does */
 	void OnTogglePaintMode();
@@ -299,6 +322,10 @@ private:
 
 	/** Goes to the other layer: through the entrance under the mouse to its exit, from an exit up to its entrance, else at the same place */
 	void OnLayer();
+
+	/** Goes through the entrance or exit of a cell to the other layer, the camera over it there, as the key of the layer does and a double click;
+	 *  false if the cell holds none that can be used or a trip runs */
+	bool TravelThroughEntrance(int32 Cell);
 
 	/** Runs the steps of a trip between the layers */
 	void UpdateTravel(float DeltaTime);
