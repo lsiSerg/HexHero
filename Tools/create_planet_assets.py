@@ -131,6 +131,197 @@ HERO_SHADE_PARAMETERS = ['HeroShadeStart', 'HeroShadeEnd', 'HeroShadeBrightness'
 for _name in HERO_SHADE_PARAMETERS + ['HeroFocus0', 'HeroShade ', 'LightField']:
     assert _name in HERO_SHADE_CODE, _name
 
+# The fog of war (UHexShroud, AHexPlanet::UpdateShroud), as the developer decided on 2026-11-11: what the player has not explored is hidden, on the
+# surface under a bank of cloud and underground in the dark. ShroudField is a map of the sphere by the direction from the center, folded out as
+# an octahedron (FieldUV, which repeats HexShroud::GetFieldUV, so change both together), 1 where the player has explored and 0 where not, blended
+# between the middles of the cells, so its edge does not follow the hexes, and a noise of two sizes that drifts makes that edge billow (Cover).
+# Shroud is 0 while there is no fog of war: outside the game, and in the editing of the planet
+SHROUD_COMMON_CODE = r'''
+struct FShroud
+{
+    float Hash(float3 p)
+    {
+        p = frac(p * 0.1031);
+        p += dot(p, p.zyx + 31.32);
+        return frac((p.x + p.y) * p.z);
+    }
+    float Value(float3 p)
+    {
+        float3 i = floor(p);
+        float3 f = p - i;
+        f = f * f * (3.0 - 2.0 * f);
+        return lerp(lerp(lerp(Hash(i), Hash(i + float3(1, 0, 0)), f.x), lerp(Hash(i + float3(0, 1, 0)), Hash(i + float3(1, 1, 0)), f.x), f.y),
+            lerp(lerp(Hash(i + float3(0, 0, 1)), Hash(i + float3(1, 0, 1)), f.x), lerp(Hash(i + float3(0, 1, 1)), Hash(i + float3(1, 1, 1)), f.x), f.y), f.z);
+    }
+    float2 FieldUV(float3 d)
+    {
+        d /= max(abs(d.x) + abs(d.y) + abs(d.z), 1.0e-6);
+        float2 folded = (1.0 - abs(d.yx)) * float2(d.x >= 0.0 ? 1.0 : -1.0, d.y >= 0.0 ? 1.0 : -1.0);
+        return (d.z >= 0.0 ? d.xy : folded) * 0.5 + 0.5;
+    }
+    // how much of the shroud lies over a point, from how much of its place is explored and the noise there, which it gives back; lift thins it
+    float Cover(float known, float3 at, float softness, float edgeNoise, float lift, out float noise)
+    {
+        noise = 0.5;
+        if (known > 0.995)
+        {
+            return 0.0;
+        }
+        noise = Value(at) * 0.65 + Value(at * 2.7 + 5.3) * 0.35;
+        return smoothstep(0.5 - softness, 0.5 + softness, 1.0 - known + (noise - 0.5) * min(edgeNoise, 0.7) - lift);
+    }
+};
+FShroud shroud;
+'''
+
+# The shroud of the surface over a view: what stands on ground that is not explored is hidden whatever its height (shroudPos, the point seen;
+# shroudSpace for a view that meets nothing), and a bank of cloud ShroudTop high lies over that ground, marched in SHROUD_STEPS looks from where the
+# view enters it to where it leaves it or meets the scene (shroudCam, shroudDir, shroudEnd), thinner towards its top (ShroudTaper), so its edge is
+# a slope and not a wall, darker at its foot (ShroudBaseShade) and at night (ShroudNightShare), lighter and darker in patches of its noise
+# (ShroudTone), so it is no flat sheet. What stands higher than the bank on such ground, a mountain, is as light as its top, so it does not
+# stand out of it as a dark shape. It is alive: its noise changes in place (ShroudChurn), lighter wisps wind through it (ShroudWisp*, a noise
+# bent by another that flows, in patches that wander), and here and there a glow swells and fades inside it (ShroudPulse*, one to a place ShroudPulseSize across, each
+# at its own time), all taken once, where the view meets the bank. The haze lays it over the opaque scene, and the water, drawn after it, over
+# itself. It changes shroudColor and leaves in shroudTotal how much of the view it covers
+SHROUD_STEPS = 6
+SHROUD_CODE = r'''
+float shroudTotal = 0.0;
+if (Shroud > 0.5 && PlanetRadius > 0.0)
+{
+    SHROUD_COMMON
+    // where no ground is drawn, as AHexPlanet draws nothing of a chunk the shroud covers whole, the level of the sea stands in for it
+    float shroudSeaB = dot(shroudCam, shroudDir);
+    float shroudSeaDisc = shroudSeaB * shroudSeaB - (dot(shroudCam, shroudCam) - PlanetRadius * PlanetRadius);
+    if (shroudSeaDisc > 0.0)
+    {
+        float shroudSeaHit = -shroudSeaB - sqrt(shroudSeaDisc);
+        if (shroudSeaHit > 0.0 && shroudEnd > shroudSeaHit + ShroudTop * 3.0)
+        {
+            shroudEnd = shroudSeaHit;
+            shroudPos = shroudCam + shroudDir * shroudSeaHit;
+            shroudSpace = false;
+        }
+    }
+    float3 shroudFlow = float3(0.3, -0.5, 0.8) * Time * ShroudDrift;
+    float shroudChurn = Time * ShroudChurn;
+    float shroudSize = max(ShroudNoiseSize, 1.0);
+    float3 shroudFace = shroudPos;
+    float shroudGround = 0.0;
+    float shroudGroundShade = ShroudBaseShade;
+    float shroudNoise = 0.5;
+    if (!shroudSpace)
+    {
+        float shroudKnown = ShroudField.SampleLevel(ShroudFieldSampler, shroud.FieldUV(shroudPos), 0.0).r;
+        shroudGround = shroud.Cover(shroudKnown, shroudPos / shroudSize + shroudFlow + normalize(shroudPos) * shroudChurn, ShroudSoftness, ShroudEdgeNoise,
+            0.0, shroudNoise);
+        shroudGroundShade = lerp(ShroudBaseShade, 1.0, saturate((length(shroudPos) - PlanetRadius) / max(ShroudTop, 1.0)))
+            * (1.0 + (shroudNoise - 0.5) * ShroudTone);
+    }
+    float shroudOuter = PlanetRadius + ShroudTop;
+    float shroudB = dot(shroudCam, shroudDir);
+    float shroudDisc = shroudB * shroudB - (dot(shroudCam, shroudCam) - shroudOuter * shroudOuter);
+    float shroudPass = 1.0;
+    float shroudLight = 0.0;
+    if (shroudDisc > 0.0)
+    {
+        float shroudRoot = sqrt(shroudDisc);
+        float shroudFrom = max(-shroudB - shroudRoot, 0.0);
+        float shroudTo = min(-shroudB + shroudRoot, shroudEnd);
+        if (shroudTo > shroudFrom)
+        {
+            float shroudStep = (shroudTo - shroudFrom) / SHROUD_STEP_COUNT.0;
+            // where the view meets the bank, a little way into it
+            shroudFace = shroudCam + shroudDir * (shroudFrom + min(shroudTo - shroudFrom, ShroudTop) * 0.5);
+            float shroudJitter = frac(shroud.Hash(shroudDir * 4096.0) + View.StateFrameIndexMod8 * 0.618);
+            for (int shroudIndex = 0; shroudIndex < SHROUD_STEP_COUNT; shroudIndex++)
+            {
+                float3 shroudAt = shroudCam + shroudDir * (shroudFrom + (shroudIndex + shroudJitter) * shroudStep);
+                float shroudUp = saturate((length(shroudAt) - PlanetRadius) / max(ShroudTop, 1.0));
+                float shroudKnown = ShroudField.SampleLevel(ShroudFieldSampler, shroud.FieldUV(shroudAt), 0.0).r;
+                float shroudCover = shroud.Cover(shroudKnown, shroudAt / shroudSize + shroudFlow + normalize(shroudAt) * shroudChurn, ShroudSoftness,
+                    ShroudEdgeNoise, shroudUp * ShroudTaper, shroudNoise);
+                float shroudTaken = 1.0 - exp(-shroudCover * ShroudDensity * shroudStep);
+                shroudLight += shroudPass * shroudTaken * lerp(ShroudBaseShade, 1.0, shroudUp) * (1.0 + (shroudNoise - 0.5) * ShroudTone);
+                shroudPass *= 1.0 - shroudTaken;
+            }
+        }
+    }
+    shroudLight += shroudPass * shroudGround * shroudGroundShade;
+    shroudTotal = 1.0 - shroudPass * (1.0 - shroudGround);
+    float shroudDay = lerp(ShroudNightShare, 1.0, smoothstep(-0.2, 0.3, dot(normalize(shroudCam), normalize(SunDirection.xyz))));
+    float3 shroudLook = ShroudColor.rgb * (shroudLight / max(shroudTotal, 1.0e-4));
+    if (shroudTotal > 0.01)
+    {
+        // wisps: the ridges of a noise that another, flowing, bends
+        float shroudWispTime = Time * ShroudWispSpeed;
+        float3 shroudWispAt = shroudFace / max(ShroudWispSize, 1.0);
+        float3 shroudBend = float3(shroud.Value(shroudWispAt * 0.6 + float3(shroudWispTime, 0.0, 3.1)), shroud.Value(shroudWispAt * 0.6 + float3(7.7, -shroudWispTime, 0.0)),
+            shroud.Value(shroudWispAt * 0.6 + float3(0.0, 13.3, shroudWispTime))) - 0.5;
+        float shroudRidge = 1.0 - abs(shroud.Value(shroudWispAt + shroudBend * 1.8 + float3(0.4, 0.2, -0.3) * shroudWispTime) * 2.0 - 1.0);
+        // in patches that wander, so the bank is calm between them and no net of veins
+        float shroudStir = smoothstep(0.4, 0.75, shroud.Value(shroudWispAt * 0.3 - float3(0.2, 0.5, 0.1) * shroudWispTime + 41.0));
+        shroudRidge *= shroudRidge * shroudStir;
+        shroudLook *= 1.0 + shroudRidge * ShroudWisp;
+        // and a glow that swells and fades in its place, each at its own time
+        float3 shroudPlace = shroudFace / max(ShroudPulseSize, 1.0);
+        float3 shroudCell = floor(shroudPlace);
+        float shroudSeed = shroud.Hash(shroudCell + 0.5);
+        float3 shroudHeart = float3(shroud.Hash(shroudCell + 11.5), shroud.Hash(shroudCell + 23.5), shroud.Hash(shroudCell + 37.5)) * 0.4 + 0.3;
+        float shroudReach = saturate(1.0 - length(frac(shroudPlace) - shroudHeart) * 3.2);
+        float shroudBeat = frac(Time * ShroudPulseRate * (0.6 + 0.8 * shroudSeed) + shroudSeed * 7.3);
+        float shroudSwell = smoothstep(0.0, 0.2, shroudBeat) * (1.0 - smoothstep(0.25, 0.75, shroudBeat));
+        shroudLook += ShroudPulseColor.rgb * (shroudReach * shroudReach * shroudSwell * ShroudPulse * (0.6 + shroudRidge));
+    }
+    shroudColor = lerp(shroudColor, shroudLook * shroudDay, shroudTotal);
+}
+'''.replace('SHROUD_COMMON', SHROUD_COMMON_CODE).replace('SHROUD_STEP_COUNT', str(SHROUD_STEPS))
+SHROUD_PARAMETERS = ['ShroudColor', 'ShroudTop', 'ShroudDensity', 'ShroudTaper', 'ShroudBaseShade', 'ShroudNightShare', 'ShroudTone', 'ShroudSoftness',
+    'ShroudEdgeNoise', 'ShroudNoiseSize', 'ShroudDrift', 'ShroudChurn', 'ShroudWisp', 'ShroudWispSize', 'ShroudWispSpeed', 'ShroudPulse', 'ShroudPulseSize',
+    'ShroudPulseRate', 'ShroudPulseColor']
+for _name in SHROUD_PARAMETERS:
+    assert _name in SHROUD_CODE, _name
+
+# The shroud of the underground, in its fog (UNDERGROUND_FOG_CODE): what stands where the player has not explored is in the dark, ShroudDarkColor.
+# It changes fogResult
+SHROUD_DARK_CODE = r'''
+// where nothing is drawn, as AHexPlanet draws nothing of a chunk the shroud covers whole, the tops of the passages stand in for the ground
+float3 shroudAt = WorldPos;
+bool shroudNone = fogSpace;
+float shroudFloor = PlanetRadius + LevelHeight;
+float shroudFloorB = dot(CameraPos, fogDir);
+float shroudFloorDisc = shroudFloorB * shroudFloorB - (dot(CameraPos, CameraPos) - shroudFloor * shroudFloor);
+if (fogSpace && shroudFloorDisc > 0.0 && -shroudFloorB - sqrt(shroudFloorDisc) > 0.0)
+{
+    shroudAt = CameraPos + fogDir * (-shroudFloorB - sqrt(shroudFloorDisc));
+    shroudNone = false;
+}
+if (Shroud > 0.5 && !shroudNone)
+{
+    SHROUD_COMMON
+    float shroudKnown = ShroudField.SampleLevel(ShroudFieldSampler, shroud.FieldUV(shroudAt), 0.0).r;
+    float shroudNoise = 0.5;
+    float shroudCover = shroud.Cover(shroudKnown, shroudAt / max(ShroudNoiseSize, 1.0) + float3(0.3, -0.5, 0.8) * Time * ShroudDrift, ShroudSoftness,
+        ShroudEdgeNoise, 0.0, shroudNoise);
+    fogResult = lerp(fogResult, ShroudDarkColor.rgb, shroudCover);
+}
+'''.replace('SHROUD_COMMON', SHROUD_COMMON_CODE)
+SHROUD_DARK_PARAMETERS = ['ShroudDarkColor', 'ShroudSoftness', 'ShroudEdgeNoise', 'ShroudNoiseSize', 'ShroudDrift']
+for _name in SHROUD_DARK_PARAMETERS:
+    assert _name in SHROUD_DARK_CODE, _name
+
+# How much of what is drawn after the shroud shows at a point, for what adds its own light or lines over it: the grid lines of the sea, the shafts
+# of daylight over the exits and the motes. It shows only well inside what is explored, as it knows nothing of the noise of the edge
+SHROUD_SHOWN_CODE = r'''
+if (Shroud < 0.5)
+{
+    return 1.0;
+}
+float3 d = WorldPos / max(abs(WorldPos.x) + abs(WorldPos.y) + abs(WorldPos.z), 1.0e-6);
+float2 folded = (1.0 - abs(d.yx)) * float2(d.x >= 0.0 ? 1.0 : -1.0, d.y >= 0.0 ? 1.0 : -1.0);
+float2 uv = (d.z >= 0.0 ? d.xy : folded) * 0.5 + 0.5;
+return smoothstep(0.7, 0.92, ShroudField.SampleLevel(ShroudFieldSampler, uv, 0.0).r);
+'''
+
 CLOUD_CODE = r'''
 struct FCloudNoise
 {
@@ -1339,8 +1530,16 @@ float3 shadeColor = lerp(color, hazeColor, hazeAmount);
 float3 shadePos = WorldPos;
 bool shadeSpace = false;
 HERO_SHADE_SNIPPET
-color = shadeColor;
-OutOpacity = opacity;
+// and the fog of war over what the player has not explored (SHROUD_CODE), as the post process lays it over the land
+float3 shroudCam = CameraPos;
+float3 shroudDir = hazeDir;
+float shroudEnd = hazeEnd;
+float3 shroudPos = WorldPos;
+bool shroudSpace = false;
+float3 shroudColor = shadeColor;
+SHROUD_SNIPPET
+color = shroudColor;
+OutOpacity = lerp(opacity, 1.0, shroudTotal);
 HIDE_CODE
 return color;
 #undef TRI_NOISE
@@ -1413,7 +1612,7 @@ WATER_CODE = WATER_CODE.replace('HIDE_CODE', '''if (HideCount > 0.5)
     float hideBest = -2.0;
     float hideIndex = 99.0;
 ''' + ''.join('    if (dot(planetUp, HideCell%d.xyz) > hideBest) { hideBest = dot(planetUp, HideCell%d.xyz); hideIndex = %d.0; }\n' % (i, i, i) for i in range(HIDE_CELLS)) + '''    OutOpacity = hideIndex < HideCount ? 0.0 : OutOpacity;
-}''').replace('HAZE_SNIPPET', HAZE_CODE).replace('HERO_SHADE_SNIPPET', HERO_SHADE_CODE)
+}''').replace('HAZE_SNIPPET', HAZE_CODE).replace('HERO_SHADE_SNIPPET', HERO_SHADE_CODE).replace('SHROUD_SNIPPET', SHROUD_CODE)
 
 # the mask of M_HexPlanet_Cut, which AHexPlanet uses while only the triangles of the cells around the cursor are drawn, so the rest keeps its normal render:
 # 0 in the first HideCount of the cells, found by the nearest center as the water does. M_HexPlanet is opaque and ignores it
@@ -1653,6 +1852,32 @@ def add_cloud_parameters(library, material, y, extra=()):
     # PlanetRadius comes from AHexPlanet, and its default is only about the size of the planet
     return [('PlanetRadius', add_scalar(library, material, 'PlanetRadius', 11503.0, y), '')] + add_config_parameters(
         library, material, unreal.HexPlanetCloudConfig, CLOUD_PARAMETERS + list(extra), y + 50)
+
+
+def add_shroud_field(library, material, y):
+    # The inputs every shroud takes: whether there is one, and the field of what is explored, which AHexPlanet::UpdateShroud gives
+    return [('Shroud', add_scalar(library, material, 'Shroud', 0.0, y), ''),
+        ('ShroudField', add_texture(library, material, DEFAULT_MARKS, 'ShroudField', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, y + 25), '')]
+
+
+def add_shroud_shown(library, material, y):
+    # A node that gives how much of what is drawn after the shroud shows at its point (SHROUD_SHOWN_CODE)
+    connections = [('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1000, y + 50), '')
+        ] + add_shroud_field(library, material, y + 100)
+    return add_custom(library, material, SHROUD_SHOWN_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT1, connections, y)
+
+
+def multiply(library, material, first, second, y):
+    node = library.create_material_expression(material, unreal.MaterialExpressionMultiply, 300, y)
+    library.connect_material_expressions(first, '', node, 'A')
+    library.connect_material_expressions(second, '', node, 'B')
+    return node
+
+
+def add_shroud_parameters(library, material, y):
+    # The inputs of SHROUD_CODE besides the view: the field, and the Shroud values of DA_HexPlanet, which AHexPlanet::SetShroudParameters gives
+    # by name, as these materials take the configs of the air and the water
+    return add_shroud_field(library, material, y) + add_config_parameters(library, material, unreal.HexPlanetConfig, SHROUD_PARAMETERS, y + 50)
 
 
 def add_hero_shade_parameters(library, material, y):
@@ -2472,7 +2697,7 @@ def build_water():
         ('HexNoise', add_texture(library, material, NOISE, 'HexNoise', unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_GRAYSCALE, 710), ''),
         ('Normals', add_texture(library, material, NORMALS, 'Normals', unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL, 800), ''),
         ('HideCount', add_scalar(library, material, 'HideCount', 0.0, 900), '')] + add_cloud_parameters(library, material, -700, SHADOW_PARAMETERS + HAZE_PARAMETERS) + \
-        add_hero_shade_parameters(library, material, 3500)
+        add_hero_shade_parameters(library, material, 3500) + add_shroud_parameters(library, material, 4200)
     for index in range(HIDE_CELLS):
         connections.append(('HideCell%d' % index, add_vector(library, material, 'HideCell%d' % index, unreal.LinearColor(0.0, 0.0, 0.0, 0.0), 950 + index * 50), ''))
     # the mouths of rivers near the camera (PLUME_CODE), whose alpha says whether they are given
@@ -2527,6 +2752,8 @@ def build_water_grid():
         hide_connections.append(('HideCell%d' % index, add_vector(library, material, 'HideCell%d' % index, unreal.LinearColor(0.0, 0.0, 0.0, 0.0), 800 + index * 50), ''))
     visible = add_custom(library, material, CUT_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT1, hide_connections, 700)
 
+    # and no line shows over the fog of war
+    visible = multiply(library, material, visible, add_shroud_shown(library, material, 3200), 3200)
     connections = [('U', u, ''), ('UDdx', u_ddx, ''), ('UDdy', u_ddy, ''), ('Visible', visible, '')] + add_config_parameters(
         library, material, unreal.HexPlanetConfig, ['GridWidth', 'GridMinPixels', 'GridMaxPixels', 'GridOpacity', 'WaterGridDarkness'], 100)
     connections += add_mark_inputs(library, material, 2500)
@@ -2644,8 +2871,16 @@ float3 shadeColor = lerp(SceneColor.rgb, hazeColor, hazeAmount);
 float3 shadePos = WorldPos;
 bool shadeSpace = SceneDepth > 1e6;
 HERO_SHADE_CODE
-return shadeColor;
-'''.replace('HAZE_CODE', HAZE_CODE).replace('HERO_SHADE_CODE', HERO_SHADE_CODE)
+// and the fog of war over what the player has not explored
+float3 shroudCam = hazeCam;
+float3 shroudDir = hazeDir;
+float shroudEnd = hazeEnd;
+float3 shroudPos = WorldPos;
+bool shroudSpace = shadeSpace;
+float3 shroudColor = shadeColor;
+SHROUD_CODE
+return shroudColor;
+'''.replace('HAZE_CODE', HAZE_CODE).replace('HERO_SHADE_CODE', HERO_SHADE_CODE).replace('SHROUD_CODE', SHROUD_CODE)
 
 
 def build_haze():
@@ -2665,8 +2900,10 @@ def build_haze():
         ('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1000, -200), ''),
         ('CameraVector', library.create_material_expression(material, unreal.MaterialExpressionCameraVectorWS, -1000, -150), ''),
         ('SunDirection', add_sun(library, material, -100), ''),
+        ('Time', library.create_material_expression(material, unreal.MaterialExpressionTime, -1000, -75), ''),
         ('PlanetRadius', add_scalar(library, material, 'PlanetRadius', 0.0, -50), '')
-        ] + add_config_parameters(library, material, unreal.HexPlanetCloudConfig, HAZE_PARAMETERS, 0) + add_hero_shade_parameters(library, material, 500)
+        ] + add_config_parameters(library, material, unreal.HexPlanetCloudConfig, HAZE_PARAMETERS, 0) + add_hero_shade_parameters(library, material, 500) + \
+        add_shroud_parameters(library, material, 1200)
     custom = add_custom(library, material, HAZE_POST_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, connections, 0)
     library.connect_material_property(custom, '', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
 
@@ -3613,8 +3850,10 @@ if (mistDisc > 0.0 && PlanetRadius > 0.0)
     }
 }
 float3 fogColor = lerp(SceneColor.rgb, FogMistColor.rgb, mistAmount);
-return lerp(fogColor, fogSpace ? FogSpaceColor.rgb : FogColor.rgb, fogSpace ? 1.0 : darkAmount);
-'''
+float3 fogResult = lerp(fogColor, fogSpace ? FogSpaceColor.rgb : FogColor.rgb, fogSpace ? 1.0 : darkAmount);
+SHROUD_DARK_CODE
+return fogResult;
+'''.replace('SHROUD_DARK_CODE', SHROUD_DARK_CODE)
 UNDERGROUND_FOG_PARAMETERS = ['LevelHeight', 'FogColor', 'FogStart', 'FogDensity', 'FogMax', 'FogSpaceColor', 'FogMistColor', 'FogMistTop', 'FogMistDepth',
     'FogMistDensity', 'FogMistMax', 'FogFocusStart', 'FogFocusEnd', 'FogFocusMax']
 UNDERGROUND_FOG_CODE = UNDERGROUND_FOG_CODE.replace('FOG_LIGHTS', hero_lights('fogLights', 'FogFocus')).replace('HERO_LIGHT_COUNT', str(HERO_LIGHTS))
@@ -3640,8 +3879,10 @@ def build_underground_fog():
         ('CameraVector', library.create_material_expression(material, unreal.MaterialExpressionCameraVectorWS, -1000, -150), ''),
         ('PlanetRadius', add_scalar(library, material, 'PlanetRadius', 0.0, -50), ''),
         # where the lights of the heroes stand and how far they reach, which AHexPlanet::UpdateHeroLight gives every frame
-        ('FogFocusOn', add_scalar(library, material, 'FogFocusOn', 0.0, -100), '')
-        ] + add_hero_lights(library, material, 'FogFocus', -350) + add_config_parameters(library, material, unreal.HexPlanetConfig, UNDERGROUND_FOG_PARAMETERS, 0)
+        ('FogFocusOn', add_scalar(library, material, 'FogFocusOn', 0.0, -100), ''),
+        ('Time', library.create_material_expression(material, unreal.MaterialExpressionTime, -1000, -125), '')
+        ] + add_hero_lights(library, material, 'FogFocus', -350) + add_config_parameters(library, material, unreal.HexPlanetConfig, UNDERGROUND_FOG_PARAMETERS, 0) + \
+        add_shroud_field(library, material, 1500) + add_config_parameters(library, material, unreal.HexPlanetConfig, SHROUD_DARK_PARAMETERS, 1600)
     custom = add_custom(library, material, UNDERGROUND_FOG_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, connections, 0)
     library.connect_material_property(custom, '', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
     library.recompile_material(material)
@@ -3873,7 +4114,8 @@ def build_marker_materials():
         ] + add_config_parameters(library, shaft, unreal.HexPlanetConfig, ['ShaftBrightness', 'ShaftFlicker', 'ShaftFlickerSpeed', 'ShaftFlickerRise',
             'ShaftFacingPower', 'ShaftNearFadeStart', 'ShaftNearFade', 'ShaftColor', 'ShaftNetworkTint'], 300)
     custom = add_custom(library, shaft, SHAFT_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, connections, 0)
-    library.connect_material_property(custom, '', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    # no shaft shows over the fog of war
+    library.connect_material_property(multiply(library, shaft, custom, add_shroud_shown(library, shaft, 1200), 0), '', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
     library.recompile_material(shaft)
     assets.save_asset(SHAFT_MATERIAL)
 
@@ -4544,7 +4786,8 @@ def build_mote_material():
             ] + add_hero_lights(library, material, 'HeroLight', y + 2000) + add_config_parameters(library, material, unreal.HexPlanetConfig, MOTE_PARAMETERS, y + 850)
 
     custom = add_custom(library, material, MOTE_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, inputs(0, True), 0)
-    library.connect_material_property(custom, '', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    # no mote shows over the fog of war
+    library.connect_material_property(multiply(library, material, custom, add_shroud_shown(library, material, 6000), 0), '', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
     offset = add_custom(library, material, MOTE_OFFSET_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, inputs(3000, False), 3000)
     library.connect_material_property(offset, '', unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
     library.recompile_material(material)
@@ -4596,6 +4839,18 @@ def main():
         return
     # with lights only the materials that take the lights of the heroes: the haze, the water and the clouds with the shade of the surface, and
     # the fog and the motes of the underground
+    # with shroud only the materials that draw the fog of war: the haze, the water and its grid, the fog and the motes of the underground and
+    # the markers of the entrances, for the shafts over the exits
+    if 'shroud' in sys.argv[1:]:
+        build_parameter_collection()
+        build_water()
+        build_water_grid()
+        build_haze()
+        build_underground_fog()
+        build_mote_material()
+        build_marker_materials()
+        unreal.log('PLANET shroud assets created')
+        return
     if 'lights' in sys.argv[1:]:
         build_water()
         build_clouds()

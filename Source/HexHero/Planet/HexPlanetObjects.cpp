@@ -986,7 +986,27 @@ void UHexPlanetObjects::SetShown(bool bInObjects, bool bInRims)
 	{
 		if (Each.Value)
 		{
-			Each.Value->SetVisibility(IsSlotShown(int32(Each.Key % 65536)));
+			Each.Value->SetVisibility(IsSlotShown(int32(Each.Key % 65536)) && IsChunkShown(int32(Each.Key / 65536)));
+		}
+	}
+}
+
+void UHexPlanetObjects::SetHiddenChunks(const TBitArray<>& InHidden)
+{
+	if (InHidden == HiddenChunks)
+	{
+		return;
+	}
+	HiddenChunks = InHidden;
+	for (const TPair<int64, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>>& Each : Components)
+	{
+		if (Each.Value)
+		{
+			const bool bShown = IsSlotShown(int32(Each.Key % 65536)) && IsChunkShown(int32(Each.Key / 65536));
+			if (Each.Value->IsVisible() != bShown)
+			{
+				Each.Value->SetVisibility(bShown);
+			}
 		}
 	}
 }
@@ -2231,7 +2251,7 @@ void UHexPlanetObjects::ApplyChunk(int32 Chunk, const TArray<FInstance>& Instanc
 			Component->bAffectDistanceFieldLighting = false;
 			Component->SetCullDistances(0, int32(Set.CullDistance));
 			// hidden with the rest while hex.PlanetObjects hides them, a rim also while hex.PlanetRims does
-			Component->SetVisibility(IsSlotShown(Slot));
+			Component->SetVisibility(IsSlotShown(Slot) && IsChunkShown(Chunk));
 			Component->RegisterComponent();
 			Components.Add(GetComponentKey(Chunk, Slot), Component);
 		}

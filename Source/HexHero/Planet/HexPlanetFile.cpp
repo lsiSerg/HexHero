@@ -1055,13 +1055,26 @@ namespace
 	}
 }
 
-FString HexPlanetFile::EncodeHeroes(TConstArrayView<FHexHeroLine> Heroes)
+FString HexPlanetFile::EncodeHeroes(TConstArrayView<FHexHeroLine> Heroes, TConstArrayView<int32> AiPlayers)
 {
 	TArray<FHexHeroLine> Sorted(Heroes);
 	Sorted.StableSort([](const FHexHeroLine& A, const FHexHeroLine& B) { return A.Id < B.Id; });
 
+	// the players the game moves by itself, a line that is there only when there are any
+	FString Text = TEXT("{\n\t\"version\": 1,");
+	if (!AiPlayers.IsEmpty())
+	{
+		TArray<int32> Players(AiPlayers);
+		Players.Sort();
+		Text += TEXT("\n\t\"ai\": [");
+		for (int32 Index = 0; Index < Players.Num(); ++Index)
+		{
+			Text += FString::Printf(TEXT("%s%d"), Index == 0 ? TEXT("") : TEXT(", "), Players[Index]);
+		}
+		Text += TEXT("],");
+	}
 	// a line per hero, so an edit changes only the lines of its heroes and Git merges them
-	FString Text = TEXT("{\n\t\"version\": 1,\n\t\"heroes\": [");
+	Text += TEXT("\n\t\"heroes\": [");
 	for (int32 Index = 0; Index < Sorted.Num(); ++Index)
 	{
 		const FHexHeroLine& Hero = Sorted[Index];
@@ -1072,7 +1085,7 @@ FString HexPlanetFile::EncodeHeroes(TConstArrayView<FHexHeroLine> Heroes)
 	return Text;
 }
 
-bool HexPlanetFile::DecodeHeroes(const FString& Text, TArray<FHexHeroLine>& OutHeroes, FString& OutError)
+bool HexPlanetFile::DecodeHeroes(const FString& Text, TArray<FHexHeroLine>& OutHeroes, FString& OutError, TArray<int32>* OutAiPlayers)
 {
 	FHexHeroesFile File;
 	if (!FJsonObjectConverter::JsonObjectStringToUStruct(Text, &File))
@@ -1081,6 +1094,11 @@ bool HexPlanetFile::DecodeHeroes(const FString& Text, TArray<FHexHeroLine>& OutH
 		return false;
 	}
 	OutHeroes = MoveTemp(File.Heroes);
+	if (OutAiPlayers)
+	{
+		*OutAiPlayers = MoveTemp(File.Ai);
+		OutAiPlayers->Sort();
+	}
 	return true;
 }
 
@@ -1089,7 +1107,7 @@ bool HexPlanetFile::HasHeroes(const FString& PlanetFolder)
 	return !PlanetFolder.IsEmpty() && IFileManager::Get().FileExists(*GetFilePath(PlanetFolder, HeroesFile));
 }
 
-bool HexPlanetFile::LoadHeroes(const FString& PlanetFolder, TArray<FHexHeroLine>& OutHeroes, FString& OutError)
+bool HexPlanetFile::LoadHeroes(const FString& PlanetFolder, TArray<FHexHeroLine>& OutHeroes, FString& OutError, TArray<int32>* OutAiPlayers)
 {
 	const FString FilePath = GetFilePath(PlanetFolder, HeroesFile);
 	FString Text;
@@ -1098,7 +1116,7 @@ bool HexPlanetFile::LoadHeroes(const FString& PlanetFolder, TArray<FHexHeroLine>
 		OutError = FString::Printf(TEXT("could not read %s"), *FilePath);
 		return false;
 	}
-	if (!DecodeHeroes(Text, OutHeroes, OutError))
+	if (!DecodeHeroes(Text, OutHeroes, OutError, OutAiPlayers))
 	{
 		OutError = FString::Printf(TEXT("%s: %s"), *FilePath, *OutError);
 		return false;
@@ -1106,7 +1124,7 @@ bool HexPlanetFile::LoadHeroes(const FString& PlanetFolder, TArray<FHexHeroLine>
 	return true;
 }
 
-bool HexPlanetFile::SaveHeroes(const FString& PlanetFolder, TConstArrayView<FHexHeroLine> Heroes, FString& OutError)
+bool HexPlanetFile::SaveHeroes(const FString& PlanetFolder, TConstArrayView<FHexHeroLine> Heroes, FString& OutError, TConstArrayView<int32> AiPlayers)
 {
 	const FString FilePath = GetFilePath(PlanetFolder, HeroesFile);
 	if (PlanetFolder.IsEmpty())
@@ -1123,7 +1141,7 @@ bool HexPlanetFile::SaveHeroes(const FString& PlanetFolder, TConstArrayView<FHex
 		}
 		return true;
 	}
-	if (!FFileHelper::SaveStringToFile(EncodeHeroes(Heroes), *FilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+	if (!FFileHelper::SaveStringToFile(EncodeHeroes(Heroes, AiPlayers), *FilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
 	{
 		OutError = FString::Printf(TEXT("could not write %s"), *FilePath);
 		return false;

@@ -45,6 +45,9 @@ public:
 	 *  (MoteDarkShare, MoteLightTint); bOn is false under the forced light, when they are not darkened at all */
 	void SetHeroLights(TConstArrayView<FLinearColor> Spheres, bool bOn);
 
+	/** Gives the motes and the spores the fog of war of their layer (AHexPlanet::ShroudField), under which they do not show */
+	void SetShroud(UTexture* Field, bool bOn);
+
 	/** Returns how many spores stand now, for the log */
 	int32 GetSporeCount() const;
 

@@ -12,7 +12,9 @@
 class AHexPlanet;
 class UHexHeroConfig;
 class UHexSites;
+class UHexShroud;
 class UInstancedStaticMeshComponent;
+class UProceduralMeshComponent;
 class UMaterialInstanceDynamic;
 class UStaticMeshComponent;
 
@@ -58,6 +60,17 @@ struct FHexHero
 	bool bWalking = false;
 	int32 FromCell = INDEX_NONE;
 	float StepAlpha = 0.0f;
+
+	/** How fast it walks now, in cells a second: it sets out and stops smoothly (WalkStartTime, WalkStopTime) */
+	float Speed = 0.0f;
+
+	/** For a hero of a player the game moves: seconds until it looks for where to go again, and whether it found nothing more to do today */
+	float AiWait = 0.0f;
+	bool bAiDone = false;
+
+	/** Whether the person who watches saw it when the game last looked, on the turn of its player: where that changes the camera stays a
+	 *  moment (UHexHeroes::NoteSeen) */
+	bool bWasSeen = true;
 
 	/** It goes through the entrance or exit its way ends on */
 	bool bEnterAtEnd = false;
@@ -126,6 +139,32 @@ public:
 
 	/** Returns the mines and piles of the planet and what the players gathered */
 	UHexSites* GetSites() const { return Sites; }
+
+	/** What each player explored (the fog of war) */
+	UHexShroud* GetShroud() const { return Shroud; }
+
+	/** Whether the fog of war hides what is not explored: while the game is played, with bShroud of the config, unless hex.PlanetShroud is 0 */
+	bool IsShroudOn() const;
+
+	/** The player whose fog of war shows while the game is played: the person whose turn it is, or was last */
+	int32 GetShroudPlayer() const;
+
+	/** The players move in turns, one after the other, as the developer decided on 2026-11-11: the player whose turn it is, whether a person
+	 *  moves it, and whether a person may choose a hero now, which it may only of its own on its turn */
+	int32 GetTurnPlayer() const { return TurnPlayer; }
+	bool IsPersonTurn() const { return bPlaying && !IsPlayerAi(TurnPlayer); }
+	bool CanChoose(int32 Id) const;
+
+	/** Whether the person who watches sees a hero: on the layer shown, on ground the fog of war does not hide, or on a step to or from it */
+	bool IsSeen(const FHexHero& Hero) const;
+
+	/** Whether the game moves the heroes of a player by itself, as the Heroes tab of the palette sets and heroes.json keeps: such a hero walks
+	 *  to open the map (MoveAi), and a person can choose it to watch but not send it */
+	bool IsPlayerAi(int32 Player) const { return AiPlayers.Contains(Player); }
+	void SetPlayerAi(int32 Player, bool bAi);
+
+	/** Whether the fog of war hides a cell from a player */
+	bool IsHidden(int32 Player, EHexPlanetLayer Layer, int32 Cell) const;
 
 	const TArray<FHexHero>& GetHeroes() const { return Heroes; }
 
@@ -282,7 +321,12 @@ private:
 	/** The meshes of a layer: the ring under the hero chosen and the marks of the way shown */
 	struct FLayerMarks
 	{
-		TWeakObjectPtr<UStaticMeshComponent> Ring;
+		TWeakObjectPtr<UProceduralMeshComponent> Ring;
+		/** Where the ring was laid, at what size, of how many pieces and on which ground, so it is laid again only when one changed */
+		FVector3d RingAt = FVector3d::ZeroVector;
+		float RingScale = -1.0f;
+		int32 RingSegments = 0;
+		int32 RingGround = -1;
 		TWeakObjectPtr<UInstancedStaticMeshComponent> Dots;
 		TWeakObjectPtr<UInstancedStaticMeshComponent> End;
 		TWeakObjectPtr<UInstancedStaticMeshComponent> Lines;
@@ -296,6 +340,9 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UHexSites> Sites;
+
+	UPROPERTY()
+	TObjectPtr<UHexShroud> Shroud;
 
 	/** The body of each hero by its Id, a component of the planet of its layer, and its material */
 	UPROPERTY(Transient)
@@ -321,6 +368,28 @@ private:
 	int32 Day = 1;
 	int32 NextId = 1;
 	bool bEdited = false;
+
+	/** Whose turn it is, whose fog of war shows, and the hero of a player the game moves that moves now, 0 for none yet */
+	int32 TurnPlayer = 0;
+	int32 ViewPlayer = 0;
+	int32 AiHeroId = 0;
+
+	/** Seconds the game waits before a player it moves begins, while no person plays at all, so the days do not race */
+	float AiTurnWait = 0.0f;
+
+	/** While above 0 the camera stays where a hero of the player the game moves went into the fog of war or is about to come out of it
+	 *  (AiFogHoldTime), on that layer, and that hero waits */
+	float WatchHold = 0.0f;
+	int32 WatchHeroId = 0;
+	EHexPlanetLayer WatchLayer = EHexPlanetLayer::Surface;
+	FVector3d WatchDirection = FVector3d::ZeroVector;
+
+	/** The players the game moves by itself, sorted, and those heroes.json holds */
+	TArray<int32> AiPlayers;
+	TArray<int32> SavedAiPlayers;
+
+	/** Counts the changes of the ground of any layer, which the ring lies on */
+	int32 GroundRevision = 0;
 	bool bPlaying = false;
 
 	/** The lines heroes.json holds, by which a step of Undo back to them leaves nothing to save */
@@ -421,6 +490,42 @@ private:
 	/** Moves the ring under the hero chosen and hides those of the other layer */
 	void UpdateRing();
 
+	/** Lays the ring of a layer on the ground around a hero */
+	void BuildRing(const AHexPlanet& Planet, const FHexHero& Hero, FLayerMarks& Each);
+
+	/** Whether the heroes or who moves them differ from what heroes.json holds */
+	void UpdateEdited();
+
+	/** Looks whether the person who watches still sees a hero of the player the game moves, or sees it again: where that changed the camera
+	 *  stays for AiFogHoldTime, there where it went into the fog or where it is about to come out. Returns true while that hero waits for it */
+	bool NoteSeen(FHexHero& Hero);
+
+	/** Takes the steps of a hero the person who watches does not see at once, until its way ends or a step of it shows */
+	void WalkUnseen(FHexHero& Hero);
+
+	/** Returns how many steps of its way a hero can still pay for after the one it takes */
+	int32 CountStepsAhead(const FHexHero& Hero) const;
+
+	/** Moves the heroes of a player the game moves on its turn, one after the other, and ends its turn when none has more to do */
+	void UpdateAi(float DeltaTime);
+
+	/** The players that have heroes, in the order they move */
+	TArray<int32> GetActivePlayers() const;
+
+	/** Begins the turn of a player: a person gets a hero of its own chosen and its fog shown */
+	void BeginTurn(int32 Player);
+
+	/** Begins the next day: every hero has its points again and the mines give */
+	void BeginDay();
+
+	/** Whether the person who watches sees a cell of a layer, and the step a hero takes */
+	bool IsCellSeen(EHexPlanetLayer Layer, int32 Cell) const;
+	bool IsStepSeen(const FHexHero& Hero) const;
+
+	/** Sends a hero the game moves to the nearest cell from which it sees ground its player has not explored, else through an entrance whose
+	 *  other side it has not seen. Returns false when it found nowhere to go */
+	bool MoveAi(int32 Id);
+
 	/** Shows the way of the hero chosen to the cell it is pointed to, or the rest of the way it walks: a line through a dot on each cell and
 	 *  a target on the last, with the numbers of the days; again only when anything it hangs on changed */
 	void UpdatePath();
@@ -446,6 +551,12 @@ private:
 
 	/** Returns the up of the ground around the middle of a cell, from three points of it Reach away, so a flat mark lies on a slope */
 	FVector3d FindGroundUp(const AHexPlanet& Planet, int32 Cell, double Reach);
+
+	/** Opens to the player of a hero the cells it sees from where it stands (SightRadius), underground only the passages */
+	void Explore(const FHexHero& Hero);
+
+	/** Opens what every hero sees from where it stands */
+	void ExploreAll();
 
 	/** Chooses the next hero that can move once the pause after the one chosen ran out of steps is over */
 	void UpdatePendingNext(float DeltaTime);

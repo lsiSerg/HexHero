@@ -114,6 +114,18 @@ public:
 	UPROPERTY(EditAnywhere, Category="Movement", meta=(ClampMin=0.5))
 	float WalkSpeed = 4.5f;
 
+	/** A hero sets out and stops smoothly, as the developer asked on 2026-11-11: seconds in which it reaches WalkSpeed from standing, seconds
+	 *  in which it brakes from it to a stop where its way or its points end, and the share of WalkSpeed it never walks slower than, so it
+	 *  gets there */
+	UPROPERTY(EditAnywhere, Category="Movement", meta=(ClampMin=0, ClampMax=5))
+	float WalkStartTime = 0.45f;
+
+	UPROPERTY(EditAnywhere, Category="Movement", meta=(ClampMin=0, ClampMax=5))
+	float WalkStopTime = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Movement", meta=(ClampMin=0.02, ClampMax=1))
+	float WalkMinSpeedShare = 0.15f;
+
 	/** How far a hero turns towards where it walks a second, in degrees */
 	UPROPERTY(EditAnywhere, Category="Movement", meta=(ClampMin=30))
 	float TurnSpeed = 540.0f;
@@ -138,6 +150,26 @@ public:
 	 *  player sees that it used its movement and where it stopped, as the developer asked on 2026-11-11 */
 	UPROPERTY(EditAnywhere, Category="Movement", meta=(ClampMin=0, ClampMax=10))
 	float NextHeroDelay = 1.2f;
+
+	/** The fog of war, as the developer decided on 2026-11-11: each player sees only what its heroes explored, on each layer, and what was
+	 *  explored once stays seen, as in Heroes III. A hero explores the cells up to SightRadius steps around the one it stands on, underground
+	 *  only the passages among them, as nobody walks the voids. A hero finds no way over cells its player has not explored */
+	UPROPERTY(EditAnywhere, Category="Rules")
+	bool bShroud = true;
+
+	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=1, ClampMax=30))
+	int32 SightRadius = 5;
+
+	/** A player the game moves by itself (the Heroes tab of the palette, kept in heroes.json) sends its heroes to open the map, each to the
+	 *  nearest cell from which it sees ground its player has not explored: seconds a hero of such a player stands before it sets out again */
+	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=0, ClampMax=10))
+	float AiThinkTime = 0.5f;
+
+	/** Seconds the camera stays where a hero of such a player went into the fog of war, before the game goes on with it or the next, and
+	 *  seconds it stays where one is about to come out of the fog, before it does, so the person sees where it went and where it comes from,
+	 *  as the developer asked on 2026-11-11; the hero waits meanwhile */
+	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=0, ClampMax=10))
+	float AiFogHoldTime = 0.8f;
 
 	/** Days of a week; nothing happens by the week yet, the panel of the heroes shows it */
 	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=1))
@@ -181,7 +213,7 @@ public:
 
 	/** Scale of the mesh of a hero */
 	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=0.1))
-	float HeroScale = 1.8f;
+	float HeroScale = 2.5f;
 
 	/** A hero, its ring and the marks of its way grow as the camera leaves them, so they still show from afar: at their own size up to FarStart
 	 *  from the camera, then larger with the distance, up to FarScale times */
@@ -205,13 +237,17 @@ public:
 	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=1))
 	float PickHeight = 40.0f;
 
-	/** The ring on the ground under the hero chosen, a flat mesh of radius 1 scaled to RingRadius, which glows in the color of its player
-	 *  and breathes by RingPulse at RingPulseSpeed */
-	UPROPERTY(EditAnywhere, Category="Look|Marks")
-	TSoftObjectPtr<UStaticMesh> RingMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Heroes/SM_PlanetHeroRing.SM_PlanetHeroRing")));
-
+	/** The ring on the ground under the hero chosen, RingRadius wide, which glows in the color of its player and breathes by RingPulse at
+	 *  RingPulseSpeed. It is a band of RingSegments pieces laid on the ground under it, so it follows the relief and no hill cuts it, as the
+	 *  developer found a flat ring did on 2026-11-11, drawn RingDepthBias nearer the camera */
 	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=1))
-	float RingRadius = 62.0f;
+	float RingRadius = 74.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=8, ClampMax=256))
+	int32 RingSegments = 64;
+
+	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=0))
+	float RingDepthBias = 4.0f;
 
 	/** The marks of the way of the hero chosen to the cell it is pointed to, a flat mesh of radius 1: a dot of PathDotRadius on each cell and a
 	 *  larger mark of PathEndRadius on the last, lying on the ground there, PathLift above it, in PathColor as far as the hero gets today,

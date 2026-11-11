@@ -1,4 +1,4 @@
-"""Generates the meshes of the heroes of the hex planet (UHexHeroes): a rider with a banner, the ring under the hero chosen and the marks of its way.
+"""Generates the meshes of the heroes of the hex planet (UHexHeroes): a rider with a banner and the marks of its way.
 
 Run with any Python 3 without packages, for example the one in the engine:
     <Engine>/Engine/Binaries/ThirdParty/Python3/Win64/python.exe generate_planet_heroes.py
@@ -111,13 +111,6 @@ def add_rings(mesh, rows, segments):
             mesh.sheet(inner[following], outer[step], outer[following])
 
 
-def ring():
-    """The ring under the hero chosen: a bright band with a soft dark rim on both sides"""
-    mesh = Mesh()
-    add_rings(mesh, [(0.7, 0.0, 0.0), (0.77, 0.0, 0.55), (0.82, 1.0, 1.0), (0.94, 1.0, 1.0), (0.985, 0.0, 0.6), (1.06, 0.0, 0.0)], 56)
-    return mesh
-
-
 def dot():
     """A step of a way: a bright disc with a dark rim"""
     mesh = Mesh()
@@ -146,7 +139,8 @@ def line():
     return mesh
 
 
-MESHES = [('Hero', hero, 'hero'), ('HeroRing', ring, 'mark'), ('HeroDot', dot, 'path'), ('HeroTarget', target, 'path'), ('HeroLine', line, 'path')]
+# the ring under the hero chosen is no mesh of these: UHexHeroes::BuildRing lays it on the ground around the hero
+MESHES = [('Hero', hero, 'hero'), ('HeroDot', dot, 'path'), ('HeroTarget', target, 'path'), ('HeroLine', line, 'path')]
 
 
 def main():

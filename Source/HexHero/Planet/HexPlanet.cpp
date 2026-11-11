@@ -55,6 +55,7 @@
 #include "Async/ParallelFor.h"
 #include "HexHeroConfig.h"
 #include "HexHeroes.h"
+#include "HexShroud.h"
 #include "HexPlanetFlocks.h"
 #include "HexPlanetMeshComponent.h"
 #include "HexPlanetMotes.h"
@@ -2475,6 +2476,8 @@ void AHexPlanet::Tick(float DeltaTime)
 	{
 		UpdateHeroShade(LayerLights);
 	}
+	// what the player has not explored lies under the fog of war
+	UpdateShroud(DeltaTime);
 	// the forced light of L, by the key or the console, lights the sky of the layer shown; the sun is the camera's, and the materials take it from
 	// ForcedLight of MPC_HexPlanet below
 	if (bAppliedForcedLight != IsLightForced())
@@ -2712,20 +2715,21 @@ void AHexPlanet::UpdateChunkLod(const FVector& CameraLocation)
 		// yet draws its coarse mesh alone
 		const double Reach = Reaches[Chunk];
 		const double Distance = Distances[Chunk];
-		const uint8 State = ChunkPieces[Chunk] != 2 ? 2 : Distance + Reach < Near ? 0 : Distance - Reach > Far ? 2 : 1;
+		// and neither, 3, where the fog of war covers all of the chunk
+		const uint8 State = IsChunkShrouded(Chunk) ? 3 : ChunkPieces[Chunk] != 2 ? 2 : Distance + Reach < Near ? 0 : Distance - Reach > Far ? 2 : 1;
 
-		if (State == ChunkLodStates[Chunk] && SurfaceChunks[Chunk]->IsVisible() == (State != 2))
+		if (State == ChunkLodStates[Chunk] && SurfaceChunks[Chunk]->IsVisible() == (State < 2))
 		{
 			continue;
 		}
 		ChunkLodStates[Chunk] = State;
 
-		SurfaceChunks[Chunk]->SetVisibility(State != 2);
-		CoarseChunks[Chunk]->SetVisibility(State != 0);
+		SurfaceChunks[Chunk]->SetVisibility(State < 2);
+		CoarseChunks[Chunk]->SetVisibility(State == 1 || State == 2);
 		if (WireChunks.IsValidIndex(Chunk) && WireCoarseChunks.IsValidIndex(Chunk))
 		{
-			WireChunks[Chunk]->SetVisibility(State != 2);
-			WireCoarseChunks[Chunk]->SetVisibility(State != 0);
+			WireChunks[Chunk]->SetVisibility(State < 2);
+			WireCoarseChunks[Chunk]->SetVisibility(State == 1 || State == 2);
 		}
 
 		for (int32 Part = 0; Part < 2; ++Part)
@@ -6341,6 +6345,287 @@ void AHexPlanet::SetHeroShadeParameters(UMaterialInstanceDynamic* Target) const
 	}
 }
 
+void AHexPlanet::UpdateShroud(float DeltaTime)
+{
+	const UHexHeroes* AllHeroes = GetHeroes();
+	const UHexShroud* Shroud = AllHeroes ? AllHeroes->GetShroud() : nullptr;
+	const int32 NumCells = Grid.GetCells().Num();
+	if (!Shroud || !AllHeroes->IsShroudOn() || !bBuilt || NumCells == 0)
+	{
+		if (bShroudOn)
+		{
+			bShroudOn = false;
+			ShroudedChunks.Reset();
+			if (Objects)
+			{
+				Objects->SetHiddenChunks(ShroudedChunks);
+			}
+			ApplyShroud();
+			UE_LOG(LogHexHero, Log, TEXT("Planet: the fog of war of the %s lifts"), GetPlanetLayerName(PlanetLayer));
+		}
+		return;
+	}
+
+	// a fog that was not shown, or that of another player, stands at once; what a hero explores opens over ShroudRevealTime
+	const int32 Player = AllHeroes->GetShroudPlayer();
+	const bool bAtOnce = !bShroudOn || Player != ShroudPlayer || ShroudShown.Num() != NumCells;
+	const bool bTargetChanged = Shroud->GetRevision() != ShroudRevision;
+	if (bAtOnce || bTargetChanged)
+	{
+		ShroudPlayer = Player;
+		ShroudRevision = Shroud->GetRevision();
+		ShroudTarget.Init(0.0f, NumCells);
+		const TBitArray<>* Explored = Shroud->GetExplored(Player, PlanetLayer);
+		if (Explored && Explored->Num() == NumCells)
+		{
+			// underground a void beside a passage that is explored shows a little, so the walls along the passage do
+			const bool bMargin = PlanetLayer == EHexPlanetLayer::Underground && Settings->ShroudVoidMargin > 0.0f;
+			const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+			for (TConstSetBitIterator<> It(*Explored); It; ++It)
+			{
+				const int32 Cell = It.GetIndex();
+				ShroudTarget[Cell] = 1.0f;
+				if (bMargin)
+				{
+					for (const int32 Neighbor : Cells[Cell].Neighbors)
+					{
+						if (!HexPlanetUnderground::IsPassage(int8(GetCellLevel(Neighbor))))
+						{
+							ShroudTarget[Neighbor] = FMath::Max(ShroudTarget[Neighbor], Settings->ShroudVoidMargin);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	bool bChanged = bAtOnce || !ShroudField;
+	if (bAtOnce)
+	{
+		ShroudShown = ShroudTarget;
+	}
+	if (bAtOnce || bTargetChanged)
+	{
+		UpdateShroudedChunks();
+	}
+	else
+	{
+		const float Step = Settings->ShroudRevealTime > 0.0f ? DeltaTime / Settings->ShroudRevealTime : 1.0f;
+		for (int32 Cell = 0; Cell < NumCells; ++Cell)
+		{
+			if (ShroudShown[Cell] != ShroudTarget[Cell])
+			{
+				ShroudShown[Cell] = ShroudShown[Cell] < ShroudTarget[Cell] ? FMath::Min(ShroudShown[Cell] + Step, ShroudTarget[Cell])
+					: FMath::Max(ShroudShown[Cell] - Step, ShroudTarget[Cell]);
+				bChanged = true;
+			}
+		}
+	}
+	if (bChanged)
+	{
+		UploadShroudField();
+		// an aurora adds its light after the shroud is drawn, so the one over a pentagon that is not explored is hidden
+		for (int32 Index = 0; Index < Auroras.Num(); ++Index)
+		{
+			if (Auroras[Index])
+			{
+				Auroras[Index]->SetVisibility(ShroudShown.IsValidIndex(Index) && ShroudShown[Index] > 0.5f);
+			}
+		}
+	}
+	if (!bShroudOn)
+	{
+		bShroudOn = true;
+		ApplyShroud();
+		UE_LOG(LogHexHero, Log, TEXT("Planet: the fog of war of the %s shows what %s explored, %d cells of %d"), GetPlanetLayerName(PlanetLayer),
+			AllHeroes->GetConfig() ? *AllHeroes->GetConfig()->GetPlayer(Player).Name : TEXT("the player"), Shroud->CountExplored(Player, PlanetLayer), NumCells);
+	}
+}
+
+void AHexPlanet::UpdateShroudedChunks()
+{
+	// a chunk shows while any cell of it shows or lies within two cells of one that does, as the edge of the fog lies past the cells that are
+	// explored and its noise moves it
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+	int32 NumChunks = 0;
+	for (const FHexSphereCell& Cell : Cells)
+	{
+		NumChunks = FMath::Max(NumChunks, Cell.Chunk + 1);
+	}
+	TBitArray<> Shown(false, NumChunks);
+	for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+	{
+		if (!ShroudTarget.IsValidIndex(Cell) || ShroudTarget[Cell] <= 0.0f)
+		{
+			continue;
+		}
+		Shown[Cells[Cell].Chunk] = true;
+		for (const int32 Neighbor : Cells[Cell].Neighbors)
+		{
+			Shown[Cells[Neighbor].Chunk] = true;
+			for (const int32 Second : Cells[Neighbor].Neighbors)
+			{
+				Shown[Cells[Second].Chunk] = true;
+			}
+		}
+	}
+	TBitArray<> Hidden(false, NumChunks);
+	int32 NumHidden = 0;
+	for (int32 Chunk = 0; Chunk < NumChunks; ++Chunk)
+	{
+		Hidden[Chunk] = !Shown[Chunk];
+		NumHidden += Hidden[Chunk] ? 1 : 0;
+	}
+	if (Hidden != ShroudedChunks)
+	{
+		ShroudedChunks = MoveTemp(Hidden);
+		if (Objects)
+		{
+			Objects->SetHiddenChunks(ShroudedChunks);
+		}
+		UE_LOG(LogHexHero, Verbose, TEXT("Planet: the fog of war of the %s covers %d of %d chunks whole, which are not drawn"), GetPlanetLayerName(PlanetLayer), NumHidden, NumChunks);
+	}
+}
+
+void AHexPlanet::UploadShroudField()
+{
+	const int32 Size = FMath::Clamp(Settings->ShroudFieldSize, 64, 2048);
+	if (ShroudTexels.Num() != Size * Size)
+	{
+		// the three cells around each texel, found once: a row walks from the cell of the texel before
+		const double StartTime = FPlatformTime::Seconds();
+		ShroudTexels.SetNumUninitialized(Size * Size);
+		ParallelFor(Size, [&](int32 Y)
+		{
+			int32 Hint = INDEX_NONE;
+			for (int32 X = 0; X < Size; ++X)
+			{
+				int32 BlendCells[3];
+				double Weights[3];
+				Hint = Grid.FindBlend(HexShroud::GetTexelDirection(X, Y, Size), Hint, BlendCells, Weights);
+				FShroudTexel& Texel = ShroudTexels[Y * Size + X];
+				for (int32 Index = 0; Index < 3; ++Index)
+				{
+					Texel.Cells[Index] = BlendCells[Index];
+					Texel.Weights[Index] = float(Weights[Index]);
+				}
+			}
+		});
+		ShroudField = nullptr;
+		UE_LOG(LogHexHero, Log, TEXT("Planet: the field of the fog of war of the %s, %d texels a side, found its cells in %.1f ms"), GetPlanetLayerName(PlanetLayer),
+			Size, (FPlatformTime::Seconds() - StartTime) * 1000.0);
+	}
+
+	const int32 NumBytes = Size * Size * sizeof(FColor);
+	FColor* Pixels = static_cast<FColor*>(FMemory::Malloc(NumBytes));
+	ParallelFor(Size, [&](int32 Y)
+	{
+		for (int32 X = 0; X < Size; ++X)
+		{
+			const FShroudTexel& Texel = ShroudTexels[Y * Size + X];
+			float Shown = 0.0f;
+			for (int32 Index = 0; Index < 3; ++Index)
+			{
+				Shown += ShroudShown.IsValidIndex(Texel.Cells[Index]) ? ShroudShown[Texel.Cells[Index]] * Texel.Weights[Index] : 0.0f;
+			}
+			const uint8 Value = uint8(FMath::RoundToInt(FMath::Clamp(Shown, 0.0f, 1.0f) * 255.0f));
+			Pixels[Y * Size + X] = FColor(Value, Value, Value, 255);
+		}
+	});
+
+	if (!ShroudField)
+	{
+		ShroudField = UTexture2D::CreateTransient(Size, Size, PF_B8G8R8A8, MakeUniqueObjectName(GetTransientPackage(), UTexture2D::StaticClass(), TEXT("PlanetShroudField")));
+		ShroudField->SRGB = false;
+		ShroudField->Filter = TF_Bilinear;
+		ShroudField->AddressX = TA_Clamp;
+		ShroudField->AddressY = TA_Clamp;
+		ShroudField->NeverStream = true;
+		FTexture2DMipMap& Mip = ShroudField->GetPlatformData()->Mips[0];
+		FMemory::Memcpy(Mip.BulkData.Lock(LOCK_READ_WRITE), Pixels, NumBytes);
+		Mip.BulkData.Unlock();
+		ShroudField->UpdateResource();
+		FMemory::Free(Pixels);
+		// the materials take the new texture
+		if (bShroudOn)
+		{
+			ApplyShroud();
+		}
+		return;
+	}
+	// the whole texture goes up, which the render thread frees once it has it
+	FUpdateTextureRegion2D* Region = new FUpdateTextureRegion2D(0, 0, 0, 0, Size, Size);
+	ShroudField->UpdateTextureRegions(0, 1, Region, Size * sizeof(FColor), sizeof(FColor), reinterpret_cast<uint8*>(Pixels),
+		[](uint8* InData, const FUpdateTextureRegion2D* InRegion)
+		{
+			FMemory::Free(InData);
+			delete InRegion;
+		});
+}
+
+void AHexPlanet::ApplyShroud()
+{
+	const auto Apply = [this](UMaterialInstanceDynamic* Target)
+	{
+		if (!Target)
+		{
+			return;
+		}
+		Target->SetScalarParameterValue(TEXT("Shroud"), bShroudOn && ShroudField ? 1.0f : 0.0f);
+		if (ShroudField)
+		{
+			Target->SetTextureParameterValue(TEXT("ShroudField"), ShroudField);
+		}
+		// the haze and the water take the configs of the air and the water, so the values of the shroud are given by name
+		Target->SetVectorParameterValue(TEXT("ShroudColor"), Settings->ShroudColor);
+		Target->SetVectorParameterValue(TEXT("ShroudDarkColor"), Settings->ShroudDarkColor);
+		Target->SetScalarParameterValue(TEXT("ShroudTop"), Settings->ShroudTop);
+		Target->SetScalarParameterValue(TEXT("ShroudDensity"), Settings->ShroudDensity);
+		Target->SetScalarParameterValue(TEXT("ShroudTaper"), Settings->ShroudTaper);
+		Target->SetScalarParameterValue(TEXT("ShroudBaseShade"), Settings->ShroudBaseShade);
+		Target->SetScalarParameterValue(TEXT("ShroudNightShare"), Settings->ShroudNightShare);
+		Target->SetScalarParameterValue(TEXT("ShroudTone"), Settings->ShroudTone);
+		Target->SetScalarParameterValue(TEXT("ShroudSoftness"), Settings->ShroudSoftness);
+		Target->SetScalarParameterValue(TEXT("ShroudEdgeNoise"), Settings->ShroudEdgeNoise);
+		Target->SetScalarParameterValue(TEXT("ShroudNoiseSize"), Settings->ShroudNoiseSize);
+		Target->SetScalarParameterValue(TEXT("ShroudDrift"), Settings->ShroudDrift);
+		Target->SetScalarParameterValue(TEXT("ShroudChurn"), Settings->ShroudChurn);
+		Target->SetScalarParameterValue(TEXT("ShroudWisp"), Settings->ShroudWisp);
+		Target->SetScalarParameterValue(TEXT("ShroudWispSize"), Settings->ShroudWispSize);
+		Target->SetScalarParameterValue(TEXT("ShroudWispSpeed"), Settings->ShroudWispSpeed);
+		Target->SetScalarParameterValue(TEXT("ShroudPulse"), Settings->ShroudPulse);
+		Target->SetScalarParameterValue(TEXT("ShroudPulseSize"), Settings->ShroudPulseSize);
+		Target->SetScalarParameterValue(TEXT("ShroudPulseRate"), Settings->ShroudPulseRate);
+		Target->SetVectorParameterValue(TEXT("ShroudPulseColor"), Settings->ShroudPulseColor);
+	};
+	Apply(HazeMaterial);
+	Apply(WaterMaterial);
+	Apply(WaterGridMaterial);
+	// the shafts of daylight over the exits, which add their light after the shroud is drawn
+	for (const UHierarchicalInstancedStaticMeshComponent* Component : MarkerComponents)
+	{
+		for (int32 Slot = 0; Component && Slot < Component->GetNumMaterials(); ++Slot)
+		{
+			Apply(Cast<UMaterialInstanceDynamic>(Component->GetMaterial(Slot)));
+		}
+	}
+	if (Motes)
+	{
+		Motes->SetShroud(ShroudField, bShroudOn && ShroudField);
+	}
+	// without it every aurora shows
+	if (!bShroudOn)
+	{
+		for (UNiagaraComponent* Aurora : Auroras)
+		{
+			if (Aurora)
+			{
+				Aurora->SetVisibility(true);
+			}
+		}
+	}
+}
+
 void AHexPlanet::UpdateLightField()
 {
 	if (!Settings || !Settings->bHeroShade || Radius <= 0.0)
@@ -6713,7 +6998,7 @@ void AHexPlanet::UpdateWallLod(const FVector& CameraLocation)
 		// a chunk whose whole walls are not built yet draws its coarse ones whole
 		const int32 ForcedLod = CVarHexPlanetWallLod.GetValueOnGameThread();
 		const uint8 Band = ForcedLod >= 1 && ForcedLod <= 3 ? uint8(ForcedLod - 1) : FarEdge < Near ? 0 : NearEdge > Far ? 2 : 1;
-		const uint8 State = !bShown ? 4 : !WallWhole[Chunk] ? 3 : Band;
+		const uint8 State = !bShown || IsChunkShrouded(Chunk) ? 4 : !WallWhole[Chunk] ? 3 : Band;
 		if (State == WallLodStates[Chunk])
 		{
 			continue;

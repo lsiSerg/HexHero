@@ -1324,6 +1324,20 @@ bool UHexPlanetPainter::CanRedo() const
 	return Layers.IsValidIndex(int32(Target)) && !GetLayerState().RedoSteps.IsEmpty();
 }
 
+bool UHexPlanetPainter::IsPlayerAi(int32 Player) const
+{
+	const UHexHeroes* Heroes = Planet ? Planet->GetHeroes() : nullptr;
+	return Heroes && Heroes->IsPlayerAi(Player);
+}
+
+void UHexPlanetPainter::TogglePlayerAi(int32 Player)
+{
+	if (UHexHeroes* Heroes = Planet ? Planet->GetHeroes() : nullptr)
+	{
+		Heroes->SetPlayerAi(Player, !Heroes->IsPlayerAi(Player));
+	}
+}
+
 void UHexPlanetPainter::Undo()
 {
 	if (bPainting || !CanUndo())

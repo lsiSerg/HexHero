@@ -1273,6 +1273,91 @@ public:
 	UPROPERTY(EditAnywhere, Category="Light|Hero", meta=(ClampMin=16, ClampMax=2048))
 	int32 LightFieldSize = 256;
 
+	/** The fog of war over what the player has not explored (UHexShroud, bShroud of DA_HexHeroes; AHexPlanet::UpdateShroud, SHROUD_CODE of
+	 *  create_planet_assets.py), as the developer decided on 2026-11-11: a bank of cloud on the surface, the dark underground, its edge soft and
+	 *  not along the hexes. ShroudField is a map of the sphere ShroudFieldSize texels a side, 1 where a cell is explored, blended between the
+	 *  middles of the cells; a cell that is explored opens over ShroudRevealTime seconds */
+	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=64, ClampMax=2048))
+	int32 ShroudFieldSize = 512;
+
+	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=0))
+	float ShroudRevealTime = 0.6f;
+
+	/** The bank of cloud of the surface: its color, how high it lies over the sea, how much of a view a world unit of it takes, how much thinner
+	 *  it is at its top, so its edge is a slope and not a wall, how dark its foot is, how much of its light it keeps at night, and how much
+	 *  lighter and darker it is in patches of its noise */
+	UPROPERTY(EditAnywhere, Category="Shroud")
+	FLinearColor ShroudColor = FLinearColor(0.07f, 0.085f, 0.125f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=1))
+	float ShroudTop = 130.0f;
+
+	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=0))
+	float ShroudDensity = 0.03f;
+
+	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=0, ClampMax=1))
+	float ShroudTaper = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=0, ClampMax=1))
+	float ShroudBaseShade = 0.55f;
+
+	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=0, ClampMax=1))
+	float ShroudNightShare = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=0, ClampMax=1.5))
+	float ShroudTone = 0.5f;
+
+	/** The dark of the underground where the player has not explored */
+	UPROPERTY(EditAnywhere, Category="Shroud")
+	FLinearColor ShroudDarkColor = FLinearColor(0.0015f, 0.002f, 0.003f, 1.0f);
+
+	/** The edge of the shroud: how soft it is, as a share of the way from a cell that is explored to one that is not, how far a noise moves it,
+	 *  as such a share, the size of that noise in world units and how many of its cells it drifts a second */
+	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=0.01, ClampMax=0.5))
+	float ShroudSoftness = 0.12f;
+
+	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=0, ClampMax=0.7))
+	float ShroudEdgeNoise = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=1))
+	float ShroudNoiseSize = 110.0f;
+
+	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=0))
+	float ShroudDrift = 0.07f;
+
+	/** The bank of the surface is alive, as the developer asked on 2026-11-11, when it was a still grey sheet: its noise changes in place by
+	 *  ShroudChurn of its cells a second, so it billows; lighter wisps ShroudWispSize across wind through it at ShroudWispSpeed, ShroudWisp
+	 *  strong, in patches that wander; and here and there, in places ShroudPulseSize across, a glow of ShroudPulseColor swells and fades about ShroudPulseRate times
+	 *  a second, ShroudPulse strong, as if something moved inside */
+	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=0))
+	float ShroudChurn = 0.1f;
+
+	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=0))
+	float ShroudWisp = 0.8f;
+
+	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=1))
+	float ShroudWispSize = 300.0f;
+
+	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=0))
+	float ShroudWispSpeed = 0.09f;
+
+	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=0))
+	float ShroudPulse = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=1))
+	float ShroudPulseSize = 620.0f;
+
+	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=0))
+	float ShroudPulseRate = 0.11f;
+
+	UPROPERTY(EditAnywhere, Category="Shroud")
+	FLinearColor ShroudPulseColor = FLinearColor(0.16f, 0.26f, 0.5f, 1.0f);
+
+	/** Underground a hero explores only passages, and a void beside one of them shows as much as this, so the walls along the passage and a
+	 *  strip of the chasm behind them show, as the developer asked on 2026-11-11: 0 hides all of it, and above 0.5 its middle shows too */
+	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=0, ClampMax=1))
+	float ShroudVoidMargin = 0.6f;
+
 	/** The forced light of L (hex.PlanetForcedLight), which lights the layer evenly, as before the dark: the shade and the light of the hero go,
 	 *  and the light of the sky takes ForcedSkyLightIntensity and the light the ground gives by itself ForcedAmbient (through ForcedLight of
 	 *  MPC_HexPlanet), each never below its own value, so 0 keeps it; the sun takes ForcedSunIntensity of FHexLayerLighting */

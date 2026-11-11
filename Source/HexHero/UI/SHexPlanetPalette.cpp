@@ -480,6 +480,34 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 		}
 		Body->AddSlot().AutoHeight()[Classes];
 		Body->AddSlot().AutoHeight()[MakeHelp(LOCTEXT("HeroHelp", "Click a cell a hero can stand on to put one of the chosen player and class there; Ctrl+click takes one away, and Undo takes either back. That is where it stands when a game starts, which the save key writes. Play starts the game."))];
+
+		// who moves the heroes of each player: a person, or the game by itself
+		Body->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("HeroMovers", "Who plays"))];
+		TSharedRef<SUniformGridPanel> Movers = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
+		for (int32 Player = 0; Player < HeroConfig->Players.Num(); ++Player)
+		{
+			TSharedRef<SHorizontalBox> Row = MakeSwatch(HeroConfig->Players[Player].Color, SwatchSize * 0.75f, SwatchSize * 0.75f, 6.0f,
+				FText::FromString(HeroConfig->Players[Player].Name), Small, FText::GetEmpty());
+			Row->AddSlot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(STextBlock)
+				.Font(Small)
+				.Text_Lambda([WeakPainter, Player]()
+				{
+					return WeakPainter.IsValid() && WeakPainter->IsPlayerAi(Player) ? LOCTEXT("MoverAi", "AI") : LOCTEXT("MoverPerson", "Human");
+				})
+			];
+			Movers->AddSlot(Player % 2, Player / 2)
+			[
+				MakeButton(Row,
+					[Player](UHexPlanetPainter& Each) { Each.TogglePlayerAi(Player); },
+					[Player](const UHexPlanetPainter& Each) { return Each.IsPlayerAi(Player); })
+			];
+		}
+		Body->AddSlot().AutoHeight()[Movers];
+		Body->AddSlot().AutoHeight()[MakeHelp(LOCTEXT("MoverHelp", "Click a player to hand its heroes to the game or back to a person. The heroes of an AI player walk by themselves to explore the map; click one to watch what it sees. The save key writes this with the heroes."))];
 		return Body;
 	};
 	TSharedRef<SVerticalBox> HeroBody = MakeHeroBody();

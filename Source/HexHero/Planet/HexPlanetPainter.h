@@ -353,6 +353,10 @@ public:
 	/** The class and the player of the heroes a click places, indices into DA_HexHeroes */
 	int32 GetHeroClass() const { return HeroClass; }
 	void SetHeroClass(int32 InClass) { HeroClass = FMath::Max(InClass, 0); }
+	/** Whether the game moves the heroes of a player by itself (UHexHeroes::IsPlayerAi), and the switch of the Heroes tab that turns it */
+	bool IsPlayerAi(int32 Player) const;
+	void TogglePlayerAi(int32 Player);
+
 	int32 GetHeroPlayer() const { return HeroPlayer; }
 	void SetHeroPlayer(int32 InPlayer) { HeroPlayer = FMath::Max(InPlayer, 0); }
 

@@ -125,6 +125,21 @@ void UHexPlanetMotes::SetHeroLights(TConstArrayView<FLinearColor> Spheres, bool 
 	}
 }
 
+void UHexPlanetMotes::SetShroud(UTexture* Field, bool bOn)
+{
+	for (UMaterialInstanceDynamic* Material : { MoteMaterial.Get(), SporeMaterial.Get() })
+	{
+		if (Material)
+		{
+			Material->SetScalarParameterValue(TEXT("Shroud"), bOn ? 1.0f : 0.0f);
+			if (Field)
+			{
+				Material->SetTextureParameterValue(TEXT("ShroudField"), Field);
+			}
+		}
+	}
+}
+
 int32 UHexPlanetMotes::GetSporeCount() const
 {
 	return Spores ? Spores->GetInstanceCount() : 0;

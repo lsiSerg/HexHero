@@ -191,7 +191,8 @@ void AHexPlanetPlayerController::ClickGame(bool bDouble)
 {
 	const AHexPlanet* Planet = GetPlanet();
 	UHexHeroes* Heroes = GetHeroes();
-	if (!Heroes || !Heroes->IsPlaying() || IsBrushArmed())
+	// a person plays on its turn alone
+	if (!Heroes || !Heroes->IsPersonTurn() || IsBrushArmed())
 	{
 		return;
 	}
@@ -203,7 +204,12 @@ void AHexPlanetPlayerController::ClickGame(bool bDouble)
 	{
 		Under = Heroes->FindHeroAt(Planet->GetLayer(), MouseCell);
 	}
-	if (bDouble && Under)
+	// a hero the fog of war hides is not there to be chosen
+	if (Under && Under->Id != Heroes->GetSelectedId() && Heroes->IsHidden(Heroes->GetShroudPlayer(), Under->Layer, Under->Cell))
+	{
+		Under = nullptr;
+	}
+	if (bDouble && Under && Heroes->CanChoose(Under->Id))
 	{
 		ShowHero(Under->Id);
 		return;
@@ -249,7 +255,8 @@ void AHexPlanetPlayerController::ShowHero(int32 Id)
 {
 	UHexHeroes* Heroes = GetHeroes();
 	const FHexHero* Hero = Heroes ? Heroes->FindHero(Id) : nullptr;
-	if (!Hero)
+	// while the game is played a person chooses only a hero of its own, on its turn
+	if (!Hero || !Heroes->CanChoose(Id))
 	{
 		return;
 	}
@@ -272,10 +279,10 @@ void AHexPlanetPlayerController::SelectNextHero()
 void AHexPlanetPlayerController::EndHeroTurn()
 {
 	UHexHeroes* Heroes = GetHeroes();
-	if (Heroes && Heroes->IsPlaying())
+	// its own turn alone; who moves next is said by the heroes
+	if (Heroes && Heroes->IsPersonTurn())
 	{
 		Heroes->EndTurn();
-		OnHeroMessage(FString::Printf(TEXT("Day %d"), Heroes->GetDay()));
 	}
 }
 
@@ -596,6 +603,12 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 	if (HoverInfo.IsValid())
 	{
 		FString Info = !HoverInfoVariable || HoverInfoVariable->GetBool() ? Planet->GetCellDebugText(Cell) : FString();
+		// the fog of war tells nothing of a cell the player has not explored
+		if (Heroes && !Info.IsEmpty() && Heroes->IsHidden(Heroes->GetShroudPlayer(), Planet->GetLayer(), Cell))
+		{
+			HoverInfo->SetInfo(TEXT("Unexplored"));
+			return;
+		}
 		const FString HeroText = Heroes && !Info.IsEmpty() ? Heroes->GetCellText(Planet->GetLayer(), Cell) : FString();
 		if (!HeroText.IsEmpty())
 		{

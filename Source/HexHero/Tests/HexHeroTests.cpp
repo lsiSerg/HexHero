@@ -5,6 +5,7 @@
 #include "HexHeroPath.h"
 #include "HexHeroes.h"
 #include "HexPlanetFile.h"
+#include "HexShroud.h"
 #include "HexSiteConfig.h"
 #include "HexSphereGrid.h"
 #include "Misc/AutomationTest.h"
@@ -237,6 +238,17 @@ bool FHexHeroFileTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("With the same heroes, a name with quotes, an apostrophe and a backslash too"), Read.Num() == 2 && Read[0] == Heroes[1] && Read[1] == Heroes[0]);
 	TestEqual(TEXT("Written again it is the same text"), HexPlanetFile::EncodeHeroes(Read), Text);
 
+	// the players the game moves by itself are a line of their own, there only when there are any, sorted
+	TArray<int32> Ai = {7, 5};
+	TestTrue(TEXT("Nobody is moved by the game in a file without that line"), HexPlanetFile::DecodeHeroes(Text, Read, Error, &Ai) && Ai.IsEmpty());
+	const FString WithAi = HexPlanetFile::EncodeHeroes(Heroes, {3, 1});
+	TArray<FString> AiLines;
+	WithAi.ParseIntoArrayLines(AiLines);
+	TestEqual(TEXT("One line more for those players"), AiLines.Num(), 8);
+	TestTrue(TEXT("Sorted"), AiLines.IsValidIndex(2) && AiLines[2].Contains(TEXT("\"ai\": [1, 3],")));
+	TestTrue(TEXT("They read back"), HexPlanetFile::DecodeHeroes(WithAi, Read, Error, &Ai) && Ai == TArray<int32>({1, 3}) && Read.Num() == 2);
+	TestEqual(TEXT("Written again it is the same text"), HexPlanetFile::EncodeHeroes(Read, Ai), WithAi);
+
 	TestTrue(TEXT("No heroes read back as none"), HexPlanetFile::DecodeHeroes(HexPlanetFile::EncodeHeroes({}), Read, Error) && Read.IsEmpty());
 	TestFalse(TEXT("Text that is no JSON is refused"), HexPlanetFile::DecodeHeroes(TEXT("heroes"), Read, Error));
 
@@ -314,6 +326,83 @@ bool FHexHeroSitesTest::RunTest(const FString& Parameters)
 	}
 	TestEqual(TEXT("A mill"), Mills, 1);
 	TestEqual(TEXT("A mill gives three days of a mine"), Config->MillDays, 3);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHexHeroShroudTest, "HexHero.Hero.Shroud",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FHexHeroShroudTest::RunTest(const FString& Parameters)
+{
+	const FHexSphereGrid Grid = FHexSphereGrid::Build(8);
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+	const int32 Start = 100;
+
+	// what a hero sees: the cells up to a number of steps away, each once, as the search of ways counts them
+	const auto Even = [](int32, int32, int32) { return 1.0f; };
+	HexHeroPath::FField Field;
+	HexHeroPath::FindField(Grid, Start, 1000.0f, Even, Field);
+	for (const int32 Rings : {0, 1, 3, 5})
+	{
+		TArray<int32> Seen;
+		HexShroud::FindWithin(Grid, Start, Rings, Seen);
+		int32 Expected = 0;
+		for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+		{
+			Expected += Field.Costs[Cell] <= float(Rings) + 0.5f ? 1 : 0;
+		}
+		TestEqual(*FString::Printf(TEXT("The cells within %d steps"), Rings), Seen.Num(), Expected);
+		TestEqual(*FString::Printf(TEXT("Each cell within %d steps once"), Rings), TSet<int32>(Seen).Num(), Seen.Num());
+		TestEqual(TEXT("The cell itself comes first"), Seen[0], Start);
+		bool bNear = true;
+		for (const int32 Cell : Seen)
+		{
+			bNear &= Field.Costs[Cell] <= float(Rings) + 0.5f;
+		}
+		TestTrue(*FString::Printf(TEXT("No cell further than %d steps"), Rings), bNear);
+	}
+	TArray<int32> None;
+	HexShroud::FindWithin(Grid, Cells.Num(), 3, None);
+	TestEqual(TEXT("No cell around a cell that is none"), None.Num(), 0);
+
+	// each player explores for itself, on each layer, and what is explored stays so
+	UHexShroud* Shroud = NewObject<UHexShroud>();
+	TArray<int32> Seen;
+	HexShroud::FindWithin(Grid, Start, 2, Seen);
+	TestFalse(TEXT("Nothing is explored at first"), Shroud->IsExplored(0, EHexPlanetLayer::Surface, Start));
+	const int32 Before = Shroud->GetRevision();
+	TestTrue(TEXT("New cells are explored"), Shroud->Explore(0, EHexPlanetLayer::Surface, Seen, Cells.Num()));
+	TestTrue(TEXT("Exploring counts as a change"), Shroud->GetRevision() != Before);
+	TestTrue(TEXT("The cell is explored"), Shroud->IsExplored(0, EHexPlanetLayer::Surface, Start));
+	TestEqual(TEXT("As many cells as were seen"), Shroud->CountExplored(0, EHexPlanetLayer::Surface), Seen.Num());
+	TestFalse(TEXT("Not by another player"), Shroud->IsExplored(1, EHexPlanetLayer::Surface, Start));
+	TestFalse(TEXT("Not on the other layer"), Shroud->IsExplored(0, EHexPlanetLayer::Underground, Start));
+	const int32 After = Shroud->GetRevision();
+	TestFalse(TEXT("The same cells again are nothing new"), Shroud->Explore(0, EHexPlanetLayer::Surface, Seen, Cells.Num()));
+	TestEqual(TEXT("Which is no change"), Shroud->GetRevision(), After);
+	TestFalse(TEXT("A cell that is none is not explored"), Shroud->IsExplored(0, EHexPlanetLayer::Surface, Cells.Num() + 5));
+	Shroud->Reset();
+	TestFalse(TEXT("A new game forgets it"), Shroud->IsExplored(0, EHexPlanetLayer::Surface, Start));
+
+	// the field of the fog is a map of the sphere: a texel lies where its direction is looked up, and every cell has a texel of its own
+	const int32 Size = 64;
+	double Worst = 0.0;
+	for (int32 Y = 0; Y < Size; ++Y)
+	{
+		for (int32 X = 0; X < Size; ++X)
+		{
+			const FVector3d Direction = HexShroud::GetTexelDirection(X, Y, Size);
+			TestTrue(TEXT("A texel looks along a unit direction"), FMath::IsNearlyEqual(Direction.Size(), 1.0, 1.0e-9));
+			const FVector2d UV = HexShroud::GetFieldUV(Direction);
+			Worst = FMath::Max(Worst, FMath::Max(FMath::Abs(UV.X * Size - (X + 0.5)), FMath::Abs(UV.Y * Size - (Y + 0.5))));
+		}
+	}
+	TestTrue(*FString::Printf(TEXT("The direction of a texel is looked up in that texel (off by %.6f of a texel)"), Worst), Worst < 1.0e-6);
+	for (const FVector3d& Axis : {FVector3d(1, 0, 0), FVector3d(-1, 0, 0), FVector3d(0, 1, 0), FVector3d(0, -1, 0), FVector3d(0, 0, 1), FVector3d(0, 0, -1)})
+	{
+		const FVector2d UV = HexShroud::GetFieldUV(Axis);
+		TestTrue(TEXT("Every axis lies in the map"), UV.X >= 0.0 && UV.X <= 1.0 && UV.Y >= 0.0 && UV.Y <= 1.0);
+	}
 	return true;
 }
 

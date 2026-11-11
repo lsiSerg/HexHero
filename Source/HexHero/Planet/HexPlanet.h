@@ -321,6 +321,44 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UTextureCube> LightField;
 
+	/** The fog of war of this layer as the materials take it (UpdateShroud): a map of the sphere by the direction from the center, folded out as
+	 *  an octahedron (HexShroud::GetFieldUV), 1 where the player whose fog shows has explored */
+	UPROPERTY(Transient)
+	TObjectPtr<UTexture2D> ShroudField;
+
+	/** The three cells each texel of ShroudField blends, and their weights (FHexSphereGrid::FindBlend), found once */
+	struct FShroudTexel
+	{
+		int32 Cells[3];
+		float Weights[3];
+	};
+	TArray<FShroudTexel> ShroudTexels;
+
+	/** How much of each cell shows through the fog of war, and how much is to show: a cell that is explored opens over ShroudRevealTime */
+	TArray<float> ShroudShown;
+	TArray<float> ShroudTarget;
+	bool bShroudOn = false;
+	int32 ShroudPlayer = INDEX_NONE;
+	int32 ShroudRevision = -1;
+
+	/** The chunks nothing of which shows through the fog of war, a bit per chunk: their ground, objects and walls are not drawn, as the
+	 *  developer asked on 2026-11-11; empty while there is no fog */
+	TBitArray<> ShroudedChunks;
+
+	bool IsChunkShrouded(int32 Chunk) const { return ShroudedChunks.IsValidIndex(Chunk) && ShroudedChunks[Chunk]; }
+
+	/** Finds ShroudedChunks from what is to show, and gives them to what draws by chunk */
+	void UpdateShroudedChunks();
+
+	/** Keeps the fog of war of this layer as the player whose fog shows has explored it (UHexShroud of the heroes), every frame it is shown */
+	void UpdateShroud(float DeltaTime);
+
+	/** Writes ShroudShown into ShroudField, making the texture and the blend of its texels the first time */
+	void UploadShroudField();
+
+	/** Gives the materials that draw the fog of war the field, whether there is any, and the Shroud values of the config */
+	void ApplyShroud();
+
 	/** Where the ground crosses the sea, by chunk (HexPlanetSurface::FBuild::Coasts), for the distance to the real coast of the sea field */
 	TArray<TArray<FVector3f>> ChunkCoasts;
 
@@ -675,6 +713,9 @@ public:
 
 	/** Returns true once the planet is built, a few frames after it begins to play; until then the grid is empty and the radius 0 */
 	bool IsBuilt() const { return bBuilt; }
+
+	/** Returns how much of a cell shows through the fog of war now, 1 while there is none */
+	float GetShroudShown(int32 Cell) const { return bShroudOn && ShroudShown.IsValidIndex(Cell) ? ShroudShown[Cell] : 1.0f; }
 
 	/**
 	 *  Returns true if every chunk that draws its pieces from a camera at a place has them on the GPU, so the camera may jump there without

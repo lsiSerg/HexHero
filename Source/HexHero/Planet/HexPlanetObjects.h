@@ -319,6 +319,17 @@ private:
 	/** Returns true if the components of a slot are drawn now */
 	bool IsSlotShown(int32 Slot) const;
 
+	/** The chunks nothing of which shows through the fog of war, a bit per chunk, whose objects are not drawn; empty while every chunk shows */
+	TBitArray<> HiddenChunks;
+
+	bool IsChunkShown(int32 Chunk) const { return !HiddenChunks.IsValidIndex(Chunk) || !HiddenChunks[Chunk]; }
+
+public:
+	/** Hides the objects of the chunks the fog of war covers whole (AHexPlanet::UpdateShroud), a bit per chunk, or shows all with none */
+	void SetHiddenChunks(const TBitArray<>& InHidden);
+
+private:
+
 	/** Takes the objects from objects.json of the planet, or generates them */
 	void Load();
 

@@ -133,7 +133,10 @@ void SHexHeroPanel::Construct(const FArguments& InArgs)
 							}
 							const int32 Day = Heroes->GetDay();
 							const int32 PerWeek = FMath::Max(Heroes->GetConfig()->DaysPerWeek, 1);
-							return FText::Format(LOCTEXT("Day", "Day {0}, week {1}"), FText::AsNumber((Day - 1) % PerWeek + 1), FText::AsNumber((Day - 1) / PerWeek + 1));
+							// and whose turn it is
+							const FText Player = FText::FromString(Heroes->GetConfig()->GetPlayer(Heroes->GetTurnPlayer()).Name);
+							return FText::Format(Heroes->IsPersonTurn() ? LOCTEXT("DayTurn", "Day {0}, week {1}: {2}") : LOCTEXT("DayWait", "Day {0}, week {1}: {2} moves..."),
+								FText::AsNumber((Day - 1) % PerWeek + 1), FText::AsNumber((Day - 1) / PerWeek + 1), Player);
 						})
 					]
 					+ SVerticalBox::Slot()
@@ -199,7 +202,8 @@ void SHexHeroPanel::Construct(const FArguments& InArgs)
 							.HAlign(HAlign_Center)
 							.ContentPadding(FMargin(6.0f, 4.0f))
 							.ButtonColorAndOpacity(HeroButtonColor)
-							.ToolTipText(LOCTEXT("EndTurnTip", "The next day begins, and every hero gets its points of movement back"))
+							.ToolTipText(LOCTEXT("EndTurnTip", "The next player moves, and after the last of them the next day begins, when every hero gets its points of movement back"))
+							.IsEnabled_Lambda([this]() { return Heroes.IsValid() && Heroes->IsPersonTurn(); })
 							.OnClicked_Lambda([this]()
 							{
 								OnEndTurn.ExecuteIfBound();
@@ -208,7 +212,7 @@ void SHexHeroPanel::Construct(const FArguments& InArgs)
 							[
 								SNew(STextBlock)
 								.Font(Font)
-								.Text(EndTurnKeys.IsEmpty() ? LOCTEXT("EndTurn", "End the day") : FText::Format(LOCTEXT("EndTurnKeys", "End the day ({0})"), FText::FromString(EndTurnKeys)))
+								.Text(EndTurnKeys.IsEmpty() ? LOCTEXT("EndTurn", "End turn") : FText::Format(LOCTEXT("EndTurnKeys", "End turn ({0})"), FText::FromString(EndTurnKeys)))
 							]
 						]
 						+ SHorizontalBox::Slot()
@@ -315,7 +319,11 @@ void SHexHeroPanel::RebuildList()
 	TArray<const FHexHero*> Sorted;
 	for (const FHexHero& Hero : Heroes->GetHeroes())
 	{
-		Sorted.Add(&Hero);
+		// while the game is played, those of the person who plays, as the others are not its to know of
+		if (!Heroes->IsPlaying() || Hero.Player == Heroes->GetShroudPlayer())
+		{
+			Sorted.Add(&Hero);
+		}
 	}
 	Sorted.Sort([](const FHexHero& A, const FHexHero& B) { return A.Id < B.Id; });
 
@@ -362,7 +370,8 @@ void SHexHeroPanel::RebuildList()
 					[
 						SNew(STextBlock)
 						.Font(Font)
-						.Text(FText::Format(LOCTEXT("HeroLine", "{0}, {1}"), FText::FromString(Hero->Name), FText::FromString(Config->GetClass(Hero->Class).DisplayName)))
+						.Text(FText::Format(LOCTEXT("HeroLine", "{0}, {1}{2}"), FText::FromString(Hero->Name), FText::FromString(Config->GetClass(Hero->Class).DisplayName),
+						Heroes->IsPlayerAi(Hero->Player) ? LOCTEXT("HeroAi", " (AI)") : FText::GetEmpty()))
 					]
 					+ SVerticalBox::Slot()
 					.AutoHeight()

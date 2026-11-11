@@ -482,6 +482,10 @@ struct FHexHeroesFile
 	UPROPERTY()
 	int32 Version = 1;
 
+	/** The players the game moves by itself, by their index in DA_HexHeroes; the others are moved by a person */
+	UPROPERTY()
+	TArray<int32> Ai;
+
 	UPROPERTY()
 	TArray<FHexHeroLine> Heroes;
 };
@@ -728,19 +732,19 @@ namespace HexPlanetFile
 	constexpr const TCHAR* HeroesFile = TEXT("heroes.json");
 
 	/** Writes heroes as the text of heroes.json, a line each, sorted by Id */
-	FString EncodeHeroes(TConstArrayView<FHexHeroLine> Heroes);
+	FString EncodeHeroes(TConstArrayView<FHexHeroLine> Heroes, TConstArrayView<int32> AiPlayers = TConstArrayView<int32>());
 
-	/** Reads the text of heroes.json */
-	bool DecodeHeroes(const FString& Text, TArray<FHexHeroLine>& OutHeroes, FString& OutError);
+	/** Reads the text of heroes.json, and the players the game moves by itself when asked for them */
+	bool DecodeHeroes(const FString& Text, TArray<FHexHeroLine>& OutHeroes, FString& OutError, TArray<int32>* OutAiPlayers = nullptr);
 
 	/** Returns true if the folder of a planet has heroes.json */
 	bool HasHeroes(const FString& PlanetFolder);
 
 	/** Reads heroes.json of the folder of a planet */
-	bool LoadHeroes(const FString& PlanetFolder, TArray<FHexHeroLine>& OutHeroes, FString& OutError);
+	bool LoadHeroes(const FString& PlanetFolder, TArray<FHexHeroLine>& OutHeroes, FString& OutError, TArray<int32>* OutAiPlayers = nullptr);
 
 	/** Writes heroes.json of the folder of a planet, or deletes it when there are none, so a planet without heroes has no such file */
-	bool SaveHeroes(const FString& PlanetFolder, TConstArrayView<FHexHeroLine> Heroes, FString& OutError);
+	bool SaveHeroes(const FString& PlanetFolder, TConstArrayView<FHexHeroLine> Heroes, FString& OutError, TConstArrayView<int32> AiPlayers = TConstArrayView<int32>());
 
 	/** sites.json holds the mines and piles of a planet, at the root of its folder, written and read as heroes.json is: a line each sorted by
 	 *  Id, and no file for a planet without any */
