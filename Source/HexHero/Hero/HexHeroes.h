@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "UObject/Object.h"
+#include "HexCastleConfig.h"
 #include "HexHeroPath.h"
 #include "HexPlanetFile.h"
 #include "HexPlanetLayers.h"
@@ -11,6 +12,7 @@
 
 class AHexPlanet;
 class UHexHeroConfig;
+class UHexCastles;
 class UHexSites;
 class UHexShroud;
 class UInstancedStaticMeshComponent;
@@ -63,6 +65,25 @@ struct FHexHero
 
 	/** How fast it walks now, in cells a second: it sets out and stops smoothly (WalkStartTime, WalkStopTime) */
 	float Speed = 0.0f;
+
+	/** The creatures it leads, up to NumArmySlots stacks of them (UHexCastles): hired in castles, and until there are battles what decides
+	 *  whether it takes a castle that is guarded */
+	TArray<FHexStack> Army;
+
+	/** The castle it is in and guards, 0 for none: it stands in the yard of that castle, on the cell of it that it went in by */
+	int32 CastleId = 0;
+
+	/** Its walk through a gate of a castle: when it began, in seconds of the world, and the points it goes by, from where it stood through
+	 *  the gate to where it stands after (UHexCastles::Visit); and for the step out of a castle the cell of it that it leaves, with the
+	 *  yard and the gate in the first two points */
+	double GlideStart = -1000.0;
+	float GlideTime = 1.0f;
+	bool bGliding = false;
+
+	/** The cells of its layer it left since it set out, which stay on the way shown until it stops */
+	TArray<int32> Trail;
+	FVector3d GlidePoints[3] = {FVector3d::ZeroVector, FVector3d::ZeroVector, FVector3d::ZeroVector};
+	int32 GateStepFrom = INDEX_NONE;
 
 	/** For a hero of a player the game moves: seconds until it looks for where to go again, and whether it found nothing more to do today */
 	float AiWait = 0.0f;
@@ -156,6 +177,9 @@ public:
 	/** Returns the mines and piles of the planet and what the players gathered */
 	UHexSites* GetSites() const { return Sites; }
 
+	/** The castles of the planet, on both layers */
+	UHexCastles* GetCastles() const { return Castles; }
+
 	/** What each player explored (the fog of war) */
 	UHexShroud* GetShroud() const { return Shroud; }
 
@@ -220,8 +244,19 @@ public:
 	float GetMaxMovePoints(const FHexHero& Hero) const;
 
 	/** Returns the hero chosen, or null */
-	const FHexHero* GetSelected() const { return FindHero(SelectedId); }
-	int32 GetSelectedId() const { return SelectedId; }
+	/** Returns the hero chosen, null while a castle is chosen in its place: either a hero or a castle is chosen, as the developer decided on
+	 *  2026-11-11 */
+	const FHexHero* GetSelected() const
+	{
+		// with a castle chosen the hero that guards it is chosen with it, and no other
+		const FHexHero* Hero = FindHero(SelectedId);
+		return SelectedCastleId != 0 && (!Hero || Hero->CastleId != SelectedCastleId) ? nullptr : Hero;
+	}
+	int32 GetSelectedId() const { const FHexHero* Hero = GetSelected(); return Hero ? Hero->Id : 0; }
+
+	/** Chooses a castle of the person whose turn it is in place of a hero, 0 for the hero that was chosen before; and the castle chosen */
+	bool SelectCastle(int32 CastleId);
+	int32 GetSelectedCastleId() const { return SelectedCastleId; }
 
 	/** Chooses a hero, 0 for none. Returns false if there is no such hero */
 	bool Select(int32 Id);
@@ -369,7 +404,7 @@ private:
 		TWeakObjectPtr<UProceduralMeshComponent> Ring;
 		/** Where the ring was laid, at what size, of how many pieces and on which ground, so it is laid again only when one changed */
 		FVector3d RingAt = FVector3d::ZeroVector;
-		float RingScale = -1.0f;
+		double RingOuter = -1.0;
 		int32 RingSegments = 0;
 		int32 RingGround = -1;
 		TWeakObjectPtr<UInstancedStaticMeshComponent> Dots;
@@ -385,6 +420,12 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UHexSites> Sites;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UHexCastles> Castles;
+
+	/** The castles hire into the armies of the heroes and take from them what an attack costs */
+	friend class UHexCastles;
 
 	UPROPERTY()
 	TObjectPtr<UHexShroud> Shroud;
@@ -410,6 +451,9 @@ private:
 	FLayerMarks Marks[NumPlanetLayers];
 
 	int32 SelectedId = 0;
+
+	/** The castle chosen in place of a hero, 0 for none */
+	int32 SelectedCastleId = 0;
 	int32 Day = 1;
 	int32 NextId = 1;
 	bool bEdited = false;
@@ -605,7 +649,15 @@ private:
 	void UpdateRing();
 
 	/** Lays the ring of a layer on the ground around a hero */
-	void BuildRing(const AHexPlanet& Planet, const FHexHero& Hero, FLayerMarks& Each);
+	void BuildRing(const AHexPlanet& Planet, FLayerMarks& Each, const FVector3d& Center, int32 Cell, double Outer, double Width, int32 Segments);
+
+	/** Chooses a hero, and with one that guards a castle that castle */
+	void ChooseHero(int32 Id);
+
+	/** The hero on a cell beside the castle a hero guards, onto which that hero is sent from the castle: one of its player swaps places
+	 *  with it, another attacks the castle (Sally); null when the cell holds none. OutCastleCell is the cell of the castle beside it */
+	const FHexHero* FindSallyTarget(const FHexHero& Hero, EHexPlanetLayer Layer, int32 Cell, int32& OutCastleCell) const;
+	bool Sally(FHexHero& Hero, int32 Cell, FString& OutMessage);
 
 	/** Whether the heroes or who moves them differ from what heroes.json holds */
 	void UpdateEdited();
@@ -674,6 +726,10 @@ private:
 
 	/** Opens to the player of a hero the cells it sees from where it stands (SightRadius), underground only the passages */
 	void Explore(const FHexHero& Hero);
+	void ExploreAround(int32 Player, EHexPlanetLayer Layer, int32 Cell, int32 Radius);
+
+	/** Every castle opens the fog of war around itself for its owner */
+	void ExploreCastles();
 
 	/** Opens what every hero sees from where it stands */
 	void ExploreAll();

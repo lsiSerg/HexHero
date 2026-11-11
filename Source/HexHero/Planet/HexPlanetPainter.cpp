@@ -145,6 +145,7 @@ FText UHexPlanetPainter::GetTabName(EHexPaintTab Tab)
 	case EHexPaintTab::CaveHeroes: return LOCTEXT("TabHeroes", "Heroes");
 	case EHexPaintTab::Sites:
 	case EHexPaintTab::CaveSites: return LOCTEXT("TabSites", "Mines");
+	case EHexPaintTab::Castles: return LOCTEXT("TabCastles", "Castles");
 	case EHexPaintTab::Maze: return LOCTEXT("TabMaze", "Maze");
 	case EHexPaintTab::Links: return LOCTEXT("TabLinks", "Links");
 	default: return LOCTEXT("TabCaveObjects", "Objects");
@@ -711,12 +712,12 @@ void UHexPlanetPainter::ContinueStroke(int32 Cell)
 		LastCell = Cell;
 		return;
 	}
-	// a hero goes on the cell pressed alone, and so does a mine or a pile
-	if (Tool == EHexPaintTool::Hero || Tool == EHexPaintTool::Site)
+	// a hero goes on the cell pressed alone, and so do a mine, a pile and a castle
+	if (Tool == EHexPaintTool::Hero || Tool == EHexPaintTool::Site || Tool == EHexPaintTool::Castle)
 	{
 		if (LastCell == INDEX_NONE)
 		{
-			Tool == EHexPaintTool::Hero ? PaintHero(Cell) : PaintSite(Cell);
+			Tool == EHexPaintTool::Hero ? PaintHero(Cell) : Tool == EHexPaintTool::Site ? PaintSite(Cell) : PaintCastle(Cell);
 		}
 		LastCell = Cell;
 		return;
@@ -958,6 +959,37 @@ void UHexPlanetPainter::PaintSite(int32 Cell)
 		}
 	}
 	Stroke.NewSites = Sites->MakeLines();
+}
+
+void UHexPlanetPainter::PaintCastle(int32 Cell)
+{
+	UHexHeroes* Heroes = Planet ? Planet->GetHeroes() : nullptr;
+	UHexCastles* Castles = Heroes ? Heroes->GetCastles() : nullptr;
+	if (!Castles)
+	{
+		return;
+	}
+	// the castles before, for Undo
+	if (!Stroke.bCastles)
+	{
+		Stroke.bCastles = true;
+		Stroke.OldCastles = Castles->MakeLines();
+	}
+	if (IsBackwards())
+	{
+		Castles->RemoveCastleAt(Target, Cell);
+	}
+	else
+	{
+		// the cell clicked and the two around its corner nearest the cursor
+		int32 Cells[3];
+		FString Problem = TEXT("there are no three cells around a corner there");
+		if ((!Castles->FindCells(Target, Cell, FVector3d(CursorPoint), Cells) || Castles->AddCastle(Target, Cells, CastleFaction, CastleOwner, Problem) == 0) && GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(INDEX_NONE, 3.0f, FColor::Yellow, FString::Printf(TEXT("No castle stands there: %s"), *Problem));
+		}
+	}
+	Stroke.NewCastles = Castles->MakeLines();
 }
 
 bool UHexPlanetPainter::GenerateSites(bool bClear)
@@ -1391,6 +1423,10 @@ void UHexPlanetPainter::Undo()
 	{
 		Heroes->GetSites()->SetLines(Step.OldSites);
 	}
+	if (UHexHeroes* Heroes = Step.bCastles && Planet ? Planet->GetHeroes() : nullptr)
+	{
+		Heroes->GetCastles()->SetLines(Step.OldCastles);
+	}
 	GetLayerState().RedoSteps.Add(MoveTemp(Step));
 	UpdateSavedState();
 }
@@ -1412,6 +1448,10 @@ void UHexPlanetPainter::Redo()
 	if (UHexHeroes* Heroes = Step.bSites && Planet ? Planet->GetHeroes() : nullptr)
 	{
 		Heroes->GetSites()->SetLines(Step.NewSites);
+	}
+	if (UHexHeroes* Heroes = Step.bCastles && Planet ? Planet->GetHeroes() : nullptr)
+	{
+		Heroes->GetCastles()->SetLines(Step.NewCastles);
 	}
 	GetLayerState().UndoSteps.Add(MoveTemp(Step));
 	UpdateSavedState();

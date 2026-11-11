@@ -2,6 +2,7 @@
 
 #include "SHexHeroPanel.h"
 #include "HexHeroConfig.h"
+#include "HexCastles.h"
 #include "HexHeroes.h"
 #include "HexSiteConfig.h"
 #include "HexSites.h"
@@ -32,6 +33,7 @@ namespace
 void SHexHeroPanel::Construct(const FArguments& InArgs)
 {
 	OnHeroChosen = InArgs._OnHeroChosen;
+	OnCastleChosen = InArgs._OnCastleChosen;
 	OnEndTurn = InArgs._OnEndTurn;
 	OnRestart = InArgs._OnRestart;
 	OnSkip = InArgs._OnSkip;
@@ -77,15 +79,16 @@ void SHexHeroPanel::Construct(const FArguments& InArgs)
 			.ToolTipText(FText::FromString(SiteConfig->Resources[Resource].DisplayName))
 			.Text_Lambda([this, Resource, Name = SiteConfig->Resources[Resource].DisplayName]()
 			{
-				const FHexHero* Hero = Heroes.IsValid() ? Heroes->GetSelected() : nullptr;
-				const UHexSites* Sites = Hero ? Heroes->GetSites() : nullptr;
+				// of the person who plays, whatever is chosen: with a castle chosen no hero is, and the bar was empty until 2026-11-11
+				const UHexSites* Sites = Heroes.IsValid() ? Heroes->GetSites() : nullptr;
 				if (!Sites)
 				{
 					return FText::GetEmpty();
 				}
-				const int32 Income = Sites->GetIncome(Hero->Player, Resource);
-				return Income > 0 ? FText::Format(LOCTEXT("ResourceIncome", "{0} {1} (+{2})"), FText::FromString(Name), FText::AsNumber(Sites->GetAmount(Hero->Player, Resource)), FText::AsNumber(Income))
-					: FText::Format(LOCTEXT("Resource", "{0} {1}"), FText::FromString(Name), FText::AsNumber(Sites->GetAmount(Hero->Player, Resource)));
+				const int32 Player = Heroes->GetShroudPlayer();
+				const int32 Income = Sites->GetIncome(Player, Resource);
+				return Income > 0 ? FText::Format(LOCTEXT("ResourceIncome", "{0} {1} (+{2})"), FText::FromString(Name), FText::AsNumber(Sites->GetAmount(Player, Resource)), FText::AsNumber(Income))
+					: FText::Format(LOCTEXT("Resource", "{0} {1}"), FText::FromString(Name), FText::AsNumber(Sites->GetAmount(Player, Resource)));
 			})
 		];
 	}
@@ -163,8 +166,10 @@ void SHexHeroPanel::Construct(const FArguments& InArgs)
 							{
 								return FText::GetEmpty();
 							}
-							return FText::Format(LOCTEXT("Attributes", "Level {0}   Attack {1}   Defense {2}\nSpell power {3}   Knowledge {4}   Mana {5}"), FText::AsNumber(Hero->Level),
-								FText::AsNumber(Hero->Attack), FText::AsNumber(Hero->Defense), FText::AsNumber(Hero->SpellPower), FText::AsNumber(Hero->Knowledge), FText::AsNumber(Hero->Mana));
+							const UHexCastles* Castles = Heroes->GetCastles();
+							return FText::Format(LOCTEXT("Attributes", "Level {0}   Attack {1}   Defense {2}\nSpell power {3}   Knowledge {4}   Mana {5}\nArmy: {6}"), FText::AsNumber(Hero->Level),
+								FText::AsNumber(Hero->Attack), FText::AsNumber(Hero->Defense), FText::AsNumber(Hero->SpellPower), FText::AsNumber(Hero->Knowledge), FText::AsNumber(Hero->Mana),
+								FText::FromString(Castles ? Castles->DescribeArmy(Hero->Army) : FString(TEXT("none"))));
 						})
 					]
 					// what the way to the cell under the cursor costs
@@ -281,9 +286,11 @@ void SHexHeroPanel::Tick(const FGeometry& AllottedGeometry, const double InCurre
 	SCompoundWidget::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
 
 	const int32 Revision = Heroes.IsValid() ? Heroes->GetListRevision() : -1;
-	if (Revision != ListedRevision)
+	const int32 CastleRevision = Heroes.IsValid() && Heroes->GetCastles() ? Heroes->GetCastles()->GetRevision() : -1;
+	if (Revision != ListedRevision || CastleRevision != ListedCastles)
 	{
 		ListedRevision = Revision;
+		ListedCastles = CastleRevision;
 		RebuildList();
 	}
 }
@@ -316,6 +323,26 @@ int32 SHexHeroPanel::OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGe
 				ESlateDrawEffect::None, Config->PathLabelBack);
 			FSlateDrawElement::MakeText(OutDrawElements, LayerId + 1, AllottedGeometry.ToPaintGeometry(TextSize, FSlateLayoutTransform(Position + Margin)), Text, Font,
 				ESlateDrawEffect::None, Config->PathLabelColor);
+		}
+
+		// the castle chosen in place of a hero is marked over it
+		const UHexCastles* Chosen = Heroes->GetCastles();
+		const FHexCastle* ChosenCastle = Chosen ? Chosen->FindCastle(Heroes->GetSelectedCastleId()) : nullptr;
+		FVector2D CastleScreen;
+		if (ChosenCastle && ChosenCastle->bSeated && ChosenCastle->Layer == Heroes->GetPathLayer()
+			&& OnProject(ChosenCastle->Seat.GetLocation() + ChosenCastle->Seat.GetLocation().GetSafeNormal() * (ChosenCastle->Seat.GetScale3D().X * 230.0), CastleScreen))
+		{
+			// with the hero that guards it, which is chosen with it
+			const FHexHero* Guard = Heroes->GetSelected();
+			const FString Text = Guard ? FString::Printf(TEXT("%s castle, %s"), *Chosen->GetConfig()->Factions[ChosenCastle->Faction].DisplayName, *Guard->Name)
+				: FString::Printf(TEXT("%s castle"), *Chosen->GetConfig()->Factions[ChosenCastle->Faction].DisplayName);
+			const FVector2D TextSize = Measure->Measure(Text, Font);
+			const FVector2D BoxSize = TextSize + Margin * 2.0;
+			const FVector2D Position = CastleScreen / Scale - FVector2D(BoxSize.X * 0.5, BoxSize.Y);
+			FSlateDrawElement::MakeBox(OutDrawElements, LayerId, AllottedGeometry.ToPaintGeometry(BoxSize, FSlateLayoutTransform(Position)), White, ESlateDrawEffect::None,
+				FLinearColor(1.0f, 0.75f, 0.1f, 0.9f));
+			FSlateDrawElement::MakeText(OutDrawElements, LayerId + 1, AllottedGeometry.ToPaintGeometry(TextSize, FSlateLayoutTransform(Position + Margin)), Text, Font,
+				ESlateDrawEffect::None, FLinearColor(0.02f, 0.02f, 0.02f, 1.0f));
 		}
 
 		// what a hero gained at a site floats up over it and fades
@@ -460,6 +487,73 @@ void SHexHeroPanel::RebuildList()
 								return TOptional<float>(Each ? Each->MovePoints / FMath::Max(WeakHeroes->GetMaxMovePoints(*Each), 0.01f) : 0.0f);
 							})
 						]
+					]
+				]
+			]
+		];
+	}
+
+	// the castles of the person who plays, chosen as a hero is: either a hero or a castle is chosen
+	const UHexCastles* Castles = Heroes->IsPlaying() ? Heroes->GetCastles() : nullptr;
+	for (int32 Index = 0; Castles && Index < Castles->GetCastles().Num(); ++Index)
+	{
+		const FHexCastle& Castle = Castles->GetCastles()[Index];
+		if (Castle.Owner != Heroes->GetShroudPlayer())
+		{
+			continue;
+		}
+		const int32 Id = Castle.Id;
+		const FHexHero* Guard = Castles->FindGuard(Castle);
+		const FLinearColor Color = Config->GetPlayer(Castle.Owner).Color;
+		List->AddSlot()
+		.AutoHeight()
+		.Padding(0.0f, 0.0f, 0.0f, 3.0f)
+		[
+			SNew(SButton)
+			.IsFocusable(false)
+			.ContentPadding(FMargin(6.0f, 4.0f))
+			.ToolTipText(LOCTEXT("CastleLineTip", "Click to choose the castle and look at it; click again, or press the key that sends a hero, to open it"))
+			.ButtonColorAndOpacity_Lambda([WeakHeroes, Id]() { return WeakHeroes.IsValid() && WeakHeroes->GetSelectedCastleId() == Id ? HeroChosenColor : HeroButtonColor; })
+			.OnClicked_Lambda([this, Id]()
+			{
+				OnCastleChosen.ExecuteIfBound(Id);
+				return FReply::Handled();
+			})
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				.Padding(0.0f, 0.0f, 8.0f, 0.0f)
+				[
+					SNew(SBox)
+					.WidthOverride(12.0f)
+					.HeightOverride(12.0f)
+					[
+						SNew(SImage)
+						.Image(White)
+						.ColorAndOpacity(FLinearColor(Color.R, Color.G, Color.B, 1.0f))
+					]
+				]
+				+ SHorizontalBox::Slot()
+				.FillWidth(1.0f)
+				[
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot()
+					.AutoHeight()
+					[
+						SNew(STextBlock)
+						.Font(Font)
+						.Text(FText::Format(LOCTEXT("CastleLine", "Castle, {0}"), FText::FromString(Castles->GetConfig()->Factions[Castle.Faction].DisplayName)))
+					]
+					+ SVerticalBox::Slot()
+					.AutoHeight()
+					[
+						SNew(STextBlock)
+						.Font(Small)
+						.ColorAndOpacity(HeroDimColor)
+						.Text(Guard ? FText::Format(LOCTEXT("CastleGuard", "{0} guards it"), FText::FromString(Guard->Name))
+							: FText::Format(LOCTEXT("CastleGarrison", "Garrison: {0}"), FText::FromString(Castles->DescribeArmy(Castle.Garrison))))
 					]
 				]
 			]

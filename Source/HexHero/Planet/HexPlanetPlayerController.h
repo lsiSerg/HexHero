@@ -10,6 +10,7 @@
 class AHexPlanet;
 class SHexDebugOverlay;
 class SHexDialog;
+class SHexCastlePanel;
 class SHexHeroPanel;
 class SHexModeBar;
 class SHexHoverInfo;
@@ -47,6 +48,9 @@ class AHexPlanetPlayerController : public APlayerController
 
 	/** Panel of the heroes of the planet, at the bottom right */
 	TSharedPtr<SHexHeroPanel> HeroPanel;
+
+	/** Panel of the castle a person looks into, at the right; a click outside it closes it */
+	TSharedPtr<SHexCastlePanel> CastlePanel;
 
 	/** The buttons Edit and Play at the top left */
 	TSharedPtr<SHexModeBar> ModeBar;
@@ -207,6 +211,13 @@ private:
 
 	/** The camera shows the hero the game chose by itself */
 	void OnHeroChosen(int32 Id);
+
+	/** A person looks into a castle of its own: its panel opens, and the camera comes close to the castle, which shows a little right of
+	 *  the middle of the screen beside the panel */
+	void OnCastleOpened(int32 Id);
+
+	/** Chooses a castle from the list of the panel of the heroes and shows it; the one chosen already opens its panel */
+	void ShowCastle(int32 Id);
 
 	/** Returns the brush, made on the surface of the planet when first needed, or null without one */
 	UHexPlanetPainter* GetPainter();

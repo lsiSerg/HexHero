@@ -54,6 +54,7 @@
 #include "Algo/BinarySearch.h"
 #include "Async/ParallelFor.h"
 #include "HexHeroConfig.h"
+#include "HexCastles.h"
 #include "HexHeroes.h"
 #include "HexShroud.h"
 #include "HexPlanetFlocks.h"
@@ -1642,12 +1643,23 @@ void AHexPlanet::UpdateClearCells()
 	{
 		Cells.Add(Entrance.Cell);
 	}
+	const AHexPlanet* SurfacePlanet = GetLayerPlanet(EHexPlanetLayer::Surface);
+	const UHexCastles* Castles = SurfacePlanet && SurfacePlanet->GetHeroes() ? SurfacePlanet->GetHeroes()->GetCastles() : nullptr;
 	for (const EHexPlanetLayer Layer : {EHexPlanetLayer::Surface, EHexPlanetLayer::Underground})
 	{
 		if (AHexPlanet* Planet = GetLayerPlanet(Layer); Planet && Planet->Objects)
 		{
+			// and the cells of the castles of the layer, whose ground covers them
+			TArray<int32> LayerCells = Cells;
+			for (int32 Index = 0; Castles && Index < Castles->GetCastles().Num(); ++Index)
+			{
+				if (Castles->GetCastles()[Index].Layer == Layer)
+				{
+					LayerCells.Append(Castles->GetCastles()[Index].Cells, 3);
+				}
+			}
 			// and the boulders at the foot of mountains on those cells, placed again only when the cleared cells changed
-			if (Planet->Objects->SetClearCells(Cells) && Planet->bBuilt)
+			if (Planet->Objects->SetClearCells(LayerCells) && Planet->bBuilt)
 			{
 				Planet->UpdateBoulders();
 			}
@@ -7091,13 +7103,14 @@ void AHexPlanet::DropWallWholes()
 	}
 }
 
-void AHexPlanet::SetHoveredCell(int32 Cell, int32 BrushSize)
+void AHexPlanet::SetHoveredCell(int32 Cell, int32 BrushSize, TConstArrayView<int32> Group, bool bPlay)
 {
 	// the neighbors are outlined while the wireframe draws them, which a brush leaves out, as it outlines its own cells
 	const FHexDebugViewSettings View = AHexWorldMap::GetDebugViewSettings();
 	const bool bNeighbors = BrushSize <= 0 && View.Mode != EHexWireframeMode::Off && View.Scope != EHexWireframeScope::Hover;
 
-	if (Cell == HoveredCell && BrushSize == HighlightBrushSize && bNeighbors == bHighlightNeighbors)
+	const bool bSameGroup = HoveredGroup.Num() == Group.Num() && (Group.IsEmpty() || FMemory::Memcmp(HoveredGroup.GetData(), Group.GetData(), Group.Num() * sizeof(int32)) == 0);
+	if (Cell == HoveredCell && BrushSize == HighlightBrushSize && bNeighbors == bHighlightNeighbors && bPlay == bHoverPlay && bSameGroup)
 	{
 		return;
 	}
@@ -7105,6 +7118,8 @@ void AHexPlanet::SetHoveredCell(int32 Cell, int32 BrushSize)
 	HoveredCell = Cell;
 	HighlightBrushSize = BrushSize;
 	bHighlightNeighbors = bNeighbors;
+	HoveredGroup = TArray<int32>(Group);
+	bHoverPlay = bPlay;
 
 	// an outline is centered on the edge of a set of cells, so each side of the edge is marked in both cells that share it: red holds the bits
 	// of the sides of the first layer, drawn in MarkPrimaryColor, and green those of the second, in NeighborOutlineColor. Side K faces neighbor K
@@ -7162,16 +7177,28 @@ void AHexPlanet::SetHoveredCell(int32 Cell, int32 BrushSize)
 				MarkEdge({Neighbor}, false);
 			}
 		}
-		MarkEdge({Cell}, true);
+		// a group of cells is outlined as one, as the three cells of a castle
+		if (!Group.IsEmpty() && Group.Contains(Cell))
+		{
+			MarkEdge(Group, true);
+		}
+		else
+		{
+			MarkEdge({Cell}, true);
+		}
 	}
 
-	// the first layer is the brush or the cell under the cursor
-	const FLinearColor PrimaryColor = BrushSize > 0 ? Settings->BrushOutlineColor : Settings->OutlineColor;
+	// the first layer is the brush or the cell under the cursor, drawn thinner and lighter while the game is played
+	const bool bPlayStyle = bPlay && BrushSize <= 0;
+	const FLinearColor PrimaryColor = BrushSize > 0 ? Settings->BrushOutlineColor : bPlayStyle ? Settings->PlayOutlineColor : Settings->OutlineColor;
 	for (UMaterialInstanceDynamic* Instance : { SurfaceMaterial.Get(), SurfaceCutMaterial.Get(), LodNearMaterial.Get(), LodFarMaterial.Get(), WaterGridMaterial.Get(), PreviewMaterial.Get() })
 	{
 		if (Instance)
 		{
 			Instance->SetVectorParameterValue(TEXT("MarkPrimaryColor"), PrimaryColor);
+			Instance->SetScalarParameterValue(TEXT("MarkWidth"), bPlayStyle ? Settings->PlayMarkWidth : Settings->MarkWidth);
+			Instance->SetScalarParameterValue(TEXT("MarkMinPixels"), bPlayStyle ? Settings->PlayMarkMinPixels : Settings->MarkMinPixels);
+			Instance->SetScalarParameterValue(TEXT("MarkOpacity"), bPlayStyle ? Settings->PlayMarkOpacity : Settings->MarkOpacity);
 		}
 	}
 	SetCellMarks(Marks);

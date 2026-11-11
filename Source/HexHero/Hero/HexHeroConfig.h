@@ -184,6 +184,15 @@ public:
 	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=1, ClampMax=30))
 	int32 SightRadius = 5;
 
+	/** A hero that takes a mine or a mill goes onto its cell, to its place there (FHexSiteKind::HeroPlace), over this many seconds, and
+	 *  guards it while it stands there, as the developer asked on 2026-11-11 */
+	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=0.05, ClampMax=5))
+	float SiteWalkTime = 0.7f;
+
+	/** A castle opens the fog of war for its owner too, this many times as far as a hero, as the developer asked on 2026-11-11 */
+	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=0, ClampMax=10))
+	float CastleSightFactor = 3.0f;
+
 	/** A player the game moves by itself (the Heroes tab of the palette, kept in heroes.json) sends its heroes to open the map, each to the
 	 *  nearest cell from which it sees ground its player has not explored: seconds a hero of such a player stands before it sets out again */
 	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=0, ClampMax=10))

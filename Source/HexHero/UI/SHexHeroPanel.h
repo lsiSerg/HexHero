@@ -23,6 +23,8 @@ public:
 	SLATE_BEGIN_ARGS(SHexHeroPanel) {}
 		/** A line of a hero was clicked */
 		SLATE_EVENT(FOnHexHeroChosen, OnHeroChosen)
+		/** A line of a castle was clicked */
+		SLATE_EVENT(FOnHexHeroChosen, OnCastleChosen)
 		/** The button that ends the day was clicked */
 		SLATE_EVENT(FSimpleDelegate, OnEndTurn)
 		/** The button that starts the game again was clicked */
@@ -55,6 +57,10 @@ private:
 	TWeakObjectPtr<UHexHeroes> Heroes;
 	TSharedPtr<SVerticalBox> List;
 	FOnHexHeroChosen OnHeroChosen;
+	FOnHexHeroChosen OnCastleChosen;
+
+	/** The revision of the castles the lines were made for (UHexCastles::GetRevision) */
+	int32 ListedCastles = -1;
 	FSimpleDelegate OnEndTurn;
 	FSimpleDelegate OnRestart;
 	FSimpleDelegate OnSkip;

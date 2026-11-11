@@ -518,7 +518,8 @@ float gridLine = saturate((U - (1.0 - width)) / pixel) * saturate(1.5 - pixel * 
 # the outlines of marked cells (AHexPlanet::SetHoveredCell), centered on the edge of a set of cells: the texture CellMarks has a pixel per cell,
 # at the third UV of its vertices (HexPlanetSurface::GetCellUV), with bits of the sides to outline in red, drawn in MarkPrimaryColor, and in
 # green for a second layer in NeighborOutlineColor. Each cell along the edge draws its half of the line on the grid line inside the side,
-# MarkWidth or MarkMinPixels wide, which never fades with distance. Where the edge bends, the halves of two sides would stop at the bisector of
+# MarkWidth or MarkMinPixels wide, which never fades with distance, covering MarkOpacity of what lies under it (AHexPlanet::SetHoveredCell
+# gives the three thinner and lighter values while the game is played). Where the edge bends, the halves of two sides would stop at the bisector of
 # their corner and leave a notch, so the half of a marked side also goes on past the corner into the side next to it, as far as the band of
 # that side, which joins the line with a sharp miter as two strokes would. The fourth UV is where a point lies in a regular cell whose side K
 # faces K turns of a side and whose corner K lies half a turn further, so the side and the corner nearest a pixel are found by its angle, in
@@ -551,7 +552,7 @@ if (any(markBits > 0u) || holeBits > 0u)
     float primary = max((float)((markBits.r >> side) & 1u), (float)((markBits.r >> other) & 1u) * miter);
     float secondary = max((float)((markBits.g >> side) & 1u), (float)((markBits.g >> other) & 1u) * miter);
     float hole = max((float)((holeBits >> side) & 1u), (float)((holeBits >> other) & 1u) * miter);
-    markLine = band * max(max(primary, secondary), hole);
+    markLine = band * max(max(primary, secondary), hole) * MarkOpacity;
     markColor = primary > 0.0 ? MarkPrimaryColor.rgb : secondary > 0.0 ? NeighborOutlineColor.rgb : WaterHideOutlineColor.rgb;
 }
 '''
@@ -1735,7 +1736,7 @@ NOISE = '/Game/HexMap/Textures/T_HexNoise'
 DEFAULT_CUBE = '/Engine/EngineResources/GrayTextureCube'
 # AHexPlanet gives the materials its CellMarks, read with Load, so the default only has to be a 2D texture
 DEFAULT_MARKS = '/Engine/EngineResources/Black'
-MARK_PARAMETERS = ['NeighborOutlineColor', 'WaterHideOutlineColor', 'MarkWidth', 'MarkMinPixels', 'MarkGlow']
+MARK_PARAMETERS = ['NeighborOutlineColor', 'WaterHideOutlineColor', 'MarkWidth', 'MarkMinPixels', 'MarkGlow', 'MarkOpacity']
 WATER_MATERIAL = FOLDER + '/M_HexPlanetWater'
 WIRE_MATERIAL = FOLDER + '/M_HexPlanetWireframe'
 WATER_GRID_MATERIAL = FOLDER + '/M_HexPlanetWaterGrid'
@@ -2594,35 +2595,69 @@ float3 resource = float3(ResourceR, ResourceG, ResourceB);
 float3 owner = float3(OwnerR, OwnerG, OwnerB);
 float since = Time - EventTime;
 float fade = Fading * saturate(since / max(PickupFadeTime, 0.01));
+// the stone of a castle (about 0.1), which M_HexPlanetCastle draws as the masonry of the style of its faction
+float masonry = Castle * step(0.05, VertexA) * (1.0 - step(0.15, VertexA));
+// and its roofs, what takes the color of the owner but for cloth, which has a V of 4 or more in its UV: tiles, which keep their own color
+// where that V is 2 or more, and take that of the owner only under it, as on a hall
+float roof = Castle * heap * (1.0 - step(4.0, UV.y));
+float plainRoof = roof * step(2.0, UV.y);
 float3 grainCell = floor(WorldPos / max(PickupGrain, 0.1));
 float grain = frac(sin(dot(grainCell, float3(12.9898, 78.233, 37.719))) * 43758.5453);
 """
 SITE_CODE = SITE_PARTS_CODE + r"""
 float3 color = lerp(VertexRGB.rgb, resource * tone, heap);
 color = lerp(color, owner * tone, flag);
+color = lerp(color, WallColor * lerp(WallHumanTint, WallUndeadTint, WallStyle) * tone * WallTone, masonry);
+// a roof is tiles: in their own color, tinted by the style of the faction, or in the color of the owner, as light as the scan of them is,
+// with RoofTextureShare of the colors of the scan itself
+float tileTone = dot(RoofColor, float3(0.3, 0.59, 0.11));
+float3 tiles = lerp(resource * tone * tileTone * RoofTone, RoofColor * tone * RoofTone * 0.6, RoofTextureShare);
+tiles = lerp(tiles, RoofColor * lerp(RoofHumanTint, RoofUndeadTint, WallStyle) * tone * RoofPlainTone, step(0.5, plainRoof));
+color = lerp(color, tiles, roof);
 return color * (1.0 - spark);
+"""
+# The normal of the masonry of a castle, in the space of the tangents of its meshes, flat on everything else
+SITE_NORMAL_CODE = SITE_PARTS_CODE + r"""
+return normalize(lerp(lerp(float3(0.0, 0.0, 1.0), WallNormal, masonry * WallRelief), RoofNormal, roof * RoofRelief));
 """
 SITE_GLOW_CODE = SITE_PARTS_CODE + r"""
 float flash = saturate(1.0 - since / max(CaptureFlashTime, 0.01)) * step(0.0, since) * (1.0 - Fading);
 flash *= flash;
-float3 glow = (resource * heap + owner * flag) * tone * (SiteGlow + CaptureFlash * flash) + VertexRGB.rgb * own * PileGlow;
+// what glows by itself: in a castle its fires and its lit windows, which flicker, each at its own time
+float flicker = 1.0 - FireFlicker * (0.5 + 0.5 * sin(Time * 13.0 + dot(WorldPos, float3(0.11, 0.13, 0.17))) * sin(Time * 7.3 + WorldPos.x * 0.21));
+float3 glow = (resource * (heap - plainRoof) + owner * flag) * tone * (SiteGlow + CaptureFlash * flash) + VertexRGB.rgb * own * lerp(PileGlow, FireGlow * flicker, Castle);
 // the grains of a pile that are about to go
 float going = Fading * step(0.001, fade) * smoothstep(fade + 0.3, fade, grain);
 glow += lerp(resource, float3(1.0, 1.0, 1.0), 0.5) * PickupGlow * going;
-return lerp(glow, lerp(resource, float3(1.0, 1.0, 1.0), SparkleWhite) * SparkleBrightness, spark);
+// the sparkles of a castle are the embers of its fires
+return lerp(glow, lerp(lerp(resource, float3(1.0, 1.0, 1.0), SparkleWhite), EmberColor, Castle) * SparkleBrightness, spark);
 """
+# A sparkle lets what is behind it through, as the developer asked on 2026-11-11: SparkleOpacity of its pixels are kept, by a noise of the pixel
+# that changes every frame, which the temporal filter blends
 SITE_MASK_CODE = SITE_PARTS_CODE + r"""
-return max(spark, step(fade * 1.03, grain));
+float solid = lerp(1.0, step(fade * 1.03, grain), Fading);
+float2 pixel = Parameters.SvPosition.xy + 5.588238 * (float)View.StateFrameIndexMod8;
+float noise = frac(52.9829189 * frac(dot(pixel, float2(0.06711056, 0.00583715))));
+return lerp(solid, noise < SparkleOpacity ? 1.0 : 0.0, spark);
 """
 # A sparkle is a small star drawn tiny in its mesh, with where each corner lies in it as its UV: it grows to SparkleSize around its middle,
-# facing the camera, as it twinkles, each at its own time (the red of its vertices and a number of its instance) and pace (their green), and
-# rises SparkleRise meanwhile by their blue. From afar it grows, as the marks of a way do (SparkleFarStart, SparkleFarScale), and in the shadow
-# pass it stays tiny (ShadowSize 0), so it casts no shadow
+# facing the camera, as it twinkles, each at its own time (the red of its vertices and a number of its instance) and pace (their green), for
+# SparkleShare of that time, and rises SparkleRise meanwhile by their blue. From afar it grows, as the marks of a way do (SparkleFarStart, SparkleFarScale), and in the shadow
+# pass it stays tiny (ShadowSize 0), so it casts no shadow.
+# A castle is alive, as the developer asked on 2026-11-11, by what its meshes mark with a V of 4 or more in their UV (generate_planet_castles.py):
+# a leaf of a gate (plain, its U how far a vertex lies from its hinge along Y, with its sign) swings into the yard by GateSwing degrees when a
+# hero goes through, GateTime being the ninth custom value of an instance, when its gate last opened: open over GateRiseTime, held for
+# GateHoldTime and shut again; cloth in the color of the owner (its U how far from its pole, 0 to 1, and its V 7 and a hundredth of how long
+# it is) flies with the wind, which blows east over the ground and veers by FlagVeer degrees, so the flags of a castle look one way, as the
+# developer asked on 2026-11-11 (each flew the way its mesh was turned before), and waves by FlagWave at FlagWaveSpeed; and a flame (what
+# glows by itself, its U how far up it) dances by FlameDance
 SITE_OFFSET_CODE = r"""
 float spark = step(0.65, VertexA) * (1.0 - step(0.9, VertexA));
 float fade = Fading * saturate((Time - EventTime) / max(PickupFadeTime, 0.01));
 float phase = frac(Time * SparkleSpeed * (0.6 + 0.8 * VertexRGB.g) + VertexRGB.r + InstanceRandom);
-float twinkle = sin(phase * 3.14159265);
+// it shows for a share of its time, and is gone for the rest
+float shown = saturate(phase / max(SparkleShare, 0.05));
+float twinkle = sin(shown * 3.14159265);
 twinkle *= twinkle;
 // as its pile dissolves every sparkle shines, grows and flies up, and is gone with it
 twinkle = lerp(twinkle, 1.0, saturate(fade * 4.0)) * (1.0 + 1.5 * fade) * (1.0 - fade * fade);
@@ -2630,22 +2665,58 @@ float size = length(AxisZ);
 float3 up = normalize(AxisZ);
 float grow = clamp(distance(CameraPos, ObjectPos) / max(SparkleFarStart, 1.0), 1.0, max(SparkleFarScale, 1.0));
 float3 star = (ViewRight * (UV.x - 0.5) + ViewUp * (UV.y - 0.5)) * 2.0 * SparkleSize * size * twinkle * grow * ShadowSize;
-float3 sparkle = star + up * ((phase * VertexRGB.b + fade * 2.0) * SparkleRise * size);
-return lerp(up * (fade * fade * PickupLift * size), sparkle, spark);
+float3 sparkle = star + up * ((shown * VertexRGB.b + fade * 2.0) * SparkleRise * size);
+float marked = Castle * step(4.0, UV.y);
+float door = marked * (1.0 - step(0.05, VertexA));
+float flame = marked * step(0.15, VertexA) * (1.0 - step(0.4, VertexA));
+float cloth = marked * step(0.4, VertexA) * (1.0 - spark);
+float sinceGate = Time - GateTime;
+float rise = max(GateRiseTime, 0.01);
+float open = smoothstep(0.0, rise, sinceGate) * (1.0 - smoothstep(rise + GateHoldTime, rise * 2.0 + GateHoldTime, sinceGate));
+float swing = radians(GateSwing) * open;
+float3 swung = AxisY * (UV.x * (cos(swing) - 1.0)) - AxisX * (abs(UV.x) * sin(swing));
+float3 east = cross(float3(0.0, 0.0, 1.0), up);
+east = dot(east, east) > 0.0001 ? normalize(east) : float3(1.0, 0.0, 0.0);
+float veer = radians(FlagVeer) * sin(Time * 0.35 + dot(ObjectPos, float3(0.001, 0.0013, 0.0017)));
+float3 wind = east * cos(veer) + cross(up, east) * sin(veer);
+float3 across = cross(up, wind);
+// the cloth lies along -X of its mesh from its pole, and is laid along the wind instead
+float3 flown = (AxisX + wind * length(AxisX)) * (UV.x * max(UV.y - 7.0, 0.0) * 100.0);
+float wave = Time * FlagWaveSpeed + InstanceRandom * 6.2832 - UV.x * 3.5;
+float3 waved = flown + (across * sin(wave) + up * (0.3 * sin(wave * 1.7 + 1.0))) * (UV.x * FlagWave * size);
+float3 danced = (AxisZ * (0.5 + 0.5 * sin(Time * 9.0 + InstanceRandom * 40.0)) + AxisX * (0.4 * sin(Time * 6.3 + InstanceRandom * 17.0))) * (UV.x * FlameDance);
+return lerp(up * (fade * fade * PickupLift * size), sparkle, spark) + swung * door + waved * cloth + danced * flame;
 """
-SITE_PARAMETERS = ['SiteGlow', 'PileGlow', 'SparkleBrightness', 'SparkleWhite', 'PickupFadeTime', 'PickupGrain', 'PickupGlow', 'CaptureFlash', 'CaptureFlashTime']
-SITE_OFFSET_PARAMETERS = ['SparkleSize', 'SparkleRise', 'SparkleSpeed', 'SparkleFarStart', 'SparkleFarScale', 'PickupFadeTime', 'PickupLift']
+SITE_PARAMETERS = ['SiteGlow', 'PileGlow', 'SparkleBrightness', 'SparkleWhite', 'SparkleOpacity', 'PickupFadeTime', 'PickupGrain', 'PickupGlow', 'CaptureFlash',
+    'CaptureFlashTime']
+SITE_OFFSET_PARAMETERS = ['SparkleSize', 'SparkleRise', 'SparkleSpeed', 'SparkleShare', 'SparkleFarStart', 'SparkleFarScale', 'PickupFadeTime', 'PickupLift']
 SITE_MATERIAL = FOLDER + '/M_HexPlanetSite'
 SITE_FADE_MATERIAL = FOLDER + '/M_HexPlanetSiteFade'
+# The castles (UHexCastles): the graph of the sites, and on their stone the masonry of two styles, of men and of the undead, which
+# generate_castle_textures.py writes and import_planet_castles.py imports before this material is built, by the UV of the meshes; the eighth
+# custom value of an instance says how much of the second style it is, and WallTone and WallRelief of DA_HexCastles how light and how deep,
+# each style tinted by its own color there (WallHumanTint, WallUndeadTint). What glows by itself in a castle is fire, FireGlow bright and
+# flickering by FireFlicker, and its sparkles are embers in EmberColor. Its roofs are tiles, T_CastleRoof by the UV of the meshes, in the
+# color of their clay, tinted by the style of the faction (RoofPlainTone, RoofHumanTint, RoofUndeadTint), and only those whose V is under 2,
+# as on a hall, in the color of the owner (RoofTone, RoofTextureShare), with RoofRelief of the normal of the scan: the developer asked for
+# tiles in place of a plain color on 2026-11-11, did not like the moss a first try had, and then found too much of the color of the player
+# on a castle, which every roof took until then
+CASTLE_PARAMETERS = ['WallHumanTint', 'WallUndeadTint', 'FireGlow', 'FireFlicker', 'EmberColor', 'RoofTone', 'RoofTextureShare', 'RoofRelief', 'RoofPlainTone',
+    'RoofHumanTint', 'RoofUndeadTint']
+CASTLE_OFFSET_PARAMETERS = ['FlagWave', 'FlagWaveSpeed', 'FlagVeer', 'GateSwing', 'GateRiseTime', 'GateHoldTime', 'FlameDance']
+CASTLE_ROOF = FOLDER + '/Castles/T_CastleRoof'
+CASTLE_MATERIAL = FOLDER + '/M_HexPlanetCastle'
+CASTLE_TEXTURES = FOLDER + '/Castles/T_CastleWall_%s'
 
 
 def build_site_material():
     # the sites, and the piles that dissolve, which alone pay for a mask
     build_site_graph(SITE_MATERIAL, False)
     build_site_graph(SITE_FADE_MATERIAL, True)
+    build_site_graph(CASTLE_MATERIAL, False, True)
 
 
-def build_site_graph(path, fading):
+def build_site_graph(path, fading, castle=False):
     library = unreal.MaterialEditingLibrary
     assets = unreal.EditorAssetLibrary
     material = unreal.load_asset(path) if assets.does_asset_exist(path) else unreal.AssetToolsHelpers.get_asset_tools().create_asset(
@@ -2654,7 +2725,8 @@ def build_site_graph(path, fading):
     material.set_editor_property('used_with_instanced_static_meshes', True)
     # the flag of a mine is a sheet seen from both its sides
     material.set_editor_property('two_sided', True)
-    material.set_editor_property('blend_mode', unreal.BlendMode.BLEND_MASKED if fading else unreal.BlendMode.BLEND_OPAQUE)
+    # masked, as a sparkle lets what is behind it through, and a pile dissolves
+    material.set_editor_property('blend_mode', unreal.BlendMode.BLEND_MASKED)
     vertex_color = library.create_material_expression(material, unreal.MaterialExpressionVertexColor, -1000, 0)
     # when a mine was taken or a pile taken, long ago for a mesh that is no instance
     event = library.create_material_expression(material, unreal.MaterialExpressionPerInstanceCustomData, -1000, 550)
@@ -2665,8 +2737,60 @@ def build_site_graph(path, fading):
     world = library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1000, 650)
     world.set_editor_property('world_position_shader_offset', unreal.WorldPositionIncludedOffsets.WPT_EXCLUDE_ALL_SHADER_OFFSETS)
     fading_value = add_scalar(library, material, 'Fading', 1.0 if fading else 0.0, 700)
+    mesh_uv = library.create_material_expression(material, unreal.MaterialExpressionTextureCoordinate, -1500, 2700)
     inputs = [('VertexRGB', vertex_color, ''), ('VertexA', vertex_color, 'A'), ('EventTime', event, ''), ('Time', time, ''), ('WorldPos', world, ''),
-        ('Fading', fading_value, '')] + add_config_parameters(library, material, unreal.HexSiteConfig, SITE_PARAMETERS, 1200)
+        ('Fading', fading_value, ''), ('UV', mesh_uv, '')] + add_config_parameters(library, material, unreal.HexSiteConfig, SITE_PARAMETERS, 1200)
+    # the masonry of a castle: two styles, blended by a value of the instance
+    wall_color = library.create_material_expression(material, unreal.MaterialExpressionConstant3Vector, -1000, 2600)
+    wall_color.set_editor_property('constant', unreal.LinearColor(1.0, 1.0, 1.0, 0.0))
+    wall_normal = library.create_material_expression(material, unreal.MaterialExpressionConstant3Vector, -1000, 2650)
+    wall_normal.set_editor_property('constant', unreal.LinearColor(0.0, 0.0, 1.0, 0.0))
+    style = library.create_material_expression(material, unreal.MaterialExpressionConstant, -1500, 2750)
+    style.set_editor_property('r', 0.0)
+    roof_color = wall_color
+    roof_normal = wall_normal
+    if castle:
+        wall_uv = mesh_uv
+        # the tiles of its roofs
+        roofs = []
+        for index, (suffix, sampler) in enumerate((('', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR), ('_N', unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL))):
+            sample = library.create_material_expression(material, unreal.MaterialExpressionTextureSampleParameter2D, -1300, 5000 + index * 220)
+            sample.set_editor_property('parameter_name', 'Roof%s' % ('Normal' if suffix else 'Color'))
+            texture = unreal.load_asset(CASTLE_ROOF + suffix)
+            if not texture:
+                raise RuntimeError('%s is missing: run fetch_castle_textures.ps1 or generate_castle_textures.py, then import_planet_castles.py textures' % (CASTLE_ROOF + suffix))
+            sample.set_editor_property('texture', texture)
+            sample.set_editor_property('sampler_type', sampler)
+            library.connect_material_expressions(wall_uv, '', sample, 'UVs')
+            roofs.append(sample)
+        roof_color, roof_normal = roofs
+        style = library.create_material_expression(material, unreal.MaterialExpressionPerInstanceCustomData, -1500, 2750)
+        style.set_editor_property('data_index', 7)
+        style.set_editor_property('const_default_value', 0.0)
+        blends = []
+        for index, (suffix, sampler) in enumerate((('', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR), ('_N', unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL))):
+            samples = []
+            for row, name in enumerate(('Human', 'Undead')):
+                sample = library.create_material_expression(material, unreal.MaterialExpressionTextureSampleParameter2D, -1300, 2800 + index * 500 + row * 220)
+                sample.set_editor_property('parameter_name', 'Wall%s%s' % (name, suffix.replace('_', '')))
+                texture = unreal.load_asset((CASTLE_TEXTURES % name) + suffix)
+                if not texture:
+                    raise RuntimeError('%s is missing: run generate_castle_textures.py and import_planet_castles.py textures first' % ((CASTLE_TEXTURES % name) + suffix))
+                sample.set_editor_property('texture', texture)
+                sample.set_editor_property('sampler_type', sampler)
+                library.connect_material_expressions(wall_uv, '', sample, 'UVs')
+                samples.append(sample)
+            blend = library.create_material_expression(material, unreal.MaterialExpressionLinearInterpolate, -1000, 2800 + index * 500)
+            library.connect_material_expressions(samples[0], 'RGB', blend, 'A')
+            library.connect_material_expressions(samples[1], 'RGB', blend, 'B')
+            library.connect_material_expressions(style, '', blend, 'Alpha')
+            blends.append(blend)
+        wall_color, wall_normal = blends
+    castle_value = add_scalar(library, material, 'Castle', 1.0 if castle else 0.0, 2500)
+    inputs += [('Castle', castle_value, ''), ('WallColor', wall_color, ''), ('WallNormal', wall_normal, ''), ('WallStyle', style, ''),
+        ('RoofColor', roof_color, 'RGB' if castle else ''), ('RoofNormal', roof_normal, 'RGB' if castle else ''),
+        ('WallTone', add_scalar(library, material, 'WallTone', 2.4, 2550), ''), ('WallRelief', add_scalar(library, material, 'WallRelief', 1.0, 2575), '')
+        ] + add_config_parameters(library, material, unreal.HexCastleConfig, CASTLE_PARAMETERS, 3800)
     # the resource is grey and the owner nobody for a mesh that is no instance
     for index, (name, default) in enumerate((('ResourceR', 0.6), ('ResourceG', 0.6), ('ResourceB', 0.6), ('OwnerR', 0.35), ('OwnerG', 0.35), ('OwnerB', 0.35))):
         data = library.create_material_expression(material, unreal.MaterialExpressionPerInstanceCustomData, -1000, 200 + index * 50)
@@ -2679,9 +2803,11 @@ def build_site_graph(path, fading):
         unreal.MaterialProperty.MP_EMISSIVE_COLOR)
     roughness = add_config_parameters(library, material, unreal.HexPlanetConfig, ['Roughness'], 1000)[0][1]
     library.connect_material_property(roughness, '', unreal.MaterialProperty.MP_ROUGHNESS)
-    if fading:
-        library.connect_material_property(add_custom(library, material, SITE_MASK_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT1, inputs, 900), '',
-            unreal.MaterialProperty.MP_OPACITY_MASK)
+    library.connect_material_property(add_custom(library, material, SITE_MASK_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT1, inputs, 900), '',
+        unreal.MaterialProperty.MP_OPACITY_MASK)
+    if castle:
+        library.connect_material_property(add_custom(library, material, SITE_NORMAL_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, inputs, 2400), '',
+            unreal.MaterialProperty.MP_NORMAL)
 
     # the sparkles of a pile
     up = library.create_material_expression(material, unreal.MaterialExpressionConstant3Vector, -1300, 1600)
@@ -2690,6 +2816,20 @@ def build_site_graph(path, fading):
     axis_z.set_editor_property('transform_source_type', unreal.MaterialVectorCoordTransformSource.TRANSFORMSOURCE_LOCAL)
     axis_z.set_editor_property('transform_type', unreal.MaterialVectorCoordTransform.TRANSFORM_WORLD)
     library.connect_material_expressions(up, '', axis_z, '')
+    # the other axes of a mesh in the world, along which the leaves of a gate swing and a flag waves
+    axes = []
+    for index, axis in enumerate(((1.0, 0.0, 0.0), (0.0, 1.0, 0.0))):
+        constant = library.create_material_expression(material, unreal.MaterialExpressionConstant3Vector, -1300, 4500 + index * 60)
+        constant.set_editor_property('constant', unreal.LinearColor(axis[0], axis[1], axis[2], 0.0))
+        transform = library.create_material_expression(material, unreal.MaterialExpressionTransform, -1100, 4500 + index * 60)
+        transform.set_editor_property('transform_source_type', unreal.MaterialVectorCoordTransformSource.TRANSFORMSOURCE_LOCAL)
+        transform.set_editor_property('transform_type', unreal.MaterialVectorCoordTransform.TRANSFORM_WORLD)
+        library.connect_material_expressions(constant, '', transform, '')
+        axes.append(transform)
+    # when the gate of an instance last opened, long ago for anything else
+    gate_time = library.create_material_expression(material, unreal.MaterialExpressionPerInstanceCustomData, -1100, 4650)
+    gate_time.set_editor_property('data_index', 8)
+    gate_time.set_editor_property('const_default_value', -1000.0)
     shadow = library.create_material_expression(material, unreal.MaterialExpressionShadowReplace, -1100, 1700)
     shown = library.create_material_expression(material, unreal.MaterialExpressionConstant, -1300, 1700)
     shown.set_editor_property('r', 1.0)
@@ -2706,7 +2846,9 @@ def build_site_graph(path, fading):
         ('ObjectPos', library.create_material_expression(material, unreal.MaterialExpressionObjectPositionWS, -1100, 2000), ''),
         ('ViewRight', add_view_axis(library, material, (1.0, 0.0, 0.0), 2050), ''),
         ('ViewUp', add_view_axis(library, material, (0.0, 1.0, 0.0), 2100), ''),
-        ('AxisZ', axis_z, ''), ('ShadowSize', shadow, '')] + add_config_parameters(library, material, unreal.HexSiteConfig, SITE_OFFSET_PARAMETERS, 2200), 1600)
+        ('AxisZ', axis_z, ''), ('ShadowSize', shadow, ''), ('AxisX', axes[0], ''), ('AxisY', axes[1], ''), ('GateTime', gate_time, ''), ('Castle', castle_value, '')
+        ] + add_config_parameters(library, material, unreal.HexSiteConfig, SITE_OFFSET_PARAMETERS, 2200)
+        + add_config_parameters(library, material, unreal.HexCastleConfig, CASTLE_OFFSET_PARAMETERS, 4700), 1600)
     library.connect_material_property(offset, '', unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
     library.recompile_material(material)
     assets.save_asset(path)
@@ -4923,6 +5065,13 @@ def main():
         unreal.log('PLANET flock assets created')
         return
     # with heroes only the materials of the heroes, their ring and the marks of their ways
+    # with marks only the materials that draw the outlines of cells: the surfaces of both layers and the grid of the sea
+    if 'marks' in sys.argv[1:]:
+        build_material()
+        build_water_grid()
+        build_underground_material()
+        unreal.log('PLANET mark materials created')
+        return
     if 'heroes' in sys.argv[1:]:
         build_hero_materials()
         build_site_material()

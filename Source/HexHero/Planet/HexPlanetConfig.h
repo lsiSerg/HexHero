@@ -1048,6 +1048,24 @@ public:
 	UPROPERTY(EditAnywhere, Category="Highlight", meta=(ClampMin=0))
 	float MarkGlow = 0.5f;
 
+	/** How much of what lies under it an outline covers */
+	UPROPERTY(EditAnywhere, Category="Highlight", meta=(ClampMin=0, ClampMax=1))
+	float MarkOpacity = 1.0f;
+
+	/** While the game is played the outline of the cell under the cursor is thinner and lets the ground show through, as the developer found
+	 *  the white one of the editing too bright and thick there on 2026-11-11: its color, its widths and how much it covers */
+	UPROPERTY(EditAnywhere, Category="Highlight")
+	FLinearColor PlayOutlineColor = FLinearColor(1.0f, 1.0f, 1.0f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Highlight", meta=(ClampMin=0.005, ClampMax=0.5))
+	float PlayMarkWidth = 0.02f;
+
+	UPROPERTY(EditAnywhere, Category="Highlight", meta=(ClampMin=0))
+	float PlayMarkMinPixels = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Highlight", meta=(ClampMin=0, ClampMax=1))
+	float PlayMarkOpacity = 0.45f;
+
 	/** Height above the sea at least of the tile of a painted cell of the sea, so it shows over the waves */
 	UPROPERTY(EditAnywhere, Category="Painting", meta=(ClampMin=0))
 	float PaintSeaLift = 8.0f;

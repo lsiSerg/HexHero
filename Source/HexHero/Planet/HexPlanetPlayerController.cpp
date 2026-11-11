@@ -17,6 +17,8 @@
 #include "HexWorldMap.h"
 #include "SHexDebugOverlay.h"
 #include "SHexDialog.h"
+#include "HexCastles.h"
+#include "SHexCastlePanel.h"
 #include "SHexHeroPanel.h"
 #include "SHexModeBar.h"
 #include "SHexHoverInfo.h"
@@ -35,6 +37,9 @@ namespace
 {
 	TAutoConsoleVariable<int32> CVarPlanetWallFade(TEXT("hex.PlanetWallFade"), 1,
 		TEXT("1: the walls of the underground dissolve in front of the point under the cursor (CaveWallFade values of DA_HexUnderground); 2: in front of the point in the middle of the screen, or as high as hex.PlanetWallFadeScreenY says, for screenshots; 0: they stay whole"));
+
+	TAutoConsoleVariable<int32> CVarPlanetHoverCell(TEXT("hex.PlanetHoverCell"), -1,
+		TEXT("A cell taken to be under the cursor in place of the one the mouse is over, for screenshots of its outline and of what a click on it does; -1 for the mouse"));
 
 	TAutoConsoleVariable<float> CVarPlanetWallFadeScreenY(TEXT("hex.PlanetWallFadeScreenY"), 0.5f,
 		TEXT("Where hex.PlanetWallFade 2 puts the point the walls dissolve in front of, as a share of the height of the screen from its top"));
@@ -78,6 +83,7 @@ void AHexPlanetPlayerController::BeginPlay()
 		TWeakObjectPtr<AHexPlanetPlayerController> WeakThis(this);
 		SAssignNew(HeroPanel, SHexHeroPanel)
 			.OnHeroChosen(FOnHexHeroChosen::CreateUObject(this, &AHexPlanetPlayerController::ShowHero))
+			.OnCastleChosen(FOnHexHeroChosen::CreateUObject(this, &AHexPlanetPlayerController::ShowCastle))
 			.OnEndTurn(FSimpleDelegate::CreateUObject(this, &AHexPlanetPlayerController::EndHeroTurn))
 			.OnRestart(FSimpleDelegate::CreateUObject(this, &AHexPlanetPlayerController::RestartGame))
 			.OnProject([WeakThis](const FVector& Point, FVector2D& OutScreen)
@@ -101,6 +107,17 @@ void AHexPlanetPlayerController::BeginPlay()
 			.NextHeroKeys(InputConfig && InputConfig->NextHeroAction ? InputConfig->GetKeysText(InputConfig->NextHeroAction) : FString())
 			.GoKeys(InputConfig && InputConfig->HeroSendAction ? InputConfig->GetKeysText(InputConfig->HeroSendAction) : FString());
 		ViewportClient->AddViewportWidgetContent(HeroPanel.ToSharedRef());
+
+		// the panel of a castle, shown while a person looks into one of its own
+		SAssignNew(CastlePanel, SHexCastlePanel)
+			.OnMessage([WeakThis](const FString& Message)
+			{
+				if (WeakThis.IsValid())
+				{
+					WeakThis->OnHeroMessage(Message);
+				}
+			});
+		ViewportClient->AddViewportWidgetContent(CastlePanel.ToSharedRef());
 
 		// Edit and Play at the top left, with the palette of the brush below them
 		SAssignNew(ModeBar, SHexModeBar)
@@ -204,10 +221,30 @@ void AHexPlanetPlayerController::ClickGame(bool bDouble)
 	{
 		return;
 	}
+	// a click on the panel of a castle is its own; one outside it has closed it already (PlayerTick)
+	if (CastlePanel.IsValid() && CastlePanel->IsUnderCursor())
+	{
+		return;
+	}
 	// a hero by its body, which stands over the cells behind it, else by its cell
 	FVector Origin;
 	FVector Direction;
 	const FHexHero* Under = DeprojectMousePositionToWorld(Origin, Direction) ? Heroes->FindHeroAlongRay(Planet->GetLayer(), Origin, Direction) : nullptr;
+	// a castle of the person is chosen by a click on it, with the hero that guards it, and two clicks open its panel; a click on the body
+	// of that hero is a click on the castle, as the developer proposed on 2026-11-11, when telling the two apart by where a click landed
+	// was not clear: an order then takes the hero out
+	const UHexCastles* Castles = Heroes->GetCastles();
+	const FHexCastle* Castle = !Castles ? nullptr : Under && Under->CastleId != 0 ? Castles->FindCastle(Under->CastleId)
+		: !Under && MouseCell != INDEX_NONE ? Castles->FindCastleAt(Planet->GetLayer(), MouseCell) : nullptr;
+	if (Castle && Castle->Owner == Heroes->GetShroudPlayer() && !Heroes->IsHidden(Castle->Owner, Castle->Layer, MouseCell))
+	{
+		Heroes->SelectCastle(Castle->Id);
+		if (bDouble)
+		{
+			OnCastleOpened(Castle->Id);
+		}
+		return;
+	}
 	if (!Under)
 	{
 		Under = Heroes->FindHeroAt(Planet->GetLayer(), MouseCell);
@@ -234,6 +271,54 @@ void AHexPlanetPlayerController::ClickGame(bool bDouble)
 	}
 }
 
+void AHexPlanetPlayerController::OnCastleOpened(int32 Id)
+{
+	const UHexHeroes* Heroes = GetHeroes();
+	const FHexCastle* Castle = Heroes && Heroes->GetCastles() ? Heroes->GetCastles()->FindCastle(Id) : nullptr;
+	if (!CastlePanel.IsValid() || !Castle || !Heroes->IsPersonTurn() || Castle->Owner != Heroes->GetShroudPlayer())
+	{
+		return;
+	}
+	CastlePanel->Open(Id);
+	// the camera comes close, to where the castle shows a little right of the middle of the screen: it looks at the ground that far to
+	// the left of the castle
+	AHexPlanetCameraPawn* CameraPawn = GetCameraPawn();
+	const AHexPlanet* Planet = GetPlanet();
+	if (!CameraPawn || !Planet || Planet->GetLayer() != Castle->Layer || !PlayerCameraManager)
+	{
+		return;
+	}
+	const UHexCastleConfig* Config = Heroes->GetCastles()->GetConfig();
+	const TArray<FHexSphereCell>& Cells = Planet->GetGrid().GetCells();
+	const FVector Up = FVector(Cells[Castle->Cells[0]].Center + Cells[Castle->Cells[1]].Center + Cells[Castle->Cells[2]].Center).GetSafeNormal();
+	const FVector Right = FVector::VectorPlaneProject(FRotationMatrix(PlayerCameraManager->GetCameraRotation()).GetScaledAxis(EAxis::Y), Up).GetSafeNormal();
+	const double Shift = double(Config->CastleScreenX - 0.5f) * 2.0 * double(Config->PanelCameraDistance) * FMath::Tan(FMath::DegreesToRadians(double(PlayerCameraManager->GetFOVAngle()) * 0.5));
+	CameraPawn->FocusOn(Up * Planet->GetRadius() - Right * Shift, Config->PanelCameraDistance);
+}
+
+void AHexPlanetPlayerController::ShowCastle(int32 Id)
+{
+	UHexHeroes* Heroes = GetHeroes();
+	const FHexCastle* Castle = Heroes && Heroes->GetCastles() ? Heroes->GetCastles()->FindCastle(Id) : nullptr;
+	if (!Castle)
+	{
+		return;
+	}
+	// the one chosen already opens
+	if (Heroes->GetSelectedCastleId() == Id)
+	{
+		OnCastleOpened(Id);
+		return;
+	}
+	if (Heroes->SelectCastle(Id))
+	{
+		if (AHexPlanetCameraPawn* CameraPawn = GetCameraPawn())
+		{
+			CameraPawn->ShowCell(Castle->Layer, Castle->Cells[0]);
+		}
+	}
+}
+
 void AHexPlanetPlayerController::OnHeroSent(int32 Id)
 {
 	const AHexPlanet* Planet = GetPlanet();
@@ -251,6 +336,11 @@ void AHexPlanetPlayerController::OrderGame()
 	const AHexPlanet* Planet = GetPlanet();
 	UHexHeroes* Heroes = GetHeroes();
 	if (!Planet || !Heroes || !Heroes->IsPersonTurn() || IsBrushArmed() || MouseCell == INDEX_NONE)
+	{
+		return;
+	}
+	// a click on the panel of a castle is its own
+	if (CastlePanel.IsValid() && CastlePanel->IsUnderCursor())
 	{
 		return;
 	}
@@ -274,6 +364,10 @@ void AHexPlanetPlayerController::OrderGame()
 
 void AHexPlanetPlayerController::SkipHero()
 {
+	if (CastlePanel.IsValid())
+	{
+		CastlePanel->Close();
+	}
 	UHexHeroes* Heroes = GetHeroes();
 	if (Heroes && Heroes->IsPersonTurn())
 	{
@@ -286,6 +380,12 @@ void AHexPlanetPlayerController::WalkHero()
 	UHexHeroes* Heroes = GetHeroes();
 	if (!Heroes || !Heroes->IsPlaying())
 	{
+		return;
+	}
+	// with a castle chosen the key opens its panel, unless the hero that guards it was shown a way, which it then walks
+	if (const FHexHero* Guard = Heroes->GetSelected(); Heroes->GetSelectedCastleId() != 0 && (!Guard || Guard->TargetCell == INDEX_NONE))
+	{
+		OnCastleOpened(Heroes->GetSelectedCastleId());
 		return;
 	}
 	// the key that sends a hero stops one that walks
@@ -322,6 +422,10 @@ void AHexPlanetPlayerController::ShowHero(int32 Id)
 		return;
 	}
 	Heroes->Select(Id);
+	if (CastlePanel.IsValid())
+	{
+		CastlePanel->Close();
+	}
 	if (AHexPlanetCameraPawn* CameraPawn = GetCameraPawn())
 	{
 		CameraPawn->ShowCell(Hero->Layer, Hero->Cell);
@@ -330,6 +434,10 @@ void AHexPlanetPlayerController::ShowHero(int32 Id)
 
 void AHexPlanetPlayerController::SelectNextHero()
 {
+	if (CastlePanel.IsValid())
+	{
+		CastlePanel->Close();
+	}
 	UHexHeroes* Heroes = GetHeroes();
 	if (const FHexHero* Hero = Heroes && Heroes->IsPlaying() ? Heroes->SelectNext() : nullptr)
 	{
@@ -339,6 +447,10 @@ void AHexPlanetPlayerController::SelectNextHero()
 
 void AHexPlanetPlayerController::EndHeroTurn()
 {
+	if (CastlePanel.IsValid())
+	{
+		CastlePanel->Close();
+	}
 	UHexHeroes* Heroes = GetHeroes();
 	// its own turn alone; who moves next is said by the heroes
 	if (Heroes && Heroes->IsPersonTurn())
@@ -381,6 +493,11 @@ void AHexPlanetPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReaso
 			ViewportClient->RemoveViewportWidgetContent(HeroPanel.ToSharedRef());
 		}
 
+		if (CastlePanel.IsValid())
+		{
+			ViewportClient->RemoveViewportWidgetContent(CastlePanel.ToSharedRef());
+		}
+
 		if (ModeBar.IsValid())
 		{
 			ViewportClient->RemoveViewportWidgetContent(ModeBar.ToSharedRef());
@@ -394,6 +511,7 @@ void AHexPlanetPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReaso
 
 	TravelScreen.Reset();
 	HeroPanel.Reset();
+	CastlePanel.Reset();
 	ModeBar.Reset();
 	Dialog.Reset();
 	HoverInfo.Reset();
@@ -601,7 +719,26 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 	FVector Origin;
 	FVector Direction;
 	FVector MousePoint = FVector::ZeroVector;
-	const int32 Cell = DeprojectMousePositionToWorld(Origin, Direction) ? Planet->FindCellAlongRay(Origin, Direction, &MousePoint) : INDEX_NONE;
+	int32 Cell = DeprojectMousePositionToWorld(Origin, Direction) ? Planet->FindCellAlongRay(Origin, Direction, &MousePoint) : INDEX_NONE;
+	// hex.PlanetHoverCell stands in for the mouse
+	if (const int32 Forced = CVarPlanetHoverCell.GetValueOnGameThread(); Planet->GetGrid().GetCells().IsValidIndex(Forced))
+	{
+		Cell = Forced;
+		MousePoint = FVector(Planet->GetGrid().GetCells()[Forced].Center * Planet->GetCellTopRadius(Forced));
+	}
+	// the panel of a castle: under it nothing of the planet is picked, and anything done with the mouse outside it closes it, as the
+	// developer asked on 2026-11-11
+	if (CastlePanel.IsValid() && CastlePanel->IsOpen())
+	{
+		if (CastlePanel->IsUnderCursor())
+		{
+			Cell = INDEX_NONE;
+		}
+		else if (WasInputKeyJustPressed(EKeys::LeftMouseButton) || WasInputKeyJustPressed(EKeys::RightMouseButton) || WasInputKeyJustPressed(EKeys::MiddleMouseButton))
+		{
+			CastlePanel->Close();
+		}
+	}
 	MouseCell = Cell;
 
 	// the brush paints the layer shown, which it follows (UHexPlanetPainter::SetTarget); the river brush follows the corner nearest the point
@@ -617,7 +754,17 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 		Painter->ContinueStroke(Cell);
 	}
 
-	Planet->SetHoveredCell(Cell, IsBrushArmed() ? Painter->GetOutlineSize() : 0);
+	// while the game is played the cursor on a castle outlines its three cells as one, as the developer asked on 2026-11-11, and the
+	// outline is thinner
+	const UHexHeroes* Played = Planet->GetHeroes();
+	const bool bPlayed = Played && Played->IsPlaying();
+	TArray<int32, TInlineAllocator<3>> Group;
+	if (const FHexCastle* Castle = bPlayed && Played->GetCastles() && Cell != INDEX_NONE ? Played->GetCastles()->FindCastleAt(Planet->GetLayer(), Cell) : nullptr;
+		Castle && !(Played->IsShroudOn() && Played->IsHidden(Played->GetShroudPlayer(), Castle->Layer, Cell)))
+	{
+		Group.Append(Castle->Cells, 3);
+	}
+	Planet->SetHoveredCell(Cell, IsBrushArmed() ? Painter->GetOutlineSize() : 0, Group, bPlayed);
 
 	// the heroes: the way of the one chosen to the cell under the cursor shows while no tool of the brush is chosen, and the camera glides
 	// after it while it walks
@@ -626,11 +773,16 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 	{
 		HeroPanel->SetHeroes(Heroes);
 	}
+	if (CastlePanel.IsValid())
+	{
+		CastlePanel->SetHeroes(Heroes);
+	}
 	if (Heroes)
 	{
 		if (BoundHeroes.Get() != Heroes)
 		{
 			BoundHeroes = Heroes;
+			Heroes->GetCastles()->OnCastleOpened.AddUObject(this, &AHexPlanetPlayerController::OnCastleOpened);
 			Heroes->OnMessage.AddUObject(this, &AHexPlanetPlayerController::OnHeroMessage);
 			Heroes->OnHeroTravelled.AddUObject(this, &AHexPlanetPlayerController::OnHeroTravelled);
 			Heroes->OnHeroChosen.AddUObject(this, &AHexPlanetPlayerController::OnHeroChosen);
@@ -680,6 +832,11 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 		if (!SiteText.IsEmpty())
 		{
 			Info += TEXT("\n") + SiteText;
+		}
+		const FString CastleText = Heroes && !Info.IsEmpty() ? Heroes->GetCastles()->GetCellText(Planet->GetLayer(), Cell) : FString();
+		if (!CastleText.IsEmpty())
+		{
+			Info += TEXT("\n") + CastleText;
 		}
 		HoverInfo->SetInfo(Info);
 	}

@@ -117,6 +117,10 @@ public:
 	const FHexSite* FindBlockerAt(EHexPlanetLayer Layer, int32 Cell) const;
 	const FHexSite* FindPileAt(EHexPlanetLayer Layer, int32 Cell) const;
 
+	/** Where the hero that took the mine or the mill of a cell stands on that cell, on the ground (HeroPlace of its kind); false for a cell
+	 *  without one, or while it is not seated on the ground yet */
+	bool GetHeroPoint(EHexPlanetLayer Layer, int32 Cell, FVector3d& OutPoint) const;
+
 
 	/** Puts a site of a kind on a cell. Returns its Id, or 0 and why not */
 	int32 AddSite(EHexPlanetLayer Layer, int32 Cell, int32 Kind, FString& OutProblem);
@@ -139,6 +143,17 @@ public:
 	 *  gives in a day if nobody took it this week, the pile for good, or what the mill gives this week. Returns a line for the player, or
 	 *  nothing when there is no site; bShown lets what was gained float up over the site, for what the person who watches sees */
 	FString Visit(int32 Player, const FString& HeroName, EHexPlanetLayer Layer, int32 Cell, int32 Week, bool bShown = true);
+
+	/** Whether a player has what something costs, by the Ids of the resources, and takes it from the player; AddAmount gives */
+	bool CanPay(int32 Player, const TMap<FName, int32>& Cost) const;
+	void Pay(int32 Player, const TMap<FName, int32>& Cost);
+	void AddAmount(int32 Player, FName Resource, int32 Amount);
+
+	/** Returns a cost as "2000 gold, 5 wood" */
+	FString DescribeCost(const TMap<FName, int32>& Cost) const;
+
+	/** Lets a line float up over a point of a layer, after those already waiting there: what happened at a castle */
+	void AddPopupAt(EHexPlanetLayer Layer, const FVector3d& Point, const FString& Text, const FLinearColor& Color);
 
 	/** Returns the lines that float up over the sites now, and those about to */
 	const TArray<FHexSitePopup>& GetPopups() const { return Popups; }

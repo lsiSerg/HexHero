@@ -64,6 +64,11 @@ struct FHexSiteKind
 	UPROPERTY(EditAnywhere, Category="Site")
 	EHexSiteType Type = EHexSiteType::Mine;
 
+	/** Where the hero that took a mine or a mill stands on its cell, which its mesh leaves free: in radii of a cell from the middle of the
+	 *  cell, along the front of the mesh and to its left */
+	UPROPERTY(EditAnywhere, Category="Site")
+	FVector2D HeroPlace = FVector2D(0.6, 0.0);
+
 	/** Id of the resource a mine or a pile gives; a mill has one of its own, any of them, by its site and the game */
 	UPROPERTY(EditAnywhere, Category="Site")
 	FName Resource;
@@ -295,19 +300,26 @@ public:
 
 	/** Sparkles twinkle and rise around a pile, as the developer asked on 2026-11-11 for an effect that tells a resource from the decor: stars
 	 *  that face the camera, this large at their brightest before the scale of the pile, rising this far while they shine, this many times a
-	 *  second each, at its own time */
+	 *  second each, at its own time. The developer found them too large and bright on 2026-11-11, so they are smaller and dimmer, let
+	 *  SparkleOpacity of what is behind them through, show for SparkleShare of their time only and twinkle faster */
 	UPROPERTY(EditAnywhere, Category="Look|Sparkles", meta=(ClampMin=0))
-	float SparkleSize = 5.0f;
+	float SparkleSize = 3.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Sparkles", meta=(ClampMin=0.05, ClampMax=1))
+	float SparkleShare = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Sparkles", meta=(ClampMin=0, ClampMax=1))
+	float SparkleOpacity = 0.55f;
 
 	UPROPERTY(EditAnywhere, Category="Look|Sparkles", meta=(ClampMin=0))
 	float SparkleRise = 14.0f;
 
 	UPROPERTY(EditAnywhere, Category="Look|Sparkles", meta=(ClampMin=0))
-	float SparkleSpeed = 0.45f;
+	float SparkleSpeed = 0.8f;
 
 	/** How bright a sparkle is, and how far its color goes from that of the resource to white */
 	UPROPERTY(EditAnywhere, Category="Look|Sparkles", meta=(ClampMin=0))
-	float SparkleBrightness = 10.0f;
+	float SparkleBrightness = 4.0f;
 
 	UPROPERTY(EditAnywhere, Category="Look|Sparkles", meta=(ClampMin=0, ClampMax=1))
 	float SparkleWhite = 0.5f;

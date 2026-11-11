@@ -113,6 +113,9 @@ public:
 	/** Glides after a direction from the center of the planet, as after a hero that walks, unless the player moves the camera */
 	void Follow(const FVector& Direction);
 
+	/** Glides to a direction from the center of the planet and to a distance from the ground there, as to a castle whose panel opens */
+	void FocusOn(const FVector& Direction, float Distance);
+
 	/** Returns where the camera is */
 	FHexPlanetCameraPlacement GetPlacement() const;
 

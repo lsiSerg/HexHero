@@ -8,6 +8,7 @@
 #include "HexPlanetObjects.h"
 #include "HexPlanetSurface.h"
 #include "UObject/Object.h"
+#include "HexCastles.h"
 #include "HexPlanetPainter.generated.h"
 
 class AHexPlanet;
@@ -48,6 +49,9 @@ enum class EHexPaintTool : uint8
 	Hero,
 	/** Puts a mine or a pile of the kind chosen on a cell of either layer, or takes the one there away with Ctrl (UHexSites), as a step of Undo */
 	Site,
+	/** Puts a castle of the faction and the owner chosen on the cell clicked and the two around its corner nearest the cursor, or takes the
+	 *  one there away with Ctrl (UHexCastles), as a step of Undo */
+	Castle,
 };
 
 /** What a click of the brush in relief mode does to the mountains and hills under it, once per cell and stroke */
@@ -109,10 +113,12 @@ enum class EHexPaintTab : uint8
 	CaveHeroes,
 	/** The mines and piles of the underground */
 	CaveSites,
+	/** The castles of the surface */
+	Castles,
 };
 
 /** Number of tabs of the palette */
-constexpr int32 NumPaintTabs = 12;
+constexpr int32 NumPaintTabs = 13;
 
 /** Old and new levels, biomes, relief, objects, rivers and entrances of the cells of one step of Undo, a stroke or a button */
 struct FHexPaintStep
@@ -147,6 +153,11 @@ struct FHexPaintStep
 	TArray<FHexSiteLine> OldSites;
 	TArray<FHexSiteLine> NewSites;
 
+	/** All the castles before and after, as lines of castles.json, when the step placed or took away one (UHexCastles::SetLines) */
+	bool bCastles = false;
+	TArray<FHexCastleLine> OldCastles;
+	TArray<FHexCastleLine> NewCastles;
+
 	/** SeedOffset of the underground before and after, when the step is a new layout (UHexPlanetPainter::NewLayout) */
 	bool bSeedOffset = false;
 	int32 OldSeedOffset = 0;
@@ -161,7 +172,7 @@ struct FHexPaintStep
 	{
 		return NewLevels.IsEmpty() && NewBiomes.IsEmpty() && NewRelief.IsEmpty() && NewObjects.IsEmpty() && NewRivers.IsEmpty() && NewWalls.IsEmpty()
 			&& !(bEntrances && OldEntrances != NewEntrances) && !(bSeedOffset && OldSeedOffset != NewSeedOffset) && !(bHeroes && OldHeroes != NewHeroes)
-			&& !(bSites && OldSites != NewSites);
+			&& !(bSites && OldSites != NewSites) && !(bCastles && OldCastles != NewCastles);
 	}
 };
 
@@ -369,6 +380,14 @@ public:
 	 *  all away, as one step of Undo; false if nothing changed */
 	bool GenerateSites(bool bClear = false);
 
+	/** Returns true while the brush places castles, of the faction and for the player chosen, -1 for a castle of nobody */
+	bool IsPlacingCastles() const { return Tool == EHexPaintTool::Castle; }
+	void SetCastleTool() { SetTool(EHexPaintTool::Castle, EHexPaintTab::Castles); }
+	int32 GetCastleFaction() const { return CastleFaction; }
+	void SetCastleFaction(int32 InFaction) { CastleFaction = FMath::Max(InFaction, 0); }
+	int32 GetCastleOwner() const { return CastleOwner; }
+	void SetCastleOwner(int32 InOwner) { CastleOwner = FMath::Max(InOwner, -1); }
+
 	/** The kind of the sites a click places, an index into DA_HexSites */
 	int32 GetSiteKind() const { return SiteKind; }
 	void SetSiteKind(int32 InKind) { SiteKind = FMath::Max(InKind, 0); }
@@ -439,7 +458,7 @@ public:
 	bool UsesBrushSize() const
 	{
 		return Tool != EHexPaintTool::Entrance && Tool != EHexPaintTool::Carve && Tool != EHexPaintTool::River && Tool != EHexPaintTool::Bridge && Tool != EHexPaintTool::Placed
-			&& Tool != EHexPaintTool::Hero && Tool != EHexPaintTool::Site;
+			&& Tool != EHexPaintTool::Hero && Tool != EHexPaintTool::Site && Tool != EHexPaintTool::Castle;
 	}
 
 	/** Returns how many rings of cells the outline of the brush shows: its size, or one cell for the tools that ignore the size */
@@ -494,7 +513,7 @@ private:
 
 	/** The tool each tab had last, by EHexPaintTab */
 	EHexPaintTool TabTools[NumPaintTabs] = {EHexPaintTool::Level, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None,
-		EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::Level, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None};
+		EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::Level, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None};
 
 	bool bActive = false;
 	bool bPainting = false;
@@ -526,6 +545,8 @@ private:
 	int32 Network = 0;
 	int32 HeroClass = 0;
 	int32 HeroPlayer = 0;
+	int32 CastleFaction = 0;
+	int32 CastleOwner = 0;
 	int32 SiteKind = 0;
 
 	/** Last cell under the cursor in the stroke, and the cell the stroke of the carving brush began at */
@@ -582,6 +603,7 @@ private:
 
 	/** Puts a mine or a pile of the kind chosen on a cell, or takes the one there away, at once, as part of the stroke */
 	void PaintSite(int32 Cell);
+	void PaintCastle(int32 Cell);
 
 	/** Makes the stroke of the carving brush the passage along the shortest way from where it began to a cell */
 	void PaintCarve(int32 Cell);

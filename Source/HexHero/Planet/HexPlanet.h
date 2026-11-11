@@ -671,8 +671,9 @@ public:
 	int32 FindCellAlongRay(const FVector& Origin, const FVector& Direction, FVector* OutPoint = nullptr) const;
 
 	/** Outlines a cell, or nothing for INDEX_NONE, and its neighbors while the wireframe draws them too. With a brush of 1 to 3 rings of
-	 *  cells around it, outlines the edge of the brush instead */
-	void SetHoveredCell(int32 Cell, int32 BrushSize = 0);
+	 *  cells around it, outlines the edge of the brush instead, and with a group the edge of those cells, as the three of a castle. While
+	 *  the game is played the outline is thinner and lets the ground through (PlayMarkWidth and the rest of the config) */
+	void SetHoveredCell(int32 Cell, int32 BrushSize = 0, TConstArrayView<int32> Group = TConstArrayView<int32>(), bool bPlay = false);
 
 	/** Returns the text of the debug panel for a cell */
 	FString GetCellDebugText(int32 Cell) const;
@@ -815,8 +816,13 @@ private:
 	 *  gone when the planet opens again although they still show now */
 	void ReportLeftOutEntrances() const;
 
-	/** Keeps the objects of both layers off the cells of the entrances (UHexPlanetObjects::SetClearCells) */
+public:
+
+	/** Keeps the objects of both layers off the cells of the entrances and of the castles (UHexPlanetObjects::SetClearCells); the castles
+	 *  call it when one comes or goes */
 	void UpdateClearCells();
+
+private:
 
 	/** Gives the materials of the surface empty cubemaps of the sea and the shore, on a layer without the sea */
 	void CreateEmptySeaField();
@@ -1067,6 +1073,8 @@ private:
 	/** Brush and neighbors outlined around it */
 	int32 HighlightBrushSize = 0;
 	bool bHighlightNeighbors = false;
+	TArray<int32> HoveredGroup;
+	bool bHoverPlay = false;
 
 	/** One pixel per cell, row by row, of the marks M_HexPlanet and M_HexPlanetWaterGrid draw on the grid line of a cell: bits of the sides
 	 *  to outline in two layers of color (SetHoveredCell). The surface finds its pixel from its third UV (HexPlanetSurface::GetCellUV) */

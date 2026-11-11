@@ -3,6 +3,7 @@
 #include "HexSites.h"
 #include "HexHero.h"
 #include "HexHeroConfig.h"
+#include "HexCastles.h"
 #include "HexHeroes.h"
 #include "HexMaterialConfig.h"
 #include "HexPlanet.h"
@@ -277,6 +278,21 @@ int32 UHexSites::Generate(FString& OutReport, const int32* Seed)
 			Avoid(Layer, Entrance.Cell, Settings.EntranceClearRings);
 		}
 	}
+	// the cells of the castles are closed, and what lies around them stays free
+	if (const UHexCastles* Castles = Heroes->GetCastles())
+	{
+		for (const FHexCastle& Castle : Castles->GetCastles())
+		{
+			for (const int32 Cell : Castle.Cells)
+			{
+				Avoid(int32(Castle.Layer), Cell, Settings.EntranceClearRings);
+				if (Input.Walkable[int32(Castle.Layer)].IsValidIndex(Cell))
+				{
+					Input.Walkable[int32(Castle.Layer)][Cell] = false;
+				}
+			}
+		}
+	}
 	// where the heroes start, and for each player where its first one does
 	TMap<int32, const FHexHero*> First;
 	for (const FHexHero& Hero : Heroes->GetHeroes())
@@ -381,16 +397,67 @@ void UHexSites::OnLayerRebuilt(EHexPlanetLayer Layer)
 	}
 }
 
+bool UHexSites::CanPay(int32 Player, const TMap<FName, int32>& Cost) const
+{
+	for (const TPair<FName, int32>& Each : Cost)
+	{
+		if (Each.Value > 0 && GetAmount(Player, Config->FindResource(Each.Key)) < Each.Value)
+		{
+			return false;
+		}
+	}
+	return Amounts.IsValidIndex(Player);
+}
+
+void UHexSites::Pay(int32 Player, const TMap<FName, int32>& Cost)
+{
+	for (const TPair<FName, int32>& Each : Cost)
+	{
+		AddAmount(Player, Each.Key, -Each.Value);
+	}
+}
+
+void UHexSites::AddAmount(int32 Player, FName Resource, int32 Amount)
+{
+	const int32 Index = Config->FindResource(Resource);
+	if (Amounts.IsValidIndex(Player) && Amounts[Player].IsValidIndex(Index))
+	{
+		Amounts[Player][Index] = FMath::Max(Amounts[Player][Index] + Amount, 0);
+	}
+}
+
+FString UHexSites::DescribeCost(const TMap<FName, int32>& Cost) const
+{
+	FString Text;
+	for (const FHexResourceInfo& Resource : Config->Resources)
+	{
+		const int32* Amount = Cost.Find(Resource.Id);
+		if (Amount && *Amount > 0)
+		{
+			Text += FString::Printf(TEXT("%s%d %s"), Text.IsEmpty() ? TEXT("") : TEXT(", "), *Amount, *Resource.DisplayName.ToLower());
+		}
+	}
+	return Text.IsEmpty() ? FString(TEXT("nothing")) : Text;
+}
+
 void UHexSites::AddPopup(const FHexSite& Site, const FString& Text, const FLinearColor& Color)
 {
-	if (!Site.bSeated || Text.IsEmpty())
+	if (Site.bSeated)
+	{
+		const FVector3d Foot(Site.Seat.GetLocation());
+		AddPopupAt(Site.Layer, Foot + Foot.GetSafeNormal() * double(Config->PopupHeight), Text, Color);
+	}
+}
+
+void UHexSites::AddPopupAt(EHexPlanetLayer Layer, const FVector3d& Point, const FString& Text, const FLinearColor& Color)
+{
+	if (Text.IsEmpty())
 	{
 		return;
 	}
 	FHexSitePopup& Popup = Popups.AddDefaulted_GetRef();
-	Popup.Layer = Site.Layer;
-	const FVector3d Foot(Site.Seat.GetLocation());
-	Popup.Point = Foot + Foot.GetSafeNormal() * double(Config->PopupHeight);
+	Popup.Layer = Layer;
+	Popup.Point = Point;
 	Popup.Text = Text;
 	Popup.Color = FMath::Lerp(Color, FLinearColor::White, FMath::Clamp(Config->PopupWhite, 0.0f, 1.0f));
 	Popup.Color.A = 1.0f;
@@ -403,6 +470,26 @@ void UHexSites::AddPopup(const FHexSite& Site, const FString& Text, const FLinea
 			Popup.StartTime = FMath::Max(Popup.StartTime, Popups[Index].StartTime + double(Config->PopupStagger));
 		}
 	}
+}
+
+bool UHexSites::GetHeroPoint(EHexPlanetLayer Layer, int32 Cell, FVector3d& OutPoint) const
+{
+	const FHexSite* Site = FindBlockerAt(Layer, Cell);
+	const AHexPlanet* Planet = Site && Site->bSeated ? GetPlanet(Layer) : nullptr;
+	if (!Planet || !Planet->IsBuilt() || !Planet->GetGrid().GetCells().IsValidIndex(Cell))
+	{
+		return false;
+	}
+	// before its mesh, as that is turned, a share of the radius of its cell out; the middles of two neighbors are the root of three radii apart
+	const TArray<FHexSphereCell>& Cells = Planet->GetGrid().GetCells();
+	const FVector3d Center = Cells[Cell].Center;
+	const double CellRadius = FMath::Acos(FMath::Clamp(FVector3d::DotProduct(Center, Cells[Cells[Cell].Neighbors[0]].Center), -1.0, 1.0)) / FMath::Sqrt(3.0);
+	const FVector2D Place = Config->Kinds[Site->Kind].HeroPlace;
+	const FVector3d Forward = FVector3d(Site->Seat.GetUnitAxis(EAxis::X));
+	const FVector3d Left = FVector3d(Site->Seat.GetUnitAxis(EAxis::Y));
+	const FVector3d Direction = (Center + (Forward * Place.X + Left * Place.Y) * CellRadius).GetSafeNormal();
+	OutPoint = Direction * Planet->FindGroundRadius(Cell, Direction);
+	return true;
 }
 
 FString UHexSites::Visit(int32 Player, const FString& HeroName, EHexPlanetLayer Layer, int32 Cell, int32 Week, bool bShown)

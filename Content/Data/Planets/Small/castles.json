@@ -1,0 +1,8 @@
+{
+	"version": 1,
+	"castles": [
+		{"id": 1, "faction": "Dawn", "layer": "Surface", "cells": [3888, 3902, 3903], "owner": 0},
+		{"id": 2, "faction": "Decay", "layer": "Surface", "cells": [3944, 3954, 3955], "owner": 1},
+		{"id": 3, "faction": "Dawn", "layer": "Surface", "cells": [2028, 2039, 2040], "owner": -1}
+	]
+}

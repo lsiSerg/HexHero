@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "HexHero.h"
+#include "HexCastles.h"
 #include "HexHeroConfig.h"
 #include "HexHeroPath.h"
 #include "HexHeroes.h"
@@ -578,6 +579,78 @@ bool FHexHeroSiteGeneratorTest::RunTest(const FString& Parameters)
 		Open[Neighbor] = false;
 	}
 	TestFalse(TEXT("A cell nothing reaches takes no site"), HexSiteGenerator::KeepsWays(Grid, Open, Middle));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHexHeroCastlesTest, "HexHero.Hero.Castles",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FHexHeroCastlesTest::RunTest(const FString& Parameters)
+{
+	// two factions, each with a hall, a fort, and seven levels of creatures with a dwelling each
+	const UHexCastleConfig* Config = GetDefault<UHexCastleConfig>();
+	const UHexSiteConfig* Sites = GetDefault<UHexSiteConfig>();
+	TestEqual(TEXT("Two factions"), Config->Factions.Num(), 2);
+	for (const FHexFaction& Faction : Config->Factions)
+	{
+		TestEqual(*FString::Printf(TEXT("%s has seven levels of creatures"), *Faction.DisplayName), Faction.Creatures.Num(), NumCreatureLevels);
+		TestTrue(*FString::Printf(TEXT("%s has a hall that stands from the start, and a fort"), *Faction.DisplayName),
+			Faction.Buildings.IsValidIndex(Faction.FindBuilding(EHexBuildingType::Hall)) && Faction.Buildings[Faction.FindBuilding(EHexBuildingType::Hall)].StartLevel == 1
+			&& Faction.Buildings.IsValidIndex(Faction.FindBuilding(EHexBuildingType::Fort)));
+		float Power = 0.0f;
+		for (int32 Level = 0; Level < Faction.Creatures.Num(); ++Level)
+		{
+			const FHexCreature& Creature = Faction.Creatures[Level];
+			TestTrue(*FString::Printf(TEXT("%s is stronger than the level before, and its upgraded version than itself"), *Creature.Base.DisplayName),
+				Creature.Base.GetPower() > Power && Creature.Upgraded.GetPower() > Creature.Base.GetPower());
+			TestTrue(*FString::Printf(TEXT("%s costs gold, the upgraded one more, and comes every week"), *Creature.Base.DisplayName),
+				Creature.Base.Gold > 0 && Creature.Upgraded.Gold > Creature.Base.Gold && Creature.Growth >= 1);
+			Power = Creature.Base.GetPower();
+			const int32 Dwelling = Faction.FindBuilding(EHexBuildingType::Dwelling, Level);
+			TestTrue(*FString::Printf(TEXT("%s has a dwelling that is built and upgraded"), *Creature.Base.DisplayName),
+				Faction.Buildings.IsValidIndex(Dwelling) && Faction.Buildings[Dwelling].Levels.Num() == 2);
+		}
+		// what is paid with is a resource there is
+		for (const FHexBuilding& Building : Faction.Buildings)
+		{
+			for (const FHexBuildingLevel& Level : Building.Levels)
+			{
+				for (const TPair<FName, int32>& Cost : Level.Cost)
+				{
+					TestTrue(*FString::Printf(TEXT("%s is paid for with a resource there is, %s"), *Level.DisplayName, *Cost.Key.ToString()), Sites->FindResource(Cost.Key) != INDEX_NONE);
+				}
+			}
+		}
+		for (const FHexCreature& Creature : Faction.Creatures)
+		{
+			TestTrue(*FString::Printf(TEXT("%s is paid for with a resource there is"), *Creature.Base.DisplayName), Creature.CostResource.IsNone() || Sites->FindResource(Creature.CostResource) != INDEX_NONE);
+		}
+	}
+
+	// until there are battles the stronger army wins, and loses the more the nearer the weaker one came
+	float Loss = -1.0f;
+	TestTrue(TEXT("A castle nobody guards is taken without a loss"), UHexCastles::Resolve(0.0f, 0.0f, 1.5f, 0.9f, Loss) && Loss == 0.0f);
+	TestFalse(TEXT("A weaker attacker turns back"), UHexCastles::Resolve(90.0f, 100.0f, 1.5f, 0.9f, Loss));
+	TestFalse(TEXT("And so does one as strong as the guard"), UHexCastles::Resolve(100.0f, 100.0f, 1.5f, 0.9f, Loss));
+	TestTrue(TEXT("A stronger attacker wins"), UHexCastles::Resolve(400.0f, 100.0f, 1.5f, 0.9f, Loss));
+	TestEqual(TEXT("And loses the share the guard was of it, to the power"), Loss, 0.125f, 0.001f);
+	float Close = 0.0f;
+	UHexCastles::Resolve(101.0f, 100.0f, 1.5f, 0.9f, Close);
+	TestEqual(TEXT("A narrow win costs at most the largest share"), Close, 0.9f, 0.001f);
+
+	// creatures stack, an army holds seven kinds, and losses leave one creature at least
+	TArray<FHexStack> Army;
+	for (int32 Creature = 0; Creature < NumArmySlots; ++Creature)
+	{
+		TestTrue(TEXT("A new kind takes a free slot"), UHexCastles::AddToArmy(Army, {0, Creature, false, 10}));
+	}
+	TestTrue(TEXT("More of a kind join its stack"), UHexCastles::AddToArmy(Army, {0, 2, false, 5}) && Army.Num() == NumArmySlots && Army[2].Count == 15);
+	TestFalse(TEXT("An eighth kind finds no slot"), UHexCastles::AddToArmy(Army, {1, 0, false, 1}));
+	TestFalse(TEXT("And the upgraded version is a kind of its own"), UHexCastles::AddToArmy(Army, {0, 0, true, 1}));
+	UHexCastles::ApplyLosses(Army, 0.5f);
+	TestTrue(TEXT("Half of every stack is lost"), Army.Num() == NumArmySlots && Army[0].Count == 5 && Army[2].Count == 8);
+	UHexCastles::ApplyLosses(Army, 1.0f);
+	TestTrue(TEXT("One creature of the highest level is left at least"), Army.Num() == 1 && Army[0].Creature == NumArmySlots - 1 && Army[0].Count == 1);
 	return true;
 }
 

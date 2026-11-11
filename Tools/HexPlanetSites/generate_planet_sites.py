@@ -234,27 +234,35 @@ def add_sack(mesh, center, size, seed, top_color=None):
         add_blob(mesh, add(center, (0.0, 0.0, size * 1.95)), (size * 0.3, size * 0.3, size * 0.32), CLOTH, 0.0, seed + 1, 1, bumps=0.2, flatten=0.9, shade=0.3)
 
 
+# where the hero that took a mine or a mill stands, before it, in the units of its cell (FHexSiteKind::HeroPlace times the radius of a
+# cell), which is HERO_PLACE over the scale of the mesh in its own units (MineScale 1.3, MillScale 1.5)
+HERO_PLACE = 60.0
+
+
 def mine():
-    """A mound of rock with a dark mouth framed by timbers, a heap of what is dug beside it and a flag on a pole"""
+    """A mound of rock with a dark mouth framed by timbers, a heap of what is dug beside it and a flag on a pole. It stands in the back of
+    its cell: the hero that takes it stands before its mouth, on a trodden patch around HERO_PLACE, which nothing of it reaches"""
     mesh = Mesh()
     # the rock it stands on goes down under the ground
-    add_blob(mesh, (-12.0, 0.0, -8.0), (58.0, 54.0, 14.0), ROCK, 0.0, 40, 2, bumps=0.2, flatten=1.0, shade=0.4, flat=True)
-    add_blob(mesh, (-16.0, 0.0, 6.0), (42.0, 40.0, 34.0), ROCK, 0.0, 41, 2, bumps=0.3, flatten=0.4, shade=0.5, flat=True)
-    add_blob(mesh, (-26.0, 20.0, 4.0), (24.0, 22.0, 24.0), ROCK, 0.0, 42, 2, bumps=0.3, flatten=0.4, shade=0.5, flat=True)
-    add_blob(mesh, (-18.0, -24.0, 3.0), (22.0, 20.0, 20.0), ROCK, 0.0, 43, 2, bumps=0.3, flatten=0.4, shade=0.5, flat=True)
+    add_blob(mesh, (-24.0, 0.0, -8.0), (48.0, 50.0, 14.0), ROCK, 0.0, 40, 2, bumps=0.2, flatten=1.0, shade=0.4, flat=True)
+    add_blob(mesh, (-30.0, 0.0, 6.0), (36.0, 36.0, 32.0), ROCK, 0.0, 41, 2, bumps=0.3, flatten=0.4, shade=0.5, flat=True)
+    add_blob(mesh, (-40.0, 20.0, 4.0), (22.0, 20.0, 22.0), ROCK, 0.0, 42, 2, bumps=0.3, flatten=0.4, shade=0.5, flat=True)
+    add_blob(mesh, (-32.0, -24.0, 3.0), (20.0, 18.0, 18.0), ROCK, 0.0, 43, 2, bumps=0.3, flatten=0.4, shade=0.5, flat=True)
     # the mouth, a dark hollow in the front of the mound, and its frame
-    add_blob(mesh, (26.0, 0.0, 9.0), (9.0, 10.5, 13.5), DARK, 0.0, 44, 1, bumps=0.0, flatten=0.7, shade=0.0)
+    add_blob(mesh, (5.0, 0.0, 9.0), (9.0, 10.5, 13.5), DARK, 0.0, 44, 1, bumps=0.0, flatten=0.7, shade=0.0)
     for side in (-1.0, 1.0):
-        timber(mesh, (33.0, side * 12.5, -SKIRT), (33.0, side * 11.5, 25.0), 2.1, 45)
-        timber(mesh, (33.5, side * 12.0, 12.0), (20.0, side * 14.0, 20.0), 1.5, 46)
-    timber(mesh, (33.0, -15.5, 25.5), (33.0, 15.5, 25.5), 2.4, 47)
-    # the heap of its resource, and a few chunks on the ground before the mouth
-    chunks(mesh, (40.0, -30.0, 0.0), 9, 13.0, (3.5, 7.5), 48)
-    chunks(mesh, (46.0, 22.0, 0.0), 3, 6.0, (3.0, 4.5), 49)
+        timber(mesh, (12.0, side * 12.5, -SKIRT), (12.0, side * 11.5, 25.0), 2.1, 45)
+        timber(mesh, (12.5, side * 12.0, 12.0), (-1.0, side * 14.0, 20.0), 1.5, 46)
+    timber(mesh, (12.0, -15.5, 25.5), (12.0, 15.5, 25.5), 2.4, 47)
+    # the heap of its resource, and a few chunks on the ground beside the mouth
+    chunks(mesh, (10.0, -38.0, 0.0), 9, 13.0, (3.5, 7.5), 48)
+    chunks(mesh, (16.0, 34.0, 0.0), 3, 6.0, (3.0, 4.5), 49)
+    # the place of the hero
+    add_blob(mesh, (HERO_PLACE / 1.3, 0.0, -SKIRT * 0.5), (25.0, 23.0, SKIRT * 0.5 + 1.2), EARTH, 0.0, 51, 2, bumps=0.1, flatten=1.0, shade=0.3)
     # the flag of its owner
-    add_tube(mesh, [(4.0, 30.0, 18.0), (4.0, 30.0, 78.0)], [1.2, 0.9], WOOD, [0.0, 0.0], 50, 5, True, bark=0.06)
+    add_tube(mesh, [(-10.0, 34.0, 14.0), (-10.0, 34.0, 78.0)], [1.2, 0.9], WOOD, [0.0, 0.0], 50, 5, True, bark=0.06)
     mesh.begin_part()
-    flag = [((4.0, 30.0, 76.0), 1.0), ((4.0, 30.0, 58.0), 1.0), ((-22.0, 30.5, 61.0), 0.85), ((-14.0, 30.0, 67.0), 0.8), ((-22.0, 29.5, 73.0), 0.85)]
+    flag = [((-10.0, 34.0, 76.0), 1.0), ((-10.0, 34.0, 58.0), 1.0), ((-36.0, 34.5, 61.0), 0.85), ((-28.0, 34.0, 67.0), 0.8), ((-36.0, 33.5, 73.0), 0.85)]
     indices = [mesh.vertex(point, (TINTED[0] * tone, TINTED[1] * tone, TINTED[2] * tone), OWNER, normal=(0.0, 1.0, 0.25)) for point, tone in flag]
     for index in range(1, len(indices) - 1):
         mesh.sheet(indices[0], indices[index], indices[index + 1])
@@ -482,17 +490,21 @@ def gem_pile():
 
 
 def mill():
-    """A windmill: a round stone tower under a pointed roof, four sails on its front and sacks of what it gives at its foot"""
+    """A windmill: a round stone tower under a pointed roof, four sails on its front and sacks of what it gives at its foot. It stands in the
+    back of its cell, as a mine does, and the hero that takes it stands before it, around HERO_PLACE"""
     mesh = Mesh()
     stone = (0.34, 0.32, 0.29)
+    back = -16.0
     # its footing goes down under the ground
-    add_blob(mesh, (0.0, 0.0, -7.0), (26.0, 25.0, 9.0), ROCK, 0.0, 70, 2, bumps=0.15, flatten=1.0, shade=0.4, flat=True)
-    add_tube(mesh, [(0.0, 0.0, -SKIRT), (0.0, 0.0, 24.0), (0.0, 0.0, 48.0)], [15.5, 12.5, 10.0], stone, [0.0, 0.0, 0.0], 71, 10, False, bark=0.08)
-    add_tube(mesh, [(0.0, 0.0, 47.0), (0.0, 0.0, 56.0), (0.0, 0.0, 66.0)], [12.5, 7.5, 0.6], WOOD, [0.0, 0.0, 0.0], 72, 10, True, bark=0.1)
-    add_blob(mesh, (14.0, 0.0, 6.0), (3.0, 4.5, 8.0), DARK, 0.0, 73, 1, bumps=0.0, flatten=0.8, shade=0.0)
+    add_blob(mesh, (back, 0.0, -7.0), (26.0, 25.0, 9.0), ROCK, 0.0, 70, 2, bumps=0.15, flatten=1.0, shade=0.4, flat=True)
+    add_tube(mesh, [(back, 0.0, -SKIRT), (back, 0.0, 24.0), (back, 0.0, 48.0)], [15.5, 12.5, 10.0], stone, [0.0, 0.0, 0.0], 71, 10, False, bark=0.08)
+    add_tube(mesh, [(back, 0.0, 47.0), (back, 0.0, 56.0), (back, 0.0, 66.0)], [12.5, 7.5, 0.6], WOOD, [0.0, 0.0, 0.0], 72, 10, True, bark=0.1)
+    add_blob(mesh, (back + 14.0, 0.0, 6.0), (3.0, 4.5, 8.0), DARK, 0.0, 73, 1, bumps=0.0, flatten=0.8, shade=0.0)
+    # the place of the hero
+    add_blob(mesh, (HERO_PLACE / 1.5, 0.0, -SKIRT * 0.5), (22.0, 20.0, SKIRT * 0.5 + 1.2), EARTH, 0.0, 76, 2, bumps=0.1, flatten=1.0, shade=0.3)
     # the sails, flat on the front of the tower around a hub
-    hub = (13.0, 0.0, 42.0)
-    timber(mesh, (9.0, 0.0, 42.0), (15.0, 0.0, 42.0), 1.6, 74)
+    hub = (back + 13.0, 0.0, 42.0)
+    timber(mesh, (back + 9.0, 0.0, 42.0), (back + 15.0, 0.0, 42.0), 1.6, 74)
     mesh.begin_part()
     cloth = (0.62, 0.58, 0.5)
     for turn in range(4):
@@ -506,7 +518,7 @@ def mill():
         mesh.sheet(corners[0], corners[1], corners[2])
         mesh.sheet(corners[0], corners[2], corners[3])
     # the sacks of its resource
-    chunks(mesh, (20.0, -20.0, 0.0), 6, 9.0, (3.5, 6.0), 75)
+    chunks(mesh, (back + 16.0, -26.0, 0.0), 6, 9.0, (3.5, 6.0), 75)
     return mesh
 
 

@@ -1,0 +1,9 @@
+{
+  "comment": "Photo-scanned masonry of the walls of the castles, one set for each style, and the tiles of their roofs (the style Roof, T_CastleRoof), CC0, from Poly Haven (https://polyhaven.com/license). fetch_castle_textures.ps1 downloads them at the resolution below, which keeps them light, to Saved/TextureSources/castle/<id> as <id>_color.jpg and <id>_normal.jpg (DirectX); import_planet_castles.py textures imports them as T_CastleWall_<Style> and T_CastleWall_<Style>_N, and takes the masonry generate_castle_textures.py generates for a style whose set is not there.",
+  "resolution": "1k",
+  "sets": [
+    { "style": "Human", "id": "medieval_blocks_05" },
+    { "style": "Undead", "id": "castle_wall_slates" },
+    { "style": "Roof", "id": "clay_roof_tiles_02" }
+  ]
+}

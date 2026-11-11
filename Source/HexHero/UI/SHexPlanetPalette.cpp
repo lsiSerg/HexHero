@@ -3,6 +3,7 @@
 #include "SHexPlanetPalette.h"
 #include "SHexModeBar.h"
 #include "HexHeroConfig.h"
+#include "HexCastleConfig.h"
 #include "HexSiteConfig.h"
 #include "HexPlanetFile.h"
 #include "HexPlanetPainter.h"
@@ -30,7 +31,7 @@ namespace
 	const FLinearColor KeyColor(0.7f, 0.7f, 0.7f);
 
 	/** The tabs of each layer, in the order of their buttons */
-	const EHexPaintTab SurfaceTabs[] = {EHexPaintTab::Ground, EHexPaintTab::Relief, EHexPaintTab::Objects, EHexPaintTab::Rivers, EHexPaintTab::Entrances, EHexPaintTab::Heroes, EHexPaintTab::Sites};
+	const EHexPaintTab SurfaceTabs[] = {EHexPaintTab::Ground, EHexPaintTab::Relief, EHexPaintTab::Objects, EHexPaintTab::Rivers, EHexPaintTab::Entrances, EHexPaintTab::Heroes, EHexPaintTab::Sites, EHexPaintTab::Castles};
 	const EHexPaintTab UndergroundTabs[] = {EHexPaintTab::Maze, EHexPaintTab::Links, EHexPaintTab::CaveObjects, EHexPaintTab::CaveHeroes, EHexPaintTab::CaveSites};
 }
 
@@ -566,6 +567,41 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 	TSharedRef<SVerticalBox> SiteBody = MakeSiteBody();
 	TSharedRef<SVerticalBox> CaveSiteBody = MakeSiteBody();
 
+	// Castles, on the surface: the faction of the castle a click places, and who has it when a game starts
+	const UHexCastleConfig* CastleConfig = UHexCastleConfig::Load();
+	TSharedRef<SVerticalBox> CastleBody = SNew(SVerticalBox);
+	{
+		CastleBody->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("CastleFactions", "Faction"), 0.0f)];
+		TSharedRef<SUniformGridPanel> Factions = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
+		for (int32 Faction = 0; Faction < CastleConfig->Factions.Num(); ++Faction)
+		{
+			Factions->AddSlot(Faction % 2, Faction / 2)
+			[
+				MakeButton(
+					MakeSwatch(CastleConfig->Factions[Faction].Color, SwatchSize * 0.75f, SwatchSize * 0.75f, 6.0f, FText::FromString(CastleConfig->Factions[Faction].DisplayName), Small, FText::GetEmpty()),
+					[Faction](UHexPlanetPainter& Each) { Each.SetCastleFaction(Faction); Each.SetCastleTool(); },
+					[Faction](const UHexPlanetPainter& Each) { return Each.IsPlacingCastles() && Each.GetCastleFaction() == Faction; })
+			];
+		}
+		CastleBody->AddSlot().AutoHeight()[Factions];
+		CastleBody->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("CastleOwners", "Who has it when a game starts"))];
+		TSharedRef<SUniformGridPanel> Owners = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
+		for (int32 Owner = -1; Owner < HeroConfig->Players.Num(); ++Owner)
+		{
+			const FLinearColor Color = Owner >= 0 ? HeroConfig->Players[Owner].Color : FLinearColor(0.35f, 0.35f, 0.35f, 1.0f);
+			const FText Name = Owner >= 0 ? FText::FromString(HeroConfig->Players[Owner].Name) : LOCTEXT("CastleNobody", "Nobody");
+			Owners->AddSlot((Owner + 1) % 2, (Owner + 1) / 2)
+			[
+				MakeButton(
+					MakeSwatch(Color, SwatchSize * 0.75f, SwatchSize * 0.75f, 6.0f, Name, Small, FText::GetEmpty()),
+					[Owner](UHexPlanetPainter& Each) { Each.SetCastleOwner(Owner); Each.SetCastleTool(); },
+					[Owner](const UHexPlanetPainter& Each) { return Each.IsPlacingCastles() && Each.GetCastleOwner() == Owner; })
+			];
+		}
+		CastleBody->AddSlot().AutoHeight()[Owners];
+		CastleBody->AddSlot().AutoHeight()[MakeHelp(LOCTEXT("CastleHelp", "Click a cell to put a castle on it and on the two cells around its corner nearest the cursor; Ctrl+click takes one away, and Undo takes either back. A castle fills its three cells: in the game a hero beside it that is sent onto it comes to its own, or takes another's if its army is the stronger. A castle of nobody is guarded."))];
+	}
+
 	// Maze: the void and passages underground, carving, and the cave biomes
 	TSharedRef<SVerticalBox> Maze = SNew(SVerticalBox);
 	{
@@ -812,6 +848,7 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 			+ SWidgetSwitcher::Slot()[CaveObjects]
 			+ SWidgetSwitcher::Slot()[CaveHeroBody]
 			+ SWidgetSwitcher::Slot()[CaveSiteBody]
+			+ SWidgetSwitcher::Slot()[CastleBody]
 		]
 
 		// Undo and Redo of the layer painted

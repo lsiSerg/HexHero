@@ -1442,6 +1442,17 @@ void AHexPlanetCameraPawn::Follow(const FVector& Direction)
 	bFocusing = true;
 }
 
+void AHexPlanetCameraPawn::FocusOn(const FVector& Direction, float Distance)
+{
+	if (IsTravelling() || !Planet || Direction.IsNearlyZero())
+	{
+		return;
+	}
+	FocusDirection = Direction.GetSafeNormal();
+	bFocusing = true;
+	TargetDistance = FMath::Clamp(double(Distance), double(Settings()->MinDistance), GetMaxDistance());
+}
+
 void AHexPlanetCameraPawn::OnTurnStarted()
 {
 	if (IsTravelling())
