@@ -6,7 +6,9 @@
 #include "Engine/DataAsset.h"
 #include "HexHeroConfig.generated.h"
 
+class UAnimSequence;
 class UMaterialInterface;
+class USkeletalMesh;
 class UStaticMesh;
 
 /**
@@ -218,6 +220,12 @@ public:
 	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=0, ClampMax=10))
 	float AiFogHoldTime = 0.8f;
 
+	/** And seconds it stays at an entrance or exit such a hero comes out of into what the person sees, as the developer did not see an
+	 *  enemy come up out of an underground they had not explored on 2026-11-11, before it took the castle beside the entrance: longer, as
+	 *  the camera may come from far and the hero is seen there for the first time */
+	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=0, ClampMax=10))
+	float AiEntranceHoldTime = 2.0f;
+
 	/** Days of a week; nothing happens by the week yet, the panel of the heroes shows it */
 	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=1))
 	int32 DaysPerWeek = 7;
@@ -258,6 +266,58 @@ public:
 	UPROPERTY(EditAnywhere, Category="Look")
 	TSoftObjectPtr<UMaterialInterface> HeroMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/HexPlanet/M_HexPlanetHero.M_HexPlanetHero")));
 
+	/** The animated hero, as the developer asked on 2026-11-11 ("знайди меші коня та людини, спрости їх і якусь анімацію зроби - мув та
+	 *  стоп, початок мува, реакція на вибір"): a skeletal mesh that is drawn in place of HeroMesh when it is there, a rider on a horse
+	 *  built from two CC0 models (Tools/HexPlanetHeroes/blender_build_rider.py), RiderScale times its size before HeroScale and turned
+	 *  by RiderYaw degrees, so its front looks along X. It stands in IdleAnimation and walks in MoveAnimation, MoveAnimRate fast at
+	 *  WalkSpeed; StartAnimation plays once as it sets out and StopAnimation, from StopAnimStart of its length, as it stops, and
+	 *  ChosenAnimation once when it is chosen while it stands. The developer found leaps at setting out and stopping and rearing when chosen too much on 2026-11-11, and then a sway of the whole horse too ("злегка", "тільки голова"), so it sets out and stops through a few steps of its walk, and chosen it only turns its head (Look, which blender_build_rider.py makes); each blends into the next over AnimBlendTime seconds. One left empty is
+	 *  skipped. */
+	UPROPERTY(EditAnywhere, Category="Look|Animation")
+	TSoftObjectPtr<USkeletalMesh> RiderMesh = TSoftObjectPtr<USkeletalMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Heroes/SK_PlanetRider/SkeletalMeshes/SK_PlanetRider.SK_PlanetRider")));
+
+	UPROPERTY(EditAnywhere, Category="Look|Animation", meta=(ClampMin=0.001))
+	float RiderScale = 0.085f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Animation")
+	float RiderYaw = -90.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Animation")
+	TSoftObjectPtr<UAnimSequence> IdleAnimation = TSoftObjectPtr<UAnimSequence>(FSoftObjectPath(TEXT("/Game/HexPlanet/Heroes/SK_PlanetRider/SkeletalMeshes/SK_PlanetRiderIdle.SK_PlanetRiderIdle")));
+
+	UPROPERTY(EditAnywhere, Category="Look|Animation")
+	TSoftObjectPtr<UAnimSequence> MoveAnimation = TSoftObjectPtr<UAnimSequence>(FSoftObjectPath(TEXT("/Game/HexPlanet/Heroes/SK_PlanetRider/SkeletalMeshes/SK_PlanetRiderGallop.SK_PlanetRiderGallop")));
+
+	UPROPERTY(EditAnywhere, Category="Look|Animation")
+	TSoftObjectPtr<UAnimSequence> StartAnimation = TSoftObjectPtr<UAnimSequence>(FSoftObjectPath(TEXT("/Game/HexPlanet/Heroes/SK_PlanetRider/SkeletalMeshes/SK_PlanetRiderWalk.SK_PlanetRiderWalk")));
+
+	UPROPERTY(EditAnywhere, Category="Look|Animation")
+	TSoftObjectPtr<UAnimSequence> StopAnimation = TSoftObjectPtr<UAnimSequence>(FSoftObjectPath(TEXT("/Game/HexPlanet/Heroes/SK_PlanetRider/SkeletalMeshes/SK_PlanetRiderWalk.SK_PlanetRiderWalk")));
+
+	UPROPERTY(EditAnywhere, Category="Look|Animation")
+TSoftObjectPtr<UAnimSequence> ChosenAnimation = TSoftObjectPtr<UAnimSequence>(FSoftObjectPath(TEXT("/Game/HexPlanet/Heroes/SK_PlanetRider/SkeletalMeshes/SK_PlanetRiderLook.SK_PlanetRiderLook")));
+
+	UPROPERTY(EditAnywhere, Category="Look|Animation", meta=(ClampMin=0))
+	float AnimBlendTime = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Animation", meta=(ClampMin=0.01))
+	float IdleAnimRate = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Animation", meta=(ClampMin=0.01))
+	float MoveAnimRate = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Animation", meta=(ClampMin=0.01))
+	float StartAnimRate = 1.4f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Animation", meta=(ClampMin=0.01))
+	float StopAnimRate = 1.2f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Animation", meta=(ClampMin=0, ClampMax=0.95))
+	float StopAnimStart = 0.4f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Animation", meta=(ClampMin=0.01))
+	float ChosenAnimRate = 1.3f;
+
 	/** Scale of the mesh of a hero */
 	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=0.1))
 	float HeroScale = 2.5f;
@@ -276,6 +336,14 @@ public:
 
 	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=0))
 	float HeroGlow = 0.25f;
+
+	/** The banner the animated hero carries waves, as the developer asked on 2026-11-11: its far end moves by HeroFlagWave units of
+	 *  the mesh, at HeroFlagWaveSpeed */
+	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=0))
+	float HeroFlagWave = 16.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=0))
+	float HeroFlagWaveSpeed = 6.0f;
 
 	/** How far from the body of a hero a click still chooses it, in world units, and how tall that body is */
 	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=1))

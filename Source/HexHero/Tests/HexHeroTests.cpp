@@ -180,6 +180,20 @@ bool FHexHeroPathTest::RunTest(const FString& Parameters)
 	HexHeroPath::FindLayerField(Grid, 1, Start, 1000.0f, Open2, Linked, Both);
 	TestEqual(TEXT("A search from the second layer starts at its node"), Both.Start, NumCells + Start);
 	TestEqual(TEXT("And reaches the first through the way at its start"), Both.Costs[Start], LinkCost);
+
+	// no way runs over a cell with a way through that it does not use: it is reached, and nothing is reached from it by a step
+	const int32 Beside = Cells[Start].Neighbors[0];
+	const auto LinkedBeside = [&](int32, int32 Cell) { return Cell == Beside ? LinkCost : -1.0f; };
+	HexHeroPath::FindLayerField(Grid, 0, Start, 1000.0f, Open2, LinkedBeside, Both);
+	int32 WalkedOver = 0;
+	for (int32 Cell = 0; Cell < NumCells; ++Cell)
+	{
+		WalkedOver += Both.Previous[Cell] == Beside ? 1 : 0;
+	}
+	TestEqual(TEXT("The cell with a way through is reached by a step"), Both.Costs[Beside], 1.0f);
+	TestEqual(TEXT("No way on its layer runs on over it"), WalkedOver, 0);
+	TestTrue(TEXT("The ways go around it"), Both.IsReached(Far));
+	TestTrue(TEXT("On the other layer the way walks on from it"), Both.IsReached(NumCells + Cells[Beside].Neighbors[0]));
 	return true;
 }
 

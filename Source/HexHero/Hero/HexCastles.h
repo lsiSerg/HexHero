@@ -196,6 +196,9 @@ public:
 
 	/** A cheat: lets every castle build as much as it can pay for in a day (hex.Cheat build) */
 	void SetUnlimitedBuilds(bool bOn) { bUnlimitedBuilds = bOn; ++Revision; }
+
+	/** A cheat: builds every building of a castle to its last level at once, for nothing; gives how many levels it built */
+	int32 BuildAll(int32 CastleId);
 	bool HasUnlimitedBuilds() const { return bUnlimitedBuilds; }
 
 	/** Returns how much an army counts, and a garrison behind the walls of its castle */

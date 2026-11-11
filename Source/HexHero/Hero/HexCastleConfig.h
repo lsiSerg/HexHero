@@ -441,6 +441,72 @@ public:
 	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=0, ClampMax=1))
 	float WallRelief = 1.0f;
 
+	/** The developer found the stone of a castle one tone all over, without shade, and its masonry too much of a pattern on 2026-11-11
+	 *  ("в кутах темніше, на відкритих ділянках світліше"). So the scan is drawn WallContrast of the way from its own mean, in patches of
+	 *  the place WallPatchSize units across that are lighter or darker by WallPatchTone and warmer or cooler (WallWarmColor,
+	 *  WallCoolColor), each piece lighter or darker by WallPieceTone */
+	UPROPERTY(EditAnywhere, Category="Look|Shade", meta=(ClampMin=0, ClampMax=1.5))
+	float WallContrast = 0.45f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Shade", meta=(ClampMin=1))
+	float WallPatchSize = 45.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Shade", meta=(ClampMin=0, ClampMax=1))
+	float WallPatchTone = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Shade", meta=(ClampMin=0, ClampMax=1))
+	float WallPieceTone = 0.08f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Shade")
+	FLinearColor WallWarmColor = FLinearColor(1.08f, 1.0f, 0.9f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Look|Shade")
+	FLinearColor WallCoolColor = FLinearColor(0.92f, 0.97f, 1.06f, 1.0f);
+
+	/** Stone is darker by WallFootShade at the ground, up to WallFootHeight units of its mesh above it */
+	UPROPERTY(EditAnywhere, Category="Look|Shade", meta=(ClampMin=0, ClampMax=1))
+	float WallFootShade = 0.45f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Shade", meta=(ClampMin=0.1))
+	float WallFootHeight = 22.0f;
+
+	/** And lighter by WallTopLight towards its top, WallTopHeight units above the ground, as more of the sky lights it there */
+	UPROPERTY(EditAnywhere, Category="Look|Shade", meta=(ClampMin=0, ClampMax=1))
+	float WallTopLight = 0.22f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Shade", meta=(ClampMin=1))
+	float WallTopHeight = 90.0f;
+
+	/** Streaks the rain left down the stone, as the developer asked on 2026-11-11 for dirt gathered over the years: darker by
+	 *  WallStreakShade, WallStreakWidth units of the mesh wide and WallStreakLength long */
+	UPROPERTY(EditAnywhere, Category="Look|Shade", meta=(ClampMin=0, ClampMax=1))
+	float WallStreakShade = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Shade", meta=(ClampMin=0.1))
+	float WallStreakWidth = 3.5f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Shade", meta=(ClampMin=0.1))
+	float WallStreakLength = 40.0f;
+
+	/** A stretch of the wall is darker by WallCornerShade where it meets a tower or a gate, as a corner is: from WallCornerInset degrees
+	 *  around the middle of a tower, or the edge of a gate, the shade fades over WallCornerReach degrees along the wall; WallCornerSpan
+	 *  is the length of a stretch of the wall in the units of its mesh */
+	UPROPERTY(EditAnywhere, Category="Look|Shade", meta=(ClampMin=0, ClampMax=1))
+	float WallCornerShade = 0.65f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Shade", meta=(ClampMin=0.1))
+	float WallCornerSpan = 30.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Shade", meta=(ClampMin=0, ClampMax=45))
+	float WallCornerInset = 4.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Shade", meta=(ClampMin=0.1, ClampMax=90))
+	float WallCornerReach = 12.0f;
+
+	/** The fires, embers and lit windows of a castle of the undead style burn in this color */
+	UPROPERTY(EditAnywhere, Category="Look")
+	FLinearColor UndeadGlowColor = FLinearColor(0.2f, 1.0f, 0.7f, 1.0f);
+
 	/** Past this distance from the camera the castles are not drawn */
 	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=100))
 	float CullDistance = 20000.0f;

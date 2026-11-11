@@ -125,7 +125,13 @@ void HexHeroPath::FindLayerField(const FHexSphereGrid& Grid, int32 StartLayer, i
 		const int32 Layer = Current.Cell / NumCells;
 		const int32 CellIndex = Current.Cell % NumCells;
 		const FHexSphereCell& Cell = Cells[CellIndex];
-		for (int32 Side = 0; Side < Cell.Neighbors.Num(); ++Side)
+		// and through an entrance or exit to the same cell of the other layer
+		const float LinkCost = GetLinkCost(Layer, CellIndex);
+		// no way runs over an entrance or exit it does not use, as the developer found on 2026-11-11 that a way lay across one: a cell
+		// with one is walked off only where the way starts on it or came up or down through it
+		const int32 CameFrom = OutField.Previous[Current.Cell];
+		const bool bWalksOn = LinkCost < 0.0f || Current.Cell == OutField.Start || (CameFrom != INDEX_NONE && CameFrom / NumCells != Layer);
+		for (int32 Side = 0; bWalksOn && Side < Cell.Neighbors.Num(); ++Side)
 		{
 			const int32 Neighbor = Cell.Neighbors[Side];
 			const float StepCost = GetStepCost(Layer, CellIndex, Side, Neighbor);
@@ -135,8 +141,6 @@ void HexHeroPath::FindLayerField(const FHexSphereGrid& Grid, int32 StartLayer, i
 				Reach(Current.Cell, Layer * NumCells + Neighbor, Current.Cost + FMath::Max(StepCost, CostTolerance));
 			}
 		}
-		// and through an entrance or exit to the same cell of the other layer
-		const float LinkCost = GetLinkCost(Layer, CellIndex);
 		if (LinkCost >= 0.0f)
 		{
 			Reach(Current.Cell, (1 - Layer) * NumCells + CellIndex, Current.Cost + FMath::Max(LinkCost, CostTolerance));

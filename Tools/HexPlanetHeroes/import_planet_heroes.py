@@ -14,7 +14,42 @@ import unreal
 SOURCE_FOLDER = os.path.join(unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_saved_dir()), 'HexPlanetHeroes')
 FOLDER = '/Game/HexPlanet/Heroes'
 CONFIG = 'DA_HexHeroes'
+RIDER = 'SK_PlanetRider'
 MATERIALS = {'hero': '/Game/HexPlanet/M_HexPlanetHero', 'mark': '/Game/HexPlanet/M_HexPlanetHeroMark', 'path': '/Game/HexPlanet/M_HexPlanetHeroPath'}
+
+
+def import_rider(material):
+    """The animated hero, a rider on a horse, which blender_build_rider.py wrote: a skeletal mesh with its skeleton and animations, which stay
+    in the folders the importer gives them, /Game/HexPlanet/Heroes/SK_PlanetRider; skipped when the file is not there"""
+    assets = unreal.EditorAssetLibrary
+    source = os.path.join(SOURCE_FOLDER, RIDER + '.glb')
+    if not os.path.exists(source):
+        unreal.log_warning('HEROES %s is missing: run fetch_rider_models.ps1 and blender_build_rider.py for the animated hero' % source)
+        return
+    # anew each time, as a skeleton with other bones does not take the place of the one before
+    if assets.does_directory_exist('%s/%s' % (FOLDER, RIDER)):
+        assets.delete_directory('%s/%s' % (FOLDER, RIDER))
+    pipeline = unreal.InterchangeGenericAssetsPipeline()
+    pipeline.get_editor_property('material_pipeline').set_editor_property('import_materials', False)
+    pipeline.get_editor_property('common_meshes_properties').set_editor_property('vertex_color_import_option', unreal.InterchangeVertexColorImportOption.IVCIO_REPLACE)
+    task = unreal.AssetImportTask()
+    task.set_editor_property('filename', source)
+    task.set_editor_property('destination_path', FOLDER)
+    task.set_editor_property('automated', True)
+    task.set_editor_property('replace_existing', True)
+    task.set_editor_property('save', True)
+    task.set_editor_property('options', pipeline)
+    unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks([task])
+    found = unreal.AssetRegistryHelpers.get_asset_registry().get_assets_by_path('%s/%s' % (FOLDER, RIDER), recursive=True)
+    for data in found:
+        asset = data.get_asset()
+        unreal.log('HEROES rider asset %s %s' % (data.asset_class_path.asset_name, data.package_name))
+        if isinstance(asset, unreal.MaterialInterface):
+            # the importer makes a material of its own, which nothing uses
+            assets.delete_asset(str(data.package_name))
+        elif isinstance(asset, unreal.SkeletalMesh):
+            asset.set_editor_property('materials', [unreal.SkeletalMaterial(material_interface=material, material_slot_name='Rider')])
+            assets.save_loaded_asset(asset, only_if_is_dirty=False)
 
 
 def main():
@@ -68,6 +103,7 @@ def main():
         assets.save_loaded_asset(mesh, only_if_is_dirty=False)
         unreal.log('HEROES %s: %d triangles' % (name, entry['triangles']))
 
+    import_rider(materials['hero'])
     config_path = '%s/%s' % (FOLDER, CONFIG)
     if not assets.does_asset_exist(config_path):
         unreal.AssetToolsHelpers.get_asset_tools().create_asset(CONFIG, FOLDER, unreal.HexHeroConfig, unreal.DataAssetFactory())

@@ -12,7 +12,11 @@
 #include "HexCastles.h"
 #include "HexSites.h"
 #include "Components/InstancedStaticMeshComponent.h"
+#include "HexHeroAnimInstance.h"
+#include "Animation/AnimSequence.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Engine/SkeletalMesh.h"
 #include "ProceduralMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
@@ -1724,6 +1728,7 @@ bool UHexHeroes::PassEntrance(FHexHero& Hero, FString& OutMessage, bool bBroadca
 	Hero.FromCell = Hero.Cell;
 	Hero.bPlaced = false;
 	Hero.Facing = FVector3d::ZeroVector;
+	Hero.bCameThrough = true;
 	++MapRevision;
 	Explore(Hero);
 	UE_LOG(LogHexHero, Log, TEXT("Heroes: %s goes %s through cell %d"), *Hero.Name, Other == EHexPlanetLayer::Underground ? TEXT("down into the underground") : TEXT("up to the surface"), Hero.Cell);
@@ -2085,7 +2090,7 @@ void UHexHeroes::PlaceHero(FHexHero& Hero)
 
 void UHexHeroes::RemoveBody(int32 Id)
 {
-	if (TObjectPtr<UStaticMeshComponent>* Body = Bodies.Find(Id))
+	if (TObjectPtr<UMeshComponent>* Body = Bodies.Find(Id))
 	{
 		if (*Body)
 		{
@@ -2093,14 +2098,15 @@ void UHexHeroes::RemoveBody(int32 Id)
 		}
 	}
 	Bodies.Remove(Id);
+	BodyStates.Remove(Id);
 	BodyMaterials.Remove(Id);
 }
 
 void UHexHeroes::UpdateBody(FHexHero& Hero)
 {
 	AHexPlanet* Planet = GetPlanet(Hero.Layer);
-	TObjectPtr<UStaticMeshComponent>* Found = Bodies.Find(Hero.Id);
-	UStaticMeshComponent* Body = Found ? Found->Get() : nullptr;
+	TObjectPtr<UMeshComponent>* Found = Bodies.Find(Hero.Id);
+	UMeshComponent* Body = Found ? Found->Get() : nullptr;
 	// a hero under the fog of war of the person who watches is not drawn
 	const bool bFogged = IsShroudOn() && IsHidden(ViewPlayer, Hero.Layer, Hero.Cell) && (!Hero.bWalking || IsHidden(ViewPlayer, Hero.Layer, Hero.FromCell));
 	if (!Planet || !Hero.bPlaced || bFogged)
@@ -2116,15 +2122,30 @@ void UHexHeroes::UpdateBody(FHexHero& Hero)
 	{
 		RemoveBody(Hero.Id);
 		const FHexHeroClass& Class = Config->GetClass(Hero.Class);
-		UStaticMesh* Mesh = Class.Mesh.IsNull() ? Config->HeroMesh.LoadSynchronous() : Class.Mesh.LoadSynchronous();
-		if (!Mesh)
+		// the animated rider where a class names no mesh of its own and the rider is there, else a mesh that stands still
+		USkeletalMesh* Rider = Class.Mesh.IsNull() ? Config->RiderMesh.LoadSynchronous() : nullptr;
+		if (Rider)
 		{
-			return;
+			USkeletalMeshComponent* Animated = NewObject<USkeletalMeshComponent>(Planet);
+			Animated->SetSkeletalMesh(Rider);
+			Animated->SetAnimationMode(EAnimationMode::AnimationBlueprint);
+			Animated->SetAnimInstanceClass(UHexHeroAnimInstance::StaticClass());
+			Animated->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::OnlyTickPoseWhenRendered;
+			Body = Animated;
 		}
-		Body = NewObject<UStaticMeshComponent>(Planet);
+		else
+		{
+			UStaticMesh* Mesh = Class.Mesh.IsNull() ? Config->HeroMesh.LoadSynchronous() : Class.Mesh.LoadSynchronous();
+			if (!Mesh)
+			{
+				return;
+			}
+			UStaticMeshComponent* Still = NewObject<UStaticMeshComponent>(Planet);
+			Still->SetStaticMesh(Mesh);
+			Body = Still;
+		}
 		Body->SetupAttachment(Planet->GetRootComponent());
 		Body->SetMobility(EComponentMobility::Movable);
-		Body->SetStaticMesh(Mesh);
 		Body->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		Body->SetCanEverAffectNavigation(false);
 		if (UMaterialInterface* Material = Config->HeroMaterial.LoadSynchronous())
@@ -2133,6 +2154,8 @@ void UHexHeroes::UpdateBody(FHexHero& Hero)
 			Instance->SetVectorParameterValue(TEXT("PlayerColor"), Config->GetPlayer(Hero.Player).Color);
 			Instance->SetScalarParameterValue(TEXT("HeroColorShare"), Config->HeroColorShare);
 			Instance->SetScalarParameterValue(TEXT("HeroGlow"), Config->HeroGlow);
+			Instance->SetScalarParameterValue(TEXT("HeroFlagWave"), Config->HeroFlagWave);
+			Instance->SetScalarParameterValue(TEXT("HeroFlagWaveSpeed"), Config->HeroFlagWaveSpeed);
 			Body->SetMaterial(0, Instance);
 			BodyMaterials.Add(Hero.Id, Instance);
 		}
@@ -2141,7 +2164,51 @@ void UHexHeroes::UpdateBody(FHexHero& Hero)
 	}
 
 	const FVector3d Up = Hero.Position.GetSafeNormal();
-	const FTransform Transform(FRotationMatrix::MakeFromZX(FVector(Up), FVector(Hero.Facing)).ToQuat(), FVector(Hero.Position), FVector(Config->HeroScale * Hero.ViewScale));
+	USkeletalMeshComponent* Animated = Cast<USkeletalMeshComponent>(Body);
+	const FQuat Turn = Animated ? FRotator(0.0, double(Config->RiderYaw), 0.0).Quaternion() : FQuat::Identity;
+	const FTransform Transform(FRotationMatrix::MakeFromZX(FVector(Up), FVector(Hero.Facing)).ToQuat() * Turn, FVector(Hero.Position),
+		FVector(Config->HeroScale * Hero.ViewScale * (Animated ? Config->RiderScale : 1.0f)));
+	if (UHexHeroAnimInstance* Anim = Animated ? Cast<UHexHeroAnimInstance>(Animated->GetAnimInstance()) : nullptr)
+	{
+		// it stands, sets out, walks and stops, and answers being chosen while it stands
+		FBodyState& State = BodyStates.FindOrAdd(Hero.Id);
+		const bool bMoving = Hero.bWalking || Hero.bGliding;
+		const bool bChosen = bPlaying && SelectedId == Hero.Id;
+		UAnimSequence* Idle = Config->IdleAnimation.LoadSynchronous();
+		UAnimSequence* Move = Config->MoveAnimation.LoadSynchronous();
+		const float Blend = Config->AnimBlendTime;
+		if (!Anim->GetCurrent())
+		{
+			Anim->Play(bMoving && Move ? Move : Idle, true, bMoving ? Config->MoveAnimRate : Config->IdleAnimRate, 0.0f);
+		}
+		else if (bMoving != State.bMoving)
+		{
+			UAnimSequence* Start = Config->StartAnimation.LoadSynchronous();
+			UAnimSequence* Stop = Config->StopAnimation.LoadSynchronous();
+			if (bMoving)
+			{
+				Start ? Anim->Play(Start, false, Config->StartAnimRate, Blend, 0.0f, Move, Config->MoveAnimRate) : Anim->Play(Move, true, Config->MoveAnimRate, Blend);
+			}
+			else
+			{
+				Stop ? Anim->Play(Stop, false, Config->StopAnimRate, Blend, Config->StopAnimStart, Idle, Config->IdleAnimRate) : Anim->Play(Idle, true, Config->IdleAnimRate, Blend);
+			}
+		}
+		else if (bChosen && !State.bChosen && !bMoving)
+		{
+			if (UAnimSequence* Chosen = Config->ChosenAnimation.LoadSynchronous())
+			{
+				Anim->Play(Chosen, false, Config->ChosenAnimRate, Blend, 0.0f, Idle, Config->IdleAnimRate);
+			}
+		}
+		else if (bMoving && Anim->GetCurrent() == Move)
+		{
+			// its strides follow its speed
+			Anim->SetRate(Config->MoveAnimRate * FMath::Clamp(Hero.Speed / FMath::Max(Config->WalkSpeed, 0.01f), 0.5f, 1.5f));
+		}
+		State.bMoving = bMoving;
+		State.bChosen = bChosen;
+	}
 	if (!Body->GetComponentTransform().Equals(Transform, 1.0e-3))
 	{
 		Body->SetWorldTransform(Transform);
@@ -3007,18 +3074,22 @@ bool UHexHeroes::NoteSeen(FHexHero& Hero)
 		return false;
 	}
 	const bool bSeen = IsSeen(Hero);
+	const bool bCameThrough = Hero.bCameThrough;
+	Hero.bCameThrough = false;
 	if (bSeen != Hero.bWasSeen)
 	{
 		Hero.bWasSeen = bSeen;
 		const AHexPlanet* Planet = GetPlanet(Hero.Layer);
-		if (IsShroudOn() && Config->AiFogHoldTime > 0.0f && Planet && Planet->IsPresented() && Planet->GetGrid().GetCells().IsValidIndex(Hero.Cell))
+		// longer where it comes out of an entrance or exit
+		const float Hold = bSeen && bCameThrough ? FMath::Max(Config->AiFogHoldTime, Config->AiEntranceHoldTime) : Config->AiFogHoldTime;
+		if (IsShroudOn() && Hold > 0.0f && Planet && Planet->IsPresented() && Planet->GetGrid().GetCells().IsValidIndex(Hero.Cell))
 		{
 			// the camera stays where it went into the fog, or goes where it is about to come out of it
-			WatchHold = Config->AiFogHoldTime;
+			WatchHold = Hold;
 			WatchHeroId = Hero.Id;
 			WatchLayer = Hero.Layer;
 			WatchDirection = !bSeen && Hero.bPlaced ? Hero.Position.GetSafeNormal() : Planet->GetGrid().GetCells()[Hero.Cell].Center;
-			UE_LOG(LogHexHero, Verbose, TEXT("Heroes: %s %s the fog of war at cell %d, the camera stays %.1f s"), *Hero.Name,
+			UE_LOG(LogHexHero, Log, TEXT("Heroes: %s %s the fog of war at cell %d, the camera stays %.1f s"), *Hero.Name,
 				bSeen ? TEXT("is about to come out of") : TEXT("went into"), Hero.Cell, WatchHold);
 		}
 	}

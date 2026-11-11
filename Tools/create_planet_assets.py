@@ -2473,6 +2473,14 @@ HERO_CODE = r"""
 float clothTone = max(max(VertexRGB.r, VertexRGB.g), VertexRGB.b);
 return lerp(VertexRGB.rgb, PlayerColor.rgb * clothTone, saturate(VertexA * HeroColorShare));
 """
+# The cloth of the banner of the animated hero waves, as the developer asked on 2026-11-11: its vertices have a V of 7 in their UV and how far
+# along the cloth they lie as their U (blender_build_rider.py), and move across the cloth, which lies across X of its mesh, by HeroFlagWave
+# units of the mesh at the far end, at HeroFlagWaveSpeed
+HERO_OFFSET_CODE = r"""
+float marked = step(6.5, UV.y) * (1.0 - step(7.5, UV.y));
+float wave = Time * HeroFlagWaveSpeed - UV.x * 4.0;
+return (AxisX * sin(wave) + AxisZ * (0.35 * sin(wave * 1.7 + 1.0))) * (UV.x * HeroFlagWave * marked);
+"""
 HERO_GLOW_CODE = r"""
 float clothTone = max(max(VertexRGB.r, VertexRGB.g), VertexRGB.b);
 return PlayerColor.rgb * clothTone * saturate(VertexA * HeroColorShare) * HeroGlow;
@@ -2513,6 +2521,8 @@ def build_hero_materials():
     material = open_material(HERO_MATERIAL)
     # the flag is a sheet seen from both its sides
     material.set_editor_property('two_sided', True)
+    # the animated hero is a skeletal mesh (SK_PlanetRider)
+    material.set_editor_property('used_with_skeletal_mesh', True)
     vertex_color = library.create_material_expression(material, unreal.MaterialExpressionVertexColor, -1000, 0)
     inputs = [('VertexRGB', vertex_color, ''), ('VertexA', vertex_color, 'A'),
         ('PlayerColor', add_vector(library, material, 'PlayerColor', unreal.LinearColor(0.75, 0.06, 0.05, 1.0), 100), ''),
@@ -2524,6 +2534,21 @@ def build_hero_materials():
         unreal.MaterialProperty.MP_EMISSIVE_COLOR)
     roughness = add_config_parameters(library, material, unreal.HexPlanetConfig, ['Roughness'], 700)[0][1]
     library.connect_material_property(roughness, '', unreal.MaterialProperty.MP_ROUGHNESS)
+    # the banner waves
+    axes = []
+    for index, axis in enumerate(((1.0, 0.0, 0.0), (0.0, 0.0, 1.0))):
+        constant = library.create_material_expression(material, unreal.MaterialExpressionConstant3Vector, -1300, 1000 + index * 60)
+        constant.set_editor_property('constant', unreal.LinearColor(axis[0], axis[1], axis[2], 0.0))
+        transform = library.create_material_expression(material, unreal.MaterialExpressionTransform, -1100, 1000 + index * 60)
+        transform.set_editor_property('transform_source_type', unreal.MaterialVectorCoordTransformSource.TRANSFORMSOURCE_LOCAL)
+        transform.set_editor_property('transform_type', unreal.MaterialVectorCoordTransform.TRANSFORM_WORLD)
+        library.connect_material_expressions(constant, '', transform, '')
+        axes.append(transform)
+    offset = add_custom(library, material, HERO_OFFSET_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, [
+        ('UV', library.create_material_expression(material, unreal.MaterialExpressionTextureCoordinate, -1100, 1150), ''),
+        ('Time', library.create_material_expression(material, unreal.MaterialExpressionTime, -1100, 1200), ''),
+        ('AxisX', axes[0], ''), ('AxisZ', axes[1], '')] + add_config_parameters(library, material, unreal.HexHeroConfig, ['HeroFlagWave', 'HeroFlagWaveSpeed'], 1250), 1000)
+    library.connect_material_property(offset, '', unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
     library.recompile_material(material)
     assets.save_asset(HERO_MATERIAL)
 
@@ -2607,7 +2632,43 @@ float grain = frac(sin(dot(grainCell, float3(12.9898, 78.233, 37.719))) * 43758.
 SITE_CODE = SITE_PARTS_CODE + r"""
 float3 color = lerp(VertexRGB.rgb, resource * tone, heap);
 color = lerp(color, owner * tone, flag);
-color = lerp(color, WallColor * lerp(WallHumanTint, WallUndeadTint, WallStyle) * tone * WallTone, masonry);
+// the masonry of a castle. The developer found it one tone all over and too much of a pattern on 2026-11-11, so the scan is drawn
+// WallContrast of the way from its own mean (the same texture at a coarse mip), in patches of tone of the place WallPatchSize across, warmer
+// or cooler, each piece of the castle a little lighter or darker, and shaded as if the light did not reach everywhere: darker towards the
+// ground (WallFootShade below WallFootHeight of the mesh) and where a stretch of the wall meets a tower or a gate (WallCornerShade, by
+// how near each end of the stretch is to one, which UHexCastles gives the instance)
+struct FWallNoise
+{
+    float Hash(float3 p)
+    {
+        p = frac(p * 0.3183099 + 0.1);
+        p *= 17.0;
+        return frac(p.x * p.y * p.z * (p.x + p.y + p.z));
+    }
+    float Value(float3 x)
+    {
+        float3 i = floor(x);
+        float3 f = frac(x);
+        f = f * f * (3.0 - 2.0 * f);
+        return lerp(lerp(lerp(Hash(i), Hash(i + float3(1, 0, 0)), f.x), lerp(Hash(i + float3(0, 1, 0)), Hash(i + float3(1, 1, 0)), f.x), f.y),
+            lerp(lerp(Hash(i + float3(0, 0, 1)), Hash(i + float3(1, 0, 1)), f.x), lerp(Hash(i + float3(0, 1, 1)), Hash(i + float3(1, 1, 1)), f.x), f.y), f.z);
+    }
+};
+FWallNoise wallNoise;
+float3 patchPoint = WorldPos / max(WallPatchSize, 1.0);
+float patch = saturate((wallNoise.Value(patchPoint) * 0.65 + wallNoise.Value(patchPoint * 3.1 + 7.3) * 0.35 - 0.5) * 2.2 + 0.5);
+float3 stone = lerp(WallMean, WallColor, WallContrast) * lerp(WallCoolColor, WallWarmColor, patch);
+float wallShade = 1.0 + WallPatchTone * (patch * 2.0 - 1.0) + WallPieceTone * (InstanceRandom * 2.0 - 1.0);
+wallShade *= 1.0 - WallFootShade * (1.0 - smoothstep(0.0, max(WallFootHeight, 0.1), LocalPos.z));
+// and lighter towards its top
+wallShade *= 1.0 + WallTopLight * saturate(LocalPos.z / max(WallTopHeight, 1.0));
+// streaks the rain left down the stone over the years: a noise of the mesh stretched along its height, darker where it is high
+float3 streakPoint = float3(LocalPos.xy / max(WallStreakWidth, 0.1), LocalPos.z / max(WallStreakLength, 0.1));
+float streak = smoothstep(0.5, 0.85, wallNoise.Value(streakPoint) * 0.7 + wallNoise.Value(streakPoint * float3(2.3, 2.3, 1.7) + 3.1) * 0.3);
+wallShade *= 1.0 - WallStreakShade * streak;
+float corner = lerp(CornerLow, CornerHigh, saturate(LocalPos.y / max(WallCornerSpan, 0.1) + 0.5));
+wallShade *= 1.0 - WallCornerShade * corner * corner;
+color = lerp(color, stone * lerp(WallHumanTint, WallUndeadTint, WallStyle) * tone * WallTone * wallShade, masonry);
 // a roof is tiles: in their own color, tinted by the style of the faction, or in the color of the owner, as light as the scan of them is,
 // with RoofTextureShare of the colors of the scan itself
 float tileTone = dot(RoofColor, float3(0.3, 0.59, 0.11));
@@ -2625,12 +2686,14 @@ float flash = saturate(1.0 - since / max(CaptureFlashTime, 0.01)) * step(0.0, si
 flash *= flash;
 // what glows by itself: in a castle its fires and its lit windows, which flicker, each at its own time
 float flicker = 1.0 - FireFlicker * (0.5 + 0.5 * sin(Time * 13.0 + dot(WorldPos, float3(0.11, 0.13, 0.17))) * sin(Time * 7.3 + WorldPos.x * 0.21));
-float3 glow = (resource * (heap - plainRoof) + owner * flag) * tone * (SiteGlow + CaptureFlash * flash) + VertexRGB.rgb * own * lerp(PileGlow, FireGlow * flicker, Castle);
+// the fires and windows of the undead burn in a color of their own (UndeadGlowColor), as light as theirs
+float3 fire = lerp(VertexRGB.rgb, UndeadGlowColor * max(max(VertexRGB.r, VertexRGB.g), VertexRGB.b), Castle * WallStyle);
+float3 glow = (resource * (heap - plainRoof) + owner * flag) * tone * (SiteGlow + CaptureFlash * flash) + fire * own * lerp(PileGlow, FireGlow * flicker, Castle);
 // the grains of a pile that are about to go
 float going = Fading * step(0.001, fade) * smoothstep(fade + 0.3, fade, grain);
 glow += lerp(resource, float3(1.0, 1.0, 1.0), 0.5) * PickupGlow * going;
 // the sparkles of a castle are the embers of its fires
-return lerp(glow, lerp(lerp(resource, float3(1.0, 1.0, 1.0), SparkleWhite), EmberColor, Castle) * SparkleBrightness, spark);
+return lerp(glow, lerp(lerp(resource, float3(1.0, 1.0, 1.0), SparkleWhite), lerp(EmberColor, UndeadGlowColor, WallStyle), Castle) * SparkleBrightness, spark);
 """
 # A sparkle lets what is behind it through, as the developer asked on 2026-11-11: SparkleOpacity of its pixels are kept, by a noise of the pixel
 # that changes every frame, which the temporal filter blends
@@ -2702,7 +2765,10 @@ SITE_FADE_MATERIAL = FOLDER + '/M_HexPlanetSiteFade'
 # tiles in place of a plain color on 2026-11-11, did not like the moss a first try had, and then found too much of the color of the player
 # on a castle, which every roof took until then
 CASTLE_PARAMETERS = ['WallHumanTint', 'WallUndeadTint', 'FireGlow', 'FireFlicker', 'EmberColor', 'RoofTone', 'RoofTextureShare', 'RoofRelief', 'RoofPlainTone',
-    'RoofHumanTint', 'RoofUndeadTint']
+    'RoofHumanTint', 'RoofUndeadTint', 'WallContrast', 'WallPatchSize', 'WallPatchTone', 'WallPieceTone', 'WallWarmColor', 'WallCoolColor', 'WallFootShade',
+    'WallFootHeight', 'WallTopLight', 'WallTopHeight', 'WallStreakShade', 'WallStreakWidth', 'WallStreakLength', 'WallCornerShade', 'WallCornerSpan', 'UndeadGlowColor']
+# the mip at which the masonry is its own mean, a few texels a tile
+CASTLE_MEAN_MIP = 7
 CASTLE_OFFSET_PARAMETERS = ['FlagWave', 'FlagWaveSpeed', 'FlagVeer', 'GateSwing', 'GateRiseTime', 'GateHoldTime', 'FlameDance']
 CASTLE_ROOF = FOLDER + '/Castles/T_CastleRoof'
 CASTLE_MATERIAL = FOLDER + '/M_HexPlanetCastle'
@@ -2749,6 +2815,7 @@ def build_site_graph(path, fading, castle=False):
     style.set_editor_property('r', 0.0)
     roof_color = wall_color
     roof_normal = wall_normal
+    wall_mean = wall_color
     if castle:
         wall_uv = mesh_uv
         # the tiles of its roofs
@@ -2786,7 +2853,32 @@ def build_site_graph(path, fading, castle=False):
             library.connect_material_expressions(style, '', blend, 'Alpha')
             blends.append(blend)
         wall_color, wall_normal = blends
+        # the mean of the masonry of each style: the same texture at a coarse mip
+        means = []
+        for row, name in enumerate(('Human', 'Undead')):
+            sample = library.create_material_expression(material, unreal.MaterialExpressionTextureSample, -1300, 5600 + row * 220)
+            sample.set_editor_property('texture', unreal.load_asset(CASTLE_TEXTURES % name))
+            sample.set_editor_property('sampler_type', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR)
+            sample.set_editor_property('mip_value_mode', unreal.TextureMipValueMode.TMVM_MIP_LEVEL)
+            sample.set_editor_property('const_mip_value', CASTLE_MEAN_MIP)
+            library.connect_material_expressions(wall_uv, '', sample, 'UVs')
+            means.append(sample)
+        wall_mean = library.create_material_expression(material, unreal.MaterialExpressionLinearInterpolate, -1000, 5600)
+        library.connect_material_expressions(means[0], 'RGB', wall_mean, 'A')
+        library.connect_material_expressions(means[1], 'RGB', wall_mean, 'B')
+        library.connect_material_expressions(style, '', wall_mean, 'Alpha')
     castle_value = add_scalar(library, material, 'Castle', 1.0 if castle else 0.0, 2500)
+    # where a pixel lies in its mesh, which only the vertices know, and how near each end of a stretch of the wall is to a tower or a gate
+    local = library.create_material_expression(material, unreal.MaterialExpressionVertexInterpolator, -1100, 6100)
+    library.connect_material_expressions(library.create_material_expression(material, unreal.MaterialExpressionPreSkinnedPosition, -1300, 6100), '', local, '')
+    corners = []
+    for index in range(2):
+        data = library.create_material_expression(material, unreal.MaterialExpressionPerInstanceCustomData, -1100, 6200 + index * 50)
+        data.set_editor_property('data_index', 9 + index)
+        data.set_editor_property('const_default_value', 0.0)
+        corners.append(data)
+    inputs += [('LocalPos', local, ''), ('CornerLow', corners[0], ''), ('CornerHigh', corners[1], ''), ('WallMean', wall_mean, ''),
+        ('InstanceRandom', library.create_material_expression(material, unreal.MaterialExpressionPerInstanceRandom, -1100, 6300), '')]
     inputs += [('Castle', castle_value, ''), ('WallColor', wall_color, ''), ('WallNormal', wall_normal, ''), ('WallStyle', style, ''),
         ('RoofColor', roof_color, 'RGB' if castle else ''), ('RoofNormal', roof_normal, 'RGB' if castle else ''),
         ('WallTone', add_scalar(library, material, 'WallTone', 2.4, 2550), ''), ('WallRelief', add_scalar(library, material, 'WallRelief', 1.0, 2575), '')

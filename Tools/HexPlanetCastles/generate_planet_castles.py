@@ -13,7 +13,9 @@ mesh of its own, standing on its origin with its front towards +X, which is stoo
 built. Every mesh reaches SKIRT under its origin, so it stands in the ground where that falls away under it.
 
 They are drawn with M_HexPlanetCastle: the color of a vertex is its color, and its alpha 0.1 (MASONRY) is stone, which takes the masonry of
-the style of its faction by its UV, in tiles of TILE units, 0.3 (GLOW) glows by itself, as a fire or a lit window, 0.5 takes the color of the
+the style of its faction by its UV, in tiles of TILE units, as light as the color of the vertex, which is the shade baked into a mesh: the
+plinths darker, the merlons and courses lighter, a tower darker where the wall runs into it (the material adds the shade of the ground and
+of the corners of the wall); 0.3 (GLOW) glows by itself, as a fire or a lit window, 0.5 takes the color of the
 owner, as the roofs, 0.75 is an ember, a sparkle as those of the piles, and 1 the flag. Both factions share the meshes for now and differ in
 their masonry.
 
@@ -69,6 +71,18 @@ ROOF_TILE = 70.0
 # the V of the UV of a roof that keeps the color of its tiles starts here, and that of one in the color of the owner at 0: the developer
 # found too much of that color on a castle on 2026-11-11, so only its flags and pennants and the roofs of its hall take it
 PLAIN_ROOF_V = 2.0
+# a tower is this much darker where the wall runs into it, up to the height of the wall, and lighter again this far above it
+JUNCTION_SHADE = 0.5
+JUNCTION_FADE = 10.0
+# what stands out of the stone, lighter, and its foot, darker, so a castle is not one tone: its merlons and string courses, and its plinths
+TRIM_TONE = 1.18
+PLINTH_TONE = 0.78
+# how far a roof reaches out over the long walls of its house, so it casts a shadow on them
+EAVES = 3.5
+# stone is this much as light where it meets other stone in a corner, as under a crown or at the foot of a merlon, where dirt gathers, and
+# its own tone again this far from the corner
+GRIME_SHADE = 0.5
+GRIME_BAND = 5.0
 WINDOW = (0.5, 0.36, 0.15)
 FLAME_LOW = (1.0, 0.3, 0.04)
 FLAME_HIGH = (1.0, 0.78, 0.25)
@@ -172,8 +186,14 @@ def add_brazier(mesh, foot, seed=0, stand=20.0):
             0.6 + 0.4 * hash_unit(seed, index, 7))
 
 
-def stone_box(mesh, center, size, yaw=0.0, tone=1.0, seed=0):
-    """A box of stone, of full sizes along its own axes, turned and put at its center, with the UV of its masonry running along each face"""
+def stone_box(mesh, center, size, yaw=0.0, tone=1.0, seed=0, foot=1.0, top=1.0):
+    """A box of stone, of full sizes along its own axes, turned and put at its center, with the UV of its masonry running along each face.
+    Where it stands on other stone, or carries some, dirt has gathered in the corner between the two, as the developer asked on
+    2026-11-11 ("наче грязь скопилась від дощу за роки"): its sides are foot times as light at their foot and top times at their top,
+    back to their own tone GRIME_BAND further"""
+    if foot != 1.0 or top != 1.0:
+        banded_box(mesh, center, size, yaw, tone, seed, foot, top)
+        return
     mesh.begin_part(flat=True)
     half = (size[0] * 0.5, size[1] * 0.5, size[2] * 0.5)
     shift = (hash_unit(seed, 1), hash_unit(seed, 2))
@@ -193,23 +213,70 @@ def stone_box(mesh, center, size, yaw=0.0, tone=1.0, seed=0):
         mesh.quad(corners[0], corners[1], corners[2], corners[3], center)
 
 
-def stone_cylinder(mesh, foot, radius, height, sides=10, top_radius=None, tone=1.0, seed=0):
-    """A round tower of stone from a foot up, its masonry running around it"""
+def banded_box(mesh, center, size, yaw, tone, seed, foot, top):
+    """A box of stone whose sides are in bands, darker at their foot and at their top"""
+    mesh.begin_part(flat=True)
+    half = (size[0] * 0.5, size[1] * 0.5, size[2] * 0.5)
+    shift = (hash_unit(seed, 1), hash_unit(seed, 2))
+    band = min(GRIME_BAND, size[2] * 0.45)
+    levels = [(-half[2], foot)]
+    if foot != 1.0:
+        levels.append((-half[2] + band, 1.0))
+    if top != 1.0:
+        levels.append((half[2] - band, 1.0))
+    levels.append((half[2], top))
+    for index, (fixed, sign, along) in enumerate(((0, -1, 1), (0, 1, 1), (1, -1, 0), (1, 1, 0))):
+        shade = tone * (0.9 + 0.2 * hash_unit(seed, index, 9))
+        for (low, low_shade), (high, high_shade) in zip(levels, levels[1:]):
+            corners = []
+            for end, height, part in ((-1, low, low_shade), (1, low, low_shade), (1, high, high_shade), (-1, high, high_shade)):
+                local = [0.0, 0.0, height]
+                local[fixed] = sign * half[fixed]
+                local[along] = end * half[along]
+                corners.append(mesh.vertex(add(center, rotated(tuple(local), yaw)), scale_color(STONE, shade * part), MASONRY,
+                    uv=(local[along] / TILE + shift[0], (center[2] + height) / TILE + shift[1])))
+                note_vertical(mesh, corners[-1], shift[1])
+            mesh.quad(corners[0], corners[1], corners[2], corners[3], center)
+    for index, sign in ((4, -1), (5, 1)):
+        shade = tone * (0.9 + 0.2 * hash_unit(seed, index, 9))
+        corners = [mesh.vertex(add(center, rotated((x * half[0], y * half[1], sign * half[2]), yaw)), scale_color(STONE, shade), MASONRY,
+            uv=(x * half[0] / TILE + shift[0], y * half[1] / TILE + shift[1])) for x, y in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+        mesh.quad(corners[0], corners[1], corners[2], corners[3], center)
+
+
+def stone_cylinder(mesh, foot, radius, height, sides=10, top_radius=None, tone=1.0, seed=0, junction=None, grime=False):
+    """A round tower of stone from a foot up, its masonry running around it. Up to a junction, a height over the ground, the wall of the
+    castle runs into it along Y, and it is darker there, the more the nearer the wall, as the corner between the two is (JUNCTION_SHADE);
+    the developer asked for darker corners on 2026-11-11"""
     top_radius = radius if top_radius is None else top_radius
     middle = add(foot, (0.0, 0.0, height * 0.5))
     mesh.begin_part()
+    shares = [0.0, 1.0]
+    if junction is not None and foot[2] + 1.0 < junction < foot[2] + height - JUNCTION_FADE - 1.0:
+        shares = [0.0, (junction - foot[2]) / height, (junction + JUNCTION_FADE - foot[2]) / height, 1.0]
+    # dirt under what it carries: its top GRIME_SHADE as light, back to its own tone GRIME_BAND lower
+    under = None
+    if grime and height > GRIME_BAND * 2.0:
+        under = 1.0 - GRIME_BAND / height
+        if under > shares[-2] + 0.01:
+            shares.insert(len(shares) - 1, under)
     rings = []
-    for share, reach in ((0.0, radius), (1.0, top_radius)):
+    for share in shares:
+        reach = radius + (top_radius - radius) * share
         ring = []
         for step in range(sides + 1):
             angle = 2.0 * math.pi * step / sides
             position = add(foot, (reach * math.cos(angle), reach * math.sin(angle), height * share))
-            ring.append(mesh.vertex(position, scale_color(STONE, tone * (0.92 + 0.16 * hash_unit(seed, step % sides))), MASONRY,
+            shade = 1.0 - JUNCTION_SHADE * math.sin(angle) ** 4 if junction is not None and position[2] <= junction + 0.01 else 1.0
+            if under is not None and share >= 1.0:
+                shade *= GRIME_SHADE
+            ring.append(mesh.vertex(position, scale_color(STONE, tone * shade * (0.92 + 0.16 * hash_unit(seed, step % sides))), MASONRY,
                 uv=(angle * radius / TILE, position[2] / TILE)))
             note_vertical(mesh, ring[-1], 0.0)
         rings.append(ring)
-    for step in range(sides):
-        mesh.quad(rings[0][step], rings[0][step + 1], rings[1][step + 1], rings[1][step], middle)
+    for lower, upper in zip(rings, rings[1:]):
+        for step in range(sides):
+            mesh.quad(lower[step], lower[step + 1], upper[step + 1], upper[step], middle)
     mesh.begin_part(flat=True)
     top = add(foot, (0.0, 0.0, height))
     hub = mesh.vertex(top, scale_color(STONE, tone * 0.8), MASONRY, uv=(0.0, 0.0))
@@ -224,7 +291,7 @@ def add_roof(mesh, center, size, yaw=0.0, seed=0, own=False):
     """A gabled roof over a box of a length and a width, in the color of the owner: its ridge runs along its length, at a height over its foot"""
     mesh.begin_part(flat=True)
     length, width, height = size
-    half_l, half_w = length * 0.5 + 1.5, width * 0.5 + 1.5
+    half_l, half_w = length * 0.5 + 1.5, width * 0.5 + EAVES
 
     def at(point):
         return add(center, rotated(point, yaw))
@@ -234,11 +301,16 @@ def add_roof(mesh, center, size, yaw=0.0, seed=0, own=False):
     inside = add(center, (0.0, 0.0, height * 0.3))
     shift = hash_unit(seed, 31) * ROOF_TILE
     for index, corners in enumerate(((eaves[0], eaves[1], ridge[1], ridge[0]), (eaves[3], eaves[2], ridge[1], ridge[0]))):
-        quad = [roof_vertex(mesh, point, shift + (-half_l if corner in (0, 3) else half_l), center[2], 0.0 if corner < 2 else half_w, 0.85 + 0.25 * index, own)
+        quad = [roof_vertex(mesh, point, shift + (-half_l if corner in (0, 3) else half_l), center[2], 0.0 if corner < 2 else half_w,
+            (0.85 + 0.25 * index) * (0.8 if corner < 2 else 1.12), own)
             for corner, point in enumerate(corners)]
         mesh.quad(quad[0], quad[1], quad[2], quad[3], inside)
-    for corners in ((eaves[0], eaves[3], ridge[0]), (eaves[1], eaves[2], ridge[1])):
-        triangle = [mesh.vertex(point, scale_color(STONE, 0.9), MASONRY, uv=(point[1] / TILE, point[2] / TILE)) for point in corners]
+    # its gables, over the walls of the house and not out with the eaves
+    inner = [at((-half_l + 1.3, -width * 0.5, 0.0)), at((half_l - 1.3, -width * 0.5, 0.0)), at((half_l - 1.3, width * 0.5, 0.0)), at((-half_l + 1.3, width * 0.5, 0.0))]
+    peak = height * (width * 0.5) / half_w
+    tops = [at((-half_l + 1.3, 0.0, peak)), at((half_l - 1.3, 0.0, peak))]
+    for corners in ((inner[0], inner[3], tops[0]), (inner[1], inner[2], tops[1])):
+        triangle = [mesh.vertex(point, scale_color(STONE, 0.8 if index < 2 else 1.0), MASONRY, uv=(point[1] / TILE, point[2] / TILE)) for index, point in enumerate(corners)]
         for index in triangle:
             note_vertical(mesh, index, 0.0)
         mesh.triangle(triangle[0], triangle[1], triangle[2], inside)
@@ -254,7 +326,7 @@ def add_cone(mesh, foot, radius, height, seed=0, sides=10, own=False):
         for step in range(sides + 1):
             angle = 2.0 * math.pi * step / sides
             point = add(foot, (reach * math.cos(angle), reach * math.sin(angle), height * share))
-            ring.append(roof_vertex(mesh, point, angle * radius, foot[2], radius - reach, 0.8 + 0.4 * hash_unit(seed, step % sides, 2), own))
+            ring.append(roof_vertex(mesh, point, angle * radius, foot[2], radius - reach, (0.8 + 0.4 * hash_unit(seed, step % sides, 2)) * (0.78 + 0.4 * share), own))
         rings.append(ring)
     middle = add(foot, (0.0, 0.0, height * 0.4))
     for step in range(sides):
@@ -264,7 +336,8 @@ def add_cone(mesh, foot, radius, height, seed=0, sides=10, own=False):
 def add_house(mesh, center, size, yaw=0.0, roof=None, seed=0, door=True, windows=True, own=False):
     """A house of stone under a gabled roof, from under the ground, with a dark door in its front, towards +X, and lit windows along its sides"""
     length, width, height = size
-    stone_box(mesh, add(center, (0.0, 0.0, (height - SKIRT) * 0.5)), (length, width, height + SKIRT), yaw=yaw, seed=seed)
+    stone_box(mesh, add(center, (0.0, 0.0, (height - SKIRT) * 0.5)), (length, width, height + SKIRT), yaw=yaw, tone=1.08, seed=seed, top=GRIME_SHADE + 0.1)
+    stone_box(mesh, add(center, (0.0, 0.0, (2.2 - SKIRT) * 0.5)), (length + 1.6, width + 1.6, 2.2 + SKIRT), yaw=yaw, tone=PLINTH_TONE, seed=seed + 3)
     add_roof(mesh, add(center, (0.0, 0.0, height)), (length, width, roof if roof else width * 0.55), yaw, seed=seed, own=own)
     if door:
         add_box(mesh, add(center, rotated((length * 0.5 + 0.2, 0.0, height * 0.28), yaw)), (0.8, min(width * 0.3, 6.0), height * 0.56), DARK, yaw=yaw, seed=seed + 1)
@@ -276,10 +349,14 @@ def add_house(mesh, center, size, yaw=0.0, roof=None, seed=0, door=True, windows
                 add_box(mesh, add(center, rotated((along, side * (width * 0.5 + 0.2), height * 0.62), yaw)), (2.6, 0.8, height * 0.24), WINDOW, GLOW, yaw=yaw, seed=seed + 5)
 
 
-def add_tower(mesh, foot, radius, height, roof=0.0, seed=0, sides=10, slits=3, flare=0.0, own=False):
+def add_tower(mesh, foot, radius, height, roof=0.0, seed=0, sides=10, slits=3, flare=0.0, own=False, junction=None):
     """A round tower from under the ground, with a crown of merlons, which stands out by a flare on corbels, or under a pointed roof in the
     color of the owner, and lit slits high in it"""
-    stone_cylinder(mesh, add(foot, (0.0, 0.0, -SKIRT)), radius, height + SKIRT, sides, seed=seed)
+    stone_cylinder(mesh, add(foot, (0.0, 0.0, -SKIRT)), radius, height + SKIRT, sides, seed=seed, junction=junction, grime=roof <= 0.0)
+    # a plinth that spreads at its foot, and a course that stands out two thirds up it
+    stone_cylinder(mesh, add(foot, (0.0, 0.0, -SKIRT)), radius * 1.16 + 0.8, SKIRT + max(height * 0.1, 3.0), sides, top_radius=radius + 0.2, tone=PLINTH_TONE, seed=seed + 4)
+    if radius >= 6.0:
+        stone_cylinder(mesh, add(foot, (0.0, 0.0, height * 0.6)), radius + 0.9, 2.0, sides, tone=TRIM_TONE, seed=seed + 5)
     for slit in range(slits):
         angle = 2.0 * math.pi * (slit + 0.25 + 0.5 * hash_unit(seed, slit, 4)) / slits
         add_box(mesh, add(foot, (radius * 0.97 * math.cos(angle), radius * 0.97 * math.sin(angle), height * 0.72)), (1.2, 2.0, min(height * 0.1, 8.0)), WINDOW, GLOW, yaw=angle,
@@ -293,14 +370,14 @@ def add_tower(mesh, foot, radius, height, roof=0.0, seed=0, sides=10, slits=3, f
         stone_cylinder(mesh, add(foot, (0.0, 0.0, height)), radius, flare * 2.4, sides, top_radius=radius + flare, tone=0.85, seed=seed + 2)
         height += flare * 2.4
         crown = radius + flare + 0.6
-    stone_cylinder(mesh, add(foot, (0.0, 0.0, height)), crown, 2.5, sides, seed=seed + 1)
+    stone_cylinder(mesh, add(foot, (0.0, 0.0, height)), crown, 2.5, sides, tone=TRIM_TONE, seed=seed + 1)
     reach = crown - radius * 0.13
     size = max(radius / 9.0, 0.8)
     for step in range(sides):
         if step % 2 == 0:
             angle = 2.0 * math.pi * (step + 0.5) / sides
             stone_box(mesh, add(foot, (reach * math.cos(angle), reach * math.sin(angle), height + 2.5 + 2.0 * size)), (2.6 * size, 3.4 * size, 4.0 * size), yaw=angle,
-                seed=seed + step)
+                tone=TRIM_TONE, seed=seed + step, foot=GRIME_SHADE)
 
 
 def add_flag(mesh, foot, height, alpha, seed=0, size=16.0):
@@ -348,15 +425,19 @@ def wall(level):
         return mesh
     height = 62.0 if level == 2 else 78.0
     thick = 11.0 if level == 2 else 13.0
-    stone_box(mesh, (0.0, 0.0, (height - SKIRT) * 0.5), (thick, WALL_LENGTH, height + SKIRT), seed=6)
+    stone_box(mesh, (0.0, 0.0, (height - SKIRT) * 0.5), (thick, WALL_LENGTH, height + SKIRT), seed=6, top=GRIME_SHADE + 0.15)
     # the merlons along its outer edge, and the walk behind them
     merlons = 3
     for index in range(merlons):
         y = -half + WALL_LENGTH * (index + 0.5) / merlons
-        stone_box(mesh, (thick * 0.5 - 1.8, y, height + 3.5), (3.6, WALL_LENGTH / merlons * 0.55, 7.0), seed=7 + index)
+        stone_box(mesh, (thick * 0.5 - 1.8, y, height + 3.5), (3.6, WALL_LENGTH / merlons * 0.55, 7.0), tone=TRIM_TONE, seed=7 + index, foot=GRIME_SHADE)
+    # a plinth along its foot on both sides, and a buttress against its outer face
+    stone_box(mesh, (0.0, 0.0, (7.0 - SKIRT) * 0.5), (thick + 4.0, WALL_LENGTH, 7.0 + SKIRT), tone=PLINTH_TONE, seed=14)
+    stone_box(mesh, (thick * 0.5 + 2.0, 0.0, (height * 0.62 - SKIRT) * 0.5), (4.0, 5.5, height * 0.62 + SKIRT), tone=0.95, seed=15, top=GRIME_SHADE + 0.1)
+    stone_box(mesh, (thick * 0.5 + 1.2, 0.0, height * 0.62 + 1.5), (2.4, 5.5, 3.0), tone=TRIM_TONE, seed=16)
     if level == 3:
         # a course that stands out under the merlons
-        stone_box(mesh, (thick * 0.5 + 0.6, 0.0, height - 3.0), (2.0, WALL_LENGTH, 4.0), tone=0.85, seed=10)
+        stone_box(mesh, (thick * 0.5 + 0.6, 0.0, height - 3.0), (2.0, WALL_LENGTH, 4.0), tone=TRIM_TONE, seed=10)
     return mesh
 
 
@@ -365,10 +446,10 @@ def tower(level):
     its crown standing out on corbels. It had a pointed roof there until the developer found a castle had too many roofs on 2026-11-11"""
     mesh = Mesh()
     if level == 2:
-        add_tower(mesh, (0.0, 0.0, 0.0), 14.0, 96.0, seed=11, sides=12)
+        add_tower(mesh, (0.0, 0.0, 0.0), 14.0, 96.0, seed=11, sides=12, junction=62.0)
         add_flag(mesh, (0.0, 0.0, 96.0), 30.0, ROOF, 13, size=15.0)
     else:
-        add_tower(mesh, (0.0, 0.0, 0.0), 12.0, 112.0, seed=12, sides=12, flare=4.0)
+        add_tower(mesh, (0.0, 0.0, 0.0), 12.0, 112.0, seed=12, sides=12, flare=4.0, junction=78.0)
         add_flag(mesh, (0.0, 0.0, 121.0), 30.0, ROOF, 14, size=17.0)
     return mesh
 
@@ -400,19 +481,20 @@ def gate(level):
     radius = 13.0 if level == 2 else 14.5
     way = 80.0 if level == 2 else 88.0
     for side in (-1.0, 1.0):
-        add_tower(mesh, (0.0, side * 30.0, 0.0), radius, height, seed=26, sides=12, flare=3.5 if level == 3 else 0.0)
+        add_tower(mesh, (0.0, side * 30.0, 0.0), radius, height, seed=26, sides=12, flare=3.5 if level == 3 else 0.0, junction=height * 0.88)
         add_leaf(mesh, side * (30.0 - radius), -side, 30.0 - radius - 0.4, -6.0, way - 1.0, seed=50)
         add_brazier(mesh, (radius + 12.0, side * 26.0, 0.0), 53 + int(side))
     # the house over the way in
     top = height * 0.88
-    stone_box(mesh, (0.0, 0.0, (way + top) * 0.5), (15.0, 40.0, top - way), seed=27)
+    stone_box(mesh, (0.0, 0.0, (way + top) * 0.5), (15.0, 40.0, top - way), seed=27, foot=GRIME_SHADE + 0.1, top=GRIME_SHADE + 0.15)
     for side in (-1.0, 1.0):
         add_box(mesh, (7.7, side * 6.0, (way + top) * 0.5), (0.8, 2.2, 7.0), WINDOW, GLOW, seed=28)
     if level == 3:
-        add_roof(mesh, (0.0, 0.0, top), (15.0, 34.0, 14.0), yaw=math.pi * 0.5, seed=29)
+        # its ridge along the wall: the length of a roof runs along its own X, which the turn lays along Y (it lay across until 2026-11-11)
+        add_roof(mesh, (0.0, 0.0, top), (40.0, 15.0, 14.0), yaw=math.pi * 0.5, seed=29)
     else:
         for index in range(3):
-            stone_box(mesh, (5.8, -11.0 + index * 11.0, top + 3.5), (3.4, 6.0, 7.0), seed=60 + index)
+            stone_box(mesh, (5.8, -11.0 + index * 11.0, top + 3.5), (3.4, 6.0, 7.0), tone=TRIM_TONE, seed=60 + index, foot=GRIME_SHADE)
     return mesh
 
 
@@ -515,7 +597,7 @@ def dwelling(level):
             stone_box(mesh, (0.0, side * 19.0, 26.0 - SKIRT * 0.5), (11.0, 9.0, 64.0 + SKIRT), seed=86)
             add_tower(mesh, (0.0, side * 30.0, 0.0), 4.5, 42.0, seed=87, sides=8, slits=1)
         stone_box(mesh, (0.0, 0.0, 61.0), (12.0, 46.0, 9.0), seed=88)
-        add_roof(mesh, (0.0, 0.0, 65.5), (12.0, 46.0, 10.0), yaw=math.pi * 0.5, seed=89)
+        add_roof(mesh, (0.0, 0.0, 65.5), (46.0, 12.0, 10.0), yaw=math.pi * 0.5, seed=89)
         add_blob(mesh, (0.0, 0.0, 30.0), (1.5, 13.0, 26.0), (0.16, 0.2, 0.3), GLOW, 90, 2, bumps=0.05, flatten=1.0, shade=0.1)
     return stretched(mesh)
 

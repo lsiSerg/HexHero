@@ -18,6 +18,7 @@ class UHexShroud;
 class UInstancedStaticMeshComponent;
 class UProceduralMeshComponent;
 class UMaterialInstanceDynamic;
+class UMeshComponent;
 class UStaticMeshComponent;
 
 /**
@@ -95,6 +96,9 @@ struct FHexHero
 	/** Whether the person who watches saw it when the game last looked, on the turn of its player: where that changes the camera stays a
 	 *  moment (UHexHeroes::NoteSeen) */
 	bool bWasSeen = true;
+
+	/** It came through an entrance or exit since the game last looked whether the person sees it (NoteSeen) */
+	bool bCameThrough = false;
 
 	/** The person left it for today (UHexHeroes::Skip): the choice of the next hero passes over it until the next day or its next order */
 	bool bSkipped = false;
@@ -432,7 +436,15 @@ private:
 
 	/** The body of each hero by its Id, a component of the planet of its layer, and its material */
 	UPROPERTY(Transient)
-	TMap<int32, TObjectPtr<UStaticMeshComponent>> Bodies;
+	TMap<int32, TObjectPtr<UMeshComponent>> Bodies;
+
+	/** What the animated body of each hero last showed: whether it moved and whether it was the hero chosen */
+	struct FBodyState
+	{
+		bool bMoving = false;
+		bool bChosen = false;
+	};
+	TMap<int32, FBodyState> BodyStates;
 
 	UPROPERTY(Transient)
 	TMap<int32, TObjectPtr<UMaterialInstanceDynamic>> BodyMaterials;

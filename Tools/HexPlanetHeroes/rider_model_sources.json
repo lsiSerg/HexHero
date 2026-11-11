@@ -1,0 +1,7 @@
+{
+ "note": "CC0 models by Quaternius, as served by poly.pizza; fetch_rider_models.ps1 downloads them to Saved/ModelSources/hero, blender_build_rider.py builds SK_PlanetRider from them",
+ "models": [
+  {"file": "horse.glb", "page": "https://poly.pizza/m/qvTrSG9pZF", "url": "https://static.poly.pizza/d37dbc87-ca61-4b2c-a2da-d2f0c4240bef.glb", "license": "CC0 1.0"},
+  {"file": "knight.glb", "page": "https://poly.pizza/m/I1gTjmuK2m", "url": "https://static.poly.pizza/29a3436b-3b06-4dbf-a236-bcec18f3351a.glb", "license": "CC0 1.0"}
+ ]
+}

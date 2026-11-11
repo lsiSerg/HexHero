@@ -511,6 +511,32 @@ bool UHexCastles::Build(int32 CastleId, int32 Building, FString& OutMessage)
 	return true;
 }
 
+int32 UHexCastles::BuildAll(int32 CastleId)
+{
+	FHexCastle* Castle = FindCastleMutable(CastleId);
+	if (!Castle || !Config || !Config->Factions.IsValidIndex(Castle->Faction))
+	{
+		return 0;
+	}
+	int32 Built = 0;
+	const TArray<FHexBuilding>& Buildings = Config->Factions[Castle->Faction].Buildings;
+	for (int32 Building = 0; Building < Buildings.Num() && Castle->Levels.IsValidIndex(Building); ++Building)
+	{
+		const FHexBuilding& Each = Buildings[Building];
+		const bool bNew = Castle->Levels[Building] == 0;
+		Built += FMath::Max(Each.Levels.Num() - Castle->Levels[Building], 0);
+		Castle->Levels[Building] = FMath::Max(Castle->Levels[Building], Each.Levels.Num());
+		// a dwelling just built offers its first creatures at once
+		if (bNew && Each.Type == EHexBuildingType::Dwelling && Castle->Available.IsValidIndex(Each.Creature))
+		{
+			Castle->Available[Each.Creature] += GetGrowth(*Castle, Each.Creature);
+		}
+	}
+	Touch(*Castle);
+	UE_LOG(LogHexHero, Log, TEXT("Castles: castle %d, a cheat builds %d levels of its buildings"), CastleId, Built);
+	return Built;
+}
+
 int32 UHexCastles::GetHireMax(const FHexCastle& Castle, int32 Creature) const
 {
 	const FHexFaction& Faction = Config->Factions[Castle.Faction];
@@ -1100,6 +1126,9 @@ void UHexCastles::Rebuild(EHexPlanetLayer Layer)
 	}
 	// when the gate that is placed last opened, long ago for every other piece
 	float GateTime = -1000.0f;
+	// how near the two ends of the stretch of the wall that is placed are to a tower or a gate, by which its material shades it as a corner
+	float CornerLow = 0.0f;
+	float CornerHigh = 0.0f;
 	const auto AddInstance = [&](const TSoftObjectPtr<UStaticMesh>& MeshAsset, const FTransform& Transform, const FHexCastle& Castle)
 	{
 		if (MeshAsset.IsNull())
@@ -1119,7 +1148,7 @@ void UHexCastles::Rebuild(EHexPlanetLayer Layer)
 			Component->SetMobility(EComponentMobility::Movable);
 			Component->SetStaticMesh(Mesh);
 			Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-			Component->SetNumCustomDataFloats(9);
+			Component->SetNumCustomDataFloats(11);
 			Component->SetCullDistances(0, int32(Config->CullDistance));
 			if (Material)
 			{
@@ -1131,7 +1160,8 @@ void UHexCastles::Rebuild(EHexPlanetLayer Layer)
 		// the roofs and the flag in the color of its owner, as the developer asked on 2026-11-11, when it was taken, and the masonry of
 		// its faction
 		const FLinearColor OwnerColor = GetPlayerColor(Castle.Owner);
-		const float Data[9] = {OwnerColor.R, OwnerColor.G, OwnerColor.B, OwnerColor.R, OwnerColor.G, OwnerColor.B, float(Castle.EventTime), Config->Factions[Castle.Faction].WallStyle, GateTime};
+		const float Data[11] = {OwnerColor.R, OwnerColor.G, OwnerColor.B, OwnerColor.R, OwnerColor.G, OwnerColor.B, float(Castle.EventTime), Config->Factions[Castle.Faction].WallStyle, GateTime,
+			CornerLow, CornerHigh};
 		Slot->SetCustomData(Slot->AddInstance(Transform, true), MakeArrayView(Data), true);
 	};
 	const auto GetMesh = [](const TArray<TSoftObjectPtr<UStaticMesh>>& Meshes, int32 Level) { return Meshes.IsValidIndex(Level) ? Meshes[Level] : TSoftObjectPtr<UStaticMesh>(); };
@@ -1165,14 +1195,37 @@ void UHexCastles::Rebuild(EHexPlanetLayer Layer)
 			return false;
 		};
 		const int32 Segments = FMath::Max(Config->WallSegments, 6);
+		const int32 Towers = Config->TowerCounts.IsValidIndex(Fort) ? Config->TowerCounts[Fort] : 0;
+		// how much of a corner the wall is at an angle: 1 at a tower or the edge of a gate, fading along the wall
+		const auto GetCorner = [this, NumGates, Towers, &IsGate](double Degrees)
+		{
+			double Nearest = 360.0;
+			for (int32 Gate = 0; Gate < NumGates; ++Gate)
+			{
+				Nearest = FMath::Min(Nearest, FMath::Abs(FMath::FindDeltaAngleDegrees(Degrees, double(Config->GateAngle) + 360.0 * Gate / NumGates)) - double(Config->GateHalfWidth));
+			}
+			for (int32 Tower = 0; Tower < Towers; ++Tower)
+			{
+				const double At = double(Config->GateAngle) + 360.0 * (Tower + 0.5) / Towers;
+				if (!IsGate(At))
+				{
+					Nearest = FMath::Min(Nearest, FMath::Abs(FMath::FindDeltaAngleDegrees(Degrees, At)) - double(Config->WallCornerInset));
+				}
+			}
+			return float(FMath::Clamp(1.0 - Nearest / FMath::Max(double(Config->WallCornerReach), 0.1), 0.0, 1.0));
+		};
 		for (int32 Segment = 0; Segment < Segments; ++Segment)
 		{
 			const double Degrees = double(Config->GateAngle) + 360.0 * Segment / Segments;
 			if (!IsGate(Degrees))
 			{
+				CornerLow = GetCorner(Degrees - 180.0 / Segments);
+				CornerHigh = GetCorner(Degrees + 180.0 / Segments);
 				AddInstance(GetMesh(Config->WallMeshes, Fort), PlaceOn(*Planet, Castle, Ground, AtRim(Degrees), float(Degrees), 1.0f), Castle);
 			}
 		}
+		CornerLow = 0.0f;
+		CornerHigh = 0.0f;
 		for (int32 Gate = 0; Gate < NumGates; ++Gate)
 		{
 			// its leaves swing open when a hero goes through it
@@ -1181,7 +1234,6 @@ void UHexCastles::Rebuild(EHexPlanetLayer Layer)
 			AddInstance(GetMesh(Config->GateMeshes, Fort), PlaceOn(*Planet, Castle, Ground, AtRim(Degrees), float(Degrees), 1.0f), Castle);
 			GateTime = -1000.0f;
 		}
-		const int32 Towers = Config->TowerCounts.IsValidIndex(Fort) ? Config->TowerCounts[Fort] : 0;
 		for (int32 Tower = 0; Tower < Towers; ++Tower)
 		{
 			// between the stretches of the wall, and none in a gate
@@ -1359,7 +1411,7 @@ namespace
 		UHexSites* Sites = Heroes ? Heroes->GetSites() : nullptr;
 		if (!Castles || !Castles->GetConfig() || !Sites || !Sites->GetConfig() || Args.IsEmpty())
 		{
-			UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat <resources [Amount] [Player]|build [on|off]>, on a built planet"));
+			UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat <resources [Amount] [Player]|build [on|off]|buildall [Castle|all]>, on a built planet"));
 			return;
 		}
 		const FString Action = Args[0].ToLower();
@@ -1385,6 +1437,29 @@ namespace
 			Castles->SetUnlimitedBuilds(bOn);
 			Message = bOn ? TEXT("Cheat: castles build without a limit") : TEXT("Cheat off: a castle builds once a day");
 		}
+		else if (Action == TEXT("buildall"))
+		{
+			// everything in the castle named, in the one chosen, else in every castle of the person who plays, and with all in every castle
+			const bool bAll = Args.IsValidIndex(1) && Args[1].Equals(TEXT("all"), ESearchCase::IgnoreCase);
+			const int32 Named = Args.IsValidIndex(1) && Args[1].IsNumeric() ? FCString::Atoi(*Args[1]) : Heroes->GetSelectedCastleId();
+			int32 Count = 0;
+			int32 Built = 0;
+			TArray<int32> Ids;
+			for (const FHexCastle& Castle : Castles->GetCastles())
+			{
+				if (bAll || (Named > 0 ? Castle.Id == Named : Castle.Owner == Heroes->GetShroudPlayer()))
+				{
+					Ids.Add(Castle.Id);
+				}
+			}
+			for (int32 Id : Ids)
+			{
+				Built += Castles->BuildAll(Id);
+				++Count;
+			}
+			Castles->NoteChanged();
+			Message = FString::Printf(TEXT("Cheat: everything built in %d %s, %d levels"), Count, Count == 1 ? TEXT("castle") : TEXT("castles"), Built);
+		}
 		else
 		{
 			UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat: unknown action %s"), *Args[0]);
@@ -1398,7 +1473,7 @@ namespace
 	}
 
 	FAutoConsoleCommandWithWorldAndArgs CheatCommand(TEXT("hex.Cheat"),
-		TEXT("Cheats for trying the game: resources [Amount] [Player] gives the person who plays, or the player named, that much of every resource, or without an amount CheatGold and CheatResources of DA_HexCastles; build [on|off] lets every castle build without the limit of one building a day, or switches that."),
+		TEXT("Cheats for trying the game: resources [Amount] [Player] gives the person who plays, or the player named, that much of every resource, or without an amount CheatGold and CheatResources of DA_HexCastles; build [on|off] lets every castle build without the limit of one building a day, or switches that; buildall [Castle|all] builds every building to its last level for nothing, in the castle named, else in the one chosen, else in every castle of the person who plays, and with all in every castle."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&RunCheatCommand));
 
 	FAutoConsoleCommandWithWorldAndArgs CastleCommand(TEXT("hex.Castle"),
