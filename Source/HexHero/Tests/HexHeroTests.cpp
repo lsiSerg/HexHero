@@ -7,6 +7,7 @@
 #include "HexPlanetFile.h"
 #include "HexShroud.h"
 #include "HexSiteConfig.h"
+#include "HexSiteGenerator.h"
 #include "HexSphereGrid.h"
 #include "Misc/AutomationTest.h"
 
@@ -365,6 +366,218 @@ bool FHexHeroSitesTest::RunTest(const FString& Parameters)
 	}
 	TestEqual(TEXT("A mill"), Mills, 1);
 	TestEqual(TEXT("A mill gives three days of a mine"), Config->MillDays, 3);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHexHeroSiteGeneratorTest, "HexHero.Hero.SiteGenerator",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FHexHeroSiteGeneratorTest::RunTest(const FString& Parameters)
+{
+	const FHexSphereGrid Grid = FHexSphereGrid::Build(12);
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+	const int32 NumCells = Cells.Num();
+	const UHexSiteConfig* Config = GetDefault<UHexSiteConfig>();
+
+	// a surface with obstacles scattered over it and a sea around one pole, and an underground that is a band around the equator
+	HexSiteGenerator::FInput Input;
+	Input.Settings = Config->Generation;
+	Input.Settings.Density = 3.0f;
+	Input.Seed = 17;
+	for (int32 Layer = 0; Layer < NumPlanetLayers; ++Layer)
+	{
+		Input.Walkable[Layer].Init(false, NumCells);
+		Input.Avoid[Layer].Init(false, NumCells);
+	}
+	for (int32 Cell = 0; Cell < NumCells; ++Cell)
+	{
+		const uint32 Hash = MurmurFinalize32(uint32(Cell) * 2654435761u + 7u);
+		Input.Walkable[0][Cell] = Cells[Cell].Center.Z < 0.7 && Hash % 6 != 0;
+		Input.Avoid[0][Cell] = Hash % 11 == 1;
+		Input.Walkable[1][Cell] = FMath::Abs(Cells[Cell].Center.Z) < 0.25 && Hash % 9 != 0;
+	}
+	// two players start far apart, each on open ground
+	const auto FindStart = [&](const FVector3d& Towards)
+	{
+		int32 Best = INDEX_NONE;
+		for (int32 Cell = 0; Cell < NumCells; ++Cell)
+		{
+			const bool bOpen = Input.Walkable[0][Cell] && !Cells[Cell].Neighbors.ContainsByPredicate([&](int32 Neighbor) { return !Input.Walkable[0][Neighbor]; });
+			if (bOpen && (Best == INDEX_NONE || FVector3d::DotProduct(Cells[Cell].Center, Towards) > FVector3d::DotProduct(Cells[Best].Center, Towards)))
+			{
+				Best = Cell;
+			}
+		}
+		return Best;
+	};
+	const int32 Starts[2] = {FindStart(FVector3d(1.0, 0.0, 0.0)), FindStart(FVector3d(-1.0, 0.0, 0.0))};
+	TArray<int32> Ring;
+	for (const int32 Start : Starts)
+	{
+		Input.Starts.Add({0, Start});
+		HexShroud::FindWithin(Grid, Start, Input.Settings.StartClearRings, Ring);
+		for (const int32 Cell : Ring)
+		{
+			Input.Avoid[0][Cell] = true;
+		}
+	}
+	TArray<int32> NearStartKinds;
+	for (const FHexSiteShare& Share : Config->Generation.Shares)
+	{
+		const int32 Kind = Config->FindKind(Share.Kind.ToString());
+		TestTrue(*FString::Printf(TEXT("The generation names a kind there is: %s"), *Share.Kind.ToString()), Kind != INDEX_NONE);
+		if (Kind == INDEX_NONE)
+		{
+			continue;
+		}
+		HexSiteGenerator::FKind& Each = Input.Kinds.AddDefaulted_GetRef();
+		Each.Kind = Kind;
+		Each.Type = Config->Kinds[Kind].Type;
+		Each.PerThousand[0] = Share.PerThousand;
+		Each.PerThousand[1] = Share.UndergroundPerThousand;
+		Each.bNearStart = Share.bNearStart;
+		if (Share.bNearStart)
+		{
+			NearStartKinds.Add(Kind);
+		}
+	}
+	TestTrue(TEXT("Every player gets some mine near where it starts"), !NearStartKinds.IsEmpty());
+
+	TArray<HexSiteGenerator::FSite> Sites;
+	HexSiteGenerator::FReport Report;
+	HexSiteGenerator::Generate(Grid, Input, Sites, &Report);
+	TArray<HexSiteGenerator::FSite> Again;
+	HexSiteGenerator::Generate(Grid, Input, Again);
+	const auto IsSame = [](const TArray<HexSiteGenerator::FSite>& A, const TArray<HexSiteGenerator::FSite>& B)
+	{
+		bool bSame = A.Num() == B.Num();
+		for (int32 Index = 0; bSame && Index < A.Num(); ++Index)
+		{
+			bSame = A[Index].Kind == B[Index].Kind && A[Index].Layer == B[Index].Layer && A[Index].Cell == B[Index].Cell;
+		}
+		return bSame;
+	};
+	TestTrue(TEXT("The same seed gives the same sites"), IsSame(Sites, Again));
+	HexSiteGenerator::FInput Other = Input;
+	Other.Seed = 18;
+	HexSiteGenerator::Generate(Grid, Other, Again);
+	TestFalse(TEXT("Another seed gives other sites"), IsSame(Sites, Again));
+	TestTrue(TEXT("Both layers get sites"), Sites.ContainsByPredicate([](const HexSiteGenerator::FSite& Each) { return Each.Layer == 0; })
+		&& Sites.ContainsByPredicate([](const HexSiteGenerator::FSite& Each) { return Each.Layer == 1; }));
+	TestTrue(TEXT("Many sites on a planet this dense"), Sites.Num() > 30);
+
+	// the pieces of ground a hero walks, with the cells of the sites closed or not
+	const auto CountPieces = [&](const TBitArray<>& Open)
+	{
+		TBitArray<> Seen(false, NumCells);
+		int32 Pieces = 0;
+		TArray<int32> Queue;
+		for (int32 First = 0; First < NumCells; ++First)
+		{
+			if (!Open[First] || Seen[First])
+			{
+				continue;
+			}
+			++Pieces;
+			Queue.Reset();
+			Queue.Add(First);
+			Seen[First] = true;
+			for (int32 Index = 0; Index < Queue.Num(); ++Index)
+			{
+				for (const int32 Neighbor : Cells[Queue[Index]].Neighbors)
+				{
+					if (Open[Neighbor] && !Seen[Neighbor])
+					{
+						Seen[Neighbor] = true;
+						Queue.Add(Neighbor);
+					}
+				}
+			}
+		}
+		return Pieces;
+	};
+	for (int32 Layer = 0; Layer < NumPlanetLayers; ++Layer)
+	{
+		TBitArray<> Open = Input.Walkable[Layer];
+		TMap<int32, int32> KindAt;
+		bool bOnGround = true;
+		for (const HexSiteGenerator::FSite& Site : Sites)
+		{
+			if (Site.Layer != Layer)
+			{
+				continue;
+			}
+			bOnGround &= Cells.IsValidIndex(Site.Cell) && Input.Walkable[Layer][Site.Cell] && !Input.Avoid[Layer][Site.Cell] && !Cells[Site.Cell].IsPentagon() && !KindAt.Contains(Site.Cell);
+			KindAt.Add(Site.Cell, Site.Kind);
+			Open[Site.Cell] = false;
+		}
+		TestTrue(*FString::Printf(TEXT("Layer %d: every site stands on a cell of its own that a hero walks and that is not to avoid"), Layer), bOnGround);
+		TestEqual(*FString::Printf(TEXT("Layer %d: the sites cut no ground a hero walks in two"), Layer), CountPieces(Open), CountPieces(Input.Walkable[Layer]));
+		bool bApart = true;
+		bool bVisited = true;
+		bool bMinesApart = true;
+		for (const TPair<int32, int32>& Each : KindAt)
+		{
+			bool bBeside = false;
+			for (const int32 Neighbor : Cells[Each.Key].Neighbors)
+			{
+				bApart &= !KindAt.Contains(Neighbor);
+				bBeside |= Open[Neighbor];
+			}
+			bVisited &= bBeside;
+			if (Config->Kinds[Each.Value].IsMine())
+			{
+				HexShroud::FindWithin(Grid, Each.Key, 3, Ring);
+				for (const int32 Cell : Ring)
+				{
+					const int32* Near = Cell != Each.Key ? KindAt.Find(Cell) : nullptr;
+					bMinesApart &= !(Near && Config->Kinds[*Near].IsMine());
+				}
+			}
+		}
+		TestTrue(*FString::Printf(TEXT("Layer %d: no two sites stand side by side"), Layer), bApart);
+		TestTrue(*FString::Printf(TEXT("Layer %d: every site has a cell beside it to be visited from"), Layer), bVisited);
+		TestTrue(*FString::Printf(TEXT("Layer %d: mines keep apart"), Layer), bMinesApart);
+	}
+	// a kind with no number underground stays on the surface
+	for (const HexSiteGenerator::FKind& Kind : Input.Kinds)
+	{
+		if (Kind.PerThousand[1] <= 0.0f)
+		{
+			TestFalse(*FString::Printf(TEXT("%s stays on the surface"), *Config->Kinds[Kind.Kind].DisplayName),
+				Sites.ContainsByPredicate([&Kind](const HexSiteGenerator::FSite& Each) { return Each.Layer == 1 && Each.Kind == Kind.Kind; }));
+		}
+	}
+	// each player has its mines within reach of where it starts
+	for (const int32 Start : Starts)
+	{
+		HexShroud::FindWithin(Grid, Start, Input.Settings.StartMaxSteps, Ring);
+		for (const int32 Kind : NearStartKinds)
+		{
+			TestTrue(*FString::Printf(TEXT("A %s stands near the start on cell %d"), *Config->Kinds[Kind].DisplayName, Start),
+				Sites.ContainsByPredicate([&](const HexSiteGenerator::FSite& Each) { return Each.Layer == 0 && Each.Kind == Kind && Ring.Contains(Each.Cell); }));
+		}
+		HexShroud::FindWithin(Grid, Start, Input.Settings.StartClearRings, Ring);
+		TestFalse(*FString::Printf(TEXT("No site stands right at the start on cell %d"), Start),
+			Sites.ContainsByPredicate([&](const HexSiteGenerator::FSite& Each) { return Each.Layer == 0 && Ring.Contains(Each.Cell); }));
+	}
+	TestEqual(TEXT("The sites near the starts are counted"), Report.NearStarts, 2 * (NearStartKinds.Num() + Input.Settings.StartPiles));
+
+	// closing a cell keeps the ways while the open cells around it lie in one run
+	TBitArray<> Open(true, NumCells);
+	const int32 Middle = Starts[0];
+	TestTrue(TEXT("A cell in open ground may be closed"), HexSiteGenerator::KeepsWays(Grid, Open, Middle));
+	Open[Cells[Middle].Neighbors[0]] = false;
+	Open[Cells[Middle].Neighbors[3]] = false;
+	TestFalse(TEXT("A cell between two closed ones is a neck, and stays open"), HexSiteGenerator::KeepsWays(Grid, Open, Middle));
+	Open[Cells[Middle].Neighbors[1]] = false;
+	Open[Cells[Middle].Neighbors[2]] = false;
+	TestTrue(TEXT("With one run of open cells around it, it may be closed again"), HexSiteGenerator::KeepsWays(Grid, Open, Middle));
+	for (const int32 Neighbor : Cells[Middle].Neighbors)
+	{
+		Open[Neighbor] = false;
+	}
+	TestFalse(TEXT("A cell nothing reaches takes no site"), HexSiteGenerator::KeepsWays(Grid, Open, Middle));
 	return true;
 }
 

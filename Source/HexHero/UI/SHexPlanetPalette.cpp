@@ -544,7 +544,23 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 			}
 			Body->AddSlot().AutoHeight()[Kinds];
 		}
-		Body->AddSlot().AutoHeight()[MakeHelp(LOCTEXT("SiteHelp", "Click a cell a hero can stand on to put a mine or a pile of the chosen kind there; Ctrl+click takes one away, and Undo takes either back. It fills its cell: in the game a hero beside it that is sent onto it takes it."))];
+		Body->AddSlot().AutoHeight()[MakeHelp(LOCTEXT("SiteHelp", "Click a cell a hero can stand on to put a mine or a pile of the chosen kind there; Ctrl+click takes one away, and Undo takes either back. A mine or a mill fills its cell: in the game a hero beside it that is sent onto it takes it. A pile lies on its cell, and the hero that steps onto it takes it."))];
+
+		Body->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("SiteGenerate", "Scatter over the planet"), 8.0f)];
+		const TSharedRef<SButton> Generate = MakeButton(
+			MakeLabel(LOCTEXT("GenerateSites", "Generate")),
+			[](UHexPlanetPainter& Each) { Each.GenerateSites(); },
+			nullptr,
+			[](const UHexPlanetPainter& Each) { return !Each.IsPainting(); });
+		Generate->SetToolTipText(LOCTEXT("GenerateSitesTip", "Scatters mines, piles and mills over both layers in place of all there are, by Generation of DA_HexSites: a sawmill, a quarry and some piles near where each player starts, the rest at random where a hero walks. Each press gives another layout; one step of Undo"));
+		Body->AddSlot().AutoHeight()[Generate];
+		const TSharedRef<SButton> Clear = MakeButton(
+			MakeLabel(LOCTEXT("ClearSites", "Remove all")),
+			[](UHexPlanetPainter& Each) { Each.GenerateSites(true); },
+			nullptr,
+			[](const UHexPlanetPainter& Each) { return !Each.IsPainting(); });
+		Clear->SetToolTipText(LOCTEXT("ClearSitesTip", "Takes every mine, pile and mill off both layers; one step of Undo"));
+		Body->AddSlot().AutoHeight().Padding(0.0f, 3.0f, 0.0f, 0.0f)[Clear];
 		return Body;
 	};
 	TSharedRef<SVerticalBox> SiteBody = MakeSiteBody();

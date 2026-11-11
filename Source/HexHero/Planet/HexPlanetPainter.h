@@ -365,6 +365,10 @@ public:
 	void SetSiteTool() { SetTool(EHexPaintTool::Site, GetSitesTab()); }
 	EHexPaintTab GetSitesTab() const { return Target == EHexPlanetLayer::Underground ? EHexPaintTab::CaveSites : EHexPaintTab::Sites; }
 
+	/** Scatters the sites over both layers again in place of all there are (UHexSites::Generate), each time another layout, or takes them
+	 *  all away, as one step of Undo; false if nothing changed */
+	bool GenerateSites(bool bClear = false);
+
 	/** The kind of the sites a click places, an index into DA_HexSites */
 	int32 GetSiteKind() const { return SiteKind; }
 	void SetSiteKind(int32 InKind) { SiteKind = FMath::Max(InKind, 0); }

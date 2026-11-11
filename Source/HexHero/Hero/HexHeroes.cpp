@@ -591,8 +591,8 @@ bool UHexHeroes::IsBlockedUnbuilt(const AHexPlanet& Planet, int32 Cell) const
 
 float UHexHeroes::GetCellCost(const AHexPlanet& Planet, int32 Cell, bool bIgnoreSite) const
 {
-	// a mine, a pile or a mill fills its cell
-	if (!bIgnoreSite && Sites && Sites->FindSiteAt(Planet.GetLayer(), Cell))
+	// a mine or a mill fills its cell; a pile lies on its, and is walked onto
+	if (!bIgnoreSite && Sites && Sites->FindBlockerAt(Planet.GetLayer(), Cell))
 	{
 		return -1.0f;
 	}
@@ -614,6 +614,17 @@ float UHexHeroes::GetCellCost(const AHexPlanet& Planet, int32 Cell, bool bIgnore
 		return -1.0f;
 	}
 	return (Level == 1 && !bUnderground ? Config->HillCost : 1.0f) * (Biome ? FMath::Max(Biome->MoveCostMultiplier, 0.01f) : 1.0f);
+}
+
+bool UHexHeroes::IsOpenGround(EHexPlanetLayer Layer, int32 Cell) const
+{
+	const AHexPlanet* Planet = GetPlanet(Layer);
+	return Planet && Config && Planet->GetGrid().GetCells().IsValidIndex(Cell) && GetCellCost(*Planet, Cell, true) >= 0.0f;
+}
+
+int32 UHexHeroes::GetWeek() const
+{
+	return (Day - 1) / FMath::Max(Config ? Config->DaysPerWeek : 7, 1) + 1;
 }
 
 float UHexHeroes::GetStepCost(const AHexPlanet& Planet, const FHexHero* Hero, int32 From, int32 To) const
@@ -666,9 +677,9 @@ bool UHexHeroes::CanStand(EHexPlanetLayer Layer, int32 Cell, int32 IgnoreHero, F
 		}
 		return false;
 	}
-	if (Sites && Sites->FindSiteAt(Layer, Cell))
+	if (Sites && Sites->FindBlockerAt(Layer, Cell))
 	{
-		return Fail(TEXT("a mine, a pile or a mill fills that cell"));
+		return Fail(TEXT("a mine or a mill fills that cell"));
 	}
 	if (GetCellCost(*Planet, Cell) < 0.0f)
 	{
@@ -693,6 +704,12 @@ int32 UHexHeroes::AddHero(EHexPlanetLayer Layer, int32 Cell, int32 Class, int32 
 {
 	if (!Config || !CanStand(Layer, Cell, 0, &OutProblem))
 	{
+		return 0;
+	}
+	// a hero takes a pile by stepping onto it, so none starts on one
+	if (Sites && Sites->FindSiteAt(Layer, Cell))
+	{
+		OutProblem = TEXT("a pile lies there");
 		return 0;
 	}
 	FHexHero Hero;
@@ -1082,13 +1099,13 @@ void UHexHeroes::FindFieldFor(const FHexHero& Hero, HexHeroPath::FField& OutFiel
 		}
 		return Cost < 0.0f ? -1.0f : Cost * (Layer == 0 && Rivers ? Rivers->GetCrossingFactor(From, To) : 1.0f);
 	};
-	// a hero a person moves may go through an entrance or exit its player has seen, to the same cell of the other layer, where no hero it
-	// knows of stands; the heroes the game moves keep to their layer
+	// a hero may go through an entrance or exit its player has seen, to the same cell of the other layer, where no hero it knows of stands;
+	// a hero the game moves only where its player has seen the other side too, as it keeps to what it explored
 	const auto GetLink = [&](int32 Layer, int32 Cell)
 	{
 		const int32 Other = 1 - Layer;
-		if (!bThroughUnknown || !Planets[Other] || Planets[Other]->GetGrid().GetCells().Num() != NumCells || !IsKnown(Layer, Cell) || !IsUsableEntrance(*Planets[Layer], Cell)
-			|| (IsKnown(Other, Cell) && Occupied.Contains(Other * NumCells + Cell)))
+		if (!Planets[Other] || Planets[Other]->GetGrid().GetCells().Num() != NumCells || !IsKnown(Layer, Cell) || !IsUsableEntrance(*Planets[Layer], Cell)
+			|| (IsKnown(Other, Cell) ? Occupied.Contains(Other * NumCells + Cell) : !bThroughUnknown))
 		{
 			return -1.0f;
 		}
@@ -1115,7 +1132,7 @@ bool UHexHeroes::FindWay(const FHexHero& Hero, const HexHeroPath::FField& Ways, 
 	}
 	const int32 NumCells = Planet->GetGrid().GetCells().Num();
 	// what stands on ground its player has not explored is unknown, so the cell is only one the hero cannot stand on
-	bOutVisit = Sites && Sites->FindSiteAt(TargetLayer, Target) && !IsHidden(Hero.Player, TargetLayer, Target);
+	bOutVisit = Sites && Sites->FindBlockerAt(TargetLayer, Target) && !IsHidden(Hero.Player, TargetLayer, Target);
 	TArray<int32> Nodes;
 	if (!bOutVisit)
 	{
@@ -1128,21 +1145,7 @@ bool UHexHeroes::FindWay(const FHexHero& Hero, const HexHeroPath::FField& Ways, 
 	{
 		// to the cell beside the site from which the whole way, with the visit, is the cheapest; that may be where the hero stands
 		int32 Best = INDEX_NONE;
-		float BestCost = 0.0f;
-		for (const int32 Neighbor : Planet->GetGrid().GetCells()[Target].Neighbors)
-		{
-			const int32 Node = GetNode(TargetLayer, Neighbor);
-			if (Ways.IsReached(Node))
-			{
-				const float Cost = Ways.Costs[Node] + GetVisitCost(*Planet, Neighbor, Target);
-				if (Best == INDEX_NONE || Cost < BestCost)
-				{
-					Best = Node;
-					BestCost = Cost;
-				}
-			}
-		}
-		if (Best == INDEX_NONE || !Ways.GetPath(Best, Nodes))
+		if (GetSiteWayCost(Ways, TargetLayer, Target, &Best) < 0.0f || !Ways.GetPath(Best, Nodes))
 		{
 			return false;
 		}
@@ -1155,12 +1158,51 @@ bool UHexHeroes::FindWay(const FHexHero& Hero, const HexHeroPath::FField& Ways, 
 	return true;
 }
 
+float UHexHeroes::GetSiteWayCost(const HexHeroPath::FField& Ways, EHexPlanetLayer Layer, int32 SiteCell, int32* OutNode) const
+{
+	const AHexPlanet* Planet = GetPlanet(Layer);
+	if (!Planet || !Planet->GetGrid().GetCells().IsValidIndex(SiteCell))
+	{
+		return -1.0f;
+	}
+	int32 Best = INDEX_NONE;
+	float BestCost = -1.0f;
+	// a pile is walked onto
+	if (Sites && Sites->FindPileAt(Layer, SiteCell))
+	{
+		const int32 Node = GetNode(Layer, SiteCell);
+		if (OutNode)
+		{
+			*OutNode = Ways.IsReached(Node) ? Node : int32(INDEX_NONE);
+		}
+		return Ways.IsReached(Node) ? Ways.Costs[Node] : -1.0f;
+	}
+	for (const int32 Neighbor : Planet->GetGrid().GetCells()[SiteCell].Neighbors)
+	{
+		const int32 Node = GetNode(Layer, Neighbor);
+		if (Ways.IsReached(Node))
+		{
+			const float Cost = Ways.Costs[Node] + GetVisitCost(*Planet, Neighbor, SiteCell);
+			if (Best == INDEX_NONE || Cost < BestCost)
+			{
+				Best = Node;
+				BestCost = Cost;
+			}
+		}
+	}
+	if (OutNode)
+	{
+		*OutNode = Best;
+	}
+	return BestCost;
+}
+
 bool UHexHeroes::VisitSite(FHexHero& Hero, FString& OutMessage)
 {
 	const AHexPlanet* Planet = GetPlanet(Hero.Layer);
 	const int32 SiteCell = Hero.VisitCell;
 	if (!Planet || !Sites || !Planet->GetGrid().GetCells().IsValidIndex(Hero.Cell) || !Planet->GetGrid().GetCells()[Hero.Cell].Neighbors.Contains(SiteCell)
-		|| !Sites->FindSiteAt(Hero.Layer, SiteCell))
+		|| !Sites->FindBlockerAt(Hero.Layer, SiteCell))
 	{
 		Hero.VisitCell = INDEX_NONE;
 		Hero.TargetCell = INDEX_NONE;
@@ -1183,16 +1225,49 @@ bool UHexHeroes::VisitSite(FHexHero& Hero, FString& OutMessage)
 		Hero.Facing = Towards;
 		Hero.bPlaced = false;
 	}
-	const int32 Week = (Day - 1) / FMath::Max(Config->DaysPerWeek, 1) + 1;
-	const FString Found = Sites->Visit(Hero.Player, Hero.Name, Hero.Layer, SiteCell, Week);
+	// of what a hero the game moves does the person hears what it sees, and that a mine of its own was taken
+	const FHexSite* Site = Sites->FindSiteAt(Hero.Layer, SiteCell);
+	const bool bTold = !bPlaying || !IsPlayerAi(Hero.Player) || (Site && Site->Owner == ViewPlayer) || IsCellSeen(Hero.Layer, Hero.Cell);
+	const FString Found = Sites->Visit(Hero.Player, Hero.Name, Hero.Layer, SiteCell, GetWeek(), bTold);
 	if (!Found.IsEmpty())
 	{
-		OnMessage.Broadcast(Found);
+		if (bTold)
+		{
+			OnMessage.Broadcast(Found);
+		}
+		else
+		{
+			UE_LOG(LogHexHero, Log, TEXT("Heroes: unseen, %s"), *Found);
+		}
 	}
 	Hero.VisitCell = INDEX_NONE;
 	Hero.TargetCell = INDEX_NONE;
 	++MapRevision;
 	return true;
+}
+
+void UHexHeroes::TakePile(FHexHero& Hero)
+{
+	if (!Sites || !Sites->FindPileAt(Hero.Layer, Hero.Cell))
+	{
+		return;
+	}
+	// of what a hero the game moves does the person hears what it sees
+	const bool bTold = !bPlaying || !IsPlayerAi(Hero.Player) || IsCellSeen(Hero.Layer, Hero.Cell);
+	const FString Found = Sites->Visit(Hero.Player, Hero.Name, Hero.Layer, Hero.Cell, GetWeek(), bTold);
+	if (Found.IsEmpty())
+	{
+		return;
+	}
+	if (bTold)
+	{
+		OnMessage.Broadcast(Found);
+	}
+	else
+	{
+		UE_LOG(LogHexHero, Log, TEXT("Heroes: unseen, %s"), *Found);
+	}
+	++MapRevision;
 }
 
 void UHexHeroes::GetStepCosts(const FHexHero& Hero, TConstArrayView<int32> Path, TArray<float>& OutCosts) const
@@ -1390,6 +1465,8 @@ void UHexHeroes::Arrive(FHexHero& Hero)
 	Hero.bPlaced = false;
 	if (Hero.Cell == Hero.TargetCell && Hero.Layer == Hero.TargetLayer)
 	{
+		// where it was sent to: the pile that lies there is its
+		TakePile(Hero);
 		Hero.TargetCell = INDEX_NONE;
 	}
 	UE_LOG(LogHexHero, Log, TEXT("Heroes: %s stops on cell %d of the %s with %.2f points of movement left"), *Hero.Name, Hero.Cell, GetPlanetLayerName(Hero.Layer), Hero.MovePoints);
@@ -1542,6 +1619,12 @@ bool UHexHeroes::Send(int32 Id, EHexPlanetLayer TargetLayer, int32 Cell, FString
 			return true;
 		}
 		Hero->TargetCell = INDEX_NONE;
+		// a pile it stopped on, on a way that went further
+		if (Sites && Sites->FindPileAt(Hero->Layer, Cell))
+		{
+			TakePile(*Hero);
+			return true;
+		}
 		const bool bTravelled = Travel(*Hero, OutMessage);
 		Hero->bOutOfPoints = false;
 		return bTravelled;
@@ -2305,7 +2388,7 @@ void UHexHeroes::UpdatePath()
 	{
 		HoverText += Passes == 1 ? FString(TEXT(", through an entrance")) : FString::Printf(TEXT(", through %d entrances"), Passes);
 	}
-	if (bVisit)
+	if (bVisit || (Sites && !Path.IsEmpty() && !IsHidden(Hero->Player, TargetLayer, Path.Last()) && Sites->FindPileAt(TargetLayer, Path.Last())))
 	{
 		HoverText += FString::Printf(TEXT(", to %s"), *Sites->GetCellText(TargetLayer, Path.Last()).RightChop(6));
 	}
@@ -2706,6 +2789,72 @@ void UHexHeroes::UpdateAi(float DeltaTime)
 	}
 }
 
+bool UHexHeroes::MoveAiToSite(int32 Id, const HexHeroPath::FField& Ways, bool& bOutSent)
+{
+	bOutSent = false;
+	const FHexHero* Hero = FindHero(Id);
+	if (!Hero || !Sites || !Config)
+	{
+		return false;
+	}
+	struct FGoal
+	{
+		float Share = 0.0f;
+		float Cost = 0.0f;
+		const FHexSite* Site = nullptr;
+		EHexSiteGoal Goal = EHexSiteGoal::None;
+	};
+	TArray<FGoal> Goals;
+	const float DayPoints = FMath::Max(GetMaxMovePoints(*Hero), 1.0f);
+	const int32 Player = Hero->Player;
+	for (const FHexSite& Site : Sites->GetSites())
+	{
+		// what its player has seen and does not own, and no other hero of its player goes for already
+		const EHexSiteGoal Goal = Sites->GetGoal(Site, Player, GetWeek());
+		if (Goal == EHexSiteGoal::None || IsHidden(Player, Site.Layer, Site.Cell)
+			|| Heroes.ContainsByPredicate([&](const FHexHero& Other) { return Other.Id != Id && Other.Player == Player && Other.AiSiteId == Site.Id; }))
+		{
+			continue;
+		}
+		const float Reach = DayPoints * (Goal == EHexSiteGoal::LostMine ? Config->AiLostMineReachDays : Goal == EHexSiteGoal::Mine ? Config->AiMineReachDays : Config->AiPileReachDays);
+		const float Cost = GetSiteWayCost(Ways, Site.Layer, Site.Cell);
+		if (Reach > 0.0f && Cost >= 0.0f && Cost <= Reach)
+		{
+			Goals.Add({Cost / Reach, Cost, &Site, Goal});
+		}
+	}
+	// the nearest by the share of its reach first
+	Goals.Sort([](const FGoal& A, const FGoal& B) { return A.Share != B.Share ? A.Share < B.Share : A.Site->Id < B.Site->Id; });
+	for (int32 Index = 0; Index < FMath::Min(Goals.Num(), 4); ++Index)
+	{
+		const FGoal& Goal = Goals[Index];
+		const int32 SiteId = Goal.Site->Id;
+		const EHexPlanetLayer Layer = Goal.Site->Layer;
+		const int32 Cell = Goal.Site->Cell;
+		const TCHAR* What = Goal.Goal == EHexSiteGoal::LostMine ? TEXT("to take back the mine") : Goal.Goal == EHexSiteGoal::Mine ? TEXT("for the mine") : TEXT("to gather");
+		FString Message;
+		if (Send(Id, Layer, Cell, Message))
+		{
+			FHexHero* Sent = FindHeroMutable(Id);
+			Sent->AiSiteId = SiteId;
+			bOutSent = true;
+			UE_LOG(LogHexHero, Log, TEXT("Heroes: %s, moved by the game, goes %s on cell %d of the %s, %.1f points away"), *Sent->Name, What, Cell, GetPlanetLayerName(Layer), Goal.Cost);
+			return true;
+		}
+		FHexHero* Kept = FindHeroMutable(Id);
+		Kept->TargetCell = INDEX_NONE;
+		Kept->VisitCell = INDEX_NONE;
+		// its points do not pay for the next step of a way of more than a day: it goes on tomorrow, and does not wander off meanwhile
+		if (Goal.Cost > Kept->MovePoints + UE_KINDA_SMALL_NUMBER)
+		{
+			Kept->AiSiteId = SiteId;
+			UE_LOG(LogHexHero, Log, TEXT("Heroes: %s, moved by the game, waits for tomorrow to go on %s on cell %d of the %s"), *Kept->Name, What, Cell, GetPlanetLayerName(Layer));
+			return true;
+		}
+	}
+	return false;
+}
+
 bool UHexHeroes::MoveAi(int32 Id)
 {
 	const FHexHero* Hero = FindHero(Id);
@@ -2714,65 +2863,91 @@ bool UHexHeroes::MoveAi(int32 Id)
 	{
 		return false;
 	}
+	// what it went for before is looked at anew; one that cannot move keeps it, so another hero of its player takes something else
+	FindHeroMutable(Id)->AiSiteId = 0;
 	const TArray<FHexSphereCell>& Cells = Planet->GetGrid().GetCells();
 	const int32 NumCells = Cells.Num();
-	const bool bUnderground = Hero->Layer == EHexPlanetLayer::Underground;
-	const TBitArray<>* Explored = Shroud->GetExplored(Hero->Player, Hero->Layer);
+
+	HexHeroPath::FField Ways;
+	FindFieldFor(*Hero, Ways, false);
+
+	// first what it can gather and the mines to take, or to take back
+	bool bSent = false;
+	if (MoveAiToSite(Id, Ways, bSent))
+	{
+		return bSent;
+	}
 
 	// how many steps each cell lies from ground its player has not explored, as far as a hero sees: from such a cell it would open some.
-	// Underground only the passages count, as a hero opens nothing else there
+	// Underground only the passages count, as a hero opens nothing else there. On both layers, as its ways go through the entrances and
+	// exits its player has seen from both sides
 	TArray<int8> Near;
-	Near.Init(-1, NumCells);
-	TArray<int32> Ring;
-	for (int32 Cell = 0; Cell < NumCells; ++Cell)
+	Near.Init(-1, NumCells * NumPlanetLayers);
+	for (int32 Layer = 0; Layer < NumPlanetLayers; ++Layer)
 	{
-		if (!(Explored && Explored->IsValidIndex(Cell) && (*Explored)[Cell]) && (!bUnderground || HexPlanetUnderground::IsPassage(int8(Planet->GetCellLevel(Cell)))))
+		const AHexPlanet* Each = GetPlanet(EHexPlanetLayer(Layer));
+		if (!Each || !Each->IsDataLoaded() || Each->GetGrid().GetCells().Num() != NumCells)
 		{
-			Near[Cell] = 0;
-			Ring.Add(Cell);
+			continue;
 		}
-	}
-	for (int32 Steps = 1; Steps <= Config->SightRadius && !Ring.IsEmpty(); ++Steps)
-	{
-		TArray<int32> Next;
-		for (const int32 Cell : Ring)
+		const bool bUnderground = Layer == int32(EHexPlanetLayer::Underground);
+		const TBitArray<>* Explored = Shroud->GetExplored(Hero->Player, EHexPlanetLayer(Layer));
+		int8* LayerNear = Near.GetData() + Layer * NumCells;
+		TArray<int32> Ring;
+		for (int32 Cell = 0; Cell < NumCells; ++Cell)
 		{
-			for (const int32 Neighbor : Cells[Cell].Neighbors)
+			if (!(Explored && Explored->IsValidIndex(Cell) && (*Explored)[Cell]) && (!bUnderground || HexPlanetUnderground::IsPassage(int8(Each->GetCellLevel(Cell)))))
 			{
-				if (Near[Neighbor] < 0)
-				{
-					Near[Neighbor] = int8(FMath::Min(Steps, 127));
-					Next.Add(Neighbor);
-				}
+				LayerNear[Cell] = 0;
+				Ring.Add(Cell);
 			}
 		}
-		Ring = MoveTemp(Next);
+		for (int32 Steps = 1; Steps <= Config->SightRadius && !Ring.IsEmpty(); ++Steps)
+		{
+			TArray<int32> Next;
+			for (const int32 Cell : Ring)
+			{
+				for (const int32 Neighbor : Cells[Cell].Neighbors)
+				{
+					if (LayerNear[Neighbor] < 0)
+					{
+						LayerNear[Neighbor] = int8(FMath::Min(Steps, 127));
+						Next.Add(Neighbor);
+					}
+				}
+			}
+			Ring = MoveTemp(Next);
+		}
 	}
 
 	// of the cells it reaches today the one nearest that ground, the cheapest of those, so it walks along the edge of what it knows; else
 	// the cheapest it reaches on a later day
-	HexHeroPath::FField Ways;
-	FindFieldFor(*Hero, Ways, false);
-	int32 Best = INDEX_NONE;
+	const int32 Here = GetNode(Hero->Layer, Hero->Cell);
+	int32 BestNode = INDEX_NONE;
 	bool bBestToday = false;
-	for (int32 Cell = 0; Cell < NumCells; ++Cell)
+	for (int32 Node = 0; Node < Near.Num(); ++Node)
 	{
-		if (Cell == Hero->Cell || Near[Cell] <= 0 || !Ways.IsReached(GetNode(Hero->Layer, Cell)))
+		if (Node == Here || Near[Node] <= 0 || !Ways.IsReached(Node))
 		{
 			continue;
 		}
-		const bool bToday = Ways.Costs[GetNode(Hero->Layer, Cell)] <= Hero->MovePoints + UE_KINDA_SMALL_NUMBER;
-		const bool bBetter = Best == INDEX_NONE || (bToday != bBestToday ? bToday
-			: bToday && Near[Cell] != Near[Best] ? Near[Cell] < Near[Best] : Ways.Costs[GetNode(Hero->Layer, Cell)] < Ways.Costs[GetNode(Hero->Layer, Best)]);
+		const bool bToday = Ways.Costs[Node] <= Hero->MovePoints + UE_KINDA_SMALL_NUMBER;
+		const bool bBetter = BestNode == INDEX_NONE || (bToday != bBestToday ? bToday
+			: bToday && Near[Node] != Near[BestNode] ? Near[Node] < Near[BestNode] : Ways.Costs[Node] < Ways.Costs[BestNode]);
 		if (bBetter)
 		{
-			Best = Cell;
+			BestNode = Node;
 			bBestToday = bToday;
 		}
 	}
+	if (BestNode != INDEX_NONE)
+	{
+		FString Message;
+		return Send(Id, EHexPlanetLayer(BestNode / NumCells), BestNode % NumCells, Message);
+	}
 
-	// nothing left to open on this layer within reach: through the nearest entrance or exit whose other side its player has not seen
-	if (Best == INDEX_NONE)
+	// nothing left to open within reach: through the nearest entrance or exit of its layer whose other side its player has not seen
+	int32 Best = INDEX_NONE;
 	{
 		const EHexPlanetLayer Other = GetOtherLayer(Hero->Layer);
 		float BestCost = 0.0f;

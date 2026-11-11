@@ -2574,37 +2574,99 @@ def build_hero_materials():
         assets.save_asset(path)
 
 
-# A mine or a pile of the map (UHexSites): the color of its vertices, and by their alpha the heap of its resource (about 0.5) in the color of
-# that resource and the flag of a mine (1) in the color of its owner, both from the custom data of the instance, glowing a little in those colors
-# (SiteGlow of DA_HexSites), so a site reads in the shade and in the dark of the underground
-SITE_CODE = r"""
+# A mine, a pile or a mill of the map (UHexSites): the color of its vertices, and by their alpha (generate_planet_sites.py) what a pile holds
+# (about 0.3) glowing a little in its own color (PileGlow), the heap of a mine and the sacks of a mill (about 0.5) in the color of their
+# resource and the flag of a mine (1) in the color of its owner, both from the custom data of the instance and glowing a little (SiteGlow of
+# DA_HexSites), so a site reads in the shade and in the dark of the underground. A sparkle (about 0.75) is black but for its light
+# (SparkleBrightness), the color of the resource SparkleWhite of the way to white.
+# What happens to a site shows, as the developer asked on 2026-11-11: EventTime, the seventh custom value of an instance, is when a mine was
+# taken or a pile taken, in the seconds of the world. A mine flashes: its flag and heap glow CaptureFlash more, fading over
+# CaptureFlashTime. A pile dissolves, in M_HexPlanetSiteFade, the same graph masked with Fading 1, which UHexSites draws it with meanwhile: over
+# PickupFadeTime it goes in grains PickupGrain across, those about to go glowing by PickupGlow, while it lifts by PickupLift and its sparkles
+# burst
+SITE_PARTS_CODE = r"""
 float tone = max(max(VertexRGB.r, VertexRGB.g), VertexRGB.b);
-float flag = step(0.75, VertexA);
-float heap = step(0.25, VertexA) * (1.0 - flag);
-float3 color = lerp(VertexRGB.rgb, float3(ResourceR, ResourceG, ResourceB) * tone, heap);
-return lerp(color, float3(OwnerR, OwnerG, OwnerB) * tone, flag);
+float flag = step(0.9, VertexA);
+float spark = step(0.65, VertexA) * (1.0 - flag);
+float heap = step(0.4, VertexA) * (1.0 - step(0.65, VertexA));
+float own = step(0.15, VertexA) * (1.0 - step(0.4, VertexA));
+float3 resource = float3(ResourceR, ResourceG, ResourceB);
+float3 owner = float3(OwnerR, OwnerG, OwnerB);
+float since = Time - EventTime;
+float fade = Fading * saturate(since / max(PickupFadeTime, 0.01));
+float3 grainCell = floor(WorldPos / max(PickupGrain, 0.1));
+float grain = frac(sin(dot(grainCell, float3(12.9898, 78.233, 37.719))) * 43758.5453);
 """
-SITE_GLOW_CODE = r"""
-float tone = max(max(VertexRGB.r, VertexRGB.g), VertexRGB.b);
-float flag = step(0.75, VertexA);
-float heap = step(0.25, VertexA) * (1.0 - flag);
-return (float3(ResourceR, ResourceG, ResourceB) * heap + float3(OwnerR, OwnerG, OwnerB) * flag) * tone * SiteGlow;
+SITE_CODE = SITE_PARTS_CODE + r"""
+float3 color = lerp(VertexRGB.rgb, resource * tone, heap);
+color = lerp(color, owner * tone, flag);
+return color * (1.0 - spark);
 """
+SITE_GLOW_CODE = SITE_PARTS_CODE + r"""
+float flash = saturate(1.0 - since / max(CaptureFlashTime, 0.01)) * step(0.0, since) * (1.0 - Fading);
+flash *= flash;
+float3 glow = (resource * heap + owner * flag) * tone * (SiteGlow + CaptureFlash * flash) + VertexRGB.rgb * own * PileGlow;
+// the grains of a pile that are about to go
+float going = Fading * step(0.001, fade) * smoothstep(fade + 0.3, fade, grain);
+glow += lerp(resource, float3(1.0, 1.0, 1.0), 0.5) * PickupGlow * going;
+return lerp(glow, lerp(resource, float3(1.0, 1.0, 1.0), SparkleWhite) * SparkleBrightness, spark);
+"""
+SITE_MASK_CODE = SITE_PARTS_CODE + r"""
+return max(spark, step(fade * 1.03, grain));
+"""
+# A sparkle is a small star drawn tiny in its mesh, with where each corner lies in it as its UV: it grows to SparkleSize around its middle,
+# facing the camera, as it twinkles, each at its own time (the red of its vertices and a number of its instance) and pace (their green), and
+# rises SparkleRise meanwhile by their blue. From afar it grows, as the marks of a way do (SparkleFarStart, SparkleFarScale), and in the shadow
+# pass it stays tiny (ShadowSize 0), so it casts no shadow
+SITE_OFFSET_CODE = r"""
+float spark = step(0.65, VertexA) * (1.0 - step(0.9, VertexA));
+float fade = Fading * saturate((Time - EventTime) / max(PickupFadeTime, 0.01));
+float phase = frac(Time * SparkleSpeed * (0.6 + 0.8 * VertexRGB.g) + VertexRGB.r + InstanceRandom);
+float twinkle = sin(phase * 3.14159265);
+twinkle *= twinkle;
+// as its pile dissolves every sparkle shines, grows and flies up, and is gone with it
+twinkle = lerp(twinkle, 1.0, saturate(fade * 4.0)) * (1.0 + 1.5 * fade) * (1.0 - fade * fade);
+float size = length(AxisZ);
+float3 up = normalize(AxisZ);
+float grow = clamp(distance(CameraPos, ObjectPos) / max(SparkleFarStart, 1.0), 1.0, max(SparkleFarScale, 1.0));
+float3 star = (ViewRight * (UV.x - 0.5) + ViewUp * (UV.y - 0.5)) * 2.0 * SparkleSize * size * twinkle * grow * ShadowSize;
+float3 sparkle = star + up * ((phase * VertexRGB.b + fade * 2.0) * SparkleRise * size);
+return lerp(up * (fade * fade * PickupLift * size), sparkle, spark);
+"""
+SITE_PARAMETERS = ['SiteGlow', 'PileGlow', 'SparkleBrightness', 'SparkleWhite', 'PickupFadeTime', 'PickupGrain', 'PickupGlow', 'CaptureFlash', 'CaptureFlashTime']
+SITE_OFFSET_PARAMETERS = ['SparkleSize', 'SparkleRise', 'SparkleSpeed', 'SparkleFarStart', 'SparkleFarScale', 'PickupFadeTime', 'PickupLift']
 SITE_MATERIAL = FOLDER + '/M_HexPlanetSite'
+SITE_FADE_MATERIAL = FOLDER + '/M_HexPlanetSiteFade'
 
 
 def build_site_material():
+    # the sites, and the piles that dissolve, which alone pay for a mask
+    build_site_graph(SITE_MATERIAL, False)
+    build_site_graph(SITE_FADE_MATERIAL, True)
+
+
+def build_site_graph(path, fading):
     library = unreal.MaterialEditingLibrary
     assets = unreal.EditorAssetLibrary
-    material = unreal.load_asset(SITE_MATERIAL) if assets.does_asset_exist(SITE_MATERIAL) else unreal.AssetToolsHelpers.get_asset_tools().create_asset(
-        SITE_MATERIAL.split('/')[-1], FOLDER, unreal.Material, unreal.MaterialFactoryNew())
+    material = unreal.load_asset(path) if assets.does_asset_exist(path) else unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+        path.split('/')[-1], FOLDER, unreal.Material, unreal.MaterialFactoryNew())
     clear_expressions(material)
     material.set_editor_property('used_with_instanced_static_meshes', True)
     # the flag of a mine is a sheet seen from both its sides
     material.set_editor_property('two_sided', True)
+    material.set_editor_property('blend_mode', unreal.BlendMode.BLEND_MASKED if fading else unreal.BlendMode.BLEND_OPAQUE)
     vertex_color = library.create_material_expression(material, unreal.MaterialExpressionVertexColor, -1000, 0)
-    inputs = [('VertexRGB', vertex_color, ''), ('VertexA', vertex_color, 'A'),
-        ('SiteGlow', add_scalar(library, material, 'SiteGlow', 0.3, 100), '')]
+    # when a mine was taken or a pile taken, long ago for a mesh that is no instance
+    event = library.create_material_expression(material, unreal.MaterialExpressionPerInstanceCustomData, -1000, 550)
+    event.set_editor_property('data_index', 6)
+    event.set_editor_property('const_default_value', -1000.0)
+    time = library.create_material_expression(material, unreal.MaterialExpressionTime, -1000, 600)
+    # the grains of a pile that dissolves stay where they are as it lifts
+    world = library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1000, 650)
+    world.set_editor_property('world_position_shader_offset', unreal.WorldPositionIncludedOffsets.WPT_EXCLUDE_ALL_SHADER_OFFSETS)
+    fading_value = add_scalar(library, material, 'Fading', 1.0 if fading else 0.0, 700)
+    inputs = [('VertexRGB', vertex_color, ''), ('VertexA', vertex_color, 'A'), ('EventTime', event, ''), ('Time', time, ''), ('WorldPos', world, ''),
+        ('Fading', fading_value, '')] + add_config_parameters(library, material, unreal.HexSiteConfig, SITE_PARAMETERS, 1200)
     # the resource is grey and the owner nobody for a mesh that is no instance
     for index, (name, default) in enumerate((('ResourceR', 0.6), ('ResourceG', 0.6), ('ResourceB', 0.6), ('OwnerR', 0.35), ('OwnerG', 0.35), ('OwnerB', 0.35))):
         data = library.create_material_expression(material, unreal.MaterialExpressionPerInstanceCustomData, -1000, 200 + index * 50)
@@ -2617,8 +2679,37 @@ def build_site_material():
         unreal.MaterialProperty.MP_EMISSIVE_COLOR)
     roughness = add_config_parameters(library, material, unreal.HexPlanetConfig, ['Roughness'], 1000)[0][1]
     library.connect_material_property(roughness, '', unreal.MaterialProperty.MP_ROUGHNESS)
+    if fading:
+        library.connect_material_property(add_custom(library, material, SITE_MASK_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT1, inputs, 900), '',
+            unreal.MaterialProperty.MP_OPACITY_MASK)
+
+    # the sparkles of a pile
+    up = library.create_material_expression(material, unreal.MaterialExpressionConstant3Vector, -1300, 1600)
+    up.set_editor_property('constant', unreal.LinearColor(0.0, 0.0, 1.0, 0.0))
+    axis_z = library.create_material_expression(material, unreal.MaterialExpressionTransform, -1100, 1600)
+    axis_z.set_editor_property('transform_source_type', unreal.MaterialVectorCoordTransformSource.TRANSFORMSOURCE_LOCAL)
+    axis_z.set_editor_property('transform_type', unreal.MaterialVectorCoordTransform.TRANSFORM_WORLD)
+    library.connect_material_expressions(up, '', axis_z, '')
+    shadow = library.create_material_expression(material, unreal.MaterialExpressionShadowReplace, -1100, 1700)
+    shown = library.create_material_expression(material, unreal.MaterialExpressionConstant, -1300, 1700)
+    shown.set_editor_property('r', 1.0)
+    hidden = library.create_material_expression(material, unreal.MaterialExpressionConstant, -1300, 1750)
+    hidden.set_editor_property('r', 0.0)
+    library.connect_material_expressions(shown, '', shadow, 'Default')
+    library.connect_material_expressions(hidden, '', shadow, 'Shadow')
+    offset = add_custom(library, material, SITE_OFFSET_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, [
+        ('VertexRGB', vertex_color, ''), ('VertexA', vertex_color, 'A'), ('EventTime', event, ''), ('Fading', fading_value, ''),
+        ('UV', library.create_material_expression(material, unreal.MaterialExpressionTextureCoordinate, -1100, 1800), ''),
+        ('Time', time, ''),
+        ('InstanceRandom', library.create_material_expression(material, unreal.MaterialExpressionPerInstanceRandom, -1100, 1900), ''),
+        ('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1100, 1950), ''),
+        ('ObjectPos', library.create_material_expression(material, unreal.MaterialExpressionObjectPositionWS, -1100, 2000), ''),
+        ('ViewRight', add_view_axis(library, material, (1.0, 0.0, 0.0), 2050), ''),
+        ('ViewUp', add_view_axis(library, material, (0.0, 1.0, 0.0), 2100), ''),
+        ('AxisZ', axis_z, ''), ('ShadowSize', shadow, '')] + add_config_parameters(library, material, unreal.HexSiteConfig, SITE_OFFSET_PARAMETERS, 2200), 1600)
+    library.connect_material_property(offset, '', unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
     library.recompile_material(material)
-    assets.save_asset(SITE_MATERIAL)
+    assets.save_asset(path)
 
 
 def add_texture(library, material, path, name, sampler_type, y):

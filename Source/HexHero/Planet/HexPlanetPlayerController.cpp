@@ -1198,6 +1198,10 @@ void AHexPlanetPlayerController::RunPaintCommand(const TArray<FString>& Args)
 	{
 		Brush->EndStroke();
 	}
+	else if (Action == TEXT("regenerate") && Args.IsValidIndex(1) && Args[1].Equals(TEXT("sites"), ESearchCase::IgnoreCase))
+	{
+		Brush->GenerateSites();
+	}
 	else if (Action == TEXT("regenerate") && Args.IsValidIndex(1) && Args[1].Equals(TEXT("objects"), ESearchCase::IgnoreCase))
 	{
 		Brush->RegenerateObjects();
@@ -1313,7 +1317,7 @@ namespace
 		TEXT("Drives the brush of the planet as the palette and the mouse would, for tests: on | off | tab <Ground|Relief|Objects|Rivers|Entrances|Maze|Links> (Objects of the layer shown) | ")
 		TEXT("key <1-5> | biome <Index> | size <1-3> | network <A-H> | entrance | carve | walls <Height|Auto> | object <Index on the palette of the layer> | eraser | river | bridge | relief <Version|Turn|Mirror|Higher|Lower|Auto> | none | ")
 		TEXT("byhand <on|off> | placed <Place|Move|Turn|Size|Version|Erase> | place @Latitude:Longitude [ctrl] | drag @Latitude:Longitude @Latitude:Longitude | ")
-		TEXT("stroke <Cell or @Latitude:Longitude> [...] [ctrl] | press <Cell> | release | regenerate [all|objects] | newlayout | undo | redo | save. A stroke presses on the first cell, passes the others and releases on the last; ctrl makes it take away; ")
+		TEXT("stroke <Cell or @Latitude:Longitude> [...] [ctrl] | press <Cell> | release | regenerate [all|objects|sites] | newlayout | undo | redo | save. A stroke presses on the first cell, passes the others and releases on the last; ctrl makes it take away; ")
 		TEXT("press holds a stroke, which follows the mouse as the held left button does, until release; place clicks at a point, as the tools of objects placed by hand need, and drag presses at one and releases at the other"),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&PlanetPaintCommand));
 }

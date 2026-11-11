@@ -246,6 +246,26 @@ TBitArray<> UHexPlanetObjects::FindSavedBlockers(const AHexPlanet& InPlanet)
 	return Blocked;
 }
 
+TBitArray<> UHexPlanetObjects::FindSavedCells(const AHexPlanet& InPlanet)
+{
+	TBitArray<> Held(false, InPlanet.GetGrid().GetCells().Num());
+	TArray<FHexObjectCell> Lines;
+	FString Error;
+	const FString Folder = InPlanet.GetDataFolder();
+	if (!InPlanet.IsSaved() || !HexPlanetFile::HasObjects(Folder) || !HexPlanetFile::LoadObjects(Folder, Lines, Error))
+	{
+		return Held;
+	}
+	for (const FHexObjectCell& Line : Lines)
+	{
+		if (Held.IsValidIndex(Line.Cell) && (!Line.Cover.IsNone() || !Line.Decor.IsNone() || !Line.Placed.IsEmpty()))
+		{
+			Held[Line.Cell] = true;
+		}
+	}
+	return Held;
+}
+
 TArray<TObjectPtr<UHexPlanetObjectSet>> UHexPlanetObjects::FindLayerSets(EHexPlanetLayer Layer)
 {
 	TArray<TObjectPtr<UHexPlanetObjectSet>> Found;

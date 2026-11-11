@@ -34,22 +34,64 @@ struct FHexSite
 
 	/** The week a mill last gave, 0 for none yet in the game played */
 	int32 VisitedWeek = 0;
+
+	/** The players who owned a mine in the game played and lost it to another, a bit each: a player the game moves wants it back */
+	uint32 FormerOwners = 0;
+
+	/** When a mine was last taken or a pile taken, in seconds of the world, by which the mine flashes and the pile dissolves */
+	double EventTime = -1000.0;
+
+	/** A pile that was taken and is still drawn, dissolving */
+	bool bFading = false;
+
+	/** Where it sits on the ground, found once until the ground changes (UHexSites::FindSeat) */
+	bool bSeated = false;
+	FTransform Seat;
+};
+
+/** A line of text that floats up over a site: what a hero gained there */
+struct FHexSitePopup
+{
+	EHexPlanetLayer Layer = EHexPlanetLayer::Surface;
+	FVector3d Point = FVector3d::ZeroVector;
+	FString Text;
+	FLinearColor Color = FLinearColor::White;
+
+	/** When it starts, in the seconds of FPlatformTime, which may lie ahead for a line that follows another */
+	double StartTime = 0.0;
+};
+
+/** What a site is to a player who looks for something to do (UHexSites::GetGoal) */
+enum class EHexSiteGoal : uint8
+{
+	/** Nothing: its own mine, a mill that gave this week */
+	None,
+	/** A pile to take or a mill to visit */
+	Gather,
+	/** A mine of nobody or of another player */
+	Mine,
+	/** A mine it owned and another player took */
+	LostMine,
 };
 
 /**
  *  The mines and piles of a planet and what the players have gathered, an object of UHexHeroes that serves both layers, as the developer's
  *  document "Ресурси та шахти" of 2026-11-11 describes them (see UHexSiteConfig).
  *
- *  A site fills a cell of a layer that a hero could stand on, one site to a cell, and no hero enters that cell. A hero beside it that is
- *  sent onto its cell visits it instead (Visit, from UHexHeroes::VisitSite): a mine becomes that of its player, shown by the color of its
- *  flag, a pile gives what it holds and is gone, and a mill gives once a week. Every new day each mine gives its owner its resource
- *  (EndDay). The game starts with no mine owned, every pile there and what the players start with (Restart).
+ *  A site stands on a cell of a layer that a hero could stand on, one site to a cell. A mine or a mill fills its cell (FindBlockerAt), so
+ *  no hero enters it, and a hero beside it that is sent onto its cell visits it instead (Visit, from UHexHeroes::VisitSite): a mine becomes
+ *  that of its player, shown by the color of its flag, and gives what it gives in a day at once, but once a week whoever takes it, and a
+ *  mill gives once a week. A pile lies on its cell (FindPileAt), and the hero whose way ends on it takes what it holds
+ *  (UHexHeroes::TakePile). What a hero gained floats up over the site as text (GetPopups, drawn by SHexHeroPanel), a mine that is taken
+ *  flashes, and a pile that is taken dissolves before it is gone (bFading, PickupFadeTime). Every new day each mine gives its owner its resource (EndDay). The game starts with no mine owned, every pile
+ *  there and what the players start with (Restart).
  *
- *  sites.json of the planet holds the sites (HexPlanetFile::SaveSites), which the Mines tab of the palette and hex.Site edit; who owns what
- *  and what was gathered are not saved yet.
+ *  sites.json of the planet holds the sites (HexPlanetFile::SaveSites), which the Mines tab of the palette and hex.Site edit and Generate
+ *  there scatters over both layers (HexSiteGenerator); who owns what and what was gathered are not saved yet.
  *
- *  The sites of a layer are instances of the mesh of a mine and of a pile, components of the planet of that layer, placed again when a site
- *  or the ground changed; the custom data of an instance is the color of its resource and of its owner (M_HexPlanetSite).
+ *  The sites of a layer are instances of the mesh of each kind, a component of the planet of that layer a mesh, placed again when a site
+ *  or the ground changed, each seated on the ground under it (FindSeat); the custom data of an instance is the color of its resource and of
+ *  its owner (M_HexPlanetSite).
  */
 UCLASS()
 class UHexSites : public UObject
@@ -71,6 +113,10 @@ public:
 	/** Returns the site on a cell of a layer that is still there, or null */
 	const FHexSite* FindSiteAt(EHexPlanetLayer Layer, int32 Cell) const;
 
+	/** Returns the mine or mill that fills a cell, which no hero enters, or the pile that lies on it, which the hero whose way ends there takes */
+	const FHexSite* FindBlockerAt(EHexPlanetLayer Layer, int32 Cell) const;
+	const FHexSite* FindPileAt(EHexPlanetLayer Layer, int32 Cell) const;
+
 
 	/** Puts a site of a kind on a cell. Returns its Id, or 0 and why not */
 	int32 AddSite(EHexPlanetLayer Layer, int32 Cell, int32 Kind, FString& OutProblem);
@@ -78,9 +124,24 @@ public:
 	/** Takes the site of a cell off the planet. Returns false if there is none */
 	bool RemoveSiteAt(EHexPlanetLayer Layer, int32 Cell);
 
-	/** A hero of a player visits the site of a cell, in a week of the game from 1: it takes the mine there for the player, the pile for good,
-	 *  or what the mill gives this week. Returns a line for the player, or nothing when there is no site */
-	FString Visit(int32 Player, const FString& HeroName, EHexPlanetLayer Layer, int32 Cell, int32 Week);
+	/** Scatters sites over both layers in place of all there are (HexSiteGenerator, Generation of DA_HexSites): on the ground a hero walks,
+	 *  off the entrances, where heroes start and what stands on cells, some near where each player starts. The seed chooses the layout; without
+	 *  one each call gives another, the first that of the seed of the planet. Returns how many sites there are now, and says what it did */
+	int32 Generate(FString& OutReport, const int32* Seed = nullptr);
+
+	/** Takes every site off the planet. Returns false if there is none */
+	bool Clear();
+
+	/** Returns what a site is to a player in a week of the game: something to gather, a mine to take, one to take back, or nothing */
+	EHexSiteGoal GetGoal(const FHexSite& Site, int32 Player, int32 Week) const;
+
+	/** A hero of a player visits the site of a cell, in a week of the game from 1: it takes the mine there for the player, with what it
+	 *  gives in a day if nobody took it this week, the pile for good, or what the mill gives this week. Returns a line for the player, or
+	 *  nothing when there is no site; bShown lets what was gained float up over the site, for what the person who watches sees */
+	FString Visit(int32 Player, const FString& HeroName, EHexPlanetLayer Layer, int32 Cell, int32 Week, bool bShown = true);
+
+	/** Returns the lines that float up over the sites now, and those about to */
+	const TArray<FHexSitePopup>& GetPopups() const { return Popups; }
 
 	/** A new day: every mine gives its owner its resource */
 	void EndDay();
@@ -107,8 +168,8 @@ public:
 	TArray<FHexSiteLine> MakeLines() const;
 	void SetLines(const TArray<FHexSiteLine>& Lines);
 
-	/** Says that the ground of a layer changed, so its sites are placed on it again */
-	void OnLayerRebuilt(EHexPlanetLayer Layer) { bDirty[int32(Layer)] = true; }
+	/** Says that the ground of a layer changed, so its sites are seated and placed on it again */
+	void OnLayerRebuilt(EHexPlanetLayer Layer);
 
 private:
 
@@ -121,8 +182,15 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> Material;
 
-	/** The instances of the mines, the piles and the mills of each layer, by EHexSiteType */
-	TWeakObjectPtr<UInstancedStaticMeshComponent> Instances[NumPlanetLayers][3];
+	/** The material of the piles that dissolve */
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> FadeMaterial;
+
+	/** The instances of the sites of each layer, a component for each mesh, and another for those of it that dissolve, by the path of the
+	 *  mesh and a mark */
+	TMap<FString, TWeakObjectPtr<UInstancedStaticMeshComponent>> Instances[NumPlanetLayers];
+
+	TArray<FHexSitePopup> Popups;
 
 	TArray<FHexSite> Sites;
 
@@ -134,6 +202,9 @@ private:
 
 	int32 NextId = 1;
 	int32 GameNumber = 0;
+
+	/** How many layouts Generate gave without a seed, so the next is another */
+	int32 GenerateCount = 0;
 	bool bEdited = false;
 	bool bDirty[NumPlanetLayers] = {true, true};
 	bool bLayerBuilt[NumPlanetLayers] = {false, false};
@@ -142,6 +213,16 @@ private:
 
 	/** Places the instances of a layer again */
 	void Rebuild(EHexPlanetLayer Layer);
+
+	/** Returns where a site of a cell sits: on the ground under it, read in the middle of the cell and around it, leaning as that ground
+	 *  does up to MaxTilt degrees, turned by Angle around its up, at a scale */
+	FTransform FindSeat(const AHexPlanet& Planet, int32 Cell, double Angle, float MaxTilt, float Scale) const;
+
+	/** Lets a line float up over a site that is seated, after those already waiting there */
+	void AddPopup(const FHexSite& Site, const FString& Text, const FLinearColor& Color);
+
+	/** Returns the seconds of the world, by which the materials time what happens to a site */
+	double GetWorldTime() const;
 
 	/** Returns what a pile holds in the game played, and the resource of a mill */
 	int32 GetPileAmount(const FHexSite& Site) const;

@@ -960,6 +960,41 @@ void UHexPlanetPainter::PaintSite(int32 Cell)
 	Stroke.NewSites = Sites->MakeLines();
 }
 
+bool UHexPlanetPainter::GenerateSites(bool bClear)
+{
+	UHexHeroes* Heroes = Planet ? Planet->GetHeroes() : nullptr;
+	UHexSites* Sites = Heroes ? Heroes->GetSites() : nullptr;
+	if (bPainting || !Sites || Heroes->IsPlaying())
+	{
+		return false;
+	}
+	FHexPaintStep Step;
+	Step.bSites = true;
+	Step.OldSites = Sites->MakeLines();
+	FString Report;
+	if (bClear)
+	{
+		Sites->Clear();
+		Report = TEXT("every mine, pile and mill is taken off the planet");
+	}
+	else
+	{
+		Sites->Generate(Report);
+	}
+	Step.NewSites = Sites->MakeLines();
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(INDEX_NONE, 6.0f, FColor::White, FString::Printf(TEXT("Sites: %s"), *Report));
+	}
+	if (Step.IsEmpty())
+	{
+		return false;
+	}
+	AddStep(MoveTemp(Step));
+	UpdateSavedState();
+	return true;
+}
+
 void UHexPlanetPainter::PaintEntrance(int32 Cell)
 {
 	if (Target != EHexPlanetLayer::Surface)

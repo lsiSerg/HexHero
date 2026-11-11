@@ -189,6 +189,20 @@ public:
 	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=0, ClampMax=10))
 	float AiThinkTime = 0.5f;
 
+	/** A hero of such a player goes for what its player has seen and can gather before it explores, as the developer asked on 2026-11-11
+	 *  ("АІ - має почати збирати їх, гравець може захопити шахти - АІ захоче їх повернути"): a pile or a mill whose way costs at most this
+	 *  many days of its movement, a mine of nobody or of another player within AiMineReachDays, and a mine another player took from its own
+	 *  within AiLostMineReachDays. Of several it takes the one nearest by the share of its reach, so a mine it lost twice as far as a pile
+	 *  still comes first; 0 leaves a kind alone */
+	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=0, ClampMax=60))
+	float AiPileReachDays = 1.5f;
+
+	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=0, ClampMax=60))
+	float AiMineReachDays = 3.0f;
+
+	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=0, ClampMax=60))
+	float AiLostMineReachDays = 7.0f;
+
 	/** Seconds the camera stays where a hero of such a player went into the fog of war, before the game goes on with it or the next, and
 	 *  seconds it stays where one is about to come out of the fog, before it does, so the person sees where it went and where it comes from,
 	 *  as the developer asked on 2026-11-11; the hero waits meanwhile */

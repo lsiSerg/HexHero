@@ -4,8 +4,12 @@
 #include "HexHero.h"
 #include "HexHeroConfig.h"
 #include "HexHeroes.h"
+#include "HexMaterialConfig.h"
 #include "HexPlanet.h"
+#include "HexPlanetObjects.h"
+#include "HexShroud.h"
 #include "HexSiteConfig.h"
+#include "HexSiteGenerator.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
@@ -134,6 +138,18 @@ const FHexSite* UHexSites::FindSiteAt(EHexPlanetLayer Layer, int32 Cell) const
 	return Sites.FindByPredicate([Layer, Cell](const FHexSite& Each) { return Each.Layer == Layer && Each.Cell == Cell && !Each.bTaken; });
 }
 
+const FHexSite* UHexSites::FindBlockerAt(EHexPlanetLayer Layer, int32 Cell) const
+{
+	const FHexSite* Site = FindSiteAt(Layer, Cell);
+	return Site && Config->Kinds[Site->Kind].FillsCell() ? Site : nullptr;
+}
+
+const FHexSite* UHexSites::FindPileAt(EHexPlanetLayer Layer, int32 Cell) const
+{
+	const FHexSite* Site = FindSiteAt(Layer, Cell);
+	return Site && !Config->Kinds[Site->Kind].FillsCell() ? Site : nullptr;
+}
+
 int32 UHexSites::AddSite(EHexPlanetLayer Layer, int32 Cell, int32 Kind, FString& OutProblem)
 {
 	const AHexPlanet* Planet = GetPlanet(Layer);
@@ -185,6 +201,148 @@ bool UHexSites::RemoveSiteAt(EHexPlanetLayer Layer, int32 Cell)
 	return true;
 }
 
+bool UHexSites::Clear()
+{
+	if (Sites.IsEmpty())
+	{
+		return false;
+	}
+	SetLines({});
+	return true;
+}
+
+int32 UHexSites::Generate(FString& OutReport, const int32* Seed)
+{
+	const UHexHeroes* Heroes = Surface ? Surface->GetHeroes() : nullptr;
+	if (!Config || !Heroes || !Surface->IsBuilt())
+	{
+		OutReport = TEXT("the planet is not built yet");
+		return Sites.Num();
+	}
+	const double StartTime = FPlatformTime::Seconds();
+	const FHexSphereGrid& Grid = Surface->GetGrid();
+	const int32 NumCells = Grid.GetCells().Num();
+	const FHexSiteGeneration& Settings = Config->Generation;
+
+	HexSiteGenerator::FInput Input;
+	Input.Settings = Settings;
+	Input.Seed = Seed ? *Seed : Surface->GetManifest().Seed * 7919 + GenerateCount++ * 104729;
+	for (const FHexSiteShare& Share : Settings.Shares)
+	{
+		const int32 Kind = Config->FindKind(Share.Kind.ToString());
+		if (Kind == INDEX_NONE)
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("Sites: the generation names the kind %s, which DA_HexSites does not have"), *Share.Kind.ToString());
+			continue;
+		}
+		HexSiteGenerator::FKind& Each = Input.Kinds.AddDefaulted_GetRef();
+		Each.Kind = Kind;
+		Each.Type = Config->Kinds[Kind].Type;
+		Each.PerThousand[int32(EHexPlanetLayer::Surface)] = Share.PerThousand;
+		Each.PerThousand[int32(EHexPlanetLayer::Underground)] = Share.UndergroundPerThousand;
+		Each.bNearStart = Share.bNearStart;
+	}
+
+	TArray<int32> Ring;
+	const auto Avoid = [&](int32 Layer, int32 Cell, int32 Rings)
+	{
+		if (Input.Avoid[Layer].Num() == NumCells && Grid.GetCells().IsValidIndex(Cell))
+		{
+			HexShroud::FindWithin(Grid, Cell, FMath::Max(Rings, 0), Ring);
+			for (const int32 Each : Ring)
+			{
+				Input.Avoid[Layer][Each] = true;
+			}
+		}
+	};
+	for (int32 Layer = 0; Layer < NumPlanetLayers; ++Layer)
+	{
+		// a layer without its data yet gets no sites; an underground never shown has its levels, and its objects are read from its file
+		const AHexPlanet* Planet = GetPlanet(EHexPlanetLayer(Layer));
+		if (!Planet || !Planet->IsDataLoaded() || Planet->GetGrid().GetCells().Num() != NumCells)
+		{
+			continue;
+		}
+		Input.Walkable[Layer].Init(false, NumCells);
+		Input.Avoid[Layer].Init(false, NumCells);
+		const UHexPlanetObjects* Objects = Planet->IsBuilt() ? Planet->GetObjects() : nullptr;
+		const TBitArray<> Saved = Settings.bAvoidObjects && !Objects ? UHexPlanetObjects::FindSavedCells(*Planet) : TBitArray<>();
+		for (int32 Cell = 0; Cell < NumCells; ++Cell)
+		{
+			Input.Walkable[Layer][Cell] = Heroes->IsOpenGround(EHexPlanetLayer(Layer), Cell);
+			Input.Avoid[Layer][Cell] = Settings.bAvoidObjects && (Objects ? !Objects->GetCell(Cell).IsEmpty() : Saved.IsValidIndex(Cell) && Saved[Cell]);
+		}
+		for (const FHexEntrance& Entrance : Planet->GetEntrances())
+		{
+			Avoid(Layer, Entrance.Cell, Settings.EntranceClearRings);
+		}
+	}
+	// where the heroes start, and for each player where its first one does
+	TMap<int32, const FHexHero*> First;
+	for (const FHexHero& Hero : Heroes->GetHeroes())
+	{
+		Avoid(int32(Hero.StartLayer), Hero.StartCell, Settings.StartClearRings);
+		const FHexHero*& Each = First.FindOrAdd(Hero.Player);
+		if (!Each || Hero.Id < Each->Id)
+		{
+			Each = &Hero;
+		}
+	}
+	First.KeySort([](int32 A, int32 B) { return A < B; });
+	for (const TPair<int32, const FHexHero*>& Each : First)
+	{
+		Input.Starts.Add({int32(Each.Value->StartLayer), Each.Value->StartCell});
+	}
+
+	TArray<HexSiteGenerator::FSite> Found;
+	HexSiteGenerator::FReport Report;
+	HexSiteGenerator::Generate(Grid, Input, Found, &Report);
+
+	TArray<FHexSiteLine> Lines;
+	int32 Counts[NumPlanetLayers][3] = {};
+	for (const HexSiteGenerator::FSite& Each : Found)
+	{
+		FHexSiteLine& Line = Lines.AddDefaulted_GetRef();
+		Line.Id = Lines.Num();
+		Line.Kind = Config->Kinds[Each.Kind].Id.ToString();
+		Line.Layer = GetPlanetLayerName(EHexPlanetLayer(Each.Layer));
+		Line.Cell = Each.Cell;
+		++Counts[Each.Layer][int32(Config->Kinds[Each.Kind].Type)];
+	}
+	// every site anew, as an old one whose line came out the same would keep its owner
+	Sites.Reset();
+	NextId = 1;
+	SetLines(Lines);
+	Restart();
+
+	const int32 Mine = int32(EHexSiteType::Mine);
+	const int32 Pile = int32(EHexSiteType::Pile);
+	const int32 Mill = int32(EHexSiteType::Mill);
+	OutReport = FString::Printf(TEXT("%d sites: on the surface %d mines, %d piles and %d mills on %d cells, underground %d mines and %d piles on %d cells; %d near where %d players start%s"),
+		Sites.Num(), Counts[0][Mine], Counts[0][Pile], Counts[0][Mill], Report.Cells[0], Counts[1][Mine], Counts[1][Pile] + Counts[1][Mill], Report.Cells[1],
+		Report.NearStarts, Input.Starts.Num(), Report.NoRoom > 0 ? *FString::Printf(TEXT("; %d found no room"), Report.NoRoom) : TEXT(""));
+	UE_LOG(LogHexHero, Log, TEXT("Sites: generated with the seed %d in %.1f ms, %s"), Input.Seed, (FPlatformTime::Seconds() - StartTime) * 1000.0, *OutReport);
+	return Sites.Num();
+}
+
+EHexSiteGoal UHexSites::GetGoal(const FHexSite& Site, int32 Player, int32 Week) const
+{
+	if (Site.bTaken || !Config->Kinds.IsValidIndex(Site.Kind))
+	{
+		return EHexSiteGoal::None;
+	}
+	switch (Config->Kinds[Site.Kind].Type)
+	{
+	case EHexSiteType::Mine:
+		return Site.Owner == Player ? EHexSiteGoal::None
+			: Player >= 0 && Player < 32 && (Site.FormerOwners & (1u << Player)) != 0 ? EHexSiteGoal::LostMine : EHexSiteGoal::Mine;
+	case EHexSiteType::Mill:
+		return Site.VisitedWeek == Week ? EHexSiteGoal::None : EHexSiteGoal::Gather;
+	default:
+		return EHexSiteGoal::Gather;
+	}
+}
+
 int32 UHexSites::GetPileAmount(const FHexSite& Site) const
 {
 	const FHexSiteKind& Kind = Config->Kinds[Site.Kind];
@@ -205,7 +363,49 @@ int32 UHexSites::GetSiteResource(const FHexSite& Site) const
 	return Config->Resources.IsEmpty() ? int32(INDEX_NONE) : Stream.RandRange(0, Config->Resources.Num() - 1);
 }
 
-FString UHexSites::Visit(int32 Player, const FString& HeroName, EHexPlanetLayer Layer, int32 Cell, int32 Week)
+double UHexSites::GetWorldTime() const
+{
+	const UWorld* World = Surface ? Surface->GetWorld() : nullptr;
+	return World ? World->GetTimeSeconds() : 0.0;
+}
+
+void UHexSites::OnLayerRebuilt(EHexPlanetLayer Layer)
+{
+	bDirty[int32(Layer)] = true;
+	for (FHexSite& Site : Sites)
+	{
+		if (Site.Layer == Layer)
+		{
+			Site.bSeated = false;
+		}
+	}
+}
+
+void UHexSites::AddPopup(const FHexSite& Site, const FString& Text, const FLinearColor& Color)
+{
+	if (!Site.bSeated || Text.IsEmpty())
+	{
+		return;
+	}
+	FHexSitePopup& Popup = Popups.AddDefaulted_GetRef();
+	Popup.Layer = Site.Layer;
+	const FVector3d Foot(Site.Seat.GetLocation());
+	Popup.Point = Foot + Foot.GetSafeNormal() * double(Config->PopupHeight);
+	Popup.Text = Text;
+	Popup.Color = FMath::Lerp(Color, FLinearColor::White, FMath::Clamp(Config->PopupWhite, 0.0f, 1.0f));
+	Popup.Color.A = 1.0f;
+	// after the lines that already wait over this site
+	Popup.StartTime = FPlatformTime::Seconds();
+	for (int32 Index = 0; Index < Popups.Num() - 1; ++Index)
+	{
+		if (Popups[Index].Layer == Popup.Layer && Popups[Index].Point.Equals(Popup.Point, 1.0))
+		{
+			Popup.StartTime = FMath::Max(Popup.StartTime, Popups[Index].StartTime + double(Config->PopupStagger));
+		}
+	}
+}
+
+FString UHexSites::Visit(int32 Player, const FString& HeroName, EHexPlanetLayer Layer, int32 Cell, int32 Week, bool bShown)
 {
 	FHexSite* Site = Sites.FindByPredicate([Layer, Cell](const FHexSite& Each) { return Each.Layer == Layer && Each.Cell == Cell && !Each.bTaken; });
 	if (!Site || !Amounts.IsValidIndex(Player))
@@ -226,9 +426,41 @@ FString UHexSites::Visit(int32 Player, const FString& HeroName, EHexPlanetLayer 
 		{
 			return FString::Printf(TEXT("The %s is %s's already"), *Kind.DisplayName.ToLower(), *GetPlayerName(Player));
 		}
+	{
+		// who lost it remembers that it was its own
+		const int32 Before = Site->Owner;
+		if (Before >= 0 && Before < 32)
+		{
+			Site->FormerOwners |= 1u << Before;
+		}
+		if (Player < 32)
+		{
+			Site->FormerOwners &= ~(1u << Player);
+		}
 		Site->Owner = Player;
+		// it flashes
+		Site->EventTime = GetWorldTime();
 		bDirty[int32(Layer)] = true;
-		return FString::Printf(TEXT("%s takes the %s for %s: %d %s a day"), *HeroName, *Kind.DisplayName.ToLower(), *GetPlayerName(Player), Kind.PerDay, *ResourceName);
+		if (bShown)
+		{
+			AddPopup(*Site, FString::Printf(TEXT("%s: %s"), *Kind.DisplayName, *GetPlayerName(Player)), GetPlayerColor(Player));
+		}
+		// taken, it gives what it gives in a day at once, if nobody took that this week, as the developer asked on 2026-11-11
+		FString Now;
+		if (Site->VisitedWeek != Week && Kind.PerDay > 0)
+		{
+			Site->VisitedWeek = Week;
+			Amounts[Player][Resource] += Kind.PerDay;
+			Now = FString::Printf(TEXT(", and %d now"), Kind.PerDay);
+			if (bShown)
+			{
+				AddPopup(*Site, FString::Printf(TEXT("+%d %s"), Kind.PerDay, *Config->Resources[Resource].DisplayName), Config->Resources[Resource].Color);
+			}
+		}
+		return Amounts.IsValidIndex(Before)
+			? FString::Printf(TEXT("%s takes the %s of %s for %s: %d %s a day%s"), *HeroName, *Kind.DisplayName.ToLower(), *GetPlayerName(Before), *GetPlayerName(Player), Kind.PerDay, *ResourceName, *Now)
+			: FString::Printf(TEXT("%s takes the %s for %s: %d %s a day%s"), *HeroName, *Kind.DisplayName.ToLower(), *GetPlayerName(Player), Kind.PerDay, *ResourceName, *Now);
+	}
 	case EHexSiteType::Mill:
 	{
 		if (Site->VisitedWeek == Week)
@@ -238,14 +470,25 @@ FString UHexSites::Visit(int32 Player, const FString& HeroName, EHexPlanetLayer 
 		const int32 Amount = Config->GetMineIncome(Resource) * Config->MillDays;
 		Site->VisitedWeek = Week;
 		Amounts[Player][Resource] += Amount;
+		if (bShown)
+		{
+			AddPopup(*Site, FString::Printf(TEXT("+%d %s"), Amount, *Config->Resources[Resource].DisplayName), Config->Resources[Resource].Color);
+		}
 		return FString::Printf(TEXT("%s gets %d %s at the %s"), *HeroName, Amount, *ResourceName, *Kind.DisplayName.ToLower());
 	}
 	default:
 	{
 		const int32 Amount = GetPileAmount(*Site);
 		Site->bTaken = true;
+		// it is gone for the game at once, and dissolves for the eye
+		Site->EventTime = GetWorldTime();
+		Site->bFading = Site->bSeated && Config->PickupFadeTime > 0.0f;
 		Amounts[Player][Resource] += Amount;
 		bDirty[int32(Layer)] = true;
+		if (bShown)
+		{
+			AddPopup(*Site, FString::Printf(TEXT("+%d %s"), Amount, *Config->Resources[Resource].DisplayName), Config->Resources[Resource].Color);
+		}
 		// the cell is free again
 		UHexHeroes::NoteMapChanged();
 		return FString::Printf(TEXT("%s finds %d %s"), *HeroName, Amount, *ResourceName);
@@ -274,6 +517,9 @@ void UHexSites::Restart()
 		Site.Owner = INDEX_NONE;
 		Site.bTaken = false;
 		Site.VisitedWeek = 0;
+		Site.FormerOwners = 0;
+		Site.EventTime = -1000.0;
+		Site.bFading = false;
 	}
 	for (TArray<int32>& Each : Amounts)
 	{
@@ -317,6 +563,91 @@ FString UHexSites::GetCellText(EHexPlanetLayer Layer, int32 Cell) const
 		: FString::Printf(TEXT("Site: %s, %d to %d %s"), *Kind.DisplayName, Kind.AmountMin, Kind.AmountMax, *ResourceName);
 }
 
+FTransform UHexSites::FindSeat(const AHexPlanet& Planet, int32 Cell, double Angle, float MaxTilt, float Scale) const
+{
+	const TArray<FHexSphereCell>& Cells = Planet.GetGrid().GetCells();
+	const FVector3d Up = Cells[Cell].Center;
+	FVector3d East = FVector3d::CrossProduct(FVector3d::UnitZ(), Up);
+	if (!East.Normalize())
+	{
+		East = FVector3d::UnitX();
+	}
+	const FVector3d North = FVector3d::CrossProduct(Up, East);
+
+	// the ground in the middle of the cell and at six points around it, a share of the way to its sides out
+	double HalfStep = 0.0;
+	for (const int32 Neighbor : Cells[Cell].Neighbors)
+	{
+		HalfStep += 0.5 * FMath::Acos(FMath::Clamp(FVector3d::DotProduct(Up, Cells[Neighbor].Center), -1.0, 1.0)) / Cells[Cell].Neighbors.Num();
+	}
+	const double Out = FMath::Tan(HalfStep * FMath::Clamp(double(Config->SeatReach), 0.05, 0.9));
+	// the triangles of the cell once for all the points, as AHexPlanet::FindGroundRadius would get them for each
+	TArray<FVector3f> Triangles;
+	Planet.GetCellTriangles(Cell, Triangles);
+	const double Top = Planet.GetCellTopRadius(Cell);
+	const auto FindGround = [&Triangles, Top](const FVector3d& Direction)
+	{
+		for (int32 Corner = 0; Corner + 2 < Triangles.Num(); Corner += 3)
+		{
+			const FVector3d A(Triangles[Corner]);
+			const FVector3d B(Triangles[Corner + 1]);
+			const FVector3d C(Triangles[Corner + 2]);
+			const FVector3d Normal = FVector3d::CrossProduct(B - A, C - A);
+			const double Along = FVector3d::DotProduct(Normal, Direction);
+			if (FMath::Abs(Along) < 1.0e-9)
+			{
+				continue;
+			}
+			const double Distance = FVector3d::DotProduct(Normal, A) / Along;
+			const FVector3d Point = Direction * Distance;
+			const auto Inside = [&Normal, &Point](const FVector3d& From, const FVector3d& To) { return FVector3d::DotProduct(FVector3d::CrossProduct(To - From, Point - From), Normal) >= -1.0e-6; };
+			if (Distance > 0.0 && Inside(A, B) && Inside(B, C) && Inside(C, A))
+			{
+				return Distance;
+			}
+		}
+		return Top;
+	};
+	const int32 NumAround = 6;
+	FVector3d Points[NumAround + 1];
+	Points[0] = Up * FindGround(Up);
+	for (int32 Index = 0; Index < NumAround; ++Index)
+	{
+		const double Turn = 2.0 * UE_DOUBLE_PI * Index / NumAround;
+		const FVector3d Direction = (Up + (East * FMath::Cos(Turn) + North * FMath::Sin(Turn)) * Out).GetSafeNormal();
+		Points[Index + 1] = Direction * FindGround(Direction);
+	}
+	// it leans as that ground does, but no more than its kind may
+	FVector3d Normal = FVector3d::ZeroVector;
+	for (int32 Index = 0; Index < NumAround; ++Index)
+	{
+		Normal += FVector3d::CrossProduct(Points[1 + Index] - Points[0], Points[1 + (Index + 1) % NumAround] - Points[0]);
+	}
+	if (!Normal.Normalize() || FVector3d::DotProduct(Normal, Up) <= 0.0)
+	{
+		Normal = Up;
+	}
+	const double Tilt = FMath::Acos(FMath::Clamp(FVector3d::DotProduct(Normal, Up), -1.0, 1.0));
+	const double Most = FMath::DegreesToRadians(double(FMath::Max(MaxTilt, 0.0f)));
+	if (Tilt > Most && Tilt > UE_DOUBLE_SMALL_NUMBER)
+	{
+		Normal = (Up * FMath::Sin(Tilt - Most) + Normal * FMath::Sin(Most)).GetSafeNormal();
+	}
+	// and stands between the lowest of it and its mean, so nothing of it hangs high over the ground; its mesh goes on under its foot
+	double Low = TNumericLimits<double>::Max();
+	double Mean = 0.0;
+	for (const FVector3d& Point : Points)
+	{
+		const double Height = FVector3d::DotProduct(Point, Normal);
+		Low = FMath::Min(Low, Height);
+		Mean += Height / (NumAround + 1);
+	}
+	const double Height = Low + (Mean - Low) * FMath::Clamp(double(Config->SeatLowShare), 0.0, 1.0) - double(Config->SiteSink) * Scale;
+	const FVector3d Forward = -North * FMath::Cos(Angle) + East * FMath::Sin(Angle);
+	return FTransform(FRotationMatrix::MakeFromZX(FVector(Normal), FVector(Forward)).ToQuat(), FVector(Up * (Height / FMath::Max(FVector3d::DotProduct(Up, Normal), 0.1))),
+		FVector(Scale));
+}
+
 void UHexSites::Rebuild(EHexPlanetLayer Layer)
 {
 	AHexPlanet* Planet = GetPlanet(Layer);
@@ -328,12 +659,21 @@ void UHexSites::Rebuild(EHexPlanetLayer Layer)
 	{
 		if (UMaterialInterface* Parent = Config->Material.LoadSynchronous())
 		{
+			// SiteGlow, PileGlow and the values of the sparkles and of what happens to a site
 			Material = UMaterialInstanceDynamic::Create(Parent, this);
-			Material->SetScalarParameterValue(TEXT("SiteGlow"), Config->SiteGlow);
+			HexMaterialConfig::Apply(Material, Config);
+		}
+		if (UMaterialInterface* Parent = Config->FadeMaterial.LoadSynchronous())
+		{
+			FadeMaterial = UMaterialInstanceDynamic::Create(Parent, this);
+			HexMaterialConfig::Apply(FadeMaterial, Config);
 		}
 	}
-	const auto GetComponent = [&](TWeakObjectPtr<UInstancedStaticMeshComponent>& Slot, const TSoftObjectPtr<UStaticMesh>& MeshAsset) -> UInstancedStaticMeshComponent*
+	TMap<FString, TWeakObjectPtr<UInstancedStaticMeshComponent>>& Components = Instances[int32(Layer)];
+	const auto GetComponent = [&](const TSoftObjectPtr<UStaticMesh>& MeshAsset, bool bFade) -> UInstancedStaticMeshComponent*
 	{
+		UMaterialInstanceDynamic* Shown = bFade ? FadeMaterial : Material;
+		TWeakObjectPtr<UInstancedStaticMeshComponent>& Slot = Components.FindOrAdd(MeshAsset.ToSoftObjectPath().ToString() + (bFade ? TEXT("#fade") : TEXT("")));
 		if (!Slot.IsValid())
 		{
 			UStaticMesh* Mesh = MeshAsset.LoadSynchronous();
@@ -346,60 +686,62 @@ void UHexSites::Rebuild(EHexPlanetLayer Layer)
 			Component->SetMobility(EComponentMobility::Movable);
 			Component->SetStaticMesh(Mesh);
 			Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-			// the colors of the resource and of the owner
-			Component->SetNumCustomDataFloats(6);
+			// the colors of the resource and of the owner, and when it was taken
+			Component->SetNumCustomDataFloats(7);
 			Component->SetCullDistances(0, int32(Config->CullDistance));
-			if (Material)
+			if (Shown)
 			{
-				Component->SetMaterial(0, Material);
+				Component->SetMaterial(0, Shown);
 			}
 			Component->RegisterComponent();
 			Slot = Component;
 		}
 		return Slot.Get();
 	};
+	// by EHexSiteType: a kind without a mesh of its own takes that of its type
 	const TSoftObjectPtr<UStaticMesh> Meshes[3] = {Config->MineMesh, Config->PileMesh, Config->MillMesh};
 	const float Scales[3] = {Config->MineScale, Config->PileScale, Config->MillScale};
-	UInstancedStaticMeshComponent* Components[3];
-	for (int32 Type = 0; Type < 3; ++Type)
+	for (const TPair<FString, TWeakObjectPtr<UInstancedStaticMeshComponent>>& Each : Components)
 	{
-		Components[Type] = GetComponent(Instances[int32(Layer)][Type], Meshes[Type]);
-		if (Components[Type] && Components[Type]->GetInstanceCount() > 0)
+		if (Each.Value.IsValid() && Each.Value->GetInstanceCount() > 0)
 		{
-			Components[Type]->ClearInstances();
+			Each.Value->ClearInstances();
 		}
 	}
 
 	const TArray<FHexSphereCell>& Cells = Planet->GetGrid().GetCells();
-	for (const FHexSite& Site : Sites)
+	for (FHexSite& Site : Sites)
 	{
-		if (Site.Layer != Layer || Site.bTaken || !Cells.IsValidIndex(Site.Cell))
+		// a pile that was taken is drawn while it dissolves
+		const bool bFade = Site.bTaken && Site.bFading && FadeMaterial;
+		if (Site.Layer != Layer || (Site.bTaken && !bFade) || !Cells.IsValidIndex(Site.Cell))
 		{
 			continue;
 		}
 		const FHexSiteKind& Kind = Config->Kinds[Site.Kind];
-		UInstancedStaticMeshComponent* Component = Components[int32(Kind.Type)];
+		UInstancedStaticMeshComponent* Component = Kind.Mesh.IsNull() ? nullptr : GetComponent(Kind.Mesh, bFade);
+		if (!Component)
+		{
+			Component = GetComponent(Meshes[int32(Kind.Type)], bFade);
+		}
 		if (!Component)
 		{
 			continue;
 		}
-		// on the ground in the middle of its cell, a mine or a mill facing the south and a pile turned by its Id
-		const FVector3d Up = Cells[Site.Cell].Center;
-		FVector3d East = FVector3d::CrossProduct(FVector3d::UnitZ(), Up);
-		if (!East.Normalize())
+		// on the ground of its cell, a mine or a mill facing the south and a pile turned by its Id; found once until the ground changes,
+		// as taking a pile or a mine places all of them again
+		if (!Site.bSeated)
 		{
-			East = FVector3d::UnitX();
+			const bool bPile = Kind.Type == EHexSiteType::Pile;
+			const double Angle = bPile ? FMath::DegreesToRadians(double((Site.Id * 73) % 360)) : 0.0;
+			Site.Seat = FindSeat(*Planet, Site.Cell, Angle, bPile ? Config->PileMaxTilt : Config->BuildingMaxTilt, Scales[int32(Kind.Type)]);
+			Site.bSeated = true;
 		}
-		const FVector3d North = FVector3d::CrossProduct(Up, East);
-		const double Angle = Kind.Type != EHexSiteType::Pile ? 0.0 : FMath::DegreesToRadians(double((Site.Id * 73) % 360));
-		const FVector3d Forward = -North * FMath::Cos(Angle) + East * FMath::Sin(Angle);
-		const FTransform Transform(FRotationMatrix::MakeFromZX(FVector(Up), FVector(Forward)).ToQuat(), FVector(Up * Planet->FindGroundRadius(Site.Cell, Up)),
-			FVector(Scales[int32(Kind.Type)]));
-		const int32 Instance = Component->AddInstance(Transform, true);
+		const int32 Instance = Component->AddInstance(Site.Seat, true);
 		const int32 Resource = GetSiteResource(Site);
 		const FLinearColor ResourceColor = Config->Resources.IsValidIndex(Resource) ? Config->Resources[Resource].Color : FLinearColor::White;
 		const FLinearColor OwnerColor = GetPlayerColor(Site.Owner);
-		const float Data[6] = {ResourceColor.R, ResourceColor.G, ResourceColor.B, OwnerColor.R, OwnerColor.G, OwnerColor.B};
+		const float Data[7] = {ResourceColor.R, ResourceColor.G, ResourceColor.B, OwnerColor.R, OwnerColor.G, OwnerColor.B, float(Site.EventTime)};
 		Component->SetCustomData(Instance, MakeArrayView(Data), true);
 	}
 }
@@ -410,6 +752,18 @@ void UHexSites::Update()
 	{
 		return;
 	}
+	// a pile that has dissolved is drawn no more, and a line that has floated up is gone
+	const double WorldTime = GetWorldTime();
+	for (FHexSite& Site : Sites)
+	{
+		if (Site.bFading && WorldTime - Site.EventTime >= double(Config->PickupFadeTime))
+		{
+			Site.bFading = false;
+			bDirty[int32(Site.Layer)] = true;
+		}
+	}
+	const double RealTime = FPlatformTime::Seconds();
+	Popups.RemoveAll([this, RealTime](const FHexSitePopup& Each) { return RealTime - Each.StartTime > double(Config->PopupTime); });
 	for (int32 Layer = 0; Layer < NumPlanetLayers; ++Layer)
 	{
 		const AHexPlanet* Planet = GetPlanet(EHexPlanetLayer(Layer));
@@ -417,7 +771,7 @@ void UHexSites::Update()
 		if (bBuilt != bLayerBuilt[Layer])
 		{
 			bLayerBuilt[Layer] = bBuilt;
-			bDirty[Layer] = true;
+			OnLayerRebuilt(EHexPlanetLayer(Layer));
 		}
 		if (bDirty[Layer] && bBuilt)
 		{
@@ -438,7 +792,7 @@ namespace
 		UHexSites* Sites = Heroes ? Heroes->GetSites() : nullptr;
 		if (!Sites || !Sites->GetConfig() || Args.IsEmpty())
 		{
-			UE_LOG(LogHexHero, Warning, TEXT("hex.Site <list|add <Cell> <Kind>|remove <Cell>>, on a built planet; a cell is its number or how many steps it lies from the cell of the hero chosen, as near:<Steps>[:<Side>]"));
+			UE_LOG(LogHexHero, Warning, TEXT("hex.Site <list|add <Cell> <Kind>|remove <Cell>|generate [Seed]|clear>, on a built planet; a cell is its number or how many steps it lies from the cell of the hero chosen, as near:<Steps>[:<Side>]"));
 			return;
 		}
 		const UHexSiteConfig* Config = Sites->GetConfig();
@@ -492,6 +846,17 @@ namespace
 				UE_LOG(LogHexHero, Warning, TEXT("hex.Site: no %s on cell %s: %s"), *Args[2], *Args[1], *Problem);
 			}
 		}
+		else if (Args[0].Equals(TEXT("generate"), ESearchCase::IgnoreCase))
+		{
+			// as Generate of the Mines tab, but no step of Undo
+			FString Report;
+			const int32 Seed = Args.Num() >= 2 ? FCString::Atoi(*Args[1]) : 0;
+			Sites->Generate(Report, Args.Num() >= 2 ? &Seed : nullptr);
+		}
+		else if (Args[0].Equals(TEXT("clear"), ESearchCase::IgnoreCase))
+		{
+			UE_LOG(LogHexHero, Log, TEXT("Sites: %s"), Sites->Clear() ? TEXT("every site is taken off the planet") : TEXT("there is no site to take off"));
+		}
 		else if (Args[0].Equals(TEXT("remove"), ESearchCase::IgnoreCase) && Args.Num() >= 2)
 		{
 			if (!Sites->RemoveSiteAt(Layer, ParseCell(Args[1])))
@@ -506,6 +871,6 @@ namespace
 	}
 
 	FAutoConsoleCommandWithWorldAndArgs SiteCommand(TEXT("hex.Site"),
-		TEXT("The mines and piles of the planet: list (with what each player has and gets a day), add <Cell> <Kind> on the layer shown, remove <Cell>. A cell is its number, or near:<Steps>[:<Side>] for one that many steps from the hero chosen; a kind is its Id in DA_HexSites, such as GoldMine, Sawmill or OrePile."),
+		TEXT("The mines and piles of the planet: list (with what each player has and gets a day), add <Cell> <Kind> on the layer shown, remove <Cell>, generate [Seed] (scatters them over both layers in place of all there are, by Generation of DA_HexSites), clear. A cell is its number, or near:<Steps>[:<Side>] for one that many steps from the hero chosen; a kind is its Id in DA_HexSites, such as GoldMine, Sawmill or OrePile."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&RunSiteCommand));
 }

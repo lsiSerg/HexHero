@@ -70,10 +70,43 @@ TArray<FHexSiteKind> MakeDefaultSiteKinds()
 	return Kinds;
 }
 
+TArray<FHexSiteShare> MakeDefaultSiteShares()
+{
+	// to a thousand cells a hero can stand on: about four mines, ten piles and a mill on the surface; the underground has no wood and no
+	// mills but more of the rare resources, so going down pays
+	const auto Make = [](const TCHAR* Kind, float PerThousand, float Underground, bool bNearStart = false)
+	{
+		FHexSiteShare Share;
+		Share.Kind = Kind;
+		Share.PerThousand = PerThousand;
+		Share.UndergroundPerThousand = Underground;
+		Share.bNearStart = bNearStart;
+		return Share;
+	};
+	return {
+		Make(TEXT("GoldMine"), 0.5f, 1.0f),
+		Make(TEXT("Sawmill"), 1.0f, 0.0f, true),
+		Make(TEXT("OreMine"), 1.0f, 1.0f, true),
+		Make(TEXT("MercuryLab"), 0.4f, 0.8f),
+		Make(TEXT("SulfurMine"), 0.4f, 0.8f),
+		Make(TEXT("CrystalCave"), 0.4f, 0.8f),
+		Make(TEXT("GemMine"), 0.4f, 0.8f),
+		Make(TEXT("GoldPile"), 2.0f, 2.5f),
+		Make(TEXT("WoodPile"), 2.0f, 0.0f),
+		Make(TEXT("OrePile"), 2.0f, 2.5f),
+		Make(TEXT("MercuryPile"), 1.0f, 2.0f),
+		Make(TEXT("SulfurPile"), 1.0f, 2.0f),
+		Make(TEXT("CrystalPile"), 1.0f, 2.0f),
+		Make(TEXT("GemPile"), 1.0f, 2.0f),
+		Make(TEXT("Mill"), 0.6f, 0.0f),
+	};
+}
+
 UHexSiteConfig::UHexSiteConfig()
 {
 	Resources = MakeDefaultResources();
 	Kinds = MakeDefaultSiteKinds();
+	Generation.Shares = MakeDefaultSiteShares();
 }
 
 void UHexSiteConfig::PostLoad()
@@ -87,6 +120,10 @@ void UHexSiteConfig::PostLoad()
 	if (Kinds.IsEmpty())
 	{
 		Kinds = MakeDefaultSiteKinds();
+	}
+	if (Generation.Shares.IsEmpty())
+	{
+		Generation.Shares = MakeDefaultSiteShares();
 	}
 }
 

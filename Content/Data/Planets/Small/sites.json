@@ -1,0 +1,33 @@
+{
+	"version": 1,
+	"sites": [
+		{"id": 1, "kind": "Sawmill", "layer": "Surface", "cell": 2090},
+		{"id": 2, "kind": "OreMine", "layer": "Surface", "cell": 3870},
+		{"id": 3, "kind": "OrePile", "layer": "Surface", "cell": 3897},
+		{"id": 4, "kind": "GoldPile", "layer": "Surface", "cell": 3928},
+		{"id": 5, "kind": "WoodPile", "layer": "Surface", "cell": 3934},
+		{"id": 6, "kind": "Sawmill", "layer": "Surface", "cell": 2032},
+		{"id": 7, "kind": "OreMine", "layer": "Surface", "cell": 1063},
+		{"id": 8, "kind": "CrystalPile", "layer": "Surface", "cell": 3862},
+		{"id": 9, "kind": "MercuryPile", "layer": "Surface", "cell": 2062},
+		{"id": 10, "kind": "MercuryPile", "layer": "Surface", "cell": 2009},
+		{"id": 11, "kind": "GemMine", "layer": "Surface", "cell": 1649},
+		{"id": 12, "kind": "GoldMine", "layer": "Surface", "cell": 1432},
+		{"id": 13, "kind": "CrystalCave", "layer": "Surface", "cell": 3386},
+		{"id": 14, "kind": "Mill", "layer": "Surface", "cell": 1359},
+		{"id": 15, "kind": "OrePile", "layer": "Surface", "cell": 296},
+		{"id": 16, "kind": "GemPile", "layer": "Surface", "cell": 1108},
+		{"id": 17, "kind": "GemPile", "layer": "Surface", "cell": 774},
+		{"id": 18, "kind": "WoodPile", "layer": "Surface", "cell": 2998},
+		{"id": 19, "kind": "OrePile", "layer": "Surface", "cell": 1953},
+		{"id": 20, "kind": "GoldPile", "layer": "Surface", "cell": 1703},
+		{"id": 21, "kind": "SulfurPile", "layer": "Surface", "cell": 2260},
+		{"id": 22, "kind": "WoodPile", "layer": "Surface", "cell": 2664},
+		{"id": 23, "kind": "GoldPile", "layer": "Surface", "cell": 871},
+		{"id": 24, "kind": "CrystalPile", "layer": "Surface", "cell": 3689},
+		{"id": 25, "kind": "GemMine", "layer": "Underground", "cell": 1600},
+		{"id": 26, "kind": "OrePile", "layer": "Underground", "cell": 3078},
+		{"id": 27, "kind": "SulfurPile", "layer": "Underground", "cell": 3115},
+		{"id": 28, "kind": "GemPile", "layer": "Underground", "cell": 3055}
+	]
+}

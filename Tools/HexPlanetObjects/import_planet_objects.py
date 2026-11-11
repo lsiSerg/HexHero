@@ -73,7 +73,7 @@ SETS = [
      'sink': 1.5, 'shadow': True, 'cull': 9000.0,
      'variants': [('G', ['Oak_0'], 0.0, 1.0, 1.0, 0.006), ('N', ['Spruce_0'], 0.85, 1.3, 1.0, 0.006), ('T', ['Spruce_1'], 0.0, 1.2, 1.0, 0.006),
                   ('M', ['Willow_0'], 0.0, 1.0, 1.0, 0.006), ('PD', ['Acacia_0'], 0.0, 1.0, 1.0, 0.006)]},
-    {'id': 'Boulder', 'name': 'Boulder', 'order': 80, 'color': (0.4, 0.38, 0.35), 'layer': 'decor', 'blocks': True, 'levels': [0, 1, 2],
+    {'id': 'Boulder', 'name': 'Boulder', 'order': 80, 'color': (0.4, 0.38, 0.35), 'layer': 'decor', 'blocks': False, 'levels': [0, 1, 2],
      'counts': [1], 'scale': (2.4, 3.4), 'giant': (0.0, 1.0), 'spacing': 10.0, 'reach': 0.4, 'min_up': 0.3, 'align': 0.6, 'tilt': 15.0,
      'sink': 2.5, 'shadow': True, 'cull': 7000.0,
      'variants': [('', ['Rock_0', 'Rock_1', 'Rock_2'], 0.0, 1.0, 1.0, 0.008)]},
@@ -98,6 +98,8 @@ MIGRATIONS = [
     ('Flowers', 'far_color', (0.035, 0.07, 0.03), (0.1, 0.14, 0.045)),
     # a few rocks on open ground read as ground one can walk over, so they block no hero (the developer, 2026-11-11)
     ('Rocks', 'blocks_movement', True, False),
+    # nor does a lone boulder, bones or other small things lying about: a hero walks around them on their cell (the developer, 2026-11-11)
+    ('Boulder', 'blocks_movement', True, False),
 ]
 # the shares the variants of sets that are there generate, as (set, biomes of the variant, old share, new share)
 SHARE_MIGRATIONS = [('Flowers', 'G', 0.08, 0.14), ('Flowers', 'P', 0.06, 0.08), ('Flowers', 'T', 0.05, 0.06)]

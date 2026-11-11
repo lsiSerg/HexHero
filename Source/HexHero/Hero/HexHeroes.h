@@ -68,6 +68,9 @@ struct FHexHero
 	float AiWait = 0.0f;
 	bool bAiDone = false;
 
+	/** The site a hero of such a player goes for, so another hero of its player takes another, 0 for none */
+	int32 AiSiteId = 0;
+
 	/** Whether the person who watches saw it when the game last looked, on the turn of its player: where that changes the camera stays a
 	 *  moment (UHexHeroes::NoteSeen) */
 	bool bWasSeen = true;
@@ -182,8 +185,8 @@ public:
 	/** Gives a hero points of movement, or takes them with a negative amount, for trying the game (hex.Hero points) */
 	bool AddMovePoints(int32 Id, float Amount);
 
-	/** Whether the game moves the heroes of a player by itself, as the Heroes tab of the palette sets and heroes.json keeps: such a hero walks
-	 *  to open the map (MoveAi), and a person can choose it to watch but not send it */
+	/** Whether the game moves the heroes of a player by itself, as the Heroes tab of the palette sets and heroes.json keeps: such a hero gathers
+	 *  what its player has seen, takes mines and walks to open the map (MoveAi) */
 	bool IsPlayerAi(int32 Player) const { return AiPlayers.Contains(Player); }
 	void SetPlayerAi(int32 Player, bool bAi);
 
@@ -206,6 +209,12 @@ public:
 
 	/** Returns the day of the game, from 1 */
 	int32 GetDay() const { return Day; }
+
+	/** Returns the week of the game, from 1 */
+	int32 GetWeek() const;
+
+	/** Returns true if a hero could stand on a cell of a layer were no hero and no site there: the ground alone and what blocks on it */
+	bool IsOpenGround(EHexPlanetLayer Layer, int32 Cell) const;
 
 	/** Returns the points of movement a hero has each day */
 	float GetMaxMovePoints(const FHexHero& Hero) const;
@@ -506,15 +515,28 @@ private:
 	/** Returns what the visit of the site of a cell costs a hero that stands on a cell beside it, as a step onto that cell would */
 	float GetVisitCost(const AHexPlanet& Planet, int32 From, int32 SiteCell) const;
 
+	/** Returns what the cheapest way to the site of a cell costs with its visit, from the ways found for a hero, and the node of the cell
+	 *  beside it that way ends on, which may be where the hero stands; for a pile the way onto its cell. A negative value without a way */
+	float GetSiteWayCost(const HexHeroPath::FField& Ways, EHexPlanetLayer Layer, int32 SiteCell, int32* OutNode = nullptr) const;
+
+	/** Sends a hero the game moves to the best of the sites its player has seen and wants (UHexSites::GetGoal) within the reach of its kind.
+	 *  Returns true if it went for one or waits for tomorrow to go on, bOutSent whether it set out */
+	bool MoveAiToSite(int32 Id, const HexHeroPath::FField& Ways, bool& bOutSent);
+
 	/** A hero that stands beside the site it was sent to visits it, paying as for a step. Returns false and why not */
 	bool VisitSite(FHexHero& Hero, FString& OutMessage);
+
+	/** A hero takes the pile that lies on the cell its way ended on, if any; one it only runs over on its way further stays, as the
+	 *  developer decided on 2026-11-11 */
+	void TakePile(FHexHero& Hero);
 
 	/** Returns true if a cell of a planet holds an entrance or exit that can be used */
 	static bool IsUsableEntrance(const AHexPlanet& Planet, int32 Cell);
 
 	/** Finds the cheapest ways of a hero from where it stands, within PathMaxDays of movement */
 	/** bThroughUnknown lets the ways cross ground the player of the hero has not explored, each such cell at UnknownCost whatever lies there,
-	 *  as a person may send a hero there; without it they keep to what is explored, as the heroes the game moves do */
+	 *  as a person may send a hero there; without it they keep to what is explored, also on the other side of an entrance or exit they go
+	 *  through, as the heroes the game moves do */
 	void FindFieldFor(const FHexHero& Hero, HexHeroPath::FField& OutField, bool bThroughUnknown) const;
 
 	/** Whether a way of a hero, or the cell it ends at, lies on ground its player has not explored */
@@ -619,8 +641,9 @@ private:
 	bool IsCellSeen(EHexPlanetLayer Layer, int32 Cell) const;
 	bool IsStepSeen(const FHexHero& Hero) const;
 
-	/** Sends a hero the game moves to the nearest cell from which it sees ground its player has not explored, else through an entrance whose
-	 *  other side it has not seen. Returns false when it found nowhere to go */
+	/** Sends a hero the game moves to a site its player wants (MoveAiToSite), else to the nearest cell of either layer from which it sees
+	 *  ground its player has not explored, else through an entrance whose other side it has not seen. Returns false when it found nowhere to
+	 *  go, or waits for tomorrow */
 	bool MoveAi(int32 Id);
 
 	/** Shows the way of the hero chosen to the cell it is pointed to, or the rest of the way it walks: a line through a dot on each cell and

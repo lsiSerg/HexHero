@@ -1,9 +1,9 @@
-"""Imports the meshes of the mines and piles that generate_planet_sites.py wrote (UHexSites) and creates DA_HexSites when it is missing.
+"""Imports the meshes of the mines, piles and mills that generate_planet_sites.py wrote (UHexSites) and creates DA_HexSites when it is missing.
 
 Run with UnrealEditor-Cmd.exe <uproject> -run=pythonscript -script=<this file> -unattended -nullrhi, after create_planet_assets.py (or its
 argument heroes) made M_HexPlanetSite. The meshes go to /Game/HexPlanet/Sites, replaced each run, with that material. DA_HexSites
 (UHexSiteConfig) holds the resources and the kinds of sites and belongs to whoever tunes it, so it is only created, with the defaults of its
-class, and never changed here.
+class; of what it holds only a kind that names no mesh is changed here: it gets the mesh named after it, as the piles are, SM_Planet<Id>.
 """
 
 import json
@@ -15,6 +15,7 @@ SOURCE_FOLDER = os.path.join(unreal.Paths.convert_relative_path_to_full(unreal.P
 FOLDER = '/Game/HexPlanet/Sites'
 CONFIG = 'DA_HexSites'
 MATERIAL = '/Game/HexPlanet/M_HexPlanetSite'
+OLD_PILE_SCALE = 1.3
 
 
 def main():
@@ -71,6 +72,27 @@ def main():
         unreal.AssetToolsHelpers.get_asset_tools().create_asset(CONFIG, FOLDER, unreal.HexSiteConfig, unreal.DataAssetFactory())
         assets.save_asset(config_path, only_if_is_dirty=False)
         unreal.log('SITES %s created with the defaults of its class' % CONFIG)
+
+    # a kind without a mesh takes the one named after it
+    config = unreal.load_asset(config_path)
+    kinds = list(config.get_editor_property('kinds'))
+    given = []
+    for kind in kinds:
+        path = '%s/SM_Planet%s' % (FOLDER, kind.get_editor_property('id'))
+        mesh = kind.get_editor_property('mesh')
+        if not mesh and assets.does_asset_exist(path):
+            kind.set_editor_property('mesh', unreal.load_asset(path))
+            given.append(str(kind.get_editor_property('id')))
+    if given:
+        config.set_editor_property('kinds', kinds)
+        unreal.log('SITES meshes of their own given to the kinds %s' % ', '.join(given))
+    # the piles of many things are drawn larger than the heap of chunks before them was, unless their scale was tuned by hand
+    grown = abs(config.get_editor_property('pile_scale') - OLD_PILE_SCALE) < 0.001
+    if grown:
+        config.set_editor_property('pile_scale', unreal.get_default_object(unreal.HexSiteConfig).get_editor_property('pile_scale'))
+        unreal.log('SITES pile_scale %.2f' % config.get_editor_property('pile_scale'))
+    if given or grown:
+        assets.save_asset(config_path, only_if_is_dirty=False)
     unreal.log('SITES DONE')
 
 

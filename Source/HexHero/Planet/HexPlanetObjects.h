@@ -177,6 +177,9 @@ public:
 	 *  the file, which the first show of the layer writes */
 	static TBitArray<> FindSavedBlockers(const AHexPlanet& InPlanet);
 
+	/** Returns the cells of such a planet that hold any cover, decor or object placed by hand, read from its objects.json alike */
+	static TBitArray<> FindSavedCells(const AHexPlanet& InPlanet);
+
 	/** Returns the sets of a layer (FindLayerSets) and after them the covers and decor of the other layer, as the developer asked on 2026-11-10,
 	 *  so a dead tree may stand underground or bones on the surface, placed by hand alone, at most 254; OutOwn is how many are of the layer */
 	static TArray<TObjectPtr<UHexPlanetObjectSet>> FindPlaceableSets(EHexPlanetLayer Layer, int32* OutOwn = nullptr);

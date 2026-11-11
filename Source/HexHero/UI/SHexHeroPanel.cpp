@@ -317,6 +317,33 @@ int32 SHexHeroPanel::OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGe
 			FSlateDrawElement::MakeText(OutDrawElements, LayerId + 1, AllottedGeometry.ToPaintGeometry(TextSize, FSlateLayoutTransform(Position + Margin)), Text, Font,
 				ESlateDrawEffect::None, Config->PathLabelColor);
 		}
+
+		// what a hero gained at a site floats up over it and fades
+		const UHexSites* Sites = Heroes->GetSites();
+		const UHexSiteConfig* SiteConfig = Sites ? Sites->GetConfig() : nullptr;
+		if (SiteConfig)
+		{
+			const FSlateFontInfo PopupFont = FCoreStyle::GetDefaultFontStyle("Bold", SiteConfig->PopupSize);
+			const double Now = FPlatformTime::Seconds();
+			for (const FHexSitePopup& Popup : Sites->GetPopups())
+			{
+				const float Age = float((Now - Popup.StartTime) / FMath::Max(double(SiteConfig->PopupTime), 0.1));
+				FVector2D Screen;
+				if (Popup.Layer != Heroes->GetPathLayer() || Age < 0.0f || Age > 1.0f || !OnProject(FVector(Popup.Point), Screen))
+				{
+					continue;
+				}
+				// it rises fast at first and slows, and fades over its last third
+				const float Risen = 1.0f - FMath::Square(1.0f - Age);
+				const float Alpha = FMath::Clamp((1.0f - Age) * 3.0f, 0.0f, 1.0f);
+				const FVector2D TextSize = Measure->Measure(Popup.Text, PopupFont);
+				const FVector2D Position = Screen / Scale - FVector2D(TextSize.X * 0.5, TextSize.Y + double(SiteConfig->PopupRise * Risen));
+				FSlateDrawElement::MakeText(OutDrawElements, LayerId, AllottedGeometry.ToPaintGeometry(TextSize, FSlateLayoutTransform(Position + FVector2D(1.5, 1.5))), Popup.Text,
+					PopupFont, ESlateDrawEffect::None, FLinearColor(0.0f, 0.0f, 0.0f, 0.85f * Alpha));
+				FSlateDrawElement::MakeText(OutDrawElements, LayerId + 1, AllottedGeometry.ToPaintGeometry(TextSize, FSlateLayoutTransform(Position)), Popup.Text, PopupFont,
+					ESlateDrawEffect::None, Popup.Color.CopyWithNewOpacity(Alpha));
+			}
+		}
 	}
 	return SCompoundWidget::OnPaint(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId + 2, InWidgetStyle, bParentEnabled);
 }
