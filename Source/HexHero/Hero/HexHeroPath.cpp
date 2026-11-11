@@ -86,6 +86,64 @@ void HexHeroPath::FindField(const FHexSphereGrid& Grid, int32 Start, float MaxCo
 	}
 }
 
+void HexHeroPath::FindLayerField(const FHexSphereGrid& Grid, int32 StartLayer, int32 StartCell, float MaxCost, FLayerStepCost GetStepCost, FLinkCost GetLinkCost,
+	FField& OutField)
+{
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+	const int32 NumCells = Cells.Num();
+	OutField.Start = StartLayer * NumCells + StartCell;
+	OutField.Costs.Init(-1.0f, NumCells * 2);
+	OutField.Previous.Init(INDEX_NONE, NumCells * 2);
+	if (!Cells.IsValidIndex(StartCell) || StartLayer < 0 || StartLayer > 1)
+	{
+		return;
+	}
+
+	TArray<FQueued> Queue;
+	int32 Order = 0;
+	OutField.Costs[OutField.Start] = 0.0f;
+	Queue.HeapPush({0.0f, Order++, OutField.Start});
+	const auto Reach = [&](int32 From, int32 Node, float Cost)
+	{
+		if (Cost <= MaxCost + CostTolerance && (OutField.Costs[Node] < 0.0f || Cost < OutField.Costs[Node] - CostTolerance))
+		{
+			OutField.Costs[Node] = Cost;
+			OutField.Previous[Node] = From;
+			Queue.HeapPush({Cost, Order++, Node});
+		}
+	};
+
+	while (!Queue.IsEmpty())
+	{
+		FQueued Current;
+		Queue.HeapPop(Current, EAllowShrinking::No);
+		// an older entry of a node that was reached cheaper since
+		if (Current.Cost > OutField.Costs[Current.Cell] + CostTolerance)
+		{
+			continue;
+		}
+		const int32 Layer = Current.Cell / NumCells;
+		const int32 CellIndex = Current.Cell % NumCells;
+		const FHexSphereCell& Cell = Cells[CellIndex];
+		for (int32 Side = 0; Side < Cell.Neighbors.Num(); ++Side)
+		{
+			const int32 Neighbor = Cell.Neighbors[Side];
+			const float StepCost = GetStepCost(Layer, CellIndex, Side, Neighbor);
+			if (StepCost >= 0.0f)
+			{
+				// a step is never free, or the search could circle
+				Reach(Current.Cell, Layer * NumCells + Neighbor, Current.Cost + FMath::Max(StepCost, CostTolerance));
+			}
+		}
+		// and through an entrance or exit to the same cell of the other layer
+		const float LinkCost = GetLinkCost(Layer, CellIndex);
+		if (LinkCost >= 0.0f)
+		{
+			Reach(Current.Cell, (1 - Layer) * NumCells + CellIndex, Current.Cost + FMath::Max(LinkCost, CostTolerance));
+		}
+	}
+}
+
 bool HexHeroPath::CanStep(float Cost, float Points, float PointsPerDay)
 {
 	return Points + CostTolerance >= Cost || (Points + CostTolerance >= PointsPerDay && Cost > PointsPerDay);

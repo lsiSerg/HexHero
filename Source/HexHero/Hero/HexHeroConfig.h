@@ -142,6 +142,19 @@ public:
 	UPROPERTY(EditAnywhere, Category="Movement", meta=(ClampMin=0, ClampMax=0.8))
 	float EntranceStandOff = 0.72f;
 
+	/** What going through an entrance or exit to the other layer costs a hero, in points of movement, as the developer set on 2026-11-11, and
+	 *  seconds the hero a person plays waits on the other side before it walks on, while the camera comes after it */
+	UPROPERTY(EditAnywhere, Category="Movement", meta=(ClampMin=0))
+	float EntranceCost = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Movement", meta=(ClampMin=0, ClampMax=10))
+	float EntrancePause = 1.0f;
+
+	/** Seconds a hero of a player the game moves waits at most for the camera to come to its layer, where the person who watches would see
+	 *  it on the layer that is not shown; the camera goes there first and then it sets out, as the developer asked on 2026-11-11 */
+	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=0, ClampMax=20))
+	float AiViewWaitMax = 4.0f;
+
 	/** The camera glides after the hero chosen while it walks */
 	UPROPERTY(EditAnywhere, Category="Movement")
 	bool bCameraFollows = true;
@@ -153,9 +166,20 @@ public:
 
 	/** The fog of war, as the developer decided on 2026-11-11: each player sees only what its heroes explored, on each layer, and what was
 	 *  explored once stays seen, as in Heroes III. A hero explores the cells up to SightRadius steps around the one it stands on, underground
-	 *  only the passages among them, as nobody walks the voids. A hero finds no way over cells its player has not explored */
+	 *  only the passages among them, as nobody walks the voids */
 	UPROPERTY(EditAnywhere, Category="Rules")
 	bool bShroud = true;
+
+	/** A hero a person moves may be sent over ground its player has not explored, as the developer decided on 2026-11-11, so the fog forbids no
+	 *  move: a step onto such a cell counts UnknownCost, that of open plains, whatever lies there. Its way is checked when it reaches the first
+	 *  cell of it that lay under the fog, by which it has seen what lies beyond: if the rest of its way is still open and no other way to the
+	 *  cell it was sent to is cheaper by more than RerouteStopPoints, it walks on to the next cell of it that is still under the fog, and else
+	 *  it stops, so the person decides with the new way shown */
+	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=0.1))
+	float UnknownCost = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=0))
+	float RerouteStopPoints = 0.0f;
 
 	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=1, ClampMax=30))
 	int32 SightRadius = 5;

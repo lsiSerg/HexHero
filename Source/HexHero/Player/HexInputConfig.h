@@ -142,9 +142,13 @@ public:
 	UPROPERTY(EditAnywhere, Category="Input|Heroes")
 	TObjectPtr<UInputAction> NextHeroAction;
 
-	/** Ends the day: every hero gets its points of movement back */
+	/** Ends the turn of the person who plays */
 	UPROPERTY(EditAnywhere, Category="Input|Heroes")
 	TObjectPtr<UInputAction> EndTurnAction;
+
+	/** Leaves the hero chosen for today, so the next hero is chosen and it is passed over until the next day */
+	UPROPERTY(EditAnywhere, Category="Input|Heroes")
+	TObjectPtr<UInputAction> SkipHeroAction;
 
 	/**
 	 *  Returns the keys of one action from the mapping context as the legend shows them, or nothing if it has none.

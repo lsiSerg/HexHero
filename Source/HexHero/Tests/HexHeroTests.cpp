@@ -139,6 +139,45 @@ bool FHexHeroPathTest::RunTest(const FString& Parameters)
 	// a cell that is none gives an empty field
 	HexHeroPath::FindField(Grid, INDEX_NONE, 1000.0f, Even, Field);
 	TestFalse(TEXT("No start, no ways"), Field.IsReached(0));
+
+	// two layers joined at the start and at the far cell: with the third ring closed on the first layer, the way to the far cell goes down
+	// at the start, along the second layer and up at the far cell, and costs its steps and both ways through
+	const int32 NumCells = Cells.Num();
+	const float LinkCost = 2.0f;
+	const auto Ringed = [&](int32 Layer, int32, int32, int32 To) { return Layer == 0 && Rings[To] == 3 ? -1.0f : 1.0f; };
+	const auto Linked = [&](int32, int32 Cell) { return Cell == Start || Cell == Far ? LinkCost : -1.0f; };
+	const auto Unlinked = [](int32, int32) { return -1.0f; };
+	HexHeroPath::FField Both;
+	HexHeroPath::FindLayerField(Grid, 0, Start, 1000.0f, Ringed, Linked, Both);
+	TestEqual(TEXT("The field of two layers has a node for each cell of each"), Both.Costs.Num(), NumCells * 2);
+	TestTrue(TEXT("A way leads to the far cell through the other layer"), Both.GetPath(Far, Path));
+	TestEqual(TEXT("It costs its steps and both ways through"), Both.Costs[Far], float(Rings[Far]) + LinkCost * 2.0f);
+	TestTrue(TEXT("It goes down at the start"), !Path.IsEmpty() && Path[0] == NumCells + Start);
+	TestTrue(TEXT("It comes up at the far cell"), Path.Num() >= 2 && Path[Path.Num() - 2] == NumCells + Far && Path.Last() == Far);
+	TestEqual(TEXT("It is as long as its steps and both ways through"), Path.Num(), Rings[Far] + 2);
+	TestEqual(TEXT("The same cell of the other layer costs the way through"), Both.Costs[NumCells + Start], LinkCost);
+
+	// without the ways through the other layer is not reached, nor what lies past the closed ring
+	HexHeroPath::FindLayerField(Grid, 0, Start, 1000.0f, Ringed, Unlinked, Both);
+	TestFalse(TEXT("Without a way through the far cell is not reached"), Both.IsReached(Far));
+	TestFalse(TEXT("Nor is the other layer"), Both.IsReached(NumCells + Start));
+
+	// where the first layer is open the way stays on it, as two ways through cost more, and its costs are those of the search of one layer
+	const auto Open2 = [](int32, int32, int32, int32) { return 1.0f; };
+	HexHeroPath::FindLayerField(Grid, 0, Start, 1000.0f, Open2, Linked, Both);
+	HexHeroPath::FindField(Grid, Start, 1000.0f, Even, Field);
+	int32 WrongLayerCosts = 0;
+	for (int32 Cell = 0; Cell < NumCells; ++Cell)
+	{
+		WrongLayerCosts += FMath::IsNearlyEqual(Both.Costs[Cell], Field.Costs[Cell], 1.0e-3f) ? 0 : 1;
+	}
+	TestEqual(TEXT("On open ground the costs of the first layer are those of one layer"), WrongLayerCosts, 0);
+	TestTrue(TEXT("And the way to the far cell stays on it"), Both.GetPath(Far, Path) && !Path.ContainsByPredicate([NumCells](int32 Node) { return Node >= NumCells; }));
+
+	// a search from the second layer starts at its node
+	HexHeroPath::FindLayerField(Grid, 1, Start, 1000.0f, Open2, Linked, Both);
+	TestEqual(TEXT("A search from the second layer starts at its node"), Both.Start, NumCells + Start);
+	TestEqual(TEXT("And reaches the first through the way at its start"), Both.Costs[Start], LinkCost);
 	return true;
 }
 

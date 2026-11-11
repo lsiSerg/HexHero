@@ -22,7 +22,7 @@
 
 namespace
 {
-	const float HeroPanelWidth = 280.0f;
+	const float HeroPanelWidth = 340.0f;
 	const FLinearColor HeroPanelColor(0.02f, 0.02f, 0.02f, 0.8f);
 	const FLinearColor HeroChosenColor(1.0f, 0.75f, 0.1f, 1.0f);
 	const FLinearColor HeroButtonColor(0.3f, 0.3f, 0.3f, 1.0f);
@@ -34,6 +34,8 @@ void SHexHeroPanel::Construct(const FArguments& InArgs)
 	OnHeroChosen = InArgs._OnHeroChosen;
 	OnEndTurn = InArgs._OnEndTurn;
 	OnRestart = InArgs._OnRestart;
+	OnSkip = InArgs._OnSkip;
+	const FString SkipKeys = InArgs._SkipKeys;
 	OnProject = InArgs._OnProject;
 
 	// the widget covers the viewport, of which only the panel takes the mouse
@@ -194,6 +196,28 @@ void SHexHeroPanel::Construct(const FArguments& InArgs)
 					.Padding(0.0f, 8.0f, 0.0f, 0.0f)
 					[
 						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.Padding(0.0f, 0.0f, 3.0f, 0.0f)
+						[
+							SNew(SButton)
+							.IsFocusable(false)
+							.HAlign(HAlign_Center)
+							.ContentPadding(FMargin(6.0f, 4.0f))
+							.ButtonColorAndOpacity(HeroButtonColor)
+							.ToolTipText(LOCTEXT("SkipTip", "Leaves the hero chosen for today: the next hero is chosen, and this one is passed over until the next day or until it is sent again"))
+							.IsEnabled_Lambda([this]() { return Heroes.IsValid() && Heroes->IsPersonTurn(); })
+							.OnClicked_Lambda([this]()
+							{
+								OnSkip.ExecuteIfBound();
+								return FReply::Handled();
+							})
+							[
+								SNew(STextBlock)
+								.Font(Font)
+								.Text(SkipKeys.IsEmpty() ? LOCTEXT("Skip", "Skip") : FText::Format(LOCTEXT("SkipKeys", "Skip ({0})"), FText::FromString(SkipKeys)))
+							]
+						]
 						+ SHorizontalBox::Slot()
 						.FillWidth(1.0f)
 						[
@@ -388,9 +412,10 @@ void SHexHeroPanel::RebuildList()
 							}
 							FNumberFormattingOptions Options;
 							Options.SetMaximumFractionalDigits(1);
-							return FText::Format(LOCTEXT("Movement", "Movement {0} of {1}{2}"), FText::AsNumber(Each->MovePoints, &Options),
+							return FText::Format(LOCTEXT("Movement", "Movement {0} of {1}{2}{3}"), FText::AsNumber(Each->MovePoints, &Options),
 								FText::AsNumber(WeakHeroes->GetMaxMovePoints(*Each), &Options),
-								Each->Layer == EHexPlanetLayer::Underground ? LOCTEXT("Below", ", below") : FText::GetEmpty());
+								Each->Layer == EHexPlanetLayer::Underground ? LOCTEXT("Below", ", below") : FText::GetEmpty(),
+								Each->bSkipped ? LOCTEXT("Skipped", ", skipped") : FText::GetEmpty());
 						})
 					]
 					+ SVerticalBox::Slot()

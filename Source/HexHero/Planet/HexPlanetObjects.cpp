@@ -216,6 +216,36 @@ namespace
 	}
 }
 
+TBitArray<> UHexPlanetObjects::FindSavedBlockers(const AHexPlanet& InPlanet)
+{
+	TBitArray<> Blocked(false, InPlanet.GetGrid().GetCells().Num());
+	TArray<FHexObjectCell> Lines;
+	FString Error;
+	const FString Folder = InPlanet.GetDataFolder();
+	if (!InPlanet.IsSaved() || !HexPlanetFile::HasObjects(Folder) || !HexPlanetFile::LoadObjects(Folder, Lines, Error))
+	{
+		return Blocked;
+	}
+	const TArray<TObjectPtr<UHexPlanetObjectSet>> LayerSets = FindLayerSets(InPlanet.GetLayer());
+	for (const FHexObjectCell& Line : Lines)
+	{
+		if (!Blocked.IsValidIndex(Line.Cell) || InPlanet.FindEntrance(Line.Cell) != INDEX_NONE)
+		{
+			continue;
+		}
+		const int32 Level = InPlanet.GetCellLevel(Line.Cell);
+		for (const FName Id : {Line.Cover, Line.Decor})
+		{
+			const TObjectPtr<UHexPlanetObjectSet>* Set = Id.IsNone() ? nullptr : LayerSets.FindByPredicate([Id](const UHexPlanetObjectSet* Each) { return Each->Id == Id; });
+			if (Set && (*Set)->bBlocksMovement && (*Set)->AllowedLevels.Contains(Level))
+			{
+				Blocked[Line.Cell] = true;
+			}
+		}
+	}
+	return Blocked;
+}
+
 TArray<TObjectPtr<UHexPlanetObjectSet>> UHexPlanetObjects::FindLayerSets(EHexPlanetLayer Layer)
 {
 	TArray<TObjectPtr<UHexPlanetObjectSet>> Found;

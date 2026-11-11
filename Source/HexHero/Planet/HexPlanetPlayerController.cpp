@@ -89,6 +89,14 @@ void AHexPlanetPlayerController::BeginPlay()
 				return ViewTarget && Heroes->GetPathLayer() == Planet->GetLayer() && FVector::DotProduct(ViewTarget->GetActorLocation() - Point, Point) > 0.0
 					&& WeakThis->ProjectWorldLocationToScreen(Point, OutScreen, true);
 			})
+			.OnSkip_Lambda([WeakThis]()
+			{
+				if (WeakThis.IsValid())
+				{
+					WeakThis->SkipHero();
+				}
+			})
+			.SkipKeys(InputConfig && InputConfig->SkipHeroAction ? InputConfig->GetKeysText(InputConfig->SkipHeroAction) : FString())
 			.EndTurnKeys(InputConfig && InputConfig->EndTurnAction ? InputConfig->GetKeysText(InputConfig->EndTurnAction) : FString())
 			.NextHeroKeys(InputConfig && InputConfig->NextHeroAction ? InputConfig->GetKeysText(InputConfig->NextHeroAction) : FString())
 			.GoKeys(InputConfig && InputConfig->HeroSendAction ? InputConfig->GetKeysText(InputConfig->HeroSendAction) : FString());
@@ -226,11 +234,64 @@ void AHexPlanetPlayerController::ClickGame(bool bDouble)
 	}
 }
 
+void AHexPlanetPlayerController::OnHeroSent(int32 Id)
+{
+	const AHexPlanet* Planet = GetPlanet();
+	const UHexHeroes* Heroes = GetHeroes();
+	const FHexHero* Hero = Heroes ? Heroes->FindHero(Id) : nullptr;
+	AHexPlanetCameraPawn* CameraPawn = GetCameraPawn();
+	if (Planet && Hero && Hero->Layer != Planet->GetLayer() && CameraPawn)
+	{
+		CameraPawn->ShowCell(Hero->Layer, Hero->Cell);
+	}
+}
+
+void AHexPlanetPlayerController::OrderGame()
+{
+	const AHexPlanet* Planet = GetPlanet();
+	UHexHeroes* Heroes = GetHeroes();
+	if (!Planet || !Heroes || !Heroes->IsPersonTurn() || IsBrushArmed() || MouseCell == INDEX_NONE)
+	{
+		return;
+	}
+	const FHexHero* Hero = Heroes->GetSelected();
+	if (!Hero || !Heroes->CanChoose(Hero->Id))
+	{
+		return;
+	}
+	// a hero that walks stops, as any click stops it
+	if (Hero->bWalking)
+	{
+		Heroes->Stop(Hero->Id);
+		return;
+	}
+	FString Message;
+	if (!Heroes->Send(Hero->Id, Planet->GetLayer(), MouseCell, Message) && !Message.IsEmpty())
+	{
+		OnHeroMessage(Message);
+	}
+}
+
+void AHexPlanetPlayerController::SkipHero()
+{
+	UHexHeroes* Heroes = GetHeroes();
+	if (Heroes && Heroes->IsPersonTurn())
+	{
+		Heroes->Skip(Heroes->GetSelectedId());
+	}
+}
+
 void AHexPlanetPlayerController::WalkHero()
 {
 	UHexHeroes* Heroes = GetHeroes();
 	if (!Heroes || !Heroes->IsPlaying())
 	{
+		return;
+	}
+	// the key that sends a hero stops one that walks
+	if (const FHexHero* Hero = Heroes->GetSelected(); Hero && Hero->bWalking && Heroes->IsPersonTurn())
+	{
+		Heroes->Stop(Hero->Id);
 		return;
 	}
 	FString Message;
@@ -573,6 +634,7 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 			Heroes->OnMessage.AddUObject(this, &AHexPlanetPlayerController::OnHeroMessage);
 			Heroes->OnHeroTravelled.AddUObject(this, &AHexPlanetPlayerController::OnHeroTravelled);
 			Heroes->OnHeroChosen.AddUObject(this, &AHexPlanetPlayerController::OnHeroChosen);
+			Heroes->OnHeroSent.AddUObject(this, &AHexPlanetPlayerController::OnHeroSent);
 		}
 		FVector3d FollowDirection;
 		if (AHexPlanetCameraPawn* FollowPawn = GetCameraPawn(); FollowPawn && Heroes->GetFollowDirection(Planet->GetLayer(), FollowDirection))

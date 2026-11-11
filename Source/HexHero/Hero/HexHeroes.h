@@ -72,12 +72,25 @@ struct FHexHero
 	 *  moment (UHexHeroes::NoteSeen) */
 	bool bWasSeen = true;
 
+	/** The person left it for today (UHexHeroes::Skip): the choice of the next hero passes over it until the next day or its next order */
+	bool bSkipped = false;
+
+	/** The first cell of its way that lay under the fog of war of its player when the way was found or last checked, at which the way is
+	 *  checked again (UHexHeroes::CheckRoute), or INDEX_NONE for a way over ground it knows */
+	int32 CheckCell = INDEX_NONE;
+	EHexPlanetLayer CheckLayer = EHexPlanetLayer::Surface;
+
+	/** Seconds it waits before its next step, after it went through an entrance or exit, while the camera comes after it */
+	float WalkWait = 0.0f;
+
 	/** It goes through the entrance or exit its way ends on */
 	bool bEnterAtEnd = false;
 
-	/** The cell of its layer the player pointed it to, which it walks to when told and keeps until it is there, or INDEX_NONE; and whether
-	 *  its last step failed for want of points */
+	/** The cell the player pointed it to, of either layer, which it walks to when told and keeps until it is there, or INDEX_NONE; and
+	 *  whether its last step failed for want of points. Its way there, Route, is the cells it enters in order, and a cell that comes again
+	 *  in it is a step through the entrance or exit there to the other layer */
 	int32 TargetCell = INDEX_NONE;
+	EHexPlanetLayer TargetLayer = EHexPlanetLayer::Surface;
 	bool bOutOfPoints = false;
 
 	/** The cell of the site it visits when its way ends beside it, as a site fills its cell, or INDEX_NONE */
@@ -158,6 +171,17 @@ public:
 	/** Whether the person who watches sees a hero: on the layer shown, on ground the fog of war does not hide, or on a step to or from it */
 	bool IsSeen(const FHexHero& Hero) const;
 
+	/** Stops a hero that walks, at the end of the step it is on, as a click, the key that sends it or the right button do. Returns false if
+	 *  it did not walk */
+	bool Stop(int32 Id);
+
+	/** Leaves a hero of the person who plays for today, as the developer asked on 2026-11-11: it stops, the next hero that can move is
+	 *  chosen, and the choice passes over it until the next day or until the person sends it again */
+	bool Skip(int32 Id);
+
+	/** Gives a hero points of movement, or takes them with a negative amount, for trying the game (hex.Hero points) */
+	bool AddMovePoints(int32 Id, float Amount);
+
 	/** Whether the game moves the heroes of a player by itself, as the Heroes tab of the palette sets and heroes.json keeps: such a hero walks
 	 *  to open the map (MoveAi), and a person can choose it to watch but not send it */
 	bool IsPlayerAi(int32 Player) const { return AiPlayers.Contains(Player); }
@@ -224,8 +248,8 @@ public:
 	 *  walks any click stops it. OutMessage says why nothing came of it */
 	EClick Click(EHexPlanetLayer Layer, int32 Cell, const FHexHero* Under, FString& OutMessage);
 
-	/** Points a hero to a cell of its layer, INDEX_NONE for nowhere; its way shows while it is the one chosen */
-	bool SetTarget(int32 Id, int32 Cell);
+	/** Points a hero to a cell of a layer, INDEX_NONE for nowhere; its way shows while it is the one chosen */
+	bool SetTarget(int32 Id, EHexPlanetLayer Layer, int32 Cell);
 
 	/** Sets a hero walking to the cell it was pointed to. Returns false and why it does not go */
 	bool Go(int32 Id, FString& OutMessage);
@@ -258,8 +282,11 @@ public:
 	 *  why a click shows no way (hex.Hero ways) */
 	void LogWays(int32 Cell, int32 Rings) const;
 
-	/** Sends a hero to a cell of its layer along the cheapest way, as far as its points take it today; a way that ends on an entrance or
-	 *  exit takes it through, and so does its own cell when it stands on one. Returns false and why it does not go */
+	/** Sends a hero to a cell of a layer along the cheapest way, as far as its points take it today. The way of a hero a person moves may go
+	 *  through the entrances and exits its player has seen, down, along the passages and up again (EntranceCost each), as the developer asked
+	 *  on 2026-11-11. A way that ends with a step onto an entrance or exit takes it through, and so does its own cell when it stands on one.
+	 *  Returns false and why it does not go. Without a layer the cell is of the layer the hero is on */
+	bool Send(int32 Id, EHexPlanetLayer Layer, int32 Cell, FString& OutMessage);
 	bool Send(int32 Id, int32 Cell, FString& OutMessage);
 
 	/** Begins the next day: every hero gets its points of movement back. Heroes still walking stop where their step ends */
@@ -294,6 +321,10 @@ public:
 	 *  while it stands or the config says the camera stays */
 	bool GetFollowDirection(EHexPlanetLayer Layer, FVector3d& OutDirection) const;
 
+	/** Says whether the camera is on a trip between the layers: the hero a person sent waits meanwhile, as the screen is black, so the person
+	 *  sees it set out and the camera is free to go after it through an entrance */
+	void SetViewTravelling(bool bTravelling) { bViewTravelling = bTravelling; }
+
 	/** Says that the levels, biomes, objects or rivers of a layer changed, so the ways are found again */
 	static void NoteMapChanged() { ++MapRevision; }
 
@@ -307,6 +338,11 @@ public:
 	/** Broadcast when the game itself chose another hero, as the one chosen ran out of steps or left the planet, for the camera to show it */
 	DECLARE_MULTICAST_DELEGATE_OneParam(FOnHeroChosen, int32);
 	FOnHeroChosen OnHeroChosen;
+
+	/** The hero chosen set out on the turn of a person, by a click, a key or the console, or a hero of the player the game moves that the
+	 *  person would see is about to move (WaitForView): the camera goes to it where it is on the layer that is not shown */
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnHeroSent, int32);
+	FOnHeroSent OnHeroSent;
 
 	/** Broadcast with a line for the player, as why a hero does not go */
 	DECLARE_MULTICAST_DELEGATE_OneParam(FOnMessage, const FString&);
@@ -406,8 +442,22 @@ private:
 	EHexPlanetLayer FieldLayer = EHexPlanetLayer::Surface;
 	int32 FieldRevision = -1;
 
+	/** The camera is on a trip between the layers (SetViewTravelling) */
+	bool bViewTravelling = false;
+
+	/** The hero that waits for the camera to come to its layer, that layer, since when, and whether the camera was asked (WaitForView) */
+	int32 ViewWaitHero = 0;
+	EHexPlanetLayer ViewWaitLayer = EHexPlanetLayer::Surface;
+	double ViewWaitStart = 0.0;
+	bool bViewAsked = false;
+
+	/** The cells of a layer not built yet whose objects block movement, read once from its file (IsBlockedUnbuilt) */
+	mutable TBitArray<> UnbuiltBlockers[NumPlanetLayers];
+
 	/** What the way shown was shown for, its line of text and its numbers */
 	int32 ShownTarget = INDEX_NONE;
+	EHexPlanetLayer ShownTargetLayer = EHexPlanetLayer::Surface;
+	EHexPlanetLayer ShownLayer = EHexPlanetLayer::Surface;
 	int32 ShownHero = 0;
 	int32 ShownRevision = -1;
 	float ShownPoints = -1.0f;
@@ -440,7 +490,18 @@ private:
 
 	/** Gives the way of a hero to a cell from the ways found for it: the cells it steps onto and, when a site fills the cell, whether the way
 	 *  ends beside it with a visit, by the cheapest cell beside it. Returns false if no way leads there */
-	bool FindWay(const AHexPlanet& Planet, const FHexHero& Hero, const HexHeroPath::FField& Ways, int32 Target, TArray<int32>& OutPath, bool& bOutVisit) const;
+	bool FindWay(const FHexHero& Hero, const HexHeroPath::FField& Ways, EHexPlanetLayer TargetLayer, int32 Target, TArray<int32>& OutPath, bool& bOutVisit) const;
+
+	/** Returns the node of a cell of a layer in the ways found over both layers (HexHeroPath::FindLayerField) */
+	int32 GetNode(EHexPlanetLayer Layer, int32 Cell) const;
+
+	/** Walks a way of a hero from where it stands: for each step the layer it ends on, the cell it leaves, the cell it enters and whether it
+	 *  goes through an entrance or exit to the other layer, which a cell that comes again in the way means. Visit returns false to stop */
+	void WalkWay(const FHexHero& Hero, TConstArrayView<int32> Path, TFunctionRef<bool(EHexPlanetLayer Layer, int32 From, int32 To, bool bThrough)> Visit) const;
+
+	/** Returns the cost of a step of a way as the player of a hero knows it: EntranceCost through an entrance, UnknownCost onto a cell it has
+	 *  not explored, else what GetStepCost gives */
+	float GetWayStepCost(const FHexHero& Hero, EHexPlanetLayer Layer, int32 From, int32 To, bool bThrough) const;
 
 	/** Returns what the visit of the site of a cell costs a hero that stands on a cell beside it, as a step onto that cell would */
 	float GetVisitCost(const AHexPlanet& Planet, int32 From, int32 SiteCell) const;
@@ -452,10 +513,37 @@ private:
 	static bool IsUsableEntrance(const AHexPlanet& Planet, int32 Cell);
 
 	/** Finds the cheapest ways of a hero from where it stands, within PathMaxDays of movement */
-	void FindFieldFor(const FHexHero& Hero, HexHeroPath::FField& OutField) const;
+	/** bThroughUnknown lets the ways cross ground the player of the hero has not explored, each such cell at UnknownCost whatever lies there,
+	 *  as a person may send a hero there; without it they keep to what is explored, as the heroes the game moves do */
+	void FindFieldFor(const FHexHero& Hero, HexHeroPath::FField& OutField, bool bThroughUnknown) const;
+
+	/** Whether a way of a hero, or the cell it ends at, lies on ground its player has not explored */
+	bool IsWayUnknown(const FHexHero& Hero, TConstArrayView<int32> Path, EHexPlanetLayer TargetLayer, int32 Target) const;
+
+	/** Returns the first cell of a way that lies under the fog of war of the player of a hero, and its layer, or INDEX_NONE */
+	int32 FindCheckCell(const FHexHero& Hero, TConstArrayView<int32> Path, EHexPlanetLayer& OutLayer) const;
+
+	/** Checks the way of a hero that reached the first cell of it that lay under the fog, with what its player has seen by now. Returns false
+	 *  when the hero stops for the person to decide: the cell it was sent to cannot be reached after all, the rest of its way is blocked, or
+	 *  another way is cheaper now */
+	bool CheckRoute(FHexHero& Hero);
+
+	/** Whether a cell a player has not explored is a void of the underground beside a passage it did explore: nobody explores the voids, but
+	 *  such a one was seen from the passage, as the fog of war shows it (ShroudVoidMargin), so no way is taken to lead over it */
+	bool IsSeenVoid(int32 Player, EHexPlanetLayer Layer, int32 Cell) const;
+
+	/** Whether what stands on a cell of a layer that is not built yet keeps heroes out, by its objects.json (UHexPlanetObjects::FindSavedBlockers) */
+	bool IsBlockedUnbuilt(const AHexPlanet& Planet, int32 Cell) const;
+
+	/** Adds up what a way of a hero costs as its player knows the ground. Returns false if a step of it cannot be taken */
+	bool GetWayCost(const FHexHero& Hero, TConstArrayView<int32> Path, float& OutCost) const;
+
+	/** Whether a way ends with a step over the ground and not one through an entrance or exit: only then does a way that ends on an entrance
+	 *  or exit take the hero through it */
+	bool EndsWithStep(const FHexHero& Hero, TConstArrayView<int32> Path) const;
 
 	/** Gives the costs of the steps of a way of a hero from where it stands */
-	void GetStepCosts(const AHexPlanet& Planet, const FHexHero& Hero, TConstArrayView<int32> Path, TArray<float>& OutCosts) const;
+	void GetStepCosts(const FHexHero& Hero, TConstArrayView<int32> Path, TArray<float>& OutCosts) const;
 
 	/** Starts the next step of the way of a hero, paying for it. Returns false when the way or its points end, or the step is blocked now */
 	bool StartNextStep(FHexHero& Hero);
@@ -466,6 +554,10 @@ private:
 	/** Takes a hero through the entrance or exit it stands on to the other layer, telling the camera unless the caller does. Returns false
 	 *  and why it stays */
 	bool Travel(FHexHero& Hero, FString& OutMessage, bool bBroadcast = true);
+
+	/** Takes a hero to the same cell of the other layer, through the entrance or exit it stands on, for EntranceCost of its points; its way
+	 *  and what it was sent to stay. Returns false and why it stays, with bOutOfPoints of the hero where its points do not pay for it */
+	bool PassEntrance(FHexHero& Hero, FString& OutMessage, bool bBroadcast);
 
 	/** Returns true if a hero has the points for a step onto any cell beside it */
 	bool CanMove(const FHexHero& Hero) const;
@@ -499,6 +591,11 @@ private:
 	/** Looks whether the person who watches still sees a hero of the player the game moves, or sees it again: where that changed the camera
 	 *  stays for AiFogHoldTime, there where it went into the fog or where it is about to come out. Returns true while that hero waits for it */
 	bool NoteSeen(FHexHero& Hero);
+
+	/** Whether the hero the game moves now waits for the camera: where the fog of war of the person who watches does not hide it but it is
+	 *  on the layer that is not shown, the camera is asked to go there (OnHeroSent), and the hero waits until that layer is shown and the
+	 *  trip is over, at most AiViewWaitMax */
+	bool WaitForView(const FHexHero& Hero);
 
 	/** Takes the steps of a hero the person who watches does not see at once, until its way ends or a step of it shows */
 	void WalkUnseen(FHexHero& Hero);

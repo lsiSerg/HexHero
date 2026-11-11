@@ -172,6 +172,11 @@ public:
 	 *  that layer counts FHexCellObjects by, so the palette, the generation and the files count alike before the layer is built */
 	static TArray<TObjectPtr<UHexPlanetObjectSet>> FindLayerSets(EHexPlanetLayer Layer);
 
+	/** Returns the cells of a planet whose cover or decor keeps heroes out, read from its objects.json: for a layer that has its data but
+	 *  not its objects yet, as an underground that was never shown, through which a way of a hero is found all the same. No cell without
+	 *  the file, which the first show of the layer writes */
+	static TBitArray<> FindSavedBlockers(const AHexPlanet& InPlanet);
+
 	/** Returns the sets of a layer (FindLayerSets) and after them the covers and decor of the other layer, as the developer asked on 2026-11-10,
 	 *  so a dead tree may stand underground or bones on the surface, placed by hand alone, at most 254; OutOwn is how many are of the layer */
 	static TArray<TObjectPtr<UHexPlanetObjectSet>> FindPlaceableSets(EHexPlanetLayer Layer, int32* OutOwn = nullptr);

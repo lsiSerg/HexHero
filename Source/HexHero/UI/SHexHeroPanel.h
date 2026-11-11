@@ -27,6 +27,9 @@ public:
 		SLATE_EVENT(FSimpleDelegate, OnEndTurn)
 		/** The button that starts the game again was clicked */
 		SLATE_EVENT(FSimpleDelegate, OnRestart)
+		/** The hero chosen is left for today */
+		SLATE_EVENT(FSimpleDelegate, OnSkip)
+		SLATE_ARGUMENT(FString, SkipKeys)
 		/** Gives where a point of the world lies on the viewport, in its pixels, or false when it does not show: for the numbers of the days
 		 *  on the way of the hero chosen */
 		SLATE_ARGUMENT(TFunction<bool(const FVector&, FVector2D&)>, OnProject)
@@ -54,6 +57,7 @@ private:
 	FOnHexHeroChosen OnHeroChosen;
 	FSimpleDelegate OnEndTurn;
 	FSimpleDelegate OnRestart;
+	FSimpleDelegate OnSkip;
 	TFunction<bool(const FVector&, FVector2D&)> OnProject;
 
 	/** The list revision the lines were made for (UHexHeroes::GetListRevision), -1 for none */

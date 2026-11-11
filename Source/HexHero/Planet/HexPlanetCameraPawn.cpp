@@ -19,6 +19,7 @@
 #include "HexHero.h"
 #include "HexCameraConfig.h"
 #include "HexCameraPawn.h"
+#include "HexHeroes.h"
 #include "HexInputConfig.h"
 #include "HexLastView.h"
 #include "HexMapSettings.h"
@@ -558,6 +559,11 @@ bool AHexPlanetCameraPawn::TravelTo(EHexPlanetLayer Layer, TOptional<FHexPlanetC
 	}
 	UE_LOG(LogHexHero, Log, TEXT("Travel from the %s to the %s at %.4f %.4f, heading %.1f at %.0f%s"), GetPlanetLayerName(Planet->GetLayer()), GetPlanetLayerName(Layer),
 		TravelPlacement.Latitude, TravelPlacement.Longitude, TravelPlacement.Heading, TravelPlacement.Distance, Target->IsBuilt() ? TEXT("") : TEXT(", which builds its meshes"));
+	// the hero a person sent waits while the screen is black
+	if (UHexHeroes* Heroes = Planet->GetHeroes())
+	{
+		Heroes->SetViewTravelling(true);
+	}
 	return true;
 }
 
@@ -763,6 +769,10 @@ void AHexPlanetCameraPawn::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 			EnhancedInputComponent->BindAction(InputConfig->NextHeroAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnNextHero);
 			EnhancedInputComponent->BindAction(InputConfig->EndTurnAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnEndTurn);
 		}
+		if (InputConfig->SkipHeroAction)
+		{
+			EnhancedInputComponent->BindAction(InputConfig->SkipHeroAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnSkipHero);
+		}
 		if (InputConfig->PlayModeAction)
 		{
 			EnhancedInputComponent->BindAction(InputConfig->PlayModeAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnPlayMode);
@@ -846,6 +856,17 @@ void AHexPlanetCameraPawn::Tick(float DeltaTime)
 		UpdateCameraPosition();
 		UpdateSun(DeltaTime);
 		return;
+	}
+	if (UHexHeroes* Heroes = Planet->GetHeroes())
+	{
+		Heroes->SetViewTravelling(false);
+	}
+	// a cell asked for during the trip is shown now
+	if (PendingShowLayer.IsSet())
+	{
+		const EHexPlanetLayer ShowLayer = PendingShowLayer.GetValue();
+		PendingShowLayer.Reset();
+		ShowCell(ShowLayer, PendingShowCell);
 	}
 
 	// a place asked for before hex.LoadPlanet opened this level waits until then, as the camera of the level before would be gone at once
@@ -1351,6 +1372,14 @@ void AHexPlanetCameraPawn::OnHeroSendStarted()
 	}
 }
 
+void AHexPlanetCameraPawn::OnSkipHero()
+{
+	if (AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController()); PlayerController && !IsTravelling())
+	{
+		PlayerController->SkipHero();
+	}
+}
+
 void AHexPlanetCameraPawn::OnPlayMode()
 {
 	if (AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController()); PlayerController && !IsTravelling())
@@ -1378,9 +1407,16 @@ void AHexPlanetCameraPawn::OnEndTurn()
 
 bool AHexPlanetCameraPawn::ShowCell(EHexPlanetLayer Layer, int32 Cell)
 {
-	if (IsTravelling() || !Planet || !Planet->IsBuilt() || !Planet->GetGrid().GetCells().IsValidIndex(Cell))
+	if (!Planet || !Planet->IsBuilt() || !Planet->GetGrid().GetCells().IsValidIndex(Cell))
 	{
 		return false;
+	}
+	// during a trip it waits for its end, the last one asked for
+	if (IsTravelling())
+	{
+		PendingShowLayer = Layer;
+		PendingShowCell = Cell;
+		return true;
 	}
 	if (Layer == Planet->GetLayer())
 	{
@@ -1416,11 +1452,21 @@ void AHexPlanetCameraPawn::OnTurnStarted()
 	float MouseY = 0.0f;
 	const APlayerController* PlayerController = Cast<APlayerController>(GetController());
 	bTurning = PlayerController && PlayerController->GetMousePosition(LastTurnMouseX, MouseY);
+	bTurnDown = bTurning;
+	TurnStart = FVector2D(LastTurnMouseX, MouseY);
 }
 
 void AHexPlanetCameraPawn::OnTurnCompleted()
 {
 	bTurning = false;
+	// held and moved the button turns the camera; a click of it sends the hero chosen to the cell under the cursor at once, as the developer
+	// asked on 2026-11-11
+	AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController());
+	if (bTurnDown && PlayerController && !IsTravelling() && IsClickAt(TurnStart))
+	{
+		PlayerController->OrderGame();
+	}
+	bTurnDown = false;
 }
 
 bool AHexPlanetCameraPawn::FocusCell(int32 Cell, TOptional<float> Distance)

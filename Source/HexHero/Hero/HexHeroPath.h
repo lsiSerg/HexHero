@@ -37,6 +37,14 @@ namespace HexHeroPath
 	 *  found first, so the result is the same in every run */
 	void FindField(const FHexSphereGrid& Grid, int32 Start, float MaxCost, FStepCost GetStepCost, FField& OutField);
 
+	/** The same over both layers of a planet, which share a grid: a node of the field is a cell of a layer, Layer * the number of cells + the
+	 *  cell, and besides the steps over neighbors on a layer a way may go from a cell to the same cell of the other layer, through an entrance
+	 *  or exit, where GetLinkCost gives what that costs and a negative value where there is none. Costs, Previous and GetPath of the field are
+	 *  of nodes */
+	using FLayerStepCost = TFunctionRef<float(int32 Layer, int32 From, int32 Side, int32 To)>;
+	using FLinkCost = TFunctionRef<float(int32 Layer, int32 Cell)>;
+	void FindLayerField(const FHexSphereGrid& Grid, int32 StartLayer, int32 StartCell, float MaxCost, FLayerStepCost GetStepCost, FLinkCost GetLinkCost, FField& OutField);
+
 	/** How a hero walks a way of steps with the points it has */
 	struct FSpend
 	{

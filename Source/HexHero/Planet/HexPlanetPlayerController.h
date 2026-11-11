@@ -124,6 +124,13 @@ public:
 	 *  to the cell there or sends it; a double click on a hero chooses it and looks at it */
 	void ClickGame(bool bDouble);
 
+	/** A click of the button that turns the camera, while the game is played: the hero chosen is sent to the cell under the cursor at once */
+	void OrderGame();
+
+	/** Brings the camera to the hero chosen where it was just sent on the layer that is not shown, as a cell of the layer shown may be
+	 *  clicked for a hero on the other, whose way goes through an entrance or exit */
+	void OnHeroSent(int32 Id);
+
 	/** Sends the hero chosen along the way shown, as the second click on its cell does */
 	void WalkHero();
 
@@ -135,6 +142,9 @@ public:
 
 	/** Ends the day of the heroes */
 	void EndHeroTurn();
+
+	/** Leaves the hero chosen for today (UHexHeroes::Skip) */
+	void SkipHero();
 
 	/** Chooses a hero and shows it: the camera glides to it, or travels to its layer */
 	void ShowHero(int32 Id);

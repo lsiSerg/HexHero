@@ -211,6 +211,10 @@ private:
 	/** Mouse X position at the last turn update */
 	float LastTurnMouseX = 0.0f;
 
+	/** Where the button that turns the camera went down, as a press and a release at one place is a click, which sends the hero chosen */
+	FVector2D TurnStart = FVector2D::ZeroVector;
+	bool bTurnDown = false;
+
 	/** True while the camera glides to a cell */
 	bool bFocusing = false;
 
@@ -277,6 +281,7 @@ private:
 	void OnHeroSendStarted();
 	void OnNextHero();
 	void OnEndTurn();
+	void OnSkipHero();
 	void OnPlayMode();
 
 	/** Returns true if the mouse is within ClickTolerance of where a button went down */
@@ -377,6 +382,11 @@ private:
 		FadingIn,
 	};
 	ETravelPhase TravelPhase = ETravelPhase::None;
+
+	/** A cell ShowCell was asked for during a trip, shown once the trip ends, as when a hero goes through an entrance while the camera is
+	 *  still on its way to the layer it set out on */
+	TOptional<EHexPlanetLayer> PendingShowLayer;
+	int32 PendingShowCell = INDEX_NONE;
 
 	/** Layer and place the trip goes to */
 	EHexPlanetLayer TravelLayer = EHexPlanetLayer::Surface;

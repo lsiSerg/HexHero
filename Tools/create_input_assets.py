@@ -75,7 +75,8 @@ ACTIONS = [
     ("hero_select_action", "IA_HexHeroSelect", "Choose a hero, point it, send it", BOOLEAN, [("LeftMouseButton", False, False)]),
     ("hero_send_action", "IA_HexHeroSend", "Walk the way shown", BOOLEAN, [("SpaceBar", False, False)]),
     ("next_hero_action", "IA_HexNextHero", "Next hero", BOOLEAN, [("Tab", False, False)]),
-    ("end_turn_action", "IA_HexEndTurn", "End the day", BOOLEAN, [("Enter", False, False)]),
+    ("end_turn_action", "IA_HexEndTurn", "End the turn", BOOLEAN, [("Enter", False, False)]),
+    ("skip_hero_action", "IA_HexSkipHero", "Skip the hero today", BOOLEAN, [("Z", False, False)]),
 ]
 
 # heading of each line of a new DA_HexKeyLegend, by its action
@@ -110,16 +111,17 @@ LEGEND_CATEGORIES = {
     "IA_HexHeroSend": "Heroes",
     "IA_HexNextHero": "Heroes",
     "IA_HexEndTurn": "Heroes",
+    "IA_HexSkipHero": "Heroes",
 }
 
 
 # actions added after the legend was made, whose lines an existing legend gets if it lacks them
 ADDED_LEGEND_ACTIONS = {"IA_HexPaintMode", "IA_HexPaintLevel", "IA_HexBrushSize", "IA_HexUndo", "IA_HexRedo", "IA_HexForcedLight", "IA_HexLayer",
-                        "IA_HexSaveBookmark", "IA_HexJumpBookmark", "IA_HexPlayMode", "IA_HexHeroSelect", "IA_HexHeroSend", "IA_HexNextHero", "IA_HexEndTurn"}
+                        "IA_HexSaveBookmark", "IA_HexJumpBookmark", "IA_HexPlayMode", "IA_HexHeroSelect", "IA_HexHeroSend", "IA_HexNextHero", "IA_HexEndTurn", "IA_HexSkipHero"}
 
 # lines of the legend whose action kept its name but changed what it does: its label becomes the new description only while it still holds an
 # old one, so a label edited by hand stays
-RELABELED_ACTIONS = {"IA_HexHeroSelect": ["Choose a hero (click)"], "IA_HexHeroSend": ["Send the hero (click)"]}
+RELABELED_ACTIONS = {"IA_HexHeroSelect": ["Choose a hero (click)"], "IA_HexHeroSend": ["Send the hero (click)"], "IA_HexEndTurn": ["End the day"]}
 
 # actions that another took the place of, as (old action, new action): the line of the old one in an existing legend becomes the line of the new
 # one where it stands, with the description of the new one as its label, and the old asset is deleted once nothing in the legend holds it
