@@ -134,6 +134,11 @@ public:
 	UPROPERTY(EditAnywhere, Category="Movement")
 	bool bCameraFollows = true;
 
+	/** Seconds the hero chosen stays chosen after it stopped with no steps left, before the next hero that can still move is chosen, so the
+	 *  player sees that it used its movement and where it stopped, as the developer asked on 2026-11-11 */
+	UPROPERTY(EditAnywhere, Category="Movement", meta=(ClampMin=0, ClampMax=10))
+	float NextHeroDelay = 1.2f;
+
 	/** Days of a week; nothing happens by the week yet, the panel of the heroes shows it */
 	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=1))
 	int32 DaysPerWeek = 7;
@@ -208,22 +213,59 @@ public:
 	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=1))
 	float RingRadius = 62.0f;
 
-	/** The marks of the way of the hero chosen to the cell under the cursor, a flat mesh of radius 1: a dot of PathDotRadius on each cell and a
-	 *  larger mark of PathEndRadius on the last, PathLift above the ground, in PathColor as far as the hero gets today, PathFarColor beyond,
-	 *  and PathBlockedColor for a last cell it cannot reach */
+	/** The marks of the way of the hero chosen to the cell it is pointed to, a flat mesh of radius 1: a dot of PathDotRadius on each cell and a
+	 *  larger mark of PathEndRadius on the last, lying on the ground there, PathLift above it, in PathColor as far as the hero gets today,
+	 *  PathFarColor beyond, and PathBlockedColor for a last cell it cannot reach */
 	UPROPERTY(EditAnywhere, Category="Look|Marks")
 	TSoftObjectPtr<UStaticMesh> PathMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Heroes/SM_PlanetHeroDot.SM_PlanetHeroDot")));
 
 	UPROPERTY(EditAnywhere, Category="Look|Marks")
 	TSoftObjectPtr<UStaticMesh> PathEndMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Heroes/SM_PlanetHeroTarget.SM_PlanetHeroTarget")));
 
-	/** Material of the ring, unlit, in MarkColor, and that of the marks of a way, the same but drawn over whatever stands in front of them, as
-	 *  the walls of the underground and the crowns of trees would hide a way, each mark in the color of the custom data of its instance */
+	/** Material of the ring, unlit, in MarkColor, and that of the marks of a way, the same graph, each mark in the color of the custom data of
+	 *  its instance. Both test the depth, so a way lies on the ground under the hero, the trees and whatever else stands on it, as the developer
+	 *  asked on 2026-11-11 (until then a way was drawn over everything) */
 	UPROPERTY(EditAnywhere, Category="Look|Marks")
 	TSoftObjectPtr<UMaterialInterface> MarkMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/HexPlanet/M_HexPlanetHeroMark.M_HexPlanetHeroMark")));
 
 	UPROPERTY(EditAnywhere, Category="Look|Marks")
 	TSoftObjectPtr<UMaterialInterface> PathMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/HexPlanet/M_HexPlanetHeroPath.M_HexPlanetHeroPath")));
+
+	/** The line that joins the marks of a way, a flat mesh one unit long and wide, PathLineWidth wide, laid from mark to mark in pieces at
+	 *  most PathLineStep long, each on the ground under its ends, so the line follows the relief */
+	UPROPERTY(EditAnywhere, Category="Look|Marks")
+	TSoftObjectPtr<UStaticMesh> PathLineMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Heroes/SM_PlanetHeroLine.SM_PlanetHeroLine")));
+
+	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=0.5))
+	float PathLineWidth = 7.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=2))
+	float PathLineStep = 10.0f;
+
+	/** How much the line of a way and its marks cover the ground under them, and how bright they glow; they are see-through, the line more */
+	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=0, ClampMax=1))
+	float PathLineOpacity = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=0, ClampMax=1))
+	float PathMarkOpacity = 0.85f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=0))
+	float PathBrightness = 1.0f;
+
+	/** How far the marks of a way are drawn towards the camera, in world units, so bumps of the ground between the points they lie on do not
+	 *  cut them, while what stands higher than that on the ground still hides them */
+	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=0))
+	float PathDepthBias = 5.0f;
+
+	/** The numbers of the days on a way, drawn on the screen over its marks: the size of their letters and the colors of the plate and the text */
+	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=6, ClampMax=40))
+	int32 PathLabelSize = 12;
+
+	UPROPERTY(EditAnywhere, Category="Look|Marks")
+	FLinearColor PathLabelBack = FLinearColor(0.02f, 0.02f, 0.02f, 0.85f);
+
+	UPROPERTY(EditAnywhere, Category="Look|Marks")
+	FLinearColor PathLabelColor = FLinearColor(1.0f, 0.9f, 0.55f, 1.0f);
 
 	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=1))
 	float PathDotRadius = 13.0f;
@@ -235,15 +277,15 @@ public:
 	float PathLift = 3.0f;
 
 	UPROPERTY(EditAnywhere, Category="Look|Marks")
-	FLinearColor PathColor = FLinearColor(0.35f, 1.0f, 0.3f, 1.0f);
+	FLinearColor PathColor = FLinearColor(1.0f, 0.58f, 0.07f, 1.0f);
 
 	UPROPERTY(EditAnywhere, Category="Look|Marks")
-	FLinearColor PathFarColor = FLinearColor(0.9f, 0.75f, 0.25f, 1.0f);
+	FLinearColor PathFarColor = FLinearColor(0.6f, 0.3f, 0.07f, 1.0f);
 
 	UPROPERTY(EditAnywhere, Category="Look|Marks")
 	FLinearColor PathBlockedColor = FLinearColor(1.0f, 0.2f, 0.15f, 1.0f);
 
-	/** How bright the ring and the marks glow, and how much the ring breathes and how fast */
+	/** How bright the ring glows, and how much it breathes and how fast */
 	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=0))
 	float MarkBrightness = 2.0f;
 

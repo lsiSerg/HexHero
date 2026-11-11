@@ -8,6 +8,7 @@
 #include "HexPlanetObjects.h"
 #include "HexPlanetRivers.h"
 #include "HexPlanetUnderground.h"
+#include "HexSites.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
@@ -133,6 +134,9 @@ void UHexHeroes::ResetHero(FHexHero& Hero) const
 	Hero.Route.Reset();
 	Hero.bWalking = false;
 	Hero.bEnterAtEnd = false;
+	Hero.TargetCell = INDEX_NONE;
+	Hero.VisitCell = INDEX_NONE;
+	Hero.bOutOfPoints = false;
 	Hero.StepAlpha = 0.0f;
 	Hero.bPlaced = false;
 	Hero.Facing = FVector3d::ZeroVector;
@@ -152,11 +156,24 @@ FString UHexHeroes::MakeName(int32 Class, int32 Id) const
 	return FString::Printf(TEXT("%s %d"), *Each.DisplayName, Id);
 }
 
+namespace
+{
+	/** Returns lines of heroes.json in the order of their Ids, to compare two sets of them */
+	TArray<FHexHeroLine> SortLines(TArray<FHexHeroLine> Lines)
+	{
+		Lines.Sort([](const FHexHeroLine& A, const FHexHeroLine& B) { return A.Id < B.Id; });
+		return Lines;
+	}
+}
+
 void UHexHeroes::Init(AHexPlanet* InSurface)
 {
 	Surface = InSurface;
 	Config = UHexHeroConfig::Load();
 	Heroes.Reset();
+	SavedLines.Reset();
+	Sites = NewObject<UHexSites>(this);
+	Sites->Init(InSurface, Config->Players.Num());
 	Day = 1;
 	NextId = 1;
 	bEdited = false;
@@ -172,20 +189,37 @@ void UHexHeroes::Init(AHexPlanet* InSurface)
 		UE_LOG(LogHexHero, Error, TEXT("Heroes: %s"), *Error);
 		return;
 	}
+	SetLines(Lines);
+	// what the file holds; a line that was left out leaves the planet unsaved, so the next save writes the file without it
+	SavedLines = SortLines(Lines);
+	bEdited = SortLines(MakeLines()) != SavedLines;
+	UE_LOG(LogHexHero, Log, TEXT("Heroes: %d on the planet, %.0f points of movement a day"), Heroes.Num(), Config->MovePoints);
+}
 
-	const int32 NumCells = Surface->GetGrid().GetCells().Num();
+void UHexHeroes::SetLines(const TArray<FHexHeroLine>& Lines)
+{
+	const int32 NumCells = Surface ? Surface->GetGrid().GetCells().Num() : 0;
+	const TArray<FHexHeroLine> Before = MakeLines();
+	TArray<FHexHero> Kept;
 	for (const FHexHeroLine& Line : Lines)
 	{
+		// a hero whose line is the same stays as it is, where it walked to
+		const int32 Same = Before.IndexOfByKey(Line);
+		if (Same != INDEX_NONE && !Kept.ContainsByPredicate([&Line](const FHexHero& Each) { return Each.Id == Line.Id; }))
+		{
+			Kept.Add(Heroes[Same]);
+			continue;
+		}
 		FHexHero Hero;
 		Hero.Id = Line.Id;
 		Hero.Name = Line.Name;
 		Hero.Class = Config->FindClass(Line.Class);
 		Hero.Player = FMath::Clamp(Line.Player, 0, Config->Players.Num() - 1);
 		Hero.StartCell = Line.Cell;
-		if (Hero.Id <= 0 || FindHero(Hero.Id) || Line.Cell < 0 || Line.Cell >= NumCells || !ParsePlanetLayer(Line.Layer, Hero.StartLayer))
+		if (Hero.Id <= 0 || Kept.ContainsByPredicate([&Line](const FHexHero& Each) { return Each.Id == Line.Id; }) || Line.Cell < 0 || Line.Cell >= NumCells
+			|| !ParsePlanetLayer(Line.Layer, Hero.StartLayer))
 		{
 			UE_LOG(LogHexHero, Error, TEXT("Heroes: the hero %d (%s) of heroes.json has no Id of its own, cell or layer, and is left out"), Line.Id, *Line.Name);
-			bEdited = true;
 			continue;
 		}
 		if (Hero.Class == INDEX_NONE)
@@ -194,11 +228,26 @@ void UHexHeroes::Init(AHexPlanet* InSurface)
 			Hero.Class = 0;
 		}
 		ResetHero(Hero);
-		NextId = FMath::Max(NextId, Hero.Id + 1);
-		Heroes.Add(MoveTemp(Hero));
+		Kept.Add(MoveTemp(Hero));
 	}
+	// the meshes of the heroes that go or start anew
+	for (const FHexHero& Hero : Heroes)
+	{
+		const FHexHero* Still = Kept.FindByPredicate([&Hero](const FHexHero& Each) { return Each.Id == Hero.Id; });
+		if (!Still || !Still->bPlaced)
+		{
+			RemoveBody(Hero.Id);
+		}
+	}
+	Heroes = MoveTemp(Kept);
+	for (const FHexHero& Hero : Heroes)
+	{
+		NextId = FMath::Max(NextId, Hero.Id + 1);
+	}
+	bEdited = SortLines(MakeLines()) != SavedLines;
 	++ListRevision;
-	UE_LOG(LogHexHero, Log, TEXT("Heroes: %d on the planet, %.0f points of movement a day"), Heroes.Num(), Config->MovePoints);
+	++MapRevision;
+	KeepChosen();
 }
 
 TArray<FHexHeroLine> UHexHeroes::MakeLines() const
@@ -219,12 +268,18 @@ TArray<FHexHeroLine> UHexHeroes::MakeLines() const
 
 bool UHexHeroes::Save(const FString& PlanetFolder, FString& OutError)
 {
-	if (!HexPlanetFile::SaveHeroes(PlanetFolder, MakeLines(), OutError))
+	if (!HexPlanetFile::SaveHeroes(PlanetFolder, MakeLines(), OutError) || (Sites && !Sites->Save(PlanetFolder, OutError)))
 	{
 		return false;
 	}
+	SavedLines = SortLines(MakeLines());
 	bEdited = false;
 	return true;
+}
+
+bool UHexHeroes::IsEdited() const
+{
+	return bEdited || (Sites && Sites->IsEdited());
 }
 
 bool UHexHeroes::IsUsableEntrance(const AHexPlanet& Planet, int32 Cell)
@@ -233,8 +288,13 @@ bool UHexHeroes::IsUsableEntrance(const AHexPlanet& Planet, int32 Cell)
 	return Entrance != INDEX_NONE && Planet.GetEntranceProblem(Entrance) == HexPlanetUnderground::EEntranceProblem::None;
 }
 
-float UHexHeroes::GetCellCost(const AHexPlanet& Planet, int32 Cell) const
+float UHexHeroes::GetCellCost(const AHexPlanet& Planet, int32 Cell, bool bIgnoreSite) const
 {
+	// a mine, a pile or a mill fills its cell
+	if (!bIgnoreSite && Sites && Sites->FindSiteAt(Planet.GetLayer(), Cell))
+	{
+		return -1.0f;
+	}
 	const int32 Level = Planet.GetCellLevel(Cell);
 	const bool bUnderground = Planet.GetLayer() == EHexPlanetLayer::Underground;
 	// the passages of the underground, and the plains and hills of the surface: the sea waits for ships, and mountains are walls
@@ -299,11 +359,25 @@ bool UHexHeroes::CanStand(EHexPlanetLayer Layer, int32 Cell, int32 IgnoreHero, F
 		}
 		return false;
 	}
+	if (Sites && Sites->FindSiteAt(Layer, Cell))
+	{
+		return Fail(TEXT("a mine, a pile or a mill fills that cell"));
+	}
 	if (GetCellCost(*Planet, Cell) < 0.0f)
 	{
 		const int32 Level = Planet->GetCellLevel(Cell);
-		return Fail(Layer == EHexPlanetLayer::Underground ? (HexPlanetUnderground::IsPassage(int8(Level)) ? TEXT("what stands there blocks the way") : TEXT("nothing crosses the void"))
-			: Level < 0 ? TEXT("a hero does not cross the sea yet") : Level > 1 ? TEXT("mountains cannot be crossed") : TEXT("what stands there blocks the way"));
+		const bool bGround = Layer == EHexPlanetLayer::Underground ? HexPlanetUnderground::IsPassage(int8(Level)) : Level >= 0 && Level <= 1;
+		if (!bGround)
+		{
+			return Fail(Layer == EHexPlanetLayer::Underground ? TEXT("nothing crosses the void") : Level < 0 ? TEXT("a hero does not cross the sea yet") : TEXT("mountains cannot be crossed"));
+		}
+		// what stands on the cell, by its name, as a kind that blocks may look as if one could walk through it
+		const FString Blocker = Planet->GetObjects() ? Planet->GetObjects()->GetBlockerName(Cell) : FString();
+		if (OutProblem)
+		{
+			*OutProblem = Blocker.IsEmpty() ? FString(TEXT("the ground there cannot be crossed")) : FString::Printf(TEXT("%s in the way"), *Blocker.ToLower());
+		}
+		return false;
 	}
 	return true;
 }
@@ -326,7 +400,7 @@ int32 UHexHeroes::AddHero(EHexPlanetLayer Layer, int32 Cell, int32 Class, int32 
 	UE_LOG(LogHexHero, Log, TEXT("Heroes: %s, a %s of %s, stands on cell %d of the %s as hero %d"), *Hero.Name, *Config->GetClass(Hero.Class).DisplayName,
 		*Config->GetPlayer(Hero.Player).Name, Cell, GetPlanetLayerName(Layer), Id);
 	Heroes.Add(MoveTemp(Hero));
-	bEdited = true;
+	bEdited = SortLines(MakeLines()) != SavedLines;
 	++ListRevision;
 	++MapRevision;
 	return Id;
@@ -342,13 +416,10 @@ bool UHexHeroes::RemoveHero(int32 Id)
 	UE_LOG(LogHexHero, Log, TEXT("Heroes: %s leaves the planet"), *Heroes[Index].Name);
 	RemoveBody(Id);
 	Heroes.RemoveAt(Index);
-	if (SelectedId == Id)
-	{
-		SelectedId = 0;
-	}
-	bEdited = true;
+	bEdited = SortLines(MakeLines()) != SavedLines;
 	++ListRevision;
 	++MapRevision;
+	KeepChosen();
 	return true;
 }
 
@@ -386,6 +457,174 @@ const FHexHero* UHexHeroes::SelectNext()
 	return GetSelected();
 }
 
+bool UHexHeroes::StartPlay(FString& OutProblem)
+{
+	if (Heroes.IsEmpty())
+	{
+		OutProblem = TEXT("The game needs a hero: place one in Edit, on the Heroes tab");
+		return false;
+	}
+	bPlaying = true;
+	// a hero is always chosen while the game is played: the one chosen before, else the first
+	if (!FindHero(SelectedId))
+	{
+		SelectedId = 0;
+		SelectNext();
+	}
+	UE_LOG(LogHexHero, Log, TEXT("Heroes: the game is played, day %d, %s is chosen"), Day, *GetSelected()->Name);
+	return true;
+}
+
+void UHexHeroes::StopPlay()
+{
+	bPlaying = false;
+	PendingNextFrom = 0;
+	UE_LOG(LogHexHero, Log, TEXT("Heroes: the game stops"));
+}
+
+void UHexHeroes::KeepChosen()
+{
+	if (FindHero(SelectedId))
+	{
+		return;
+	}
+	SelectedId = 0;
+	if (!bPlaying)
+	{
+		return;
+	}
+	// without a hero the player has lost
+	if (Heroes.IsEmpty())
+	{
+		bPlaying = false;
+		OnMessage.Broadcast(TEXT("No hero is left: the game is lost"));
+		return;
+	}
+	SelectNext();
+	OnHeroChosen.Broadcast(SelectedId);
+}
+
+bool UHexHeroes::CanMove(const FHexHero& Hero) const
+{
+	const AHexPlanet* Planet = GetPlanet(Hero.Layer);
+	if (!Planet || !Planet->GetGrid().GetCells().IsValidIndex(Hero.Cell))
+	{
+		return false;
+	}
+	for (const int32 Neighbor : Planet->GetGrid().GetCells()[Hero.Cell].Neighbors)
+	{
+		const float Cost = GetStepCost(*Planet, &Hero, Hero.Cell, Neighbor);
+		if (Cost >= 0.0f && HexHeroPath::CanStep(Cost, Hero.MovePoints, GetMaxMovePoints(Hero)))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+const FHexHero* UHexHeroes::FindNextAble(int32 After) const
+{
+	// in the order of their Ids, from the one after it round to the one before it
+	TArray<const FHexHero*> Sorted;
+	for (const FHexHero& Hero : Heroes)
+	{
+		Sorted.Add(&Hero);
+	}
+	Sorted.Sort([](const FHexHero& A, const FHexHero& B) { return A.Id < B.Id; });
+	const int32 Start = Sorted.IndexOfByPredicate([After](const FHexHero* Each) { return Each->Id > After; });
+	for (int32 Step = 0; Step < Sorted.Num(); ++Step)
+	{
+		const FHexHero* Hero = Sorted[((Start == INDEX_NONE ? 0 : Start) + Step) % Sorted.Num()];
+		if (Hero->Id != After && !Hero->bWalking && CanMove(*Hero))
+		{
+			return Hero;
+		}
+	}
+	return nullptr;
+}
+
+UHexHeroes::EClick UHexHeroes::Click(EHexPlanetLayer Layer, int32 Cell, const FHexHero* Under, FString& OutMessage)
+{
+	if (!bPlaying)
+	{
+		return EClick::None;
+	}
+	if (!Under)
+	{
+		Under = FindHeroAt(Layer, Cell);
+	}
+	if (Under && Under->Id != SelectedId)
+	{
+		SelectedId = Under->Id;
+		return EClick::Chosen;
+	}
+
+	FHexHero* Hero = FindHeroMutable(SelectedId);
+	const AHexPlanet* Planet = Hero ? GetPlanet(Hero->Layer) : nullptr;
+	if (!Hero || !Planet)
+	{
+		return EClick::None;
+	}
+	// the player goes on with the hero chosen, so the next one is not chosen in its place
+	PendingNextFrom = 0;
+	if (Hero->Layer != Layer)
+	{
+		OutMessage = FString::Printf(TEXT("%s is on the other layer"), *Hero->Name);
+		return EClick::None;
+	}
+	// a click on the body of the hero chosen is a click on its cell
+	if (Under)
+	{
+		Cell = Hero->Cell;
+	}
+	if (!Planet->GetGrid().GetCells().IsValidIndex(Cell))
+	{
+		return EClick::None;
+	}
+	// any click stops a hero that walks, at the end of the step it is on
+	if (Hero->bWalking)
+	{
+		Hero->Route.Reset();
+		Hero->bEnterAtEnd = false;
+		Hero->TargetCell = INDEX_NONE;
+		Hero->VisitCell = INDEX_NONE;
+		return EClick::Stopped;
+	}
+	if (Cell == Hero->TargetCell)
+	{
+		return Go(Hero->Id, OutMessage) ? EClick::Sent : EClick::None;
+	}
+	// its own cell is somewhere to go only through an entrance or exit
+	if (Cell == Hero->Cell && !IsUsableEntrance(*Planet, Cell))
+	{
+		Hero->TargetCell = INDEX_NONE;
+		return EClick::None;
+	}
+	Hero->TargetCell = Cell;
+	return EClick::Targeted;
+}
+
+bool UHexHeroes::SetTarget(int32 Id, int32 Cell)
+{
+	FHexHero* Hero = FindHeroMutable(Id);
+	if (!Hero)
+	{
+		return false;
+	}
+	Hero->TargetCell = Cell;
+	return true;
+}
+
+bool UHexHeroes::Go(int32 Id, FString& OutMessage)
+{
+	const FHexHero* Hero = FindHero(Id);
+	if (!Hero || Hero->TargetCell == INDEX_NONE || Hero->bWalking)
+	{
+		return false;
+	}
+	return Send(Id, Hero->TargetCell, OutMessage);
+}
+
 void UHexHeroes::FindFieldFor(const FHexHero& Hero, HexHeroPath::FField& OutField) const
 {
 	const AHexPlanet* Planet = GetPlanet(Hero.Layer);
@@ -420,6 +659,78 @@ void UHexHeroes::FindFieldFor(const FHexHero& Hero, HexHeroPath::FField& OutFiel
 	UE_LOG(LogHexHero, Verbose, TEXT("Heroes: the ways of %s from cell %d found in %.2f ms"), *Hero.Name, Hero.Cell, (FPlatformTime::Seconds() - StartTime) * 1000.0);
 }
 
+float UHexHeroes::GetVisitCost(const AHexPlanet& Planet, int32 From, int32 SiteCell) const
+{
+	const UHexPlanetRivers* Rivers = Planet.GetLayer() == EHexPlanetLayer::Surface ? Planet.GetRivers() : nullptr;
+	return FMath::Max(GetCellCost(Planet, SiteCell, true), 0.0f) * (Rivers ? Rivers->GetCrossingFactor(From, SiteCell) : 1.0f);
+}
+
+bool UHexHeroes::FindWay(const AHexPlanet& Planet, const FHexHero& Hero, const HexHeroPath::FField& Ways, int32 Target, TArray<int32>& OutPath, bool& bOutVisit) const
+{
+	OutPath.Reset();
+	bOutVisit = Sites && Sites->FindSiteAt(Hero.Layer, Target);
+	if (!bOutVisit)
+	{
+		return Ways.GetPath(Target, OutPath) && !OutPath.IsEmpty();
+	}
+	// to the cell beside the site from which the whole way, with the visit, is the cheapest; that may be where the hero stands
+	int32 Best = INDEX_NONE;
+	float BestCost = 0.0f;
+	for (const int32 Neighbor : Planet.GetGrid().GetCells()[Target].Neighbors)
+	{
+		if (Ways.IsReached(Neighbor))
+		{
+			const float Cost = Ways.Costs[Neighbor] + GetVisitCost(Planet, Neighbor, Target);
+			if (Best == INDEX_NONE || Cost < BestCost)
+			{
+				Best = Neighbor;
+				BestCost = Cost;
+			}
+		}
+	}
+	return Best != INDEX_NONE && Ways.GetPath(Best, OutPath);
+}
+
+bool UHexHeroes::VisitSite(FHexHero& Hero, FString& OutMessage)
+{
+	const AHexPlanet* Planet = GetPlanet(Hero.Layer);
+	const int32 SiteCell = Hero.VisitCell;
+	if (!Planet || !Sites || !Planet->GetGrid().GetCells().IsValidIndex(Hero.Cell) || !Planet->GetGrid().GetCells()[Hero.Cell].Neighbors.Contains(SiteCell)
+		|| !Sites->FindSiteAt(Hero.Layer, SiteCell))
+	{
+		Hero.VisitCell = INDEX_NONE;
+		Hero.TargetCell = INDEX_NONE;
+		return false;
+	}
+	// a visit costs what a step onto that cell would
+	const float Cost = GetVisitCost(*Planet, Hero.Cell, SiteCell);
+	if (!HexHeroPath::CanStep(Cost, Hero.MovePoints, GetMaxMovePoints(Hero)))
+	{
+		Hero.bOutOfPoints = true;
+		OutMessage = FString::Printf(TEXT("%s has no points of movement left to get there today"), *Hero.Name);
+		return false;
+	}
+	Hero.MovePoints = FMath::Max(Hero.MovePoints - Cost, 0.0f);
+	// it turns to what it visits
+	const TArray<FHexSphereCell>& Cells = Planet->GetGrid().GetCells();
+	const FVector3d Towards = ProjectToGround(Cells[SiteCell].Center - Cells[Hero.Cell].Center, Cells[Hero.Cell].Center);
+	if (!Towards.IsNearlyZero())
+	{
+		Hero.Facing = Towards;
+		Hero.bPlaced = false;
+	}
+	const int32 Week = (Day - 1) / FMath::Max(Config->DaysPerWeek, 1) + 1;
+	const FString Found = Sites->Visit(Hero.Player, Hero.Name, Hero.Layer, SiteCell, Week);
+	if (!Found.IsEmpty())
+	{
+		OnMessage.Broadcast(Found);
+	}
+	Hero.VisitCell = INDEX_NONE;
+	Hero.TargetCell = INDEX_NONE;
+	++MapRevision;
+	return true;
+}
+
 void UHexHeroes::GetStepCosts(const AHexPlanet& Planet, const FHexHero& Hero, TConstArrayView<int32> Path, TArray<float>& OutCosts) const
 {
 	OutCosts.Reset(Path.Num());
@@ -452,8 +763,10 @@ bool UHexHeroes::StartNextStep(FHexHero& Hero)
 	{
 		Hero.Route.Reset();
 		Hero.bEnterAtEnd = false;
+		Hero.bOutOfPoints = true;
 		return false;
 	}
+	Hero.bOutOfPoints = false;
 	Hero.MovePoints = FMath::Max(Hero.MovePoints - Cost, 0.0f);
 	// it stops beside an entrance on the side it comes from
 	if (IsUsableEntrance(*Planet, Next))
@@ -471,20 +784,83 @@ bool UHexHeroes::StartNextStep(FHexHero& Hero)
 void UHexHeroes::Arrive(FHexHero& Hero)
 {
 	const bool bEnter = Hero.bEnterAtEnd && Hero.Route.IsEmpty();
+	const bool bOutOfPoints = Hero.bOutOfPoints;
+	const int32 Id = Hero.Id;
 	Hero.bEnterAtEnd = false;
+	Hero.bOutOfPoints = false;
 	Hero.bPlaced = false;
+	if (Hero.Cell == Hero.TargetCell)
+	{
+		Hero.TargetCell = INDEX_NONE;
+	}
 	UE_LOG(LogHexHero, Log, TEXT("Heroes: %s stops on cell %d of the %s with %.2f points of movement left"), *Hero.Name, Hero.Cell, GetPlanetLayerName(Hero.Layer), Hero.MovePoints);
+	bool bTravelled = false;
+	bool bNoPoints = bOutOfPoints;
 	if (bEnter)
 	{
 		FString Message;
-		if (!Travel(Hero, Message) && !Message.IsEmpty())
+		bTravelled = Travel(Hero, Message, false);
+		if (!bTravelled && !Message.IsEmpty())
 		{
 			OnMessage.Broadcast(Message);
 		}
 	}
+	else if (Hero.VisitCell != INDEX_NONE && Hero.Route.IsEmpty() && !bOutOfPoints)
+	{
+		// its way ended beside the site it was sent to
+		FString Message;
+		if (!VisitSite(Hero, Message) && !Message.IsEmpty())
+		{
+			OnMessage.Broadcast(Message);
+		}
+		bNoPoints = Hero.bOutOfPoints;
+		Hero.bOutOfPoints = false;
+	}
+
+	// the hero chosen ran out of steps: the game goes on with the next that can still move, as the developer asked on 2026-11-11, after a
+	// pause in which the player sees that it used its movement and where it stopped (UpdatePendingNext)
+	if (bPlaying && Id == SelectedId && (bNoPoints || !CanMove(Hero)) && FindNextAble(Id))
+	{
+		UE_LOG(LogHexHero, Log, TEXT("Heroes: %s has no steps left today, the next hero is chosen in %.1f s"), *Hero.Name, Config->NextHeroDelay);
+		PendingNextFrom = Id;
+		PendingNextTime = FMath::Max(Config->NextHeroDelay, 0.0f);
+		// the camera stays on this layer for the next hero, and does not go through the entrance after this one
+		return;
+	}
+	if (bTravelled)
+	{
+		OnHeroTravelled.Broadcast(Id);
+	}
 }
 
-bool UHexHeroes::Travel(FHexHero& Hero, FString& OutMessage)
+void UHexHeroes::UpdatePendingNext(float DeltaTime)
+{
+	if (PendingNextFrom == 0)
+	{
+		return;
+	}
+	const FHexHero* From = FindHero(PendingNextFrom);
+	// the player chose another hero or sent this one on meanwhile
+	if (!bPlaying || !From || PendingNextFrom != SelectedId || From->bWalking)
+	{
+		PendingNextFrom = 0;
+		return;
+	}
+	PendingNextTime -= DeltaTime;
+	if (PendingNextTime > 0.0f)
+	{
+		return;
+	}
+	PendingNextFrom = 0;
+	if (const FHexHero* Next = FindNextAble(From->Id))
+	{
+		UE_LOG(LogHexHero, Log, TEXT("Heroes: %s is chosen after %s"), *Next->Name, *From->Name);
+		SelectedId = Next->Id;
+		OnHeroChosen.Broadcast(SelectedId);
+	}
+}
+
+bool UHexHeroes::Travel(FHexHero& Hero, FString& OutMessage, bool bBroadcast)
 {
 	const AHexPlanet* Planet = GetPlanet(Hero.Layer);
 	const EHexPlanetLayer Other = GetOtherLayer(Hero.Layer);
@@ -503,10 +879,15 @@ bool UHexHeroes::Travel(FHexHero& Hero, FString& OutMessage)
 	Hero.bWalking = false;
 	Hero.StepAlpha = 0.0f;
 	Hero.bPlaced = false;
+	Hero.TargetCell = INDEX_NONE;
+	Hero.VisitCell = INDEX_NONE;
 	Hero.Facing = FVector3d::ZeroVector;
 	++MapRevision;
 	UE_LOG(LogHexHero, Log, TEXT("Heroes: %s goes %s through cell %d"), *Hero.Name, Other == EHexPlanetLayer::Underground ? TEXT("down into the underground") : TEXT("up to the surface"), Hero.Cell);
-	OnHeroTravelled.Broadcast(Hero.Id);
+	if (bBroadcast)
+	{
+		OnHeroTravelled.Broadcast(Hero.Id);
+	}
 	return true;
 }
 
@@ -519,6 +900,7 @@ bool UHexHeroes::Send(int32 Id, int32 Cell, FString& OutMessage)
 		OutMessage = TEXT("There is no such hero or cell");
 		return false;
 	}
+	Hero->TargetCell = Cell;
 
 	// its own cell: through the entrance or exit it stands on, and a hero walking onto it stops there
 	if (Cell == Hero->Cell)
@@ -529,22 +911,35 @@ bool UHexHeroes::Send(int32 Id, int32 Cell, FString& OutMessage)
 			Hero->bEnterAtEnd = IsUsableEntrance(*Planet, Cell);
 			return true;
 		}
+		Hero->TargetCell = INDEX_NONE;
 		return Travel(*Hero, OutMessage);
 	}
 
 	HexHeroPath::FField Ways;
 	FindFieldFor(*Hero, Ways);
 	TArray<int32> Path;
-	if (!Ways.GetPath(Cell, Path) || Path.IsEmpty())
+	bool bVisit = false;
+	if (!FindWay(*Planet, *Hero, Ways, Cell, Path, bVisit))
 	{
-		FString Problem;
-		OutMessage = CanStand(Hero->Layer, Cell, Hero->Id, &Problem) ? FString::Printf(TEXT("%s finds no way there within %d days"), *Hero->Name, Config->PathMaxDays)
-			: FString::Printf(TEXT("%s cannot go there: %s"), *Hero->Name, *Problem);
-		return false;
+		// a site right beside the hero needs no way
+		if (!(bVisit && !Hero->bWalking && Planet->GetGrid().GetCells()[Hero->Cell].Neighbors.Contains(Cell)))
+		{
+			FString Problem;
+			OutMessage = bVisit || CanStand(Hero->Layer, Cell, Hero->Id, &Problem) ? FString::Printf(TEXT("%s finds no way there within %d days"), *Hero->Name, Config->PathMaxDays)
+				: FString::Printf(TEXT("%s cannot go there: %s"), *Hero->Name, *Problem);
+			return false;
+		}
+	}
+	Hero->VisitCell = bVisit ? Cell : INDEX_NONE;
+	if (bVisit && Path.IsEmpty() && !Hero->bWalking)
+	{
+		const bool bVisited = VisitSite(*Hero, OutMessage);
+		Hero->bOutOfPoints = false;
+		return bVisited;
 	}
 
 	Hero->Route = MoveTemp(Path);
-	Hero->bEnterAtEnd = IsUsableEntrance(*Planet, Cell);
+	Hero->bEnterAtEnd = !bVisit && IsUsableEntrance(*Planet, Cell);
 	if (!Hero->bWalking)
 	{
 		Hero->FromCell = Hero->Cell;
@@ -552,6 +947,7 @@ bool UHexHeroes::Send(int32 Id, int32 Cell, FString& OutMessage)
 		const int32 Steps = Hero->Route.Num();
 		if (!StartNextStep(*Hero))
 		{
+			Hero->bOutOfPoints = false;
 			OutMessage = FString::Printf(TEXT("%s has no points of movement left for that step today"), *Hero->Name);
 			return false;
 		}
@@ -564,12 +960,18 @@ bool UHexHeroes::Send(int32 Id, int32 Cell, FString& OutMessage)
 void UHexHeroes::EndTurn()
 {
 	++Day;
+	PendingNextFrom = 0;
 	for (FHexHero& Hero : Heroes)
 	{
 		// a hero still walking ends the step it is on
 		Hero.Route.Reset();
 		Hero.bEnterAtEnd = false;
 		Hero.MovePoints = GetMaxMovePoints(Hero);
+	}
+	// the mines give their owners their resources
+	if (Sites)
+	{
+		Sites->EndDay();
 	}
 	++MapRevision;
 	UE_LOG(LogHexHero, Log, TEXT("Heroes: day %d begins"), Day);
@@ -578,12 +980,18 @@ void UHexHeroes::EndTurn()
 void UHexHeroes::Restart()
 {
 	Day = 1;
+	PendingNextFrom = 0;
 	for (FHexHero& Hero : Heroes)
 	{
 		RemoveBody(Hero.Id);
 		ResetHero(Hero);
 	}
+	if (Sites)
+	{
+		Sites->Restart();
+	}
 	++MapRevision;
+	++ListRevision;
 	UE_LOG(LogHexHero, Log, TEXT("Heroes: back where the game starts, day 1"));
 }
 
@@ -711,7 +1119,9 @@ UMaterialInstanceDynamic* UHexHeroes::GetPathMaterial()
 		{
 			PathMaterial = UMaterialInstanceDynamic::Create(Material, this);
 			PathMaterial->SetVectorParameterValue(TEXT("MarkColor"), FLinearColor::White);
-			PathMaterial->SetScalarParameterValue(TEXT("MarkBrightness"), Config->MarkBrightness);
+			PathMaterial->SetScalarParameterValue(TEXT("MarkBrightness"), Config->PathBrightness);
+			PathMaterial->SetScalarParameterValue(TEXT("MarkOpacity"), Config->PathMarkOpacity);
+			PathMaterial->SetScalarParameterValue(TEXT("MarkDepthBias"), Config->PathDepthBias);
 			PathMaterial->SetScalarParameterValue(TEXT("MarkPulse"), 0.0f);
 			// the marks grow from afar in the material, as each is an instance
 			PathMaterial->SetScalarParameterValue(TEXT("MarkFarStart"), Config->FarStart);
@@ -721,9 +1131,30 @@ UMaterialInstanceDynamic* UHexHeroes::GetPathMaterial()
 	return PathMaterial;
 }
 
+UMaterialInstanceDynamic* UHexHeroes::GetLineMaterial()
+{
+	if (!LineMaterial)
+	{
+		if (UMaterialInterface* Material = Config->PathMaterial.LoadSynchronous())
+		{
+			LineMaterial = UMaterialInstanceDynamic::Create(Material, this);
+			LineMaterial->SetVectorParameterValue(TEXT("MarkColor"), FLinearColor::White);
+			LineMaterial->SetScalarParameterValue(TEXT("MarkBrightness"), Config->PathBrightness);
+			LineMaterial->SetScalarParameterValue(TEXT("MarkOpacity"), Config->PathLineOpacity);
+			LineMaterial->SetScalarParameterValue(TEXT("MarkDepthBias"), Config->PathDepthBias);
+			LineMaterial->SetScalarParameterValue(TEXT("MarkPulse"), 0.0f);
+			// a line grows from afar in its width alone, or it would overshoot the dots at its ends
+			LineMaterial->SetScalarParameterValue(TEXT("MarkFarStart"), Config->FarStart);
+			LineMaterial->SetScalarParameterValue(TEXT("MarkFarScale"), Config->FarScale);
+			LineMaterial->SetScalarParameterValue(TEXT("MarkAlong"), 1.0f);
+		}
+	}
+	return LineMaterial;
+}
+
 void UHexHeroes::UpdateRing()
 {
-	const FHexHero* Hero = GetSelected();
+	const FHexHero* Hero = bPlaying ? GetSelected() : nullptr;
 	for (int32 Layer = 0; Layer < NumPlanetLayers; ++Layer)
 	{
 		FLayerMarks& Each = Marks[Layer];
@@ -797,6 +1228,10 @@ void UHexHeroes::ClearMarks(EHexPlanetLayer Layer)
 	{
 		Each.End->ClearInstances();
 	}
+	if (Each.Lines.IsValid() && Each.Lines->GetInstanceCount() > 0)
+	{
+		Each.Lines->ClearInstances();
+	}
 }
 
 double UHexHeroes::GetGroundRadius(const AHexPlanet& Planet, int32 Cell)
@@ -811,47 +1246,109 @@ double UHexHeroes::GetGroundRadius(const AHexPlanet& Planet, int32 Cell)
 	return Ground;
 }
 
-void UHexHeroes::SetHoverCell(EHexPlanetLayer Layer, int32 Cell)
+FVector3d UHexHeroes::FindGroundPoint(const AHexPlanet& Planet, int32 Cell, int32 OtherCell, const FVector3d& Direction, double Lift)
 {
-	if (!bHoverOverride)
+	const FVector3d Up = Direction.GetSafeNormal();
+	TMap<int32, TArray<FVector3f>>& Cached = GroundTriangles[int32(Planet.GetLayer())];
+	const auto FindIn = [&](int32 Each, double& OutGround)
 	{
-		HoverLayer = Layer;
-		HoverCell = Cell;
+		if (!Planet.GetGrid().GetCells().IsValidIndex(Each))
+		{
+			return false;
+		}
+		const TArray<FVector3f>* Triangles = Cached.Find(Each);
+		if (!Triangles)
+		{
+			// a long game walks many cells, and the triangles of each are some kilobytes
+			if (Cached.Num() >= 256)
+			{
+				Cached.Reset();
+			}
+			TArray<FVector3f>& Added = Cached.Add(Each);
+			Planet.GetCellTriangles(Each, Added);
+			Triangles = &Added;
+		}
+		for (int32 Corner = 0; Corner + 2 < Triangles->Num(); Corner += 3)
+		{
+			const FVector3d A((*Triangles)[Corner]);
+			const FVector3d B((*Triangles)[Corner + 1]);
+			const FVector3d C((*Triangles)[Corner + 2]);
+			const FVector3d Normal = FVector3d::CrossProduct(B - A, C - A);
+			const double Along = FVector3d::DotProduct(Normal, Up);
+			if (FMath::Abs(Along) < 1.0e-9)
+			{
+				continue;
+			}
+			const double Distance = FVector3d::DotProduct(Normal, A) / Along;
+			const FVector3d Point = Up * Distance;
+			const auto Inside = [&Normal, &Point](const FVector3d& From, const FVector3d& To) { return FVector3d::DotProduct(FVector3d::CrossProduct(To - From, Point - From), Normal) >= -1.0e-6; };
+			if (Distance > 0.0 && Inside(A, B) && Inside(B, C) && Inside(C, A))
+			{
+				OutGround = Distance;
+				return true;
+			}
+		}
+		return false;
+	};
+	double Ground = 0.0;
+	if (!FindIn(Cell, Ground) && !FindIn(OtherCell, Ground))
+	{
+		Ground = Planet.GetCellTopRadius(Cell);
 	}
+	return Up * (Ground + Lift);
 }
 
-void UHexHeroes::SetHoverOverride(EHexPlanetLayer Layer, int32 Cell)
+FVector3d UHexHeroes::FindGroundUp(const AHexPlanet& Planet, int32 Cell, double Reach)
 {
-	bHoverOverride = Cell != INDEX_NONE;
-	HoverLayer = Layer;
-	HoverCell = Cell;
+	const FVector3d Up = Planet.GetGrid().GetCells()[Cell].Center;
+	FVector3d AxisX;
+	FVector3d AxisY;
+	Up.FindBestAxisVectors(AxisX, AxisY);
+	const double Middle = GetGroundRadius(Planet, Cell);
+	FVector3d Points[3];
+	for (int32 Index = 0; Index < 3; ++Index)
+	{
+		const double Angle = Index * UE_DOUBLE_TWO_PI / 3.0;
+		Points[Index] = FindGroundPoint(Planet, Cell, INDEX_NONE, Up * Middle + (AxisX * FMath::Cos(Angle) + AxisY * FMath::Sin(Angle)) * Reach, 0.0);
+	}
+	const FVector3d Normal = FVector3d::CrossProduct(Points[1] - Points[0], Points[2] - Points[0]).GetSafeNormal();
+	return Normal.IsNearlyZero() ? Up : FVector3d::DotProduct(Normal, Up) < 0.0 ? -Normal : Normal;
 }
 
-void UHexHeroes::UpdateHover()
+void UHexHeroes::UpdatePath()
 {
-	const FHexHero* Hero = GetSelected();
+	const FHexHero* Hero = bPlaying ? GetSelected() : nullptr;
 	AHexPlanet* Planet = Hero ? GetPlanet(Hero->Layer) : nullptr;
-	const bool bShow = Hero && Planet && Planet->IsBuilt() && Hero->Layer == HoverLayer && !Hero->bWalking && Planet->GetGrid().GetCells().IsValidIndex(HoverCell);
-	const int32 Cell = bShow ? HoverCell : INDEX_NONE;
-	if (Cell == ShownHoverCell && (!bShow || (Hero->Id == ShownHoverHero && MapRevision == ShownHoverRevision && Hero->MovePoints == ShownHoverPoints)))
+	// a hero that walks shows the rest of its way, one that stands the way to the cell it is pointed to
+	const bool bShow = Hero && Planet && Planet->IsBuilt() && Hero->bPlaced
+		&& (Hero->bWalking ? !Hero->Route.IsEmpty() : Planet->GetGrid().GetCells().IsValidIndex(Hero->TargetCell));
+	const int32 Target = !bShow ? INDEX_NONE : Hero->bWalking ? Hero->Route.Last() : Hero->TargetCell;
+	const int32 RouteKey = bShow && Hero->bWalking ? Hero->Route.Num() : -1;
+	const FVector3d Start = bShow && !Hero->bWalking ? Hero->Position : FVector3d::ZeroVector;
+	if (Target == ShownTarget && (!bShow || (Hero->Id == ShownHero && MapRevision == ShownRevision && Hero->MovePoints == ShownPoints && RouteKey == ShownRoute
+		&& Start.Equals(ShownStart, 0.01))))
 	{
 		return;
 	}
-	ShownHoverCell = Cell;
-	ShownHoverHero = Hero ? Hero->Id : 0;
-	ShownHoverRevision = MapRevision;
-	ShownHoverPoints = Hero ? Hero->MovePoints : -1.0f;
+	ShownTarget = Target;
+	ShownHero = Hero ? Hero->Id : 0;
+	ShownRevision = MapRevision;
+	ShownPoints = Hero ? Hero->MovePoints : -1.0f;
+	ShownRoute = RouteKey;
+	ShownStart = Start;
 	HoverText.Reset();
+	PathLabels.Reset();
 	ClearMarks(EHexPlanetLayer::Surface);
 	ClearMarks(EHexPlanetLayer::Underground);
 	if (!bShow)
 	{
 		return;
 	}
+	PathLayer = Hero->Layer;
 
 	// the marks of the layer, made when a way is first shown on it
 	FLayerMarks& Each = GetMarks(Hero->Layer);
-	const auto MakeMarks = [&](TSoftObjectPtr<UStaticMesh> MeshAsset) -> UInstancedStaticMeshComponent*
+	const auto MakeMarks = [&](TSoftObjectPtr<UStaticMesh> MeshAsset, UMaterialInstanceDynamic* Material, int32 SortPriority) -> UInstancedStaticMeshComponent*
 	{
 		UStaticMesh* Mesh = MeshAsset.LoadSynchronous();
 		if (!Mesh)
@@ -867,75 +1364,154 @@ void UHexHeroes::UpdateHover()
 		Component->SetVisibleInRayTracing(false);
 		Component->bReceivesDecals = false;
 		Component->SetNumCustomDataFloats(3);
-		if (UMaterialInstanceDynamic* Material = GetPathMaterial())
+		if (Material)
 		{
 			Component->SetMaterial(0, Material);
 		}
-		// drawn after the water and the clouds, as the marks lie over everything
-		Component->SetTranslucentSortPriority(100);
+		// drawn after the water and the clouds, as neither writes its depth, the dots over the line
+		Component->SetTranslucentSortPriority(SortPriority);
 		Component->RegisterComponent();
 		return Component;
 	};
+	if (!Each.Lines.IsValid())
+	{
+		Each.Lines = MakeMarks(Config->PathLineMesh, GetLineMaterial(), 99);
+	}
 	if (!Each.Dots.IsValid())
 	{
-		Each.Dots = MakeMarks(Config->PathMesh);
+		Each.Dots = MakeMarks(Config->PathMesh, GetPathMaterial(), 100);
 	}
 	if (!Each.End.IsValid())
 	{
-		Each.End = MakeMarks(Config->PathEndMesh);
+		Each.End = MakeMarks(Config->PathEndMesh, GetPathMaterial(), 100);
 	}
 	const TArray<FHexSphereCell>& Cells = Planet->GetGrid().GetCells();
-	const auto AddMark = [&](UInstancedStaticMeshComponent* Component, int32 MarkCell, double MarkRadius, const FLinearColor& Color)
+	const auto GetMarkPoint = [&](int32 MarkCell)
 	{
-		if (!Component)
+		return Cells[MarkCell].Center * (GetGroundRadius(*Planet, MarkCell) + Config->PathLift);
+	};
+	const auto AddMark = [&](UInstancedStaticMeshComponent* Component, const FTransform& Transform, const FLinearColor& Color)
+	{
+		if (Component)
 		{
-			return;
+			const int32 Instance = Component->AddInstance(Transform, true);
+			const float Data[3] = {Color.R, Color.G, Color.B};
+			Component->SetCustomData(Instance, MakeArrayView(Data), true);
 		}
-		const FVector3d Up = Cells[MarkCell].Center;
-		const int32 Instance = Component->AddInstance(GetMarkTransform(Up * (GetGroundRadius(*Planet, MarkCell) + Config->PathLift), Up, MarkRadius), true);
-		const float Data[3] = {Color.R, Color.G, Color.B};
-		Component->SetCustomData(Instance, MakeArrayView(Data), true);
+	};
+	// a flat mark on the middle of a cell, leaning as the ground around it does
+	const auto AddFlatMark = [&](UInstancedStaticMeshComponent* Component, int32 MarkCell, double MarkRadius, const FLinearColor& Color)
+	{
+		AddMark(Component, GetMarkTransform(GetMarkPoint(MarkCell), FindGroundUp(*Planet, MarkCell, MarkRadius * 0.7), MarkRadius), Color);
+	};
+	// the line between two points of the ground of two cells that touch, in pieces that follow the relief between them
+	const auto AddLine = [&](const FVector3d& From, int32 FromCell, const FVector3d& To, int32 ToCell, const FLinearColor& Color)
+	{
+		const int32 Pieces = FMath::Clamp(FMath::CeilToInt32(FVector3d::Distance(From, To) / FMath::Max(double(Config->PathLineStep), 2.0)), 1, 64);
+		FVector3d Last = From;
+		for (int32 Piece = 1; Piece <= Pieces; ++Piece)
+		{
+			const double Alpha = double(Piece) / Pieces;
+			const bool bFirstHalf = Alpha < 0.5;
+			const FVector3d Next = Piece == Pieces ? To : FindGroundPoint(*Planet, bFirstHalf ? FromCell : ToCell, bFirstHalf ? ToCell : FromCell, FMath::Lerp(From, To, Alpha), Config->PathLift);
+			const FVector3d Delta = Next - Last;
+			if (Delta.SizeSquared() > 0.01)
+			{
+				const FVector3d Middle = (Next + Last) * 0.5;
+				// across the whole line and not each piece, so the pieces of one line meet edge to edge where the ground bends
+				const FVector3d Across = FVector3d::CrossProduct(Middle, To - From).GetSafeNormal();
+				AddMark(Each.Lines.Get(), FTransform(FRotationMatrix::MakeFromXY(FVector(Delta), FVector(Across)).ToQuat(), FVector(Middle),
+					FVector(Delta.Size(), Config->PathLineWidth, 1.0)), Color);
+			}
+			Last = Next;
+		}
 	};
 
-	if (HoverCell == Hero->Cell)
-	{
-		if (IsUsableEntrance(*Planet, HoverCell))
-		{
-			HoverText = FString::Printf(TEXT("%s: a right click goes %s"), *Hero->Name, Hero->Layer == EHexPlanetLayer::Surface ? TEXT("down into the underground") : TEXT("up to the surface"));
-		}
-		return;
-	}
-
-	// the cheapest ways from where the hero stands, found again when it moved or the map changed
-	if (FieldHero != Hero->Id || FieldLayer != Hero->Layer || FieldRevision != MapRevision || Field.Start != Hero->Cell)
-	{
-		FindFieldFor(*Hero, Field);
-		FieldHero = Hero->Id;
-		FieldLayer = Hero->Layer;
-		FieldRevision = MapRevision;
-	}
 	TArray<int32> Path;
-	if (!Field.GetPath(HoverCell, Path) || Path.IsEmpty())
+	bool bVisit = false;
+	if (Hero->bWalking)
 	{
-		FString Problem;
-		HoverText = CanStand(Hero->Layer, HoverCell, Hero->Id, &Problem) ? FString::Printf(TEXT("%s: no way there within %d days"), *Hero->Name, Config->PathMaxDays)
-			: FString::Printf(TEXT("%s: %s"), *Hero->Name, *Problem);
-		AddMark(Each.End.Get(), HoverCell, Config->PathEndRadius, Config->PathBlockedColor);
+		Path = Hero->Route;
+		bVisit = Hero->VisitCell != INDEX_NONE;
+	}
+	else if (Hero->TargetCell == Hero->Cell)
+	{
+		// pointed to the entrance or exit it stands on
+		AddFlatMark(Each.End.Get(), Hero->Cell, Config->PathEndRadius, Config->PathColor);
+		HoverText = FString::Printf(TEXT("%s: click again to go %s"), *Hero->Name, Hero->Layer == EHexPlanetLayer::Surface ? TEXT("down into the underground") : TEXT("up to the surface"));
 		return;
+	}
+	else
+	{
+		// the cheapest ways from where the hero stands, found again when it moved or the map changed, so a way remembered is always the best now
+		if (FieldHero != Hero->Id || FieldLayer != Hero->Layer || FieldRevision != MapRevision || Field.Start != Hero->Cell)
+		{
+			FindFieldFor(*Hero, Field);
+			FieldHero = Hero->Id;
+			FieldLayer = Hero->Layer;
+			FieldRevision = MapRevision;
+		}
+		if (!FindWay(*Planet, *Hero, Field, Hero->TargetCell, Path, bVisit)
+			&& !(bVisit && Cells[Hero->Cell].Neighbors.Contains(Hero->TargetCell)))
+		{
+			FString Problem;
+			if (bVisit || CanStand(Hero->Layer, Hero->TargetCell, Hero->Id, &Problem))
+			{
+				Problem = FString::Printf(TEXT("no way there within %d days"), Config->PathMaxDays);
+			}
+			HoverText = FString::Printf(TEXT("%s: %s"), *Hero->Name, *Problem);
+			AddFlatMark(Each.End.Get(), Hero->TargetCell, Config->PathEndRadius, Config->PathBlockedColor);
+			// why, at the mark itself, as a cell that cannot be entered may look as if it could
+			Problem[0] = FChar::ToUpper(Problem[0]);
+			PathLabels.Add({GetMarkPoint(Hero->TargetCell), 0, true, Problem});
+			return;
+		}
 	}
 
 	TArray<float> Costs;
+	TArray<int32> Days;
 	GetStepCosts(*Planet, *Hero, Path, Costs);
-	const HexHeroPath::FSpend Spend = HexHeroPath::Spend(Costs, Hero->MovePoints, GetMaxMovePoints(*Hero));
+	// the visit of a site at the end of the way shows as its last step, onto the cell of the site
+	if (bVisit)
+	{
+		const int32 SiteCell = Hero->bWalking ? Hero->VisitCell : Hero->TargetCell;
+		Costs.Add(GetVisitCost(*Planet, Path.IsEmpty() ? Hero->Cell : Path.Last(), SiteCell));
+		Path.Add(SiteCell);
+	}
+	HexHeroPath::FindStepDays(Costs, Hero->MovePoints, GetMaxMovePoints(*Hero), Days);
+	float Total = 0.0f;
+	// the line starts under the hero, or at the cell it steps onto
+	FVector3d Previous = Hero->bWalking ? GetMarkPoint(Hero->Cell) : Hero->Position + Hero->Position.GetSafeNormal() * Config->PathLift;
+	int32 PreviousCell = Hero->Cell;
 	for (int32 Index = 0; Index < Path.Num(); ++Index)
 	{
-		const FLinearColor& Color = Index < Spend.StepsToday ? Config->PathColor : Config->PathFarColor;
 		const bool bLast = Index == Path.Num() - 1;
-		AddMark(bLast ? Each.End.Get() : Each.Dots.Get(), Path[Index], bLast ? Config->PathEndRadius : Config->PathDotRadius, Color);
+		const FLinearColor& Color = Days[Index] <= 1 ? Config->PathColor : Config->PathFarColor;
+		const FVector3d Point = GetMarkPoint(Path[Index]);
+		const FVector3d Up = Cells[Path[Index]].Center;
+		Total += Costs[Index];
+
+		// the line from the point before, lying on the ground between them
+		if (FVector3d::DistSquared(Point, Previous) > 1.0)
+		{
+			AddLine(Previous, PreviousCell, Point, Path[Index], Color);
+		}
+		AddFlatMark(bLast ? Each.End.Get() : Each.Dots.Get(), Path[Index], bLast ? Config->PathEndRadius : Config->PathDotRadius, Color);
+		// the number of the day at the cell where a day ends, and at the last cell the days the way takes when it is not walked today
+		if (bLast ? Days[Index] > 1 : Days[Index + 1] != Days[Index])
+		{
+			PathLabels.Add({Point, Days[Index], bLast, FString()});
+		}
+		Previous = Point;
+		PreviousCell = Path[Index];
 	}
-	HoverText = FString::Printf(TEXT("%s: %d %s, %.1f points, %s"), *Hero->Name, Path.Num(), Path.Num() == 1 ? TEXT("step") : TEXT("steps"), Spend.Total,
-		Spend.Days <= 1 ? TEXT("there today") : *FString::Printf(TEXT("%d days"), Spend.Days));
-	if (IsUsableEntrance(*Planet, HoverCell))
+	HoverText = FString::Printf(TEXT("%s: %d %s, %.1f points, %s"), *Hero->Name, Path.Num(), Path.Num() == 1 ? TEXT("step") : TEXT("steps"), Total,
+		Days.Last() <= 1 ? TEXT("there today") : *FString::Printf(TEXT("%d days"), Days.Last()));
+	if (bVisit)
+	{
+		HoverText += FString::Printf(TEXT(", to %s"), *Sites->GetCellText(Hero->Layer, Path.Last()).RightChop(6));
+	}
+	else if (IsUsableEntrance(*Planet, Path.Last()))
 	{
 		HoverText += Hero->Layer == EHexPlanetLayer::Surface ? TEXT(", then down into the underground") : TEXT(", then up to the surface");
 	}
@@ -952,9 +1528,69 @@ FString UHexHeroes::GetCellText(EHexPlanetLayer Layer, int32 Cell) const
 		Hero->MovePoints, GetMaxMovePoints(*Hero));
 }
 
+void UHexHeroes::LogWays(int32 Cell, int32 Rings) const
+{
+	const FHexHero* Hero = GetSelected();
+	const AHexPlanet* Planet = Hero ? GetPlanet(Hero->Layer) : nullptr;
+	if (!Planet || !Planet->GetGrid().GetCells().IsValidIndex(Cell))
+	{
+		UE_LOG(LogHexHero, Warning, TEXT("Heroes: no hero is chosen, or there is no such cell on its layer"));
+		return;
+	}
+	const TArray<FHexSphereCell>& Cells = Planet->GetGrid().GetCells();
+	HexHeroPath::FField Ways;
+	FindFieldFor(*Hero, Ways);
+	TArray<int32> Ring = {Cell};
+	TSet<int32> Seen = {Cell};
+	UE_LOG(LogHexHero, Log, TEXT("Heroes: the ways of %s from cell %d with %.2f points, up to %d rings around cell %d"), *Hero->Name, Hero->Cell, Hero->MovePoints, Rings, Cell);
+	for (int32 Distance = 0; Distance <= Rings; ++Distance)
+	{
+		TArray<int32> Next;
+		for (const int32 Each : Ring)
+		{
+			const TArray<TObjectPtr<UHexBiomeConfig>>& Biomes = Planet->GetBiomes();
+			const UHexBiomeConfig* Biome = Biomes.IsValidIndex(Planet->GetCellBiome(Each)) ? Biomes[Planet->GetCellBiome(Each)].Get() : nullptr;
+			TArray<int32> Path;
+			bool bVisit = false;
+			FString Result;
+			if (Each == Hero->Cell)
+			{
+				Result = TEXT("the hero stands here");
+			}
+			else if (FindWay(*Planet, *Hero, Ways, Each, Path, bVisit))
+			{
+				Result = FString::Printf(TEXT("%d steps, %.2f points%s"), Path.Num(), Path.IsEmpty() ? 0.0f : Ways.Costs[Path.Last()], bVisit ? TEXT(", then a visit") : TEXT(""));
+			}
+			else
+			{
+				FString Problem;
+				Result = bVisit ? TEXT("NO WAY to a cell beside this site") : CanStand(Hero->Layer, Each, Hero->Id, &Problem) ? TEXT("NO WAY within the days of a search")
+					: *FString::Printf(TEXT("blocked: %s"), *Problem);
+			}
+			UE_LOG(LogHexHero, Log, TEXT("  ring %d cell %d: level %d, %s, cost %.2f: %s"), Distance, Each, Planet->GetCellLevel(Each), Biome ? *Biome->GetName() : TEXT("no biome"),
+				GetCellCost(*Planet, Each), *Result);
+			for (const int32 Neighbor : Cells[Each].Neighbors)
+			{
+				bool bAlready = false;
+				Seen.Add(Neighbor, &bAlready);
+				if (!bAlready)
+				{
+					Next.Add(Neighbor);
+				}
+			}
+		}
+		Ring = MoveTemp(Next);
+	}
+}
+
 void UHexHeroes::OnLayerRebuilt(EHexPlanetLayer Layer)
 {
 	GroundRadii[int32(Layer)].Reset();
+	GroundTriangles[int32(Layer)].Reset();
+	if (Sites)
+	{
+		Sites->OnLayerRebuilt(Layer);
+	}
 	for (FHexHero& Hero : Heroes)
 	{
 		if (Hero.Layer == Layer)
@@ -1032,8 +1668,10 @@ void UHexHeroes::Update(float DeltaTime, const FVector3d* ViewPoint)
 		UpdateBody(Hero);
 	}
 
+	UpdatePendingNext(DeltaTime);
 	UpdateRing();
-	UpdateHover();
+	UpdatePath();
+	Sites->Update();
 }
 
 bool UHexHeroes::GetLights(EHexPlanetLayer Layer, const FVector3d& Focus, TArray<FHexHeroLight>& OutLights) const
@@ -1059,7 +1697,7 @@ bool UHexHeroes::GetLights(EHexPlanetLayer Layer, const FVector3d& Focus, TArray
 
 bool UHexHeroes::GetFollowDirection(EHexPlanetLayer Layer, FVector3d& OutDirection) const
 {
-	const FHexHero* Hero = GetSelected();
+	const FHexHero* Hero = bPlaying ? GetSelected() : nullptr;
 	if (!Hero || !Config || !Config->bCameraFollows || !Hero->bWalking || !Hero->bPlaced || Hero->Layer != Layer)
 	{
 		return false;
@@ -1105,7 +1743,7 @@ namespace
 		UHexHeroes* Heroes = Planet ? Planet->GetHeroes() : nullptr;
 		if (!Heroes || !Heroes->GetConfig() || Args.IsEmpty())
 		{
-			UE_LOG(LogHexHero, Warning, TEXT("hex.Hero <list|add <Cell> [Class] [Player]|remove <Hero>|select <Hero>|next|send <Cell> [Hero]|hover <Cell|off>|endturn|restart>, on a built planet; a hero is its Id or its name"));
+			UE_LOG(LogHexHero, Warning, TEXT("hex.Hero <list|play|stop|add <Cell> [Class] [Player]|remove <Hero>|select <Hero>|next|click <Cell>|target <Cell|off>|go|send <Cell> [Hero]|ways <Cell> [Rings]|endturn|restart>, on a built planet; a hero is its Id or its name"));
 			return;
 		}
 		const UHexHeroConfig* Config = Heroes->GetConfig();
@@ -1164,10 +1802,38 @@ namespace
 				UE_LOG(LogHexHero, Warning, TEXT("hex.Hero: %s"), Message.IsEmpty() ? TEXT("the hero stays") : *Message);
 			}
 		}
-		else if (Action.Equals(TEXT("hover"), ESearchCase::IgnoreCase) && Args.Num() >= 2)
+		else if (Action.Equals(TEXT("play"), ESearchCase::IgnoreCase))
 		{
-			// the way to a cell as if the cursor were over it, until hover off
-			Heroes->SetHoverOverride(Layer, Args[1].Equals(TEXT("off"), ESearchCase::IgnoreCase) ? INDEX_NONE : ParseHeroCell(Args[1], *Planet, World));
+			if (!Heroes->StartPlay(Message))
+			{
+				UE_LOG(LogHexHero, Warning, TEXT("hex.Hero: %s"), *Message);
+			}
+		}
+		else if (Action.Equals(TEXT("stop"), ESearchCase::IgnoreCase))
+		{
+			Heroes->StopPlay();
+		}
+		else if (Action.Equals(TEXT("click"), ESearchCase::IgnoreCase) && Args.Num() >= 2)
+		{
+			// what a left click on a cell of the layer shown does
+			static const TCHAR* Names[] = {TEXT("nothing"), TEXT("another hero is chosen"), TEXT("the way shows"), TEXT("the hero sets out"), TEXT("the hero stops")};
+			const UHexHeroes::EClick Result = Heroes->Click(Layer, ParseHeroCell(Args[1], *Planet, World), nullptr, Message);
+			UE_LOG(LogHexHero, Log, TEXT("hex.Hero: click, %s%s%s"), Names[int32(Result)], Message.IsEmpty() ? TEXT("") : TEXT(": "), *Message);
+		}
+		else if (Action.Equals(TEXT("target"), ESearchCase::IgnoreCase) && Args.Num() >= 2)
+		{
+			Heroes->SetTarget(Heroes->GetSelectedId(), Args[1].Equals(TEXT("off"), ESearchCase::IgnoreCase) ? INDEX_NONE : ParseHeroCell(Args[1], *Planet, World));
+		}
+		else if (Action.Equals(TEXT("go"), ESearchCase::IgnoreCase))
+		{
+			if (!Heroes->Go(Heroes->GetSelectedId(), Message))
+			{
+				UE_LOG(LogHexHero, Warning, TEXT("hex.Hero: %s"), Message.IsEmpty() ? TEXT("the hero chosen is pointed nowhere") : *Message);
+			}
+		}
+		else if (Action.Equals(TEXT("ways"), ESearchCase::IgnoreCase) && Args.Num() >= 2)
+		{
+			Heroes->LogWays(ParseHeroCell(Args[1], *Planet, World), Args.Num() >= 3 ? FMath::Clamp(FCString::Atoi(*Args[2]), 0, 8) : 2);
 		}
 		else if (Action.Equals(TEXT("endturn"), ESearchCase::IgnoreCase))
 		{
@@ -1184,6 +1850,6 @@ namespace
 	}
 
 	FAutoConsoleCommandWithWorldAndArgs HeroCommand(TEXT("hex.Hero"),
-		TEXT("Drives the heroes of the planet: list, add <Cell> [Class] [Player] on the layer shown, remove <Hero>, select <Hero>, next, send <Cell> [Hero], hover <Cell|off>, endturn, restart. A hero is its Id or its name; a cell is its number, focus for the one the camera looks at, or focus:<Steps>[:<Side>] for one that many steps from it."),
+		TEXT("Drives the heroes of the planet: list, play and stop (the game), add <Cell> [Class] [Player] on the layer shown, remove <Hero>, select <Hero>, next, click <Cell> (as the left button), target <Cell|off> and go (as a click and Space), send <Cell> [Hero], ways <Cell> [Rings] (logs the way of the hero chosen to each cell around one, or why it has none), endturn, restart. A hero is its Id or its name; a cell is its number, focus for the one the camera looks at, or focus:<Steps>[:<Side>] for one that many steps from it."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&RunHeroCommand));
 }

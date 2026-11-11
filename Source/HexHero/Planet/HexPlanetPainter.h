@@ -44,8 +44,10 @@ enum class EHexPaintTool : uint8
 	/** Gives the walls along those voids back the height of their style */
 	WallAuto,
 	/** Puts a hero of the class and player chosen on a cell of either layer, where it stands when a game starts, or takes the one there away
-	 *  with Ctrl (UHexHeroes); it is no step of Undo */
+	 *  with Ctrl (UHexHeroes), as a step of Undo */
 	Hero,
+	/** Puts a mine or a pile of the kind chosen on a cell of either layer, or takes the one there away with Ctrl (UHexSites), as a step of Undo */
+	Site,
 };
 
 /** What a click of the brush in relief mode does to the mountains and hills under it, once per cell and stroke */
@@ -95,6 +97,8 @@ enum class EHexPaintTab : uint8
 	Entrances,
 	/** The heroes that stand on the surface when a game starts */
 	Heroes,
+	/** The mines and piles of the surface */
+	Sites,
 	/** Void and passages underground, carving and the cave biomes */
 	Maze,
 	/** How the passages join the entrances of their networks, and generating them again */
@@ -103,10 +107,12 @@ enum class EHexPaintTab : uint8
 	CaveObjects,
 	/** The heroes that stand underground when a game starts */
 	CaveHeroes,
+	/** The mines and piles of the underground */
+	CaveSites,
 };
 
 /** Number of tabs of the palette */
-constexpr int32 NumPaintTabs = 10;
+constexpr int32 NumPaintTabs = 12;
 
 /** Old and new levels, biomes, relief, objects, rivers and entrances of the cells of one step of Undo, a stroke or a button */
 struct FHexPaintStep
@@ -131,6 +137,16 @@ struct FHexPaintStep
 	TArray<FHexEntrance> OldEntrances;
 	TArray<FHexEntrance> NewEntrances;
 
+	/** All the heroes before and after, as lines of heroes.json, when the step placed or took away one (UHexHeroes::SetLines) */
+	bool bHeroes = false;
+	TArray<FHexHeroLine> OldHeroes;
+	TArray<FHexHeroLine> NewHeroes;
+
+	/** All the mines and piles before and after, as lines of sites.json, when the step placed or took away one (UHexSites::SetLines) */
+	bool bSites = false;
+	TArray<FHexSiteLine> OldSites;
+	TArray<FHexSiteLine> NewSites;
+
 	/** SeedOffset of the underground before and after, when the step is a new layout (UHexPlanetPainter::NewLayout) */
 	bool bSeedOffset = false;
 	int32 OldSeedOffset = 0;
@@ -144,7 +160,8 @@ struct FHexPaintStep
 	bool IsEmpty() const
 	{
 		return NewLevels.IsEmpty() && NewBiomes.IsEmpty() && NewRelief.IsEmpty() && NewObjects.IsEmpty() && NewRivers.IsEmpty() && NewWalls.IsEmpty()
-			&& !(bEntrances && OldEntrances != NewEntrances) && !(bSeedOffset && OldSeedOffset != NewSeedOffset);
+			&& !(bEntrances && OldEntrances != NewEntrances) && !(bSeedOffset && OldSeedOffset != NewSeedOffset) && !(bHeroes && OldHeroes != NewHeroes)
+			&& !(bSites && OldSites != NewSites);
 	}
 };
 
@@ -339,6 +356,15 @@ public:
 	int32 GetHeroPlayer() const { return HeroPlayer; }
 	void SetHeroPlayer(int32 InPlayer) { HeroPlayer = FMath::Max(InPlayer, 0); }
 
+	/** Returns true while a click puts a mine or a pile of the kind chosen on a cell of the layer painted; Ctrl takes one away */
+	bool IsPlacingSites() const { return Tool == EHexPaintTool::Site; }
+	void SetSiteTool() { SetTool(EHexPaintTool::Site, GetSitesTab()); }
+	EHexPaintTab GetSitesTab() const { return Target == EHexPlanetLayer::Underground ? EHexPaintTab::CaveSites : EHexPaintTab::Sites; }
+
+	/** The kind of the sites a click places, an index into DA_HexSites */
+	int32 GetSiteKind() const { return SiteKind; }
+	void SetSiteKind(int32 InKind) { SiteKind = FMath::Max(InKind, 0); }
+
 	/** Returns true while the brush carves passages underground */
 	bool IsCarving() const { return Tool == EHexPaintTool::Carve; }
 	void SetCarveTool() { SetTool(EHexPaintTool::Carve, EHexPaintTab::Maze); }
@@ -405,7 +431,7 @@ public:
 	bool UsesBrushSize() const
 	{
 		return Tool != EHexPaintTool::Entrance && Tool != EHexPaintTool::Carve && Tool != EHexPaintTool::River && Tool != EHexPaintTool::Bridge && Tool != EHexPaintTool::Placed
-			&& Tool != EHexPaintTool::Hero;
+			&& Tool != EHexPaintTool::Hero && Tool != EHexPaintTool::Site;
 	}
 
 	/** Returns how many rings of cells the outline of the brush shows: its size, or one cell for the tools that ignore the size */
@@ -460,7 +486,7 @@ private:
 
 	/** The tool each tab had last, by EHexPaintTab */
 	EHexPaintTool TabTools[NumPaintTabs] = {EHexPaintTool::Level, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None,
-		EHexPaintTool::None, EHexPaintTool::Level, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None};
+		EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::Level, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None};
 
 	bool bActive = false;
 	bool bPainting = false;
@@ -492,6 +518,7 @@ private:
 	int32 Network = 0;
 	int32 HeroClass = 0;
 	int32 HeroPlayer = 0;
+	int32 SiteKind = 0;
 
 	/** Last cell under the cursor in the stroke, and the cell the stroke of the carving brush began at */
 	int32 LastCell = INDEX_NONE;
@@ -542,8 +569,11 @@ private:
 	/** Puts an entrance of the network on a cell, or takes one away, at once, as part of the stroke */
 	void PaintEntrance(int32 Cell);
 
-	/** Puts a hero of the class and player chosen on a cell, or takes the one there away, at once */
+	/** Puts a hero of the class and player chosen on a cell, or takes the one there away, at once, as part of the stroke */
 	void PaintHero(int32 Cell);
+
+	/** Puts a mine or a pile of the kind chosen on a cell, or takes the one there away, at once, as part of the stroke */
+	void PaintSite(int32 Cell);
 
 	/** Makes the stroke of the carving brush the passage along the shortest way from where it began to a cell */
 	void PaintCarve(int32 Cell);

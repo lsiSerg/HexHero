@@ -11,6 +11,7 @@
 
 class AHexPlanet;
 class UHexHeroConfig;
+class UHexSites;
 class UInstancedStaticMeshComponent;
 class UMaterialInstanceDynamic;
 class UStaticMeshComponent;
@@ -60,6 +61,14 @@ struct FHexHero
 
 	/** It goes through the entrance or exit its way ends on */
 	bool bEnterAtEnd = false;
+
+	/** The cell of its layer the player pointed it to, which it walks to when told and keeps until it is there, or INDEX_NONE; and whether
+	 *  its last step failed for want of points */
+	int32 TargetCell = INDEX_NONE;
+	bool bOutOfPoints = false;
+
+	/** The cell of the site it visits when its way ends beside it, as a site fills its cell, or INDEX_NONE */
+	int32 VisitCell = INDEX_NONE;
 
 	/** The side of a cell with an entrance or exit it stands on, beside the marker: the direction it came from, zero for the south */
 	FVector3d EntranceSide = FVector3d::ZeroVector;
@@ -115,6 +124,9 @@ public:
 
 	const UHexHeroConfig* GetConfig() const { return Config; }
 
+	/** Returns the mines and piles of the planet and what the players gathered */
+	UHexSites* GetSites() const { return Sites; }
+
 	const TArray<FHexHero>& GetHeroes() const { return Heroes; }
 
 	/** Returns a hero by its Id, or null */
@@ -145,18 +157,67 @@ public:
 	/** Chooses the hero after the one chosen, in the order of their Ids. Returns it, or null without heroes */
 	const FHexHero* SelectNext();
 
-	/** Shows the way of the hero chosen to a cell of a layer as marks on the ground, or none for INDEX_NONE or a cell of another layer */
-	void SetHoverCell(EHexPlanetLayer Layer, int32 Cell);
+	/** Returns true while the game is played: only then heroes are chosen and sent, and one is always chosen */
+	bool IsPlaying() const { return bPlaying; }
 
-	/** Shows the way to a cell whatever the cursor is over, for hex.Hero hover, which tries the marks without a mouse; INDEX_NONE gives the
-	 *  cursor its say back */
-	void SetHoverOverride(EHexPlanetLayer Layer, int32 Cell);
+	/** Starts the game where the heroes stand and chooses one. Returns false and why not when the planet has no hero */
+	bool StartPlay(FString& OutProblem);
+
+	/** Stops the game: no hero is chosen, and no way shows */
+	void StopPlay();
+
+	/** What a click of the player did (Click) */
+	enum class EClick : uint8
+	{
+		None,
+		/** Another hero is chosen */
+		Chosen,
+		/** The hero chosen has a new cell to go to, and its way shows */
+		Targeted,
+		/** It set out to the cell it was pointed to before */
+		Sent,
+		/** It stops at the end of the step it is on */
+		Stopped,
+	};
+
+	/** A left click of the player on a cell of the layer shown, with the hero whose body is under the cursor, if any: a click on another hero
+	 *  chooses it; on a cell it points the hero chosen there, so its way shows; a second click on that cell sets it walking; and while it
+	 *  walks any click stops it. OutMessage says why nothing came of it */
+	EClick Click(EHexPlanetLayer Layer, int32 Cell, const FHexHero* Under, FString& OutMessage);
+
+	/** Points a hero to a cell of its layer, INDEX_NONE for nowhere; its way shows while it is the one chosen */
+	bool SetTarget(int32 Id, int32 Cell);
+
+	/** Sets a hero walking to the cell it was pointed to. Returns false and why it does not go */
+	bool Go(int32 Id, FString& OutMessage);
 
 	/** Returns a line about the way shown: its cost and how many days it takes, or why there is none; empty without one */
 	const FString& GetHoverText() const { return HoverText; }
 
+	/** A number to draw at a point of the way shown: the day the hero ends there, or at its last cell the days the whole way takes */
+	struct FPathLabel
+	{
+		FVector3d Point = FVector3d::ZeroVector;
+		int32 Days = 0;
+		bool bEnd = false;
+		/** Drawn in place of the days when set: why the hero has no way to the cell marked */
+		FString Text;
+	};
+
+	/** Returns the numbers of the way shown and the layer it lies on */
+	const TArray<FPathLabel>& GetPathLabels() const { return PathLabels; }
+	EHexPlanetLayer GetPathLayer() const { return PathLayer; }
+
+	/** Sets the heroes from lines of heroes.json, for Undo of the brush: a hero whose line is the same stays as it is, another is made
+	 *  anew where it starts, and one without a line goes */
+	void SetLines(const TArray<FHexHeroLine>& Lines);
+
 	/** Returns a line about the hero on a cell for the panel at the cursor, empty without one */
 	FString GetCellText(EHexPlanetLayer Layer, int32 Cell) const;
+
+	/** Logs, for each cell up to Rings around a cell of the layer of the hero chosen, what its way there costs or why it has none, for finding out
+	 *  why a click shows no way (hex.Hero ways) */
+	void LogWays(int32 Cell, int32 Rings) const;
 
 	/** Sends a hero to a cell of its layer along the cheapest way, as far as its points take it today; a way that ends on an entrance or
 	 *  exit takes it through, and so does its own cell when it stands on one. Returns false and why it does not go */
@@ -177,10 +238,10 @@ public:
 	/** Takes a hero off the planet. Returns false if there is none */
 	bool RemoveHero(int32 Id);
 
-	/** Returns true if the heroes that heroes.json keeps changed since it was read or written */
-	bool IsEdited() const { return bEdited; }
+	/** Returns true if the heroes that heroes.json keeps, or the sites of sites.json, changed since they were read or written */
+	bool IsEdited() const;
 
-	/** Writes heroes.json into the folder of a planet */
+	/** Writes heroes.json and sites.json into the folder of a planet */
 	bool Save(const FString& PlanetFolder, FString& OutError);
 
 	/** Returns the lines of heroes.json for the heroes */
@@ -204,6 +265,10 @@ public:
 	DECLARE_MULTICAST_DELEGATE_OneParam(FOnHeroTravelled, int32);
 	FOnHeroTravelled OnHeroTravelled;
 
+	/** Broadcast when the game itself chose another hero, as the one chosen ran out of steps or left the planet, for the camera to show it */
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnHeroChosen, int32);
+	FOnHeroChosen OnHeroChosen;
+
 	/** Broadcast with a line for the player, as why a hero does not go */
 	DECLARE_MULTICAST_DELEGATE_OneParam(FOnMessage, const FString&);
 	FOnMessage OnMessage;
@@ -220,6 +285,7 @@ private:
 		TWeakObjectPtr<UStaticMeshComponent> Ring;
 		TWeakObjectPtr<UInstancedStaticMeshComponent> Dots;
 		TWeakObjectPtr<UInstancedStaticMeshComponent> End;
+		TWeakObjectPtr<UInstancedStaticMeshComponent> Lines;
 	};
 
 	UPROPERTY(Transient)
@@ -227,6 +293,9 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<const UHexHeroConfig> Config;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UHexSites> Sites;
 
 	/** The body of each hero by its Id, a component of the planet of its layer, and its material */
 	UPROPERTY(Transient)
@@ -241,6 +310,10 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> PathMaterial;
 
+	/** The material of the lines of a way, which grow from afar in their width alone */
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> LineMaterial;
+
 	TArray<FHexHero> Heroes;
 	FLayerMarks Marks[NumPlanetLayers];
 
@@ -248,6 +321,10 @@ private:
 	int32 Day = 1;
 	int32 NextId = 1;
 	bool bEdited = false;
+	bool bPlaying = false;
+
+	/** The lines heroes.json holds, by which a step of Undo back to them leaves nothing to save */
+	TArray<FHexHeroLine> SavedLines;
 	int32 ListRevision = 0;
 
 	/** Whether each layer was built at the last update, as a layer just built places its heroes */
@@ -260,18 +337,27 @@ private:
 	EHexPlanetLayer FieldLayer = EHexPlanetLayer::Surface;
 	int32 FieldRevision = -1;
 
-	/** The cell the way is shown to, and what it was shown for */
-	EHexPlanetLayer HoverLayer = EHexPlanetLayer::Surface;
-	int32 HoverCell = INDEX_NONE;
-	bool bHoverOverride = false;
-	int32 ShownHoverCell = INDEX_NONE;
-	int32 ShownHoverHero = 0;
-	int32 ShownHoverRevision = -1;
-	float ShownHoverPoints = -1.0f;
+	/** What the way shown was shown for, its line of text and its numbers */
+	int32 ShownTarget = INDEX_NONE;
+	int32 ShownHero = 0;
+	int32 ShownRevision = -1;
+	float ShownPoints = -1.0f;
+	int32 ShownRoute = -1;
+	FVector3d ShownStart = FVector3d::ZeroVector;
 	FString HoverText;
+	TArray<FPathLabel> PathLabels;
+	EHexPlanetLayer PathLayer = EHexPlanetLayer::Surface;
 
 	/** The ground under the middles of cells by layer, kept between the ways shown, dropped when the ground changes */
 	TMap<int32, double> GroundRadii[NumPlanetLayers];
+
+	/** The triangles of the ground of the cells a way was laid over, by layer, so its line follows the relief; dropped when the ground changes
+	 *  and when it holds many cells */
+	TMap<int32, TArray<FVector3f>> GroundTriangles[NumPlanetLayers];
+
+	/** The hero that stopped with no steps left and the seconds until the next one is chosen in its place (NextHeroDelay), 0 for none */
+	int32 PendingNextFrom = 0;
+	float PendingNextTime = 0.0f;
 
 	/** Counts the changes of the map of any planet (NoteMapChanged) and of where heroes stand */
 	static int32 MapRevision;
@@ -279,8 +365,19 @@ private:
 	AHexPlanet* GetPlanet(EHexPlanetLayer Layer) const;
 	FHexHero* FindHeroMutable(int32 Id);
 
-	/** Returns the factor a cell of a layer puts on a step onto it, or a negative value if no hero enters it */
-	float GetCellCost(const AHexPlanet& Planet, int32 Cell) const;
+	/** Returns the factor a cell of a layer puts on a step onto it, or a negative value if no hero enters it; bIgnoreSite for what a visit of
+	 *  the site that fills it costs */
+	float GetCellCost(const AHexPlanet& Planet, int32 Cell, bool bIgnoreSite = false) const;
+
+	/** Gives the way of a hero to a cell from the ways found for it: the cells it steps onto and, when a site fills the cell, whether the way
+	 *  ends beside it with a visit, by the cheapest cell beside it. Returns false if no way leads there */
+	bool FindWay(const AHexPlanet& Planet, const FHexHero& Hero, const HexHeroPath::FField& Ways, int32 Target, TArray<int32>& OutPath, bool& bOutVisit) const;
+
+	/** Returns what the visit of the site of a cell costs a hero that stands on a cell beside it, as a step onto that cell would */
+	float GetVisitCost(const AHexPlanet& Planet, int32 From, int32 SiteCell) const;
+
+	/** A hero that stands beside the site it was sent to visits it, paying as for a step. Returns false and why not */
+	bool VisitSite(FHexHero& Hero, FString& OutMessage);
 
 	/** Returns true if a cell of a planet holds an entrance or exit that can be used */
 	static bool IsUsableEntrance(const AHexPlanet& Planet, int32 Cell);
@@ -297,8 +394,18 @@ private:
 	/** Stops a hero where it stands, at the end of its way: through the entrance there if it was sent through */
 	void Arrive(FHexHero& Hero);
 
-	/** Takes a hero through the entrance or exit it stands on to the other layer. Returns false and why it stays */
-	bool Travel(FHexHero& Hero, FString& OutMessage);
+	/** Takes a hero through the entrance or exit it stands on to the other layer, telling the camera unless the caller does. Returns false
+	 *  and why it stays */
+	bool Travel(FHexHero& Hero, FString& OutMessage, bool bBroadcast = true);
+
+	/** Returns true if a hero has the points for a step onto any cell beside it */
+	bool CanMove(const FHexHero& Hero) const;
+
+	/** Returns the next hero after one, in the order of their Ids, that stands and can still move today, or null */
+	const FHexHero* FindNextAble(int32 After) const;
+
+	/** Chooses another hero when the one chosen is gone, and ends the game when none is left */
+	void KeepChosen();
 
 	/** Returns where a hero stands on a cell, as a direction from the center of the planet: its middle, or beside the marker of a cell with
 	 *  an entrance or exit that can be used (EntranceStandOff) */
@@ -314,8 +421,9 @@ private:
 	/** Moves the ring under the hero chosen and hides those of the other layer */
 	void UpdateRing();
 
-	/** Shows the marks of the way of the hero chosen to the cell under the cursor again when anything it hangs on changed */
-	void UpdateHover();
+	/** Shows the way of the hero chosen to the cell it is pointed to, or the rest of the way it walks: a line through a dot on each cell and
+	 *  a target on the last, with the numbers of the days; again only when anything it hangs on changed */
+	void UpdatePath();
 	void ClearMarks(EHexPlanetLayer Layer);
 
 	/** Returns the ground under the middle of a cell of a layer, as a distance from the center */
@@ -331,5 +439,16 @@ private:
 	void OnLayerRebuilt(EHexPlanetLayer Layer);
 
 	FLayerMarks& GetMarks(EHexPlanetLayer Layer) { return Marks[int32(Layer)]; }
+
+	/** Returns the point of the ground of a cell, or of the other cell where the first has none there, in a direction from the center, Lift
+	 *  above it; the top of the cell where neither has ground there */
+	FVector3d FindGroundPoint(const AHexPlanet& Planet, int32 Cell, int32 OtherCell, const FVector3d& Direction, double Lift);
+
+	/** Returns the up of the ground around the middle of a cell, from three points of it Reach away, so a flat mark lies on a slope */
+	FVector3d FindGroundUp(const AHexPlanet& Planet, int32 Cell, double Reach);
+
+	/** Chooses the next hero that can move once the pause after the one chosen ran out of steps is over */
+	void UpdatePendingNext(float DeltaTime);
 	UMaterialInstanceDynamic* GetPathMaterial();
+	UMaterialInstanceDynamic* GetLineMaterial();
 };

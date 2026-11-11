@@ -2257,11 +2257,17 @@ HERO_MARK_CODE = r"""
 return MarkColor.rgb * float3(InstanceR, InstanceG, InstanceB) * VertexRGB.r * MarkBrightness;
 """
 HERO_MARK_OPACITY_CODE = r"""
-return VertexA * (1.0 - MarkPulse * (0.5 + 0.5 * sin(Time * MarkPulseSpeed * 6.2831853)));
+return VertexA * MarkOpacity * (1.0 - MarkPulse * (0.5 + 0.5 * sin(Time * MarkPulseSpeed * 6.2831853)));
 """
 HERO_MARK_OFFSET_CODE = r"""
 float grow = clamp(distance(CameraPos, ObjectPos) / max(MarkFarStart, 1.0), 1.0, max(MarkFarScale, 1.0));
-return (WorldPos - ObjectPos) * (grow - 1.0);
+float3 fromMiddle = WorldPos - ObjectPos;
+// a piece of the line of a way grows in its width alone (MarkAlong), or it would overshoot the marks at its ends
+float3 along = normalize(AxisX);
+fromMiddle -= along * dot(fromMiddle, along) * MarkAlong;
+// drawn MarkDepthBias nearer the camera along the view, which moves nothing on the screen: bumps of the ground do not cut a flat mark, and
+// what stands higher than that still hides it
+return fromMiddle * (grow - 1.0) + normalize(CameraPos - WorldPos) * MarkDepthBias;
 """
 HERO_MATERIAL = FOLDER + '/M_HexPlanetHero'
 HERO_MARK_MATERIAL = FOLDER + '/M_HexPlanetHeroMark'
@@ -2295,8 +2301,9 @@ def build_hero_materials():
     library.recompile_material(material)
     assets.save_asset(HERO_MATERIAL)
 
-    # the marks of a way are the same material drawn over whatever stands in front of them, as walls and crowns would hide a way
-    for path, through in ((HERO_MARK_MATERIAL, False), (HERO_PATH_MATERIAL, True)):
+    # the marks of a way are the same material: both test the depth, so a way lies on the ground under the hero and whatever stands on it
+    # (until 2026-11-11 a way was drawn over everything); UHexHeroes gives the marks of a way their own MarkOpacity and MarkDepthBias
+    for path, through in ((HERO_MARK_MATERIAL, False), (HERO_PATH_MATERIAL, False)):
         material = open_material(path)
         material.set_editor_property('blend_mode', unreal.BlendMode.BLEND_TRANSLUCENT)
         material.set_editor_property('shading_model', unreal.MaterialShadingModel.MSM_UNLIT)
@@ -2316,20 +2323,77 @@ def build_hero_materials():
         library.connect_material_property(color, '', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
         opacity = add_custom(library, material, HERO_MARK_OPACITY_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT1, [('VertexA', vertex_color, 'A'),
             ('Time', library.create_material_expression(material, unreal.MaterialExpressionTime, -1000, 600), ''),
+            ('MarkOpacity', add_scalar(library, material, 'MarkOpacity', 1.0, 625), ''),
             ('MarkPulse', add_scalar(library, material, 'MarkPulse', 0.0, 650), ''),
             ('MarkPulseSpeed', add_scalar(library, material, 'MarkPulseSpeed', 0.6, 700), '')], 600)
         library.connect_material_property(opacity, '', unreal.MaterialProperty.MP_OPACITY)
         # a mark grows around its middle as the camera leaves it (FarStart, FarScale of DA_HexHeroes), so a way still shows from afar; a ring
         # is scaled with its hero by UHexHeroes, and leaves MarkFarScale at 1
+        axis = library.create_material_expression(material, unreal.MaterialExpressionConstant3Vector, -1300, 1200)
+        axis.set_editor_property('constant', unreal.LinearColor(1.0, 0.0, 0.0, 0.0))
+        axis_x = library.create_material_expression(material, unreal.MaterialExpressionTransform, -1100, 1200)
+        axis_x.set_editor_property('transform_source_type', unreal.MaterialVectorCoordTransformSource.TRANSFORMSOURCE_LOCAL)
+        axis_x.set_editor_property('transform_type', unreal.MaterialVectorCoordTransform.TRANSFORM_WORLD)
+        library.connect_material_expressions(axis, '', axis_x, '')
         grow = add_custom(library, material, HERO_MARK_OFFSET_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, [
             ('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1000, 900), ''),
             ('ObjectPos', library.create_material_expression(material, unreal.MaterialExpressionObjectPositionWS, -1000, 950), ''),
             ('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1000, 1000), ''),
             ('MarkFarStart', add_scalar(library, material, 'MarkFarStart', 1800.0, 1050), ''),
-            ('MarkFarScale', add_scalar(library, material, 'MarkFarScale', 1.0, 1100), '')], 900)
+            ('MarkFarScale', add_scalar(library, material, 'MarkFarScale', 1.0, 1100), ''),
+            ('MarkAlong', add_scalar(library, material, 'MarkAlong', 0.0, 1150), ''),
+            ('MarkDepthBias', add_scalar(library, material, 'MarkDepthBias', 0.0, 1175), ''),
+            ('AxisX', axis_x, '')], 900)
         library.connect_material_property(grow, '', unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
         library.recompile_material(material)
         assets.save_asset(path)
+
+
+# A mine or a pile of the map (UHexSites): the color of its vertices, and by their alpha the heap of its resource (about 0.5) in the color of
+# that resource and the flag of a mine (1) in the color of its owner, both from the custom data of the instance, glowing a little in those colors
+# (SiteGlow of DA_HexSites), so a site reads in the shade and in the dark of the underground
+SITE_CODE = r"""
+float tone = max(max(VertexRGB.r, VertexRGB.g), VertexRGB.b);
+float flag = step(0.75, VertexA);
+float heap = step(0.25, VertexA) * (1.0 - flag);
+float3 color = lerp(VertexRGB.rgb, float3(ResourceR, ResourceG, ResourceB) * tone, heap);
+return lerp(color, float3(OwnerR, OwnerG, OwnerB) * tone, flag);
+"""
+SITE_GLOW_CODE = r"""
+float tone = max(max(VertexRGB.r, VertexRGB.g), VertexRGB.b);
+float flag = step(0.75, VertexA);
+float heap = step(0.25, VertexA) * (1.0 - flag);
+return (float3(ResourceR, ResourceG, ResourceB) * heap + float3(OwnerR, OwnerG, OwnerB) * flag) * tone * SiteGlow;
+"""
+SITE_MATERIAL = FOLDER + '/M_HexPlanetSite'
+
+
+def build_site_material():
+    library = unreal.MaterialEditingLibrary
+    assets = unreal.EditorAssetLibrary
+    material = unreal.load_asset(SITE_MATERIAL) if assets.does_asset_exist(SITE_MATERIAL) else unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+        SITE_MATERIAL.split('/')[-1], FOLDER, unreal.Material, unreal.MaterialFactoryNew())
+    clear_expressions(material)
+    material.set_editor_property('used_with_instanced_static_meshes', True)
+    # the flag of a mine is a sheet seen from both its sides
+    material.set_editor_property('two_sided', True)
+    vertex_color = library.create_material_expression(material, unreal.MaterialExpressionVertexColor, -1000, 0)
+    inputs = [('VertexRGB', vertex_color, ''), ('VertexA', vertex_color, 'A'),
+        ('SiteGlow', add_scalar(library, material, 'SiteGlow', 0.3, 100), '')]
+    # the resource is grey and the owner nobody for a mesh that is no instance
+    for index, (name, default) in enumerate((('ResourceR', 0.6), ('ResourceG', 0.6), ('ResourceB', 0.6), ('OwnerR', 0.35), ('OwnerG', 0.35), ('OwnerB', 0.35))):
+        data = library.create_material_expression(material, unreal.MaterialExpressionPerInstanceCustomData, -1000, 200 + index * 50)
+        data.set_editor_property('data_index', index)
+        data.set_editor_property('const_default_value', default)
+        inputs.append((name, data, ''))
+    library.connect_material_property(add_custom(library, material, SITE_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, inputs, 0), '',
+        unreal.MaterialProperty.MP_BASE_COLOR)
+    library.connect_material_property(add_custom(library, material, SITE_GLOW_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, inputs, 600), '',
+        unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    roughness = add_config_parameters(library, material, unreal.HexPlanetConfig, ['Roughness'], 1000)[0][1]
+    library.connect_material_property(roughness, '', unreal.MaterialProperty.MP_ROUGHNESS)
+    library.recompile_material(material)
+    assets.save_asset(SITE_MATERIAL)
 
 
 def add_texture(library, material, path, name, sampler_type, y):
@@ -4527,6 +4591,7 @@ def main():
     # with heroes only the materials of the heroes, their ring and the marks of their ways
     if 'heroes' in sys.argv[1:]:
         build_hero_materials()
+        build_site_material()
         unreal.log('PLANET hero assets created')
         return
     # with lights only the materials that take the lights of the heroes: the haze, the water and the clouds with the shade of the surface, and
@@ -4550,6 +4615,7 @@ def main():
     build_foliage_material(build_parameter_collection())
     build_flock_material()
     build_hero_materials()
+    build_site_material()
     build_underground()
     wire_material = build_wireframe()
     build_level(material, water_material, water_grid_material, wire_material)

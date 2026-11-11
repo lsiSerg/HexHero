@@ -796,6 +796,18 @@ bool UHexPlanetObjects::BlocksMovement(int32 Cell) const
 	return !IsClear(Cell) && (Blocks(Objects.Cover) || Blocks(Objects.Decor));
 }
 
+FString UHexPlanetObjects::GetBlockerName(int32 Cell) const
+{
+	if (!BlocksMovement(Cell))
+	{
+		return FString();
+	}
+	const FHexCellObjects& Objects = GetCell(Cell);
+	const int32 Level = Planet->GetCellLevel(Cell);
+	const int32 Set = Objects.Cover > 0 && IsAllowed(Objects.Cover - 1, Level) && Sets[Objects.Cover - 1]->bBlocksMovement ? Objects.Cover : Objects.Decor;
+	return Sets[Set - 1]->DisplayName;
+}
+
 FString UHexPlanetObjects::GetCellText(int32 Cell) const
 {
 	const FHexCellObjects& Objects = GetCell(Cell);

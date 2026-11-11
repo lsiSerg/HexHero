@@ -133,7 +133,20 @@ def target():
     return mesh
 
 
-MESHES = [('Hero', hero, 'hero'), ('HeroRing', ring, 'mark'), ('HeroDot', dot, 'path'), ('HeroTarget', target, 'path')]
+def line():
+    """A piece of the line of a way: a strip one unit long along X and one wide, bright in its middle with a dark rim along both sides"""
+    mesh = Mesh()
+    mesh.begin_part()
+    rows = []
+    for y, bright, alpha in ((-0.5, 0.0, 0.0), (-0.36, 0.0, 0.7), (-0.24, 1.0, 1.0), (0.24, 1.0, 1.0), (0.36, 0.0, 0.7), (0.5, 0.0, 0.0)):
+        rows.append([mesh.vertex((x, y, 0.0), (bright, bright, bright), alpha, normal=UP) for x in (-0.5, 0.5)])
+    for near, far in zip(rows, rows[1:]):
+        mesh.sheet(near[0], near[1], far[1])
+        mesh.sheet(near[0], far[1], far[0])
+    return mesh
+
+
+MESHES = [('Hero', hero, 'hero'), ('HeroRing', ring, 'mark'), ('HeroDot', dot, 'path'), ('HeroTarget', target, 'path'), ('HeroLine', line, 'path')]
 
 
 def main():

@@ -1,7 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SHexPlanetPalette.h"
+#include "SHexModeBar.h"
 #include "HexHeroConfig.h"
+#include "HexSiteConfig.h"
 #include "HexPlanetFile.h"
 #include "HexPlanetPainter.h"
 #include "HexPlanetUnderground.h"
@@ -28,8 +30,8 @@ namespace
 	const FLinearColor KeyColor(0.7f, 0.7f, 0.7f);
 
 	/** The tabs of each layer, in the order of their buttons */
-	const EHexPaintTab SurfaceTabs[] = {EHexPaintTab::Ground, EHexPaintTab::Relief, EHexPaintTab::Objects, EHexPaintTab::Rivers, EHexPaintTab::Entrances, EHexPaintTab::Heroes};
-	const EHexPaintTab UndergroundTabs[] = {EHexPaintTab::Maze, EHexPaintTab::Links, EHexPaintTab::CaveObjects, EHexPaintTab::CaveHeroes};
+	const EHexPaintTab SurfaceTabs[] = {EHexPaintTab::Ground, EHexPaintTab::Relief, EHexPaintTab::Objects, EHexPaintTab::Rivers, EHexPaintTab::Entrances, EHexPaintTab::Heroes, EHexPaintTab::Sites};
+	const EHexPaintTab UndergroundTabs[] = {EHexPaintTab::Maze, EHexPaintTab::Links, EHexPaintTab::CaveObjects, EHexPaintTab::CaveHeroes, EHexPaintTab::CaveSites};
 }
 
 void SHexPlanetPalette::Construct(const FArguments& InArgs)
@@ -477,11 +479,48 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 			];
 		}
 		Body->AddSlot().AutoHeight()[Classes];
-		Body->AddSlot().AutoHeight()[MakeHelp(LOCTEXT("HeroHelp", "Click a cell a hero can stand on to put one of the chosen player and class there; Ctrl+click takes one away. That is where it stands when a game starts, which the save key writes. With Move the planet, a left click chooses a hero and a right click sends it."))];
+		Body->AddSlot().AutoHeight()[MakeHelp(LOCTEXT("HeroHelp", "Click a cell a hero can stand on to put one of the chosen player and class there; Ctrl+click takes one away, and Undo takes either back. That is where it stands when a game starts, which the save key writes. Play starts the game."))];
 		return Body;
 	};
 	TSharedRef<SVerticalBox> HeroBody = MakeHeroBody();
 	TSharedRef<SVerticalBox> CaveHeroBody = MakeHeroBody();
+
+	// Mines, on either layer: the kind of the mine or pile a click places
+	const UHexSiteConfig* SiteConfig = UHexSiteConfig::Load();
+	const auto MakeSiteBody = [&]()
+	{
+		TSharedRef<SVerticalBox> Body = SNew(SVerticalBox);
+		for (const bool bMines : {true, false})
+		{
+			Body->AddSlot().AutoHeight()[MakeHeading(bMines ? LOCTEXT("SiteMines", "Mines, owned by the hero's player") : LOCTEXT("SitePiles", "Piles, taken once, and mills"), bMines ? 0.0f : 8.0f)];
+			TSharedRef<SUniformGridPanel> Kinds = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
+			int32 Shown = 0;
+			for (int32 Kind = 0; Kind < SiteConfig->Kinds.Num(); ++Kind)
+			{
+				const FHexSiteKind& Each = SiteConfig->Kinds[Kind];
+				if (Each.IsMine() != bMines)
+				{
+					continue;
+				}
+				const int32 Resource = SiteConfig->FindResource(Each.Resource);
+				const FLinearColor Color = SiteConfig->Resources.IsValidIndex(Resource) ? SiteConfig->Resources[Resource].Color : FLinearColor::White;
+				const TSharedRef<SWidget> Button = MakeButton(
+					MakeSwatch(Color, SwatchSize * 0.75f, SwatchSize * 0.75f, 6.0f, FText::FromString(Each.DisplayName), Small, FText::GetEmpty()),
+					[Kind](UHexPlanetPainter& Brush) { Brush.SetSiteKind(Kind); Brush.SetSiteTool(); },
+					[Kind](const UHexPlanetPainter& Brush) { return Brush.IsPlacingSites() && Brush.GetSiteKind() == Kind; });
+				Button->SetToolTipText(bMines ? FText::Format(LOCTEXT("MineTip", "{0} a day of {1}"), FText::AsNumber(Each.PerDay), FText::FromName(Each.Resource))
+					: Each.Type == EHexSiteType::Mill ? FText::Format(LOCTEXT("MillTip", "{0} days of the income of the mine of a resource of its own, once a week"), FText::AsNumber(SiteConfig->MillDays))
+					: FText::Format(LOCTEXT("PileTip", "{0} to {1} of {2}, once"), FText::AsNumber(Each.AmountMin), FText::AsNumber(Each.AmountMax), FText::FromName(Each.Resource)));
+				Kinds->AddSlot(Shown % 2, Shown / 2)[Button];
+				++Shown;
+			}
+			Body->AddSlot().AutoHeight()[Kinds];
+		}
+		Body->AddSlot().AutoHeight()[MakeHelp(LOCTEXT("SiteHelp", "Click a cell a hero can stand on to put a mine or a pile of the chosen kind there; Ctrl+click takes one away, and Undo takes either back. It fills its cell: in the game a hero beside it that is sent onto it takes it."))];
+		return Body;
+	};
+	TSharedRef<SVerticalBox> SiteBody = MakeSiteBody();
+	TSharedRef<SVerticalBox> CaveSiteBody = MakeSiteBody();
 
 	// Maze: the void and passages underground, carving, and the cave biomes
 	TSharedRef<SVerticalBox> Maze = SNew(SVerticalBox);
@@ -723,10 +762,12 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 			+ SWidgetSwitcher::Slot()[RiverBody]
 			+ SWidgetSwitcher::Slot()[EntranceBody]
 			+ SWidgetSwitcher::Slot()[HeroBody]
+			+ SWidgetSwitcher::Slot()[SiteBody]
 			+ SWidgetSwitcher::Slot()[Maze]
 			+ SWidgetSwitcher::Slot()[Links]
 			+ SWidgetSwitcher::Slot()[CaveObjects]
 			+ SWidgetSwitcher::Slot()[CaveHeroBody]
+			+ SWidgetSwitcher::Slot()[CaveSiteBody]
 		]
 
 		// Undo and Redo of the layer painted
@@ -779,7 +820,7 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 	ChildSlot
 	.HAlign(HAlign_Left)
 	.VAlign(VAlign_Top)
-	.Padding(16.0f, 16.0f, 0.0f, 16.0f)
+	.Padding(16.0f, SHexModeBar::GetPaletteTop(), 0.0f, 16.0f)
 	[
 		SNew(SBorder)
 		.BorderImage(White)

@@ -129,6 +129,9 @@ public:
 	/** Returns true if what stands on a cell, and its level allows, keeps heroes out */
 	bool BlocksMovement(int32 Cell) const;
 
+	/** Returns the name of the kind that blocks movement on a cell, empty when none does */
+	FString GetBlockerName(int32 Cell) const;
+
 	/** Returns a line for the info at the cursor: what stands on a cell */
 	FString GetCellText(int32 Cell) const;
 

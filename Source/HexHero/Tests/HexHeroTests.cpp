@@ -5,6 +5,7 @@
 #include "HexHeroPath.h"
 #include "HexHeroes.h"
 #include "HexPlanetFile.h"
+#include "HexSiteConfig.h"
 #include "HexSphereGrid.h"
 #include "Misc/AutomationTest.h"
 
@@ -184,6 +185,21 @@ bool FHexHeroSpendTest::RunTest(const FString& Parameters)
 	Costs.Init(1.0f, 25);
 	Spend = HexHeroPath::Spend(Costs, 10.0f, 10.0f);
 	TestTrue(TEXT("25 steps take three days"), Spend.Days == 3 && Spend.StepsToday == 10);
+
+	// the day of each step, by which a way shows where each day ends: with 3 points left, three steps today, ten tomorrow, the rest after
+	TArray<int32> Days;
+	FindStepDays(Costs, 3.0f, 10.0f, Days);
+	TestEqual(TEXT("A day for each step"), Days.Num(), 25);
+	TestTrue(TEXT("The third step is still today and the fourth tomorrow"), Days[2] == 1 && Days[3] == 2);
+	TestTrue(TEXT("The thirteenth ends the second day and the last step falls on the fourth"), Days[12] == 2 && Days[13] == 3 && Days.Last() == 4);
+	int32 Backwards = 0;
+	for (int32 Index = 1; Index < Days.Num(); ++Index)
+	{
+		Backwards += Days[Index] < Days[Index - 1] ? 1 : 0;
+	}
+	TestEqual(TEXT("The days never go back along a way"), Backwards, 0);
+	FindStepDays({}, 3.0f, 10.0f, Days);
+	TestTrue(TEXT("No steps have no days"), Days.IsEmpty());
 	return true;
 }
 
@@ -234,6 +250,70 @@ bool FHexHeroFileTest::RunTest(const FString& Parameters)
 		TestTrue(*FString::Printf(TEXT("The class %s has names for its heroes"), *Class.DisplayName), !Class.Names.IsEmpty() && !Class.Id.IsNone());
 	}
 	TestTrue(TEXT("A hero has points of movement, and lights within what the materials take"), Config->MovePoints >= 1.0f && Config->MaxLights <= MaxHeroLights);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHexHeroSitesTest, "HexHero.Hero.Sites",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FHexHeroSitesTest::RunTest(const FString& Parameters)
+{
+	// sites.json: a line per site, sorted by Id, read back as written
+	TArray<FHexSiteLine> Sites;
+	FHexSiteLine& Second = Sites.AddDefaulted_GetRef();
+	Second.Id = 5;
+	Second.Kind = TEXT("CrystalCave");
+	Second.Layer = TEXT("Underground");
+	Second.Cell = 812;
+	FHexSiteLine& First = Sites.AddDefaulted_GetRef();
+	First.Id = 2;
+	First.Kind = TEXT("Sawmill");
+	First.Layer = TEXT("Surface");
+	First.Cell = 44;
+	const FString Text = HexPlanetFile::EncodeSites(Sites);
+	TArray<FString> Lines;
+	Text.ParseIntoArrayLines(Lines);
+	TestEqual(TEXT("A line per site between the brackets"), Lines.Num(), 7);
+	TestTrue(TEXT("The lowest Id comes first"), Lines.IsValidIndex(4) && Lines[3].Contains(TEXT("\"id\": 2,")) && Lines[4].Contains(TEXT("\"id\": 5,")));
+	TArray<FHexSiteLine> Read;
+	FString Error;
+	TestTrue(TEXT("The text reads back"), HexPlanetFile::DecodeSites(Text, Read, Error));
+	TestTrue(TEXT("With the same sites"), Read.Num() == 2 && Read[0] == Sites[1] && Read[1] == Sites[0]);
+	TestEqual(TEXT("Written again it is the same text"), HexPlanetFile::EncodeSites(Read), Text);
+	TestFalse(TEXT("Text that is no JSON is refused"), HexPlanetFile::DecodeSites(TEXT("sites"), Read, Error));
+
+	// the resources and sites of the developer's document: seven resources, a mine and a pile of each, and a mill
+	const UHexSiteConfig* Config = GetDefault<UHexSiteConfig>();
+	TestEqual(TEXT("Seven resources"), Config->Resources.Num(), 7);
+	const TMap<FName, int32> Incomes = {{TEXT("Gold"), 1000}, {TEXT("Wood"), 2}, {TEXT("Ore"), 2}, {TEXT("Mercury"), 1}, {TEXT("Sulfur"), 1}, {TEXT("Crystal"), 1}, {TEXT("Gems"), 1}};
+	// a player starts with 2 days of a gold mine, 4 of a basic one and 2 of a rare one
+	const TMap<FName, int32> StartDays = {{TEXT("Gold"), 2}, {TEXT("Wood"), 4}, {TEXT("Ore"), 4}, {TEXT("Mercury"), 2}, {TEXT("Sulfur"), 2}, {TEXT("Crystal"), 2}, {TEXT("Gems"), 2}};
+	int32 Mills = 0;
+	for (int32 Resource = 0; Resource < Config->Resources.Num(); ++Resource)
+	{
+		const FHexResourceInfo& Info = Config->Resources[Resource];
+		int32 Mines = 0;
+		int32 Piles = 0;
+		for (const FHexSiteKind& Kind : Config->Kinds)
+		{
+			Mines += Kind.Type == EHexSiteType::Mine && Kind.Resource == Info.Id ? 1 : 0;
+			Piles += Kind.Type == EHexSiteType::Pile && Kind.Resource == Info.Id && Kind.AmountMin > 0 && Kind.AmountMax >= Kind.AmountMin ? 1 : 0;
+		}
+		TestEqual(*FString::Printf(TEXT("One mine of %s"), *Info.DisplayName), Mines, 1);
+		TestEqual(*FString::Printf(TEXT("One pile of %s"), *Info.DisplayName), Piles, 1);
+		TestEqual(*FString::Printf(TEXT("The mine of %s gives what the document says"), *Info.DisplayName), Config->GetMineIncome(Resource), Incomes.FindRef(Info.Id));
+		TestEqual(*FString::Printf(TEXT("A player starts with the days of %s the developer chose"), *Info.DisplayName), Info.StartAmount, Incomes.FindRef(Info.Id) * StartDays.FindRef(Info.Id));
+	}
+	TSet<FName> Ids;
+	for (const FHexSiteKind& Kind : Config->Kinds)
+	{
+		Mills += Kind.Type == EHexSiteType::Mill ? 1 : 0;
+		TestTrue(*FString::Printf(TEXT("The kind %s has a name of its own"), *Kind.DisplayName), !Kind.Id.IsNone() && !Ids.Contains(Kind.Id));
+		Ids.Add(Kind.Id);
+		TestTrue(*FString::Printf(TEXT("The kind %s is found by its name"), *Kind.DisplayName), Config->Kinds.IsValidIndex(Config->FindKind(Kind.Id.ToString().ToLower())));
+	}
+	TestEqual(TEXT("A mill"), Mills, 1);
+	TestEqual(TEXT("A mill gives three days of a mine"), Config->MillDays, 3);
 	return true;
 }
 

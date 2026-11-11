@@ -1131,6 +1131,81 @@ bool HexPlanetFile::SaveHeroes(const FString& PlanetFolder, TConstArrayView<FHex
 	return true;
 }
 
+FString HexPlanetFile::EncodeSites(TConstArrayView<FHexSiteLine> Sites)
+{
+	TArray<FHexSiteLine> Sorted(Sites);
+	Sorted.StableSort([](const FHexSiteLine& A, const FHexSiteLine& B) { return A.Id < B.Id; });
+
+	FString Text = TEXT("{\n\t\"version\": 1,\n\t\"sites\": [");
+	for (int32 Index = 0; Index < Sorted.Num(); ++Index)
+	{
+		const FHexSiteLine& Site = Sorted[Index];
+		Text += FString::Printf(TEXT("%s\n\t\t{\"id\": %d, \"kind\": \"%s\", \"layer\": \"%s\", \"cell\": %d}"), Index == 0 ? TEXT("") : TEXT(","),
+			Site.Id, *EscapeJsonText(Site.Kind), *EscapeJsonText(Site.Layer), Site.Cell);
+	}
+	Text += Sorted.IsEmpty() ? TEXT("]\n}\n") : TEXT("\n\t]\n}\n");
+	return Text;
+}
+
+bool HexPlanetFile::DecodeSites(const FString& Text, TArray<FHexSiteLine>& OutSites, FString& OutError)
+{
+	FHexSitesFile File;
+	if (!FJsonObjectConverter::JsonObjectStringToUStruct(Text, &File))
+	{
+		OutError = TEXT("not valid JSON");
+		return false;
+	}
+	OutSites = MoveTemp(File.Sites);
+	return true;
+}
+
+bool HexPlanetFile::HasSites(const FString& PlanetFolder)
+{
+	return !PlanetFolder.IsEmpty() && IFileManager::Get().FileExists(*GetFilePath(PlanetFolder, SitesFile));
+}
+
+bool HexPlanetFile::LoadSites(const FString& PlanetFolder, TArray<FHexSiteLine>& OutSites, FString& OutError)
+{
+	const FString FilePath = GetFilePath(PlanetFolder, SitesFile);
+	FString Text;
+	if (!FFileHelper::LoadFileToString(Text, *FilePath))
+	{
+		OutError = FString::Printf(TEXT("could not read %s"), *FilePath);
+		return false;
+	}
+	if (!DecodeSites(Text, OutSites, OutError))
+	{
+		OutError = FString::Printf(TEXT("%s: %s"), *FilePath, *OutError);
+		return false;
+	}
+	return true;
+}
+
+bool HexPlanetFile::SaveSites(const FString& PlanetFolder, TConstArrayView<FHexSiteLine> Sites, FString& OutError)
+{
+	const FString FilePath = GetFilePath(PlanetFolder, SitesFile);
+	if (PlanetFolder.IsEmpty())
+	{
+		OutError = FString::Printf(TEXT("could not write %s"), *FilePath);
+		return false;
+	}
+	if (Sites.IsEmpty())
+	{
+		if (IFileManager::Get().FileExists(*FilePath) && !IFileManager::Get().Delete(*FilePath))
+		{
+			OutError = FString::Printf(TEXT("could not delete %s"), *FilePath);
+			return false;
+		}
+		return true;
+	}
+	if (!FFileHelper::SaveStringToFile(EncodeSites(Sites), *FilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+	{
+		OutError = FString::Printf(TEXT("could not write %s"), *FilePath);
+		return false;
+	}
+	return true;
+}
+
 FString HexPlanetFile::FindPlanetToOpen(const UWorld* World)
 {
 	const TArray<FHexPlanetEntry> Planets = FindPlanets();

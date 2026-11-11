@@ -3,6 +3,7 @@
 #include "HexPlanetPainter.h"
 #include "HexHero.h"
 #include "HexHeroes.h"
+#include "HexSites.h"
 #include "HexPlanet.h"
 #include "HexPlanetConfig.h"
 #include "HexBiomeConfig.h"
@@ -142,6 +143,8 @@ FText UHexPlanetPainter::GetTabName(EHexPaintTab Tab)
 	case EHexPaintTab::Entrances: return LOCTEXT("TabEntrances", "Entrances");
 	case EHexPaintTab::Heroes:
 	case EHexPaintTab::CaveHeroes: return LOCTEXT("TabHeroes", "Heroes");
+	case EHexPaintTab::Sites:
+	case EHexPaintTab::CaveSites: return LOCTEXT("TabSites", "Mines");
 	case EHexPaintTab::Maze: return LOCTEXT("TabMaze", "Maze");
 	case EHexPaintTab::Links: return LOCTEXT("TabLinks", "Links");
 	default: return LOCTEXT("TabCaveObjects", "Objects");
@@ -708,12 +711,12 @@ void UHexPlanetPainter::ContinueStroke(int32 Cell)
 		LastCell = Cell;
 		return;
 	}
-	// a hero goes on the cell pressed alone
-	if (Tool == EHexPaintTool::Hero)
+	// a hero goes on the cell pressed alone, and so does a mine or a pile
+	if (Tool == EHexPaintTool::Hero || Tool == EHexPaintTool::Site)
 	{
 		if (LastCell == INDEX_NONE)
 		{
-			PaintHero(Cell);
+			Tool == EHexPaintTool::Hero ? PaintHero(Cell) : PaintSite(Cell);
 		}
 		LastCell = Cell;
 		return;
@@ -904,19 +907,57 @@ void UHexPlanetPainter::PaintHero(int32 Cell)
 	{
 		return;
 	}
+	// the heroes before, for Undo
+	if (!Stroke.bHeroes)
+	{
+		Stroke.bHeroes = true;
+		Stroke.OldHeroes = Heroes->MakeLines();
+	}
 	if (IsBackwards())
 	{
 		if (const FHexHero* Hero = Heroes->FindHeroAt(Target, Cell))
 		{
 			Heroes->RemoveHero(Hero->Id);
 		}
+	}
+	else
+	{
+		FString Problem;
+		if (Heroes->AddHero(Target, Cell, HeroClass, HeroPlayer, Problem) == 0 && GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(INDEX_NONE, 3.0f, FColor::Yellow, FString::Printf(TEXT("No hero stands there: %s"), *Problem));
+		}
+	}
+	Stroke.NewHeroes = Heroes->MakeLines();
+}
+
+void UHexPlanetPainter::PaintSite(int32 Cell)
+{
+	UHexHeroes* Heroes = Planet ? Planet->GetHeroes() : nullptr;
+	UHexSites* Sites = Heroes ? Heroes->GetSites() : nullptr;
+	if (!Sites)
+	{
 		return;
 	}
-	FString Problem;
-	if (Heroes->AddHero(Target, Cell, HeroClass, HeroPlayer, Problem) == 0 && GEngine)
+	// the sites before, for Undo
+	if (!Stroke.bSites)
 	{
-		GEngine->AddOnScreenDebugMessage(INDEX_NONE, 3.0f, FColor::Yellow, FString::Printf(TEXT("No hero stands there: %s"), *Problem));
+		Stroke.bSites = true;
+		Stroke.OldSites = Sites->MakeLines();
 	}
+	if (IsBackwards())
+	{
+		Sites->RemoveSiteAt(Target, Cell);
+	}
+	else
+	{
+		FString Problem;
+		if (Sites->AddSite(Target, Cell, SiteKind, Problem) == 0 && GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(INDEX_NONE, 3.0f, FColor::Yellow, FString::Printf(TEXT("Nothing is built there: %s"), *Problem));
+		}
+	}
+	Stroke.NewSites = Sites->MakeLines();
 }
 
 void UHexPlanetPainter::PaintEntrance(int32 Cell)
@@ -1293,6 +1334,14 @@ void UHexPlanetPainter::Undo()
 	FHexPaintStep Step = GetLayerState().UndoSteps.Pop();
 	Apply(Step.OldLevels, Step.OldBiomes, Step.OldRelief, Step.OldObjects, Step.OldRivers, Step.bEntrances ? &Step.OldEntrances : nullptr,
 		Step.bSeedOffset ? &Step.OldSeedOffset : nullptr, Step.OldWalls);
+	if (UHexHeroes* Heroes = Step.bHeroes && Planet ? Planet->GetHeroes() : nullptr)
+	{
+		Heroes->SetLines(Step.OldHeroes);
+	}
+	if (UHexHeroes* Heroes = Step.bSites && Planet ? Planet->GetHeroes() : nullptr)
+	{
+		Heroes->GetSites()->SetLines(Step.OldSites);
+	}
 	GetLayerState().RedoSteps.Add(MoveTemp(Step));
 	UpdateSavedState();
 }
@@ -1307,6 +1356,14 @@ void UHexPlanetPainter::Redo()
 	FHexPaintStep Step = GetLayerState().RedoSteps.Pop();
 	Apply(Step.NewLevels, Step.NewBiomes, Step.NewRelief, Step.NewObjects, Step.NewRivers, Step.bEntrances ? &Step.NewEntrances : nullptr,
 		Step.bSeedOffset ? &Step.NewSeedOffset : nullptr, Step.NewWalls);
+	if (UHexHeroes* Heroes = Step.bHeroes && Planet ? Planet->GetHeroes() : nullptr)
+	{
+		Heroes->SetLines(Step.NewHeroes);
+	}
+	if (UHexHeroes* Heroes = Step.bSites && Planet ? Planet->GetHeroes() : nullptr)
+	{
+		Heroes->GetSites()->SetLines(Step.NewSites);
+	}
 	GetLayerState().UndoSteps.Add(MoveTemp(Step));
 	UpdateSavedState();
 }

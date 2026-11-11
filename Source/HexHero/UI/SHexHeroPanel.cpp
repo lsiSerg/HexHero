@@ -3,6 +3,11 @@
 #include "SHexHeroPanel.h"
 #include "HexHeroConfig.h"
 #include "HexHeroes.h"
+#include "HexSiteConfig.h"
+#include "HexSites.h"
+#include "Fonts/FontMeasure.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Rendering/DrawElements.h"
 #include "Styling/CoreStyle.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
@@ -28,6 +33,8 @@ void SHexHeroPanel::Construct(const FArguments& InArgs)
 {
 	OnHeroChosen = InArgs._OnHeroChosen;
 	OnEndTurn = InArgs._OnEndTurn;
+	OnRestart = InArgs._OnRestart;
+	OnProject = InArgs._OnProject;
 
 	// the widget covers the viewport, of which only the panel takes the mouse
 	SetVisibility(EVisibility::SelfHitTestInvisible);
@@ -39,9 +46,65 @@ void SHexHeroPanel::Construct(const FArguments& InArgs)
 	const FString EndTurnKeys = InArgs._EndTurnKeys;
 	const FString NextHeroKeys = InArgs._NextHeroKeys;
 
+	// what the player of the hero chosen has of each resource, and gets from its mines every day
+	TSharedRef<SHorizontalBox> ResourceRow = SNew(SHorizontalBox);
+	const UHexSiteConfig* SiteConfig = UHexSiteConfig::Load();
+	for (int32 Resource = 0; Resource < SiteConfig->Resources.Num(); ++Resource)
+	{
+		const FLinearColor Color = SiteConfig->Resources[Resource].Color;
+		ResourceRow->AddSlot()
+		.AutoWidth()
+		.VAlign(VAlign_Center)
+		.Padding(Resource == 0 ? 0.0f : 14.0f, 0.0f, 5.0f, 0.0f)
+		[
+			SNew(SBox)
+			.WidthOverride(10.0f)
+			.HeightOverride(10.0f)
+			[
+				SNew(SImage)
+				.Image(White)
+				.ColorAndOpacity(FLinearColor(Color.R, Color.G, Color.B, 1.0f))
+			]
+		];
+		ResourceRow->AddSlot()
+		.AutoWidth()
+		.VAlign(VAlign_Center)
+		[
+			SNew(STextBlock)
+			.Font(Font)
+			.ToolTipText(FText::FromString(SiteConfig->Resources[Resource].DisplayName))
+			.Text_Lambda([this, Resource, Name = SiteConfig->Resources[Resource].DisplayName]()
+			{
+				const FHexHero* Hero = Heroes.IsValid() ? Heroes->GetSelected() : nullptr;
+				const UHexSites* Sites = Hero ? Heroes->GetSites() : nullptr;
+				if (!Sites)
+				{
+					return FText::GetEmpty();
+				}
+				const int32 Income = Sites->GetIncome(Hero->Player, Resource);
+				return Income > 0 ? FText::Format(LOCTEXT("ResourceIncome", "{0} {1} (+{2})"), FText::FromString(Name), FText::AsNumber(Sites->GetAmount(Hero->Player, Resource)), FText::AsNumber(Income))
+					: FText::Format(LOCTEXT("Resource", "{0} {1}"), FText::FromString(Name), FText::AsNumber(Sites->GetAmount(Hero->Player, Resource)));
+			})
+		];
+	}
+
 	ChildSlot
 	[
 		SNew(SOverlay)
+		+ SOverlay::Slot()
+		.HAlign(HAlign_Center)
+		.VAlign(VAlign_Top)
+		.Padding(16.0f)
+		[
+			SNew(SBorder)
+			.BorderImage(White)
+			.BorderBackgroundColor(HeroPanelColor)
+			.Padding(FMargin(12.0f, 6.0f))
+			.Visibility_Lambda([this]() { return Heroes.IsValid() && Heroes->IsPlaying() ? EVisibility::HitTestInvisible : EVisibility::Collapsed; })
+			[
+				ResourceRow
+			]
+		]
 		+ SOverlay::Slot()
 		.HAlign(HAlign_Right)
 		.VAlign(VAlign_Bottom)
@@ -49,7 +112,7 @@ void SHexHeroPanel::Construct(const FArguments& InArgs)
 		[
 			SNew(SBox)
 			.WidthOverride(HeroPanelWidth)
-			.Visibility_Lambda([this]() { return Heroes.IsValid() && !Heroes->GetHeroes().IsEmpty() ? EVisibility::Visible : EVisibility::Collapsed; })
+			.Visibility_Lambda([this]() { return Heroes.IsValid() && Heroes->IsPlaying() && !Heroes->GetHeroes().IsEmpty() ? EVisibility::Visible : EVisibility::Collapsed; })
 			[
 				SNew(SBorder)
 				.BorderImage(White)
@@ -93,8 +156,7 @@ void SHexHeroPanel::Construct(const FArguments& InArgs)
 							const FHexHero* Hero = Heroes.IsValid() ? Heroes->GetSelected() : nullptr;
 							if (!Hero)
 							{
-								return FText::Format(LOCTEXT("NoHero", "Left click a hero to choose it{0}; a right click sends it."),
-									NextHeroKeys.IsEmpty() ? FText::GetEmpty() : FText::Format(LOCTEXT("OrKey", ", or {0}"), FText::FromString(NextHeroKeys)));
+								return FText::GetEmpty();
 							}
 							return FText::Format(LOCTEXT("Attributes", "Level {0}   Attack {1}   Defense {2}\nSpell power {3}   Knowledge {4}   Mana {5}"), FText::AsNumber(Hero->Level),
 								FText::AsNumber(Hero->Attack), FText::AsNumber(Hero->Defense), FText::AsNumber(Hero->SpellPower), FText::AsNumber(Hero->Knowledge), FText::AsNumber(Hero->Mana));
@@ -111,25 +173,64 @@ void SHexHeroPanel::Construct(const FArguments& InArgs)
 						.Text_Lambda([this]() { return Heroes.IsValid() ? FText::FromString(Heroes->GetHoverText()) : FText::GetEmpty(); })
 						.Visibility_Lambda([this]() { return Heroes.IsValid() && !Heroes->GetHoverText().IsEmpty() ? EVisibility::Visible : EVisibility::Collapsed; })
 					]
+					// how the mouse and the keys move a hero
+					+ SVerticalBox::Slot()
+					.AutoHeight()
+					.Padding(0.0f, 4.0f, 0.0f, 0.0f)
+					[
+						SNew(STextBlock)
+						.Font(Small)
+						.AutoWrapText(true)
+						.ColorAndOpacity(HeroDimColor)
+						.Text(FText::Format(LOCTEXT("How", "Click a cell to show the way, click it again{0} to walk. Click a hero{1} to choose it, twice to look at it."),
+							InArgs._GoKeys.IsEmpty() ? FText::GetEmpty() : FText::Format(LOCTEXT("OrGo", " or press {0}"), FText::FromString(InArgs._GoKeys)),
+							NextHeroKeys.IsEmpty() ? FText::GetEmpty() : FText::Format(LOCTEXT("OrNext", " or press {0}"), FText::FromString(NextHeroKeys))))
+					]
 					+ SVerticalBox::Slot()
 					.AutoHeight()
 					.Padding(0.0f, 8.0f, 0.0f, 0.0f)
 					[
-						SNew(SButton)
-						.IsFocusable(false)
-						.HAlign(HAlign_Center)
-						.ContentPadding(FMargin(6.0f, 4.0f))
-						.ButtonColorAndOpacity(HeroButtonColor)
-						.ToolTipText(LOCTEXT("EndTurnTip", "The next day begins, and every hero gets its points of movement back"))
-						.OnClicked_Lambda([this]()
-						{
-							OnEndTurn.ExecuteIfBound();
-							return FReply::Handled();
-						})
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot()
+						.FillWidth(1.0f)
 						[
-							SNew(STextBlock)
-							.Font(Font)
-							.Text(EndTurnKeys.IsEmpty() ? LOCTEXT("EndTurn", "End the day") : FText::Format(LOCTEXT("EndTurnKeys", "End the day ({0})"), FText::FromString(EndTurnKeys)))
+							SNew(SButton)
+							.IsFocusable(false)
+							.HAlign(HAlign_Center)
+							.ContentPadding(FMargin(6.0f, 4.0f))
+							.ButtonColorAndOpacity(HeroButtonColor)
+							.ToolTipText(LOCTEXT("EndTurnTip", "The next day begins, and every hero gets its points of movement back"))
+							.OnClicked_Lambda([this]()
+							{
+								OnEndTurn.ExecuteIfBound();
+								return FReply::Handled();
+							})
+							[
+								SNew(STextBlock)
+								.Font(Font)
+								.Text(EndTurnKeys.IsEmpty() ? LOCTEXT("EndTurn", "End the day") : FText::Format(LOCTEXT("EndTurnKeys", "End the day ({0})"), FText::FromString(EndTurnKeys)))
+							]
+						]
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.Padding(3.0f, 0.0f, 0.0f, 0.0f)
+						[
+							SNew(SButton)
+							.IsFocusable(false)
+							.HAlign(HAlign_Center)
+							.ContentPadding(FMargin(6.0f, 4.0f))
+							.ButtonColorAndOpacity(HeroButtonColor)
+							.ToolTipText(LOCTEXT("RestartTip", "Day 1 again, with every hero back where it starts"))
+							.OnClicked_Lambda([this]()
+							{
+								OnRestart.ExecuteIfBound();
+								return FReply::Handled();
+							})
+							[
+								SNew(STextBlock)
+								.Font(Font)
+								.Text(LOCTEXT("Restart", "New game"))
+							]
 						]
 					]
 				]
@@ -157,6 +258,39 @@ void SHexHeroPanel::Tick(const FGeometry& AllottedGeometry, const double InCurre
 		ListedRevision = Revision;
 		RebuildList();
 	}
+}
+
+int32 SHexHeroPanel::OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements,
+	int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const
+{
+	if (Heroes.IsValid() && Heroes->IsPlaying() && Heroes->GetConfig() && OnProject)
+	{
+		const UHexHeroConfig* Config = Heroes->GetConfig();
+		const FSlateBrush* White = FCoreStyle::Get().GetBrush(TEXT("GenericWhiteBox"));
+		const FSlateFontInfo Font = FCoreStyle::GetDefaultFontStyle("Bold", Config->PathLabelSize);
+		const TSharedRef<FSlateFontMeasure> Measure = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
+		const float Scale = FMath::Max(AllottedGeometry.Scale, 0.01f);
+		const FVector2D Margin(6.0, 2.0);
+		for (const UHexHeroes::FPathLabel& Label : Heroes->GetPathLabels())
+		{
+			FVector2D Screen;
+			if (!OnProject(FVector(Label.Point), Screen))
+			{
+				continue;
+			}
+			// the day a hero ends at a mark, and at the end of a way the days all of it takes
+			const FString Text = !Label.Text.IsEmpty() ? Label.Text : Label.bEnd ? FString::Printf(TEXT("%d days"), Label.Days) : FString::FromInt(Label.Days);
+			const FVector2D TextSize = Measure->Measure(Text, Font);
+			const FVector2D BoxSize = TextSize + Margin * 2.0;
+			// above its mark, in the units of the widget, which fills the viewport
+			const FVector2D Position = Screen / Scale - FVector2D(BoxSize.X * 0.5, BoxSize.Y + 10.0);
+			FSlateDrawElement::MakeBox(OutDrawElements, LayerId, AllottedGeometry.ToPaintGeometry(BoxSize, FSlateLayoutTransform(Position)), White,
+				ESlateDrawEffect::None, Config->PathLabelBack);
+			FSlateDrawElement::MakeText(OutDrawElements, LayerId + 1, AllottedGeometry.ToPaintGeometry(TextSize, FSlateLayoutTransform(Position + Margin)), Text, Font,
+				ESlateDrawEffect::None, Config->PathLabelColor);
+		}
+	}
+	return SCompoundWidget::OnPaint(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId + 2, InWidgetStyle, bParentEnabled);
 }
 
 void SHexHeroPanel::RebuildList()

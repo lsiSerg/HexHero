@@ -269,23 +269,26 @@ private:
 	/** Bookmarks saved on a planet that is not saved yet, by slot, which SaveView writes under its folder once it is */
 	TMap<int32, FHexPlanetBookmark> UnsavedBookmarks;
 
-	/** The heroes, which the player controller moves: a click of the left button chooses one and a click of the right button sends it, a press
-	 *  and a release within ClickTolerance of each other, as held and moved the buttons drag the planet and turn the camera */
+	/** The game, which the player controller plays: a click of the left button, a press and a release within ClickTolerance of each other,
+	 *  as held and moved the button drags the planet, and two of them within DoubleClickTime a double click; the key that walks the way
+	 *  shown, and those of the next hero, the end of the day and the game itself */
 	void OnHeroSelectStarted();
 	void OnHeroSelectCompleted();
 	void OnHeroSendStarted();
-	void OnHeroSendCompleted();
 	void OnNextHero();
 	void OnEndTurn();
+	void OnPlayMode();
 
 	/** Returns true if the mouse is within ClickTolerance of where a button went down */
 	bool IsClickAt(const FVector2D& Start) const;
 
 	/** Where those buttons went down, in pixels of the viewport, and whether each is held since */
 	FVector2D HeroSelectStart = FVector2D::ZeroVector;
-	FVector2D HeroSendStart = FVector2D::ZeroVector;
 	bool bHeroSelectDown = false;
-	bool bHeroSendDown = false;
+
+	/** Where and when the last click of the game fell, by which the next is a double click */
+	FVector2D LastHeroClick = FVector2D::ZeroVector;
+	double LastHeroClickTime = -1.0;
 
 	/** Painting the levels, which the player controller does */
 	void OnTogglePaintMode();

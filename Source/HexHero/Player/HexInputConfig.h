@@ -125,12 +125,16 @@ public:
 	UPROPERTY(EditAnywhere, Category="Input")
 	TObjectPtr<UInputAction> LayerAction;
 
-	/** Chooses the hero under the mouse with a click, a press and a release at one place; the same button drags the planet while it is held
-	 *  and moved (the developer chose the left button to choose and the right one to send on 2026-11-10) */
+	/** Starts and stops the game, in which heroes are chosen and sent, as PaintModeAction does the editing; it needs a hero on the planet */
+	UPROPERTY(EditAnywhere, Category="Input|Heroes")
+	TObjectPtr<UInputAction> PlayModeAction;
+
+	/** A click of the game, a press and a release at one place: on a hero it chooses it, twice it looks at it; on a cell it points the hero
+	 *  chosen there, and again on that cell sends it (the developer's rules of 2026-11-11). Held and moved, the same button drags the planet */
 	UPROPERTY(EditAnywhere, Category="Input|Heroes")
 	TObjectPtr<UInputAction> HeroSelectAction;
 
-	/** Sends the hero chosen to the cell under the mouse with a click; the same button turns the camera while it is held and moved */
+	/** Sends the hero chosen along the way shown, as the second click on its cell does */
 	UPROPERTY(EditAnywhere, Category="Input|Heroes")
 	TObjectPtr<UInputAction> HeroSendAction;
 

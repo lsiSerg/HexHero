@@ -11,6 +11,7 @@ class AHexPlanet;
 class SHexDebugOverlay;
 class SHexDialog;
 class SHexHeroPanel;
+class SHexModeBar;
 class SHexHoverInfo;
 class SHexMapMenu;
 class SHexPlanetPalette;
@@ -46,6 +47,9 @@ class AHexPlanetPlayerController : public APlayerController
 
 	/** Panel of the heroes of the planet, at the bottom right */
 	TSharedPtr<SHexHeroPanel> HeroPanel;
+
+	/** The buttons Edit and Play at the top left */
+	TSharedPtr<SHexModeBar> ModeBar;
 
 	/** The heroes whose messages and trips this controller listens to */
 	TWeakObjectPtr<UHexHeroes> BoundHeroes;
@@ -110,11 +114,21 @@ public:
 	/** Returns the cell under the cursor in the last tick, on the layer shown */
 	int32 GetMouseCell() const { return MouseCell; }
 
-	/** Chooses the hero under the mouse, by its body or its cell, as a click of the left button does while no tool of the brush is chosen */
-	void SelectHeroAtMouse();
+	/** Returns true while the game is played (UHexHeroes::IsPlaying) */
+	bool IsPlayMode() const;
 
-	/** Sends the hero chosen to the cell under the mouse, as a click of the right button does while no tool of the brush is chosen */
-	void SendHeroToMouse();
+	/** Starts the game, which puts the brush down and needs a hero on the planet, or stops it; the game and the editing never run together */
+	void SetPlayMode(bool bOn);
+
+	/** A left click of the game at the mouse (UHexHeroes::Click): it chooses the hero there, by its body or its cell, points the hero chosen
+	 *  to the cell there or sends it; a double click on a hero chooses it and looks at it */
+	void ClickGame(bool bDouble);
+
+	/** Sends the hero chosen along the way shown, as the second click on its cell does */
+	void WalkHero();
+
+	/** Starts the game again: day 1, every hero where it starts */
+	void RestartGame();
 
 	/** Chooses the next hero and shows it */
 	void SelectNextHero();
@@ -180,6 +194,9 @@ private:
 
 	/** The camera goes with the hero chosen when it goes through an entrance or exit */
 	void OnHeroTravelled(int32 Id);
+
+	/** The camera shows the hero the game chose by itself */
+	void OnHeroChosen(int32 Id);
 
 	/** Returns the brush, made on the surface of the planet when first needed, or null without one */
 	UHexPlanetPainter* GetPainter();

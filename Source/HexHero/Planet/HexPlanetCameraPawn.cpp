@@ -760,9 +760,12 @@ void AHexPlanetCameraPawn::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 			EnhancedInputComponent->BindAction(InputConfig->HeroSelectAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnHeroSelectStarted);
 			EnhancedInputComponent->BindAction(InputConfig->HeroSelectAction, ETriggerEvent::Completed, this, &AHexPlanetCameraPawn::OnHeroSelectCompleted);
 			EnhancedInputComponent->BindAction(InputConfig->HeroSendAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnHeroSendStarted);
-			EnhancedInputComponent->BindAction(InputConfig->HeroSendAction, ETriggerEvent::Completed, this, &AHexPlanetCameraPawn::OnHeroSendCompleted);
 			EnhancedInputComponent->BindAction(InputConfig->NextHeroAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnNextHero);
 			EnhancedInputComponent->BindAction(InputConfig->EndTurnAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnEndTurn);
+		}
+		if (InputConfig->PlayModeAction)
+		{
+			EnhancedInputComponent->BindAction(InputConfig->PlayModeAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnPlayMode);
 		}
 
 		// painting the levels, whose actions are missing until Tools/create_input_assets.py has made them
@@ -1251,7 +1254,8 @@ void AHexPlanetCameraPawn::OnDragCompleted()
 	}
 	const double Now = FPlatformTime::Seconds();
 	const int32 Cell = PlayerController->GetMouseCell();
-	if (Cell != INDEX_NONE && Cell == LastClickCell && Now - LastClickTime <= Settings()->DoubleClickTime)
+	// while the game is played two clicks on a cell point a hero there and send it, so they take the camera nowhere
+	if (Cell != INDEX_NONE && Cell == LastClickCell && Now - LastClickTime <= Settings()->DoubleClickTime && !PlayerController->IsPlayMode())
 	{
 		LastClickCell = INDEX_NONE;
 		AngularVelocity = FVector::ZeroVector;
@@ -1328,28 +1332,32 @@ void AHexPlanetCameraPawn::OnHeroSelectCompleted()
 	AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController());
 	if (bHeroSelectDown && PlayerController && !IsTravelling() && IsClickAt(HeroSelectStart))
 	{
-		PlayerController->SelectHeroAtMouse();
+		// two clicks at one place within DoubleClickTime are a double click, which looks at the hero there
+		const double Now = FPlatformTime::Seconds();
+		const bool bDouble = LastHeroClickTime >= 0.0 && Now - LastHeroClickTime <= Settings()->DoubleClickTime
+			&& FVector2D::Distance(LastHeroClick, HeroSelectStart) <= Settings()->ClickTolerance;
+		LastHeroClick = HeroSelectStart;
+		LastHeroClickTime = bDouble ? -1.0 : Now;
+		PlayerController->ClickGame(bDouble);
 	}
 	bHeroSelectDown = false;
 }
 
 void AHexPlanetCameraPawn::OnHeroSendStarted()
 {
-	const APlayerController* PlayerController = Cast<APlayerController>(GetController());
-	float MouseX = 0.0f;
-	float MouseY = 0.0f;
-	bHeroSendDown = !IsTravelling() && PlayerController && PlayerController->GetMousePosition(MouseX, MouseY);
-	HeroSendStart = FVector2D(MouseX, MouseY);
+	if (AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController()); PlayerController && !IsTravelling())
+	{
+		PlayerController->WalkHero();
+	}
 }
 
-void AHexPlanetCameraPawn::OnHeroSendCompleted()
+void AHexPlanetCameraPawn::OnPlayMode()
 {
-	AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController());
-	if (bHeroSendDown && PlayerController && !IsTravelling() && IsClickAt(HeroSendStart))
+	if (AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController()); PlayerController && !IsTravelling())
 	{
-		PlayerController->SendHeroToMouse();
+		bDragging = false;
+		PlayerController->SetPlayMode(!PlayerController->IsPlayMode());
 	}
-	bHeroSendDown = false;
 }
 
 void AHexPlanetCameraPawn::OnNextHero()

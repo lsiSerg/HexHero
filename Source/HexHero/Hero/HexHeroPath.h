@@ -57,4 +57,7 @@ namespace HexHeroPath
 	/** Returns how a hero with Points left today and PointsPerDay every day after walks steps of these costs: a step is taken only while
 	 *  CanStep allows it, and what is left over is lost with the day */
 	FSpend Spend(TConstArrayView<float> StepCosts, float Points, float PointsPerDay);
+
+	/** Gives the day each of these steps is taken on, 1 for today, by the rule of Spend */
+	void FindStepDays(TConstArrayView<float> StepCosts, float Points, float PointsPerDay, TArray<int32>& OutDays);
 }

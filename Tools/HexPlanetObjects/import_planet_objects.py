@@ -60,7 +60,7 @@ SETS = [
      'counts': [5, 10, 18], 'scale': (0.7, 1.4), 'giant': (0.05, 1.8), 'spacing': 7.0, 'reach': 1.0, 'min_up': 0.4, 'align': 0.9, 'tilt': 25.0,
      'sink': 0.6, 'shadow': False, 'cull': 3000.0,
      'variants': [('', ['Stone_0', 'Stone_1', 'Stone_2', 'Stone_3'], 0.0, 1.0, 1.0, 0.03)]},
-    {'id': 'Rocks', 'name': 'Rocks', 'order': 50, 'color': (0.3, 0.28, 0.26), 'layer': 'cover', 'blocks': True, 'levels': [0, 1, 2],
+    {'id': 'Rocks', 'name': 'Rocks', 'order': 50, 'color': (0.3, 0.28, 0.26), 'layer': 'cover', 'blocks': False, 'levels': [0, 1, 2],
      'counts': [3, 6, 10], 'scale': (0.9, 1.6), 'giant': (0.05, 1.6), 'spacing': 20.0, 'reach': 0.9, 'min_up': 0.3, 'align': 0.8, 'tilt': 20.0,
      'sink': 2.0, 'shadow': True, 'cull': 6000.0,
      'variants': [('', ['Rock_0', 'Rock_1', 'Rock_2'], 0.0, 1.0, 1.0, 0.015)]},
@@ -96,6 +96,8 @@ MIGRATIONS = [
     ('Flowers', 'generate_patch_cells', 0.0, 5.0), ('Flowers', 'spacing', 8.0, 10.0), ('Flowers', 'cull_distance', 2500.0, 3500.0),
     ('Flowers', 'count_by_density', [8, 16, 28], [10, 20, 36]), ('Flowers', 'far_cover', 0.0, 0.3),
     ('Flowers', 'far_color', (0.035, 0.07, 0.03), (0.1, 0.14, 0.045)),
+    # a few rocks on open ground read as ground one can walk over, so they block no hero (the developer, 2026-11-11)
+    ('Rocks', 'blocks_movement', True, False),
 ]
 # the shares the variants of sets that are there generate, as (set, biomes of the variant, old share, new share)
 SHARE_MIGRATIONS = [('Flowers', 'G', 0.08, 0.14), ('Flowers', 'P', 0.06, 0.08), ('Flowers', 'T', 0.05, 0.06)]

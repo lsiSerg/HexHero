@@ -69,10 +69,11 @@ ACTIONS = [
     ("brush_size_action", "IA_HexBrushSize", "Brush size", BOOLEAN, [("X", False, False)]),
     ("undo_action", "IA_HexUndo", "Undo", BOOLEAN, [("Z", False, False, "IA_HexCtrl")]),
     ("redo_action", "IA_HexRedo", "Redo", BOOLEAN, [("Y", False, False, "IA_HexCtrl")]),
-    # the heroes of the planet: a click of the left button chooses the hero under the mouse and one of the right button sends the hero chosen to
-    # the cell there, as the developer chose on 2026-11-10; held and moved, the same buttons drag the planet and turn the camera
-    ("hero_select_action", "IA_HexHeroSelect", "Choose a hero (click)", BOOLEAN, [("LeftMouseButton", False, False)]),
-    ("hero_send_action", "IA_HexHeroSend", "Send the hero (click)", BOOLEAN, [("RightMouseButton", False, False)]),
+    # the game, as the developer set its rules on 2026-11-11: P starts and stops it, a click of the left button chooses a hero or points the hero
+    # chosen to a cell, a second click on that cell or Space sends it; held and moved, the left button still drags the planet
+    ("play_mode_action", "IA_HexPlayMode", "Play the game", BOOLEAN, [("P", False, False)]),
+    ("hero_select_action", "IA_HexHeroSelect", "Choose a hero, point it, send it", BOOLEAN, [("LeftMouseButton", False, False)]),
+    ("hero_send_action", "IA_HexHeroSend", "Walk the way shown", BOOLEAN, [("SpaceBar", False, False)]),
     ("next_hero_action", "IA_HexNextHero", "Next hero", BOOLEAN, [("Tab", False, False)]),
     ("end_turn_action", "IA_HexEndTurn", "End the day", BOOLEAN, [("Enter", False, False)]),
 ]
@@ -104,6 +105,7 @@ LEGEND_CATEGORIES = {
     "IA_HexBrushSize": "Painting",
     "IA_HexUndo": "Painting",
     "IA_HexRedo": "Painting",
+    "IA_HexPlayMode": "Heroes",
     "IA_HexHeroSelect": "Heroes",
     "IA_HexHeroSend": "Heroes",
     "IA_HexNextHero": "Heroes",
@@ -113,7 +115,11 @@ LEGEND_CATEGORIES = {
 
 # actions added after the legend was made, whose lines an existing legend gets if it lacks them
 ADDED_LEGEND_ACTIONS = {"IA_HexPaintMode", "IA_HexPaintLevel", "IA_HexBrushSize", "IA_HexUndo", "IA_HexRedo", "IA_HexForcedLight", "IA_HexLayer",
-                        "IA_HexSaveBookmark", "IA_HexJumpBookmark", "IA_HexHeroSelect", "IA_HexHeroSend", "IA_HexNextHero", "IA_HexEndTurn"}
+                        "IA_HexSaveBookmark", "IA_HexJumpBookmark", "IA_HexPlayMode", "IA_HexHeroSelect", "IA_HexHeroSend", "IA_HexNextHero", "IA_HexEndTurn"}
+
+# lines of the legend whose action kept its name but changed what it does: its label becomes the new description only while it still holds an
+# old one, so a label edited by hand stays
+RELABELED_ACTIONS = {"IA_HexHeroSelect": ["Choose a hero (click)"], "IA_HexHeroSend": ["Send the hero (click)"]}
 
 # actions that another took the place of, as (old action, new action): the line of the old one in an existing legend becomes the line of the new
 # one where it stands, with the description of the new one as its label, and the old asset is deleted once nothing in the legend holds it
@@ -239,6 +245,11 @@ else:
                 lines[index] = line
                 replaced += 1
                 unreal.log(f"Hex input: the line of {old_name} in {LEGEND_NAME} is now that of {new_name}")
+
+        if action and str(line.get_editor_property("label")) in RELABELED_ACTIONS.get(action.get_name(), []):
+            line.set_editor_property("label", descriptions[action.get_name()])
+            lines[index] = line
+            replaced += 1
 
     listed = {line.get_editor_property("action").get_name() for line in lines if line.get_editor_property("action")}
     added = 0

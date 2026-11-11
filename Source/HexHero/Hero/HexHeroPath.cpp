@@ -91,28 +91,33 @@ bool HexHeroPath::CanStep(float Cost, float Points, float PointsPerDay)
 	return Points + CostTolerance >= Cost || (Points + CostTolerance >= PointsPerDay && Cost > PointsPerDay);
 }
 
-HexHeroPath::FSpend HexHeroPath::Spend(TConstArrayView<float> StepCosts, float Points, float PointsPerDay)
+void HexHeroPath::FindStepDays(TConstArrayView<float> StepCosts, float Points, float PointsPerDay, TArray<int32>& OutDays)
 {
-	FSpend Result;
-	if (StepCosts.IsEmpty())
-	{
-		return Result;
-	}
-
-	Result.Days = 1;
-	bool bToday = true;
+	OutDays.Reset(StepCosts.Num());
+	int32 Day = 1;
 	for (const float Cost : StepCosts)
 	{
-		Result.Total += Cost;
 		if (!CanStep(Cost, Points, PointsPerDay))
 		{
 			// the day ends here and the next begins with all its points, which pay for any step (CanStep)
-			++Result.Days;
-			bToday = false;
+			++Day;
 			Points = PointsPerDay;
 		}
 		Points = FMath::Max(Points - Cost, 0.0f);
-		Result.StepsToday += bToday ? 1 : 0;
+		OutDays.Add(Day);
 	}
+}
+
+HexHeroPath::FSpend HexHeroPath::Spend(TConstArrayView<float> StepCosts, float Points, float PointsPerDay)
+{
+	FSpend Result;
+	TArray<int32> Days;
+	FindStepDays(StepCosts, Points, PointsPerDay, Days);
+	for (int32 Index = 0; Index < StepCosts.Num(); ++Index)
+	{
+		Result.Total += StepCosts[Index];
+		Result.StepsToday += Days[Index] == 1 ? 1 : 0;
+	}
+	Result.Days = Days.IsEmpty() ? 0 : Days.Last();
 	return Result;
 }

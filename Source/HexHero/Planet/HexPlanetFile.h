@@ -486,6 +486,41 @@ struct FHexHeroesFile
 	TArray<FHexHeroLine> Heroes;
 };
 
+/** A mine or a pile of a planet as a line of sites.json: its kind is the Id of a kind of DA_HexSites, its layer Surface or Underground */
+USTRUCT()
+struct FHexSiteLine
+{
+	GENERATED_BODY()
+
+	/** Number of the site on its planet, which never changes */
+	UPROPERTY()
+	int32 Id = 0;
+
+	UPROPERTY()
+	FString Kind;
+
+	UPROPERTY()
+	FString Layer;
+
+	UPROPERTY()
+	int32 Cell = 0;
+
+	bool operator==(const FHexSiteLine& Other) const { return Id == Other.Id && Kind == Other.Kind && Layer == Other.Layer && Cell == Other.Cell; }
+};
+
+/** sites.json of a planet, at the root of its folder: its mines and piles, a line each, which Git can merge */
+USTRUCT()
+struct FHexSitesFile
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	int32 Version = 1;
+
+	UPROPERTY()
+	TArray<FHexSiteLine> Sites;
+};
+
 /** A letter of levels.txt and the level it stands for */
 struct FHexLevelLetter
 {
@@ -706,6 +741,15 @@ namespace HexPlanetFile
 
 	/** Writes heroes.json of the folder of a planet, or deletes it when there are none, so a planet without heroes has no such file */
 	bool SaveHeroes(const FString& PlanetFolder, TConstArrayView<FHexHeroLine> Heroes, FString& OutError);
+
+	/** sites.json holds the mines and piles of a planet, at the root of its folder, written and read as heroes.json is: a line each sorted by
+	 *  Id, and no file for a planet without any */
+	constexpr const TCHAR* SitesFile = TEXT("sites.json");
+	FString EncodeSites(TConstArrayView<FHexSiteLine> Sites);
+	bool DecodeSites(const FString& Text, TArray<FHexSiteLine>& OutSites, FString& OutError);
+	bool HasSites(const FString& PlanetFolder);
+	bool LoadSites(const FString& PlanetFolder, TArray<FHexSiteLine>& OutSites, FString& OutError);
+	bool SaveSites(const FString& PlanetFolder, TConstArrayView<FHexSiteLine> Sites, FString& OutError);
 
 	/** biomes.txt holds one letter per cell in the order of FHexSphereGrid, the PlanetLetter of its biome on the surface and its
 	 *  UndergroundLetter underground, in lines of LevelsLineLength */
