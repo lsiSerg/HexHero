@@ -1045,6 +1045,92 @@ bool HexPlanetFile::SaveEntrances(const FString& PlanetFolder, TConstArrayView<F
 	return true;
 }
 
+namespace
+{
+	/** Returns a text as it stands between the quotes of a JSON string: a backslash and a quote escaped, and nothing else, as JSON has no
+	 *  escape for an apostrophe */
+	FString EscapeJsonText(const FString& Text)
+	{
+		return Text.Replace(TEXT("\\"), TEXT("\\\\")).Replace(TEXT("\""), TEXT("\\\""));
+	}
+}
+
+FString HexPlanetFile::EncodeHeroes(TConstArrayView<FHexHeroLine> Heroes)
+{
+	TArray<FHexHeroLine> Sorted(Heroes);
+	Sorted.StableSort([](const FHexHeroLine& A, const FHexHeroLine& B) { return A.Id < B.Id; });
+
+	// a line per hero, so an edit changes only the lines of its heroes and Git merges them
+	FString Text = TEXT("{\n\t\"version\": 1,\n\t\"heroes\": [");
+	for (int32 Index = 0; Index < Sorted.Num(); ++Index)
+	{
+		const FHexHeroLine& Hero = Sorted[Index];
+		Text += FString::Printf(TEXT("%s\n\t\t{\"id\": %d, \"name\": \"%s\", \"class\": \"%s\", \"player\": %d, \"layer\": \"%s\", \"cell\": %d}"), Index == 0 ? TEXT("") : TEXT(","),
+			Hero.Id, *EscapeJsonText(Hero.Name), *EscapeJsonText(Hero.Class), Hero.Player, *EscapeJsonText(Hero.Layer), Hero.Cell);
+	}
+	Text += Sorted.IsEmpty() ? TEXT("]\n}\n") : TEXT("\n\t]\n}\n");
+	return Text;
+}
+
+bool HexPlanetFile::DecodeHeroes(const FString& Text, TArray<FHexHeroLine>& OutHeroes, FString& OutError)
+{
+	FHexHeroesFile File;
+	if (!FJsonObjectConverter::JsonObjectStringToUStruct(Text, &File))
+	{
+		OutError = TEXT("not valid JSON");
+		return false;
+	}
+	OutHeroes = MoveTemp(File.Heroes);
+	return true;
+}
+
+bool HexPlanetFile::HasHeroes(const FString& PlanetFolder)
+{
+	return !PlanetFolder.IsEmpty() && IFileManager::Get().FileExists(*GetFilePath(PlanetFolder, HeroesFile));
+}
+
+bool HexPlanetFile::LoadHeroes(const FString& PlanetFolder, TArray<FHexHeroLine>& OutHeroes, FString& OutError)
+{
+	const FString FilePath = GetFilePath(PlanetFolder, HeroesFile);
+	FString Text;
+	if (!FFileHelper::LoadFileToString(Text, *FilePath))
+	{
+		OutError = FString::Printf(TEXT("could not read %s"), *FilePath);
+		return false;
+	}
+	if (!DecodeHeroes(Text, OutHeroes, OutError))
+	{
+		OutError = FString::Printf(TEXT("%s: %s"), *FilePath, *OutError);
+		return false;
+	}
+	return true;
+}
+
+bool HexPlanetFile::SaveHeroes(const FString& PlanetFolder, TConstArrayView<FHexHeroLine> Heroes, FString& OutError)
+{
+	const FString FilePath = GetFilePath(PlanetFolder, HeroesFile);
+	if (PlanetFolder.IsEmpty())
+	{
+		OutError = FString::Printf(TEXT("could not write %s"), *FilePath);
+		return false;
+	}
+	if (Heroes.IsEmpty())
+	{
+		if (IFileManager::Get().FileExists(*FilePath) && !IFileManager::Get().Delete(*FilePath))
+		{
+			OutError = FString::Printf(TEXT("could not delete %s"), *FilePath);
+			return false;
+		}
+		return true;
+	}
+	if (!FFileHelper::SaveStringToFile(EncodeHeroes(Heroes), *FilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+	{
+		OutError = FString::Printf(TEXT("could not write %s"), *FilePath);
+		return false;
+	}
+	return true;
+}
+
 FString HexPlanetFile::FindPlanetToOpen(const UWorld* World)
 {
 	const TArray<FHexPlanetEntry> Planets = FindPlanets();

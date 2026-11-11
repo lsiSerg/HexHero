@@ -111,12 +111,17 @@ void UHexPlanetMotes::SetShown(bool bInShown)
 	bShown = bInShown;
 }
 
-void UHexPlanetMotes::SetHeroLight(const FLinearColor& Sphere)
+void UHexPlanetMotes::SetHeroLights(TConstArrayView<FLinearColor> Spheres, bool bOn)
 {
 	// the spores glow by themselves
 	if (MoteMaterial)
 	{
-		MoteMaterial->SetVectorParameterValue(TEXT("HeroLight"), Sphere);
+		static const FName Names[] = {TEXT("HeroLight0"), TEXT("HeroLight1"), TEXT("HeroLight2"), TEXT("HeroLight3"), TEXT("HeroLight4"), TEXT("HeroLight5"), TEXT("HeroLight6"), TEXT("HeroLight7")};
+		MoteMaterial->SetScalarParameterValue(TEXT("HeroLightOn"), bOn ? 1.0f : 0.0f);
+		for (int32 Index = 0; Index < UE_ARRAY_COUNT(Names); ++Index)
+		{
+			MoteMaterial->SetVectorParameterValue(Names[Index], Spheres.IsValidIndex(Index) ? Spheres[Index] : FLinearColor(0.0f, 0.0f, 0.0f, 0.0f));
+		}
 	}
 }
 

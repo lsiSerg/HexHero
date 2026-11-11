@@ -53,6 +53,8 @@
 #include "RenderTimer.h"
 #include "Algo/BinarySearch.h"
 #include "Async/ParallelFor.h"
+#include "HexHeroConfig.h"
+#include "HexHeroes.h"
 #include "HexPlanetFlocks.h"
 #include "HexPlanetMeshComponent.h"
 #include "HexPlanetMotes.h"
@@ -1516,9 +1518,11 @@ void AHexPlanet::BuildPlanet()
 		Flocks->RegisterComponent();
 		Flocks->Init(this, Settings);
 	}
-	if (Settings->bHeroLight && !HeroLight)
+	// the heroes of the planet, of both layers, which the surface holds; the lights around them are made as they are needed (UpdateHeroLight)
+	if (bSurface && !Heroes)
 	{
-		CreateHeroLight();
+		Heroes = NewObject<UHexHeroes>(this);
+		Heroes->Init(this);
 	}
 
 	const FString Name = (PlanetFolder.IsEmpty() ? FString(TEXT("(not saved)")) : PlanetFolder) + (bSurface ? TEXT("") : TEXT(" underground"));
@@ -1971,7 +1975,9 @@ bool AHexPlanet::HasUnsavedLevels() const
 			return true;
 		}
 	}
-	return false;
+	// and the heroes placed or taken away, which heroes.json keeps
+	const UHexHeroes* AllHeroes = GetHeroes();
+	return AllHeroes && AllHeroes->IsEdited();
 }
 
 bool AHexPlanet::HasUnsavedCells() const
@@ -2019,6 +2025,8 @@ void AHexPlanet::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void AHexPlanet::SetCells(const TMap<int32, int32>& NewLevels, const TMap<int32, int32>& NewBiomes, const TMap<int32, float>& NewWallHeights)
 {
+	// the levels and biomes are what a step of a hero costs
+	UHexHeroes::NoteMapChanged();
 	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
 	int32 NumChanged = 0;
 
@@ -2396,6 +2404,15 @@ void AHexPlanet::Tick(float DeltaTime)
 		FinishWallStream();
 	}
 
+	// the heroes walk whichever layer is shown, and grow a little as the camera leaves them, so they still show from afar
+	if (Heroes)
+	{
+		const APlayerController* ViewController = GetWorld()->GetFirstPlayerController();
+		const AActor* ViewTarget = ViewController ? ViewController->GetViewTarget() : nullptr;
+		const FVector3d ViewPoint = ViewTarget ? FVector3d(ViewTarget->GetActorLocation()) : FVector3d::ZeroVector;
+		Heroes->Update(DeltaTime, ViewTarget ? &ViewPoint : nullptr);
+	}
+
 	// a hidden layer streams only the pieces a trip to it asks for, without building any at once on the game thread, and does nothing else
 	// of a frame, so a camera below the surface does not build its pieces
 	if (!bPresented)
@@ -2429,14 +2446,34 @@ void AHexPlanet::Tick(float DeltaTime)
 		HeroFocus = FindViewFocus(ViewTarget->GetActorLocation(), ViewTarget->GetActorForwardVector());
 		bHasHeroFocus = true;
 	}
+	// each hero of the layer lights around itself, those nearest that focus; on a planet without heroes the focus stands in for one, as it did
+	// before there were any
+	TArray<FVector4d, TInlineAllocator<MaxHeroLights>> LayerLights;
+	if (bHasHeroFocus)
+	{
+		TArray<FHexHeroLight> Lights;
+		const UHexHeroes* AllHeroes = GetHeroes();
+		if (AllHeroes && AllHeroes->GetLights(PlanetLayer, HeroFocus, Lights))
+		{
+			const double CellStep = FMath::Sqrt(3.0) * Settings->HexRadius;
+			for (const FHexHeroLight& Light : Lights)
+			{
+				LayerLights.Add(FVector4d(Light.Point, Light.ReachCells > 0.0 ? Light.ReachCells * CellStep : Settings->GetHeroLightReach()));
+			}
+		}
+		else
+		{
+			LayerLights.Add(FVector4d(HeroFocus, Settings->GetHeroLightReach()));
+		}
+	}
 	if (bHasHeroFocus && Settings->bHeroLight)
 	{
-		UpdateHeroLight(HeroFocus);
+		UpdateHeroLight(LayerLights);
 	}
-	// and on the surface the land away from it lies in shade
+	// and on the surface the land away from them lies in shade
 	if (bHasHeroFocus && Settings->bHeroShade)
 	{
-		UpdateHeroShade(HeroFocus);
+		UpdateHeroShade(LayerLights);
 	}
 	// the forced light of L, by the key or the console, lights the sky of the layer shown; the sun is the camera's, and the materials take it from
 	// ForcedLight of MPC_HexPlanet below
@@ -3719,6 +3756,10 @@ bool AHexPlanet::SaveAs(const FString& Name, FString& OutError)
 			return false;
 		}
 	}
+	if (UHexHeroes* AllHeroes = GetHeroes(); AllHeroes && !AllHeroes->Save(Folder, OutError))
+	{
+		return false;
+	}
 
 	const FString SavedFolder = HexPlanetFile::PlanetExists(Folder) ? Folder : PlanetFolder;
 	for (AHexPlanet* Planet : Planets)
@@ -4029,6 +4070,8 @@ void AHexPlanet::SetReliefOverrides(const HexPlanetSurface::FReliefOverrides& Ch
 
 void AHexPlanet::OnRiversChanged(bool bByStep)
 {
+	// a river or a bridge changes what a step costs
+	UHexHeroes::NoteMapChanged();
 	MarkLevelsEdited(bByStep);
 	bLevelsPending = true;
 	StartRebuild();
@@ -4140,6 +4183,11 @@ bool AHexPlanet::SaveLevels(FString& OutError)
 		{
 			return false;
 		}
+	}
+	// where the heroes stand when a game starts
+	if (UHexHeroes* AllHeroes = GetHeroes(); AllHeroes && !AllHeroes->Save(PlanetFolder, OutError))
+	{
+		return false;
 	}
 	for (AHexPlanet* Planet : Planets)
 	{
@@ -6135,78 +6183,141 @@ FVector3d AHexPlanet::FindViewFocus(const FVector3d& CameraLocation, const FVect
 	return CameraLocation.GetSafeNormal() * ShellRadius;
 }
 
-void AHexPlanet::CreateHeroLight()
+namespace
 {
-	HeroLight = NewObject<UPointLightComponent>(this, TEXT("HeroLight"));
-	HeroLight->SetupAttachment(Surface);
-	HeroLight->SetMobility(EComponentMobility::Movable);
-	// a pool of light that fades out at its reach by HeroLightFalloff, as one day it shows how far the hero can go, and not the falloff of a lamp
-	// by the square of the distance, bright under it and dim soon after
-	HeroLight->bUseInverseSquaredFalloff = false;
-	HeroLight->SetLightFalloffExponent(Settings->HeroLightFalloff);
-	HeroLight->SetIntensityUnits(ELightUnits::Unitless);
-	HeroLight->SetIntensity(Settings->HeroLightIntensity);
-	HeroLight->SetLightColor(Settings->HeroLightColor);
-	// it fades out at its reach on the floor below it, HeroLightHeight under the light
-	const double Reach = Settings->GetHeroLightReach();
-	HeroLight->SetAttenuationRadius(float(FMath::Sqrt(Reach * Reach + FMath::Square(double(Settings->HeroLightHeight)))));
-	HeroLight->SetSourceRadius(Settings->HeroLightSourceRadius);
-	HeroLight->SetCastShadows(Settings->bHeroLightShadows);
-	HeroLight->bCastVolumetricShadow = false;
-	HeroLight->RegisterComponent();
-	UE_LOG(LogHexHero, Log, TEXT("Planet: the light of the hero on the %s reaches %.0f on the floor from %.0f above it, shadows %s"), GetPlanetLayerName(PlanetLayer),
-		Reach, Settings->HeroLightHeight, Settings->bHeroLightShadows ? TEXT("on") : TEXT("off"));
+	/** The names of the parameters that give a material the lights of the heroes, one for each of MaxHeroLights */
+	const FName HeroFocusNames[] = {TEXT("HeroFocus0"), TEXT("HeroFocus1"), TEXT("HeroFocus2"), TEXT("HeroFocus3"), TEXT("HeroFocus4"), TEXT("HeroFocus5"), TEXT("HeroFocus6"), TEXT("HeroFocus7")};
+	const FName FogFocusNames[] = {TEXT("FogFocus0"), TEXT("FogFocus1"), TEXT("FogFocus2"), TEXT("FogFocus3"), TEXT("FogFocus4"), TEXT("FogFocus5"), TEXT("FogFocus6"), TEXT("FogFocus7")};
+	static_assert(UE_ARRAY_COUNT(HeroFocusNames) == MaxHeroLights && UE_ARRAY_COUNT(FogFocusNames) == MaxHeroLights, "A name for each light of the heroes");
+
+	/** Gives a material the lights of the heroes under these names, and none for the rest */
+	void SetHeroLightParameters(UMaterialInstanceDynamic* Target, const FName* Names, TConstArrayView<FLinearColor> Lights)
+	{
+		for (int32 Index = 0; Index < MaxHeroLights; ++Index)
+		{
+			Target->SetVectorParameterValue(Names[Index], Lights.IsValidIndex(Index) ? Lights[Index] : FLinearColor(0.0f, 0.0f, 0.0f, 0.0f));
+		}
+	}
 }
 
-void AHexPlanet::UpdateHeroLight(const FVector3d& Focus)
+UHexHeroes* AHexPlanet::GetHeroes() const
 {
-	const FVector3d Up = Focus.GetSafeNormal();
-	const FVector3d Light = Focus + Up * Settings->HeroLightHeight;
-	// hex.PlanetHeroLight: 0 none, 2 without shadows; the forced light of L lights everything without it
+	const AHexPlanet* SurfacePlanet = GetLayerPlanet(EHexPlanetLayer::Surface);
+	return SurfacePlanet ? SurfacePlanet->Heroes.Get() : nullptr;
+}
+
+UPointLightComponent* AHexPlanet::MakeHeroLight()
+{
+	UPointLightComponent* Light = NewObject<UPointLightComponent>(this);
+	Light->SetupAttachment(Surface);
+	Light->SetMobility(EComponentMobility::Movable);
+	// a pool of light that fades out at its reach by HeroLightFalloff, as it shows how far the hero sees, and not the falloff of a lamp by the
+	// square of the distance, bright under it and dim soon after
+	Light->bUseInverseSquaredFalloff = false;
+	Light->SetLightFalloffExponent(Settings->HeroLightFalloff);
+	Light->SetIntensityUnits(ELightUnits::Unitless);
+	Light->SetIntensity(Settings->HeroLightIntensity);
+	Light->SetLightColor(Settings->HeroLightColor);
+	Light->SetSourceRadius(Settings->HeroLightSourceRadius);
+	Light->SetCastShadows(false);
+	Light->bCastVolumetricShadow = false;
+	Light->SetVisibility(false);
+	Light->RegisterComponent();
+	UE_LOG(LogHexHero, Log, TEXT("Planet: a light of a hero on the %s, %.0f above the floor, light %d of the layer"), GetPlanetLayerName(PlanetLayer),
+		Settings->HeroLightHeight, HeroLights.Num() + 1);
+	return Light;
+}
+
+void AHexPlanet::UpdateHeroLight(TConstArrayView<FVector4d> Lights)
+{
+	// hex.PlanetHeroLight: 0 none, 2 without shadows; the forced light of L lights everything without them
 	const int32 Mode = CVarHexPlanetHeroLight.GetValueOnGameThread();
-	const bool bLit = HeroLight && Mode != 0 && !IsLightForced();
-	if (HeroLight)
+	const bool bLit = Mode != 0 && !IsLightForced();
+	const int32 NumLit = bLit ? FMath::Min(Lights.Num(), MaxHeroLights) : 0;
+	// the lights nearest the view cast shadows, as each costs about 0.2 ms of GPU
+	const UHexHeroes* AllHeroes = GetHeroes();
+	const int32 NumShadows = Mode == 1 && Settings->bHeroLightShadows ? (AllHeroes && AllHeroes->GetConfig() ? AllHeroes->GetConfig()->ShadowLights : 1) : 0;
+
+	TArray<FLinearColor, TInlineAllocator<MaxHeroLights>> MoteLights;
+	TArray<FLinearColor, TInlineAllocator<MaxHeroLights>> FogLights;
+	for (int32 Index = 0; Index < FMath::Max(NumLit, HeroLights.Num()); ++Index)
 	{
-		if (HeroLight->IsVisible() != bLit)
+		if (Index >= NumLit)
 		{
-			HeroLight->SetVisibility(bLit);
+			if (HeroLights[Index] && HeroLights[Index]->IsVisible())
+			{
+				HeroLights[Index]->SetVisibility(false);
+			}
+			continue;
 		}
-		const bool bShadows = Mode == 1 && Settings->bHeroLightShadows;
-		if (HeroLight->CastShadows != bShadows)
+		if (!HeroLights.IsValidIndex(Index))
 		{
-			HeroLight->SetCastShadows(bShadows);
+			HeroLights.Add(MakeHeroLight());
 		}
+		UPointLightComponent* Light = HeroLights[Index];
+		const FVector3d Point(Lights[Index].X, Lights[Index].Y, Lights[Index].Z);
+		const double Reach = Lights[Index].W;
+		const FVector3d Position = Point + Point.GetSafeNormal() * Settings->HeroLightHeight;
+		// it fades out at its reach on the floor below it, HeroLightHeight under the light
+		const float AttenuationRadius = float(FMath::Sqrt(Reach * Reach + FMath::Square(double(Settings->HeroLightHeight))));
+		// the render state is made again: SetAttenuationRadius gives the radius to the proxy alone, and the lights of the GPU scene kept the
+		// old one ("Data for Id in GPU Scene Lights is stale", an ensure of the renderer)
+		if (!FMath::IsNearlyEqual(Light->AttenuationRadius, AttenuationRadius, 0.5f))
+		{
+			Light->AttenuationRadius = AttenuationRadius;
+			Light->MarkRenderStateDirty();
+		}
+		const bool bShadows = Index < NumShadows;
+		if (bool(Light->CastShadows) != bShadows)
+		{
+			Light->SetCastShadows(bShadows);
+		}
+		// a light that stands still keeps the shadows cached
+		if (!Light->GetComponentLocation().Equals(FVector(Position), 0.01))
+		{
+			Light->SetWorldLocation(FVector(Position));
+		}
+		if (!Light->IsVisible())
+		{
+			Light->SetVisibility(true);
+		}
+		MoteLights.Add(FLinearColor(float(Position.X), float(Position.Y), float(Position.Z), AttenuationRadius));
+		FogLights.Add(FLinearColor(float(Point.X), float(Point.Y), float(Point.Z), float(Reach)));
 	}
-	// a light that stands still keeps the shadows cached
-	if (HeroLight && !HeroLight->GetComponentLocation().Equals(FVector(Light), 0.01))
-	{
-		HeroLight->SetWorldLocation(FVector(Light));
-	}
-	// the motes show in it as dust does, and the fog clears around it
+	// the motes show in them as dust does, and the fog clears around them
 	if (Motes)
 	{
-		Motes->SetHeroLight(FLinearColor(float(Light.X), float(Light.Y), float(Light.Z), bLit ? HeroLight->AttenuationRadius : 0.0f));
+		Motes->SetHeroLights(MoteLights, bLit);
 	}
 	if (HazeMaterial && Settings->bFog && !Settings->bHaze)
 	{
-		HazeMaterial->SetVectorParameterValue(TEXT("FogFocus"), FLinearColor(float(Focus.X), float(Focus.Y), float(Focus.Z), bLit ? float(Settings->GetHeroLightReach()) : 0.0f));
+		HazeMaterial->SetScalarParameterValue(TEXT("FogFocusOn"), bLit ? 1.0f : 0.0f);
+		SetHeroLightParameters(HazeMaterial, FogFocusNames, FogLights);
 	}
 }
 
-void AHexPlanet::UpdateHeroShade(const FVector3d& Focus)
+void AHexPlanet::UpdateHeroShade(TConstArrayView<FVector4d> Lights)
 {
-	// a reach of 0 draws no shade, under the forced light of L
-	const FLinearColor Value(float(Focus.X), float(Focus.Y), float(Focus.Z), IsLightForced() ? 0.0f : float(Settings->GetHeroLightReach()));
-	if (Value == AppliedHeroShade)
+	// no shade under the forced light of L
+	const bool bOn = !IsLightForced();
+	TArray<FLinearColor> Values;
+	for (int32 Index = 0; Index < FMath::Min(Lights.Num(), MaxHeroLights); ++Index)
+	{
+		Values.Add(FLinearColor(float(Lights[Index].X), float(Lights[Index].Y), float(Lights[Index].Z), float(Lights[Index].W)));
+	}
+	if (!bHeroShadeDirty && bOn == bAppliedHeroShadeOn && Values == AppliedHeroShade)
 	{
 		return;
 	}
-	AppliedHeroShade = Value;
+	bHeroShadeDirty = false;
+	bAppliedHeroShadeOn = bOn;
+	AppliedHeroShade = Values;
 	for (UMaterialInstanceDynamic* Instance : { HazeMaterial.Get(), WaterMaterial.Get(), CloudMaterial.Get(), SkyCloudMaterial.Get() })
 	{
 		if (Instance)
 		{
-			Instance->SetVectorParameterValue(TEXT("HeroFocus"), Value);
+			Instance->SetScalarParameterValue(TEXT("HeroShade"), bOn ? 1.0f : 0.0f);
+			SetHeroLightParameters(Instance, HeroFocusNames, Values);
 		}
 	}
 }
@@ -6217,6 +6328,8 @@ void AHexPlanet::SetHeroShadeParameters(UMaterialInstanceDynamic* Target) const
 	{
 		return;
 	}
+	// a material made now has not the lights of the heroes yet
+	bHeroShadeDirty = true;
 	// these materials take the configs of the air and the water, so the values of the shade of this one are given by name
 	Target->SetScalarParameterValue(TEXT("HeroShadeStart"), Settings->HeroShadeStart);
 	Target->SetScalarParameterValue(TEXT("HeroShadeEnd"), Settings->HeroShadeEnd);

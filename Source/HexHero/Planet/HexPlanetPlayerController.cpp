@@ -17,7 +17,9 @@
 #include "HexWorldMap.h"
 #include "SHexDebugOverlay.h"
 #include "SHexDialog.h"
+#include "SHexHeroPanel.h"
 #include "SHexHoverInfo.h"
+#include "HexHeroes.h"
 #include "SHexPlanetPalette.h"
 #include "HexPlanetPainter.h"
 #include "HexPlanetUnderground.h"
@@ -68,6 +70,120 @@ void AHexPlanetPlayerController::BeginPlay()
 		});
 		DebugOverlay->AddViewStatus(&AHexPlanetCameraPawn::GetSunStatus);
 		DebugOverlay->AddViewStatus(&AHexPlanetCameraPawn::GetLightStatus);
+
+		// the panel of the heroes, hidden on a planet without any
+		const UHexInputConfig* InputConfig = GetDefault<UHexMapSettings>()->LoadInputConfig();
+		SAssignNew(HeroPanel, SHexHeroPanel)
+			.OnHeroChosen(FOnHexHeroChosen::CreateUObject(this, &AHexPlanetPlayerController::ShowHero))
+			.OnEndTurn(FSimpleDelegate::CreateUObject(this, &AHexPlanetPlayerController::EndHeroTurn))
+			.EndTurnKeys(InputConfig && InputConfig->EndTurnAction ? InputConfig->GetKeysText(InputConfig->EndTurnAction) : FString())
+			.NextHeroKeys(InputConfig && InputConfig->NextHeroAction ? InputConfig->GetKeysText(InputConfig->NextHeroAction) : FString());
+		ViewportClient->AddViewportWidgetContent(HeroPanel.ToSharedRef());
+	}
+}
+
+UHexHeroes* AHexPlanetPlayerController::GetHeroes() const
+{
+	const AHexPlanet* Planet = GetPlanet();
+	return Planet && Planet->IsBuilt() ? Planet->GetHeroes() : nullptr;
+}
+
+void AHexPlanetPlayerController::OnHeroMessage(const FString& Message)
+{
+	UE_LOG(LogHexHero, Log, TEXT("Heroes: %s"), *Message);
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(INDEX_NONE, 4.0f, FColor::Yellow, Message);
+	}
+}
+
+void AHexPlanetPlayerController::OnHeroTravelled(int32 Id)
+{
+	// the camera goes down or up with the hero chosen; another hero goes alone
+	UHexHeroes* Heroes = GetHeroes();
+	const FHexHero* Hero = Heroes ? Heroes->FindHero(Id) : nullptr;
+	AHexPlanetCameraPawn* CameraPawn = GetCameraPawn();
+	if (Hero && CameraPawn && Heroes->GetSelectedId() == Id)
+	{
+		CameraPawn->ShowCell(Hero->Layer, Hero->Cell);
+	}
+}
+
+void AHexPlanetPlayerController::SelectHeroAtMouse()
+{
+	const AHexPlanet* Planet = GetPlanet();
+	UHexHeroes* Heroes = GetHeroes();
+	if (!Heroes || IsBrushArmed())
+	{
+		return;
+	}
+	// by its body, which stands over the cells behind it, else by its cell
+	FVector Origin;
+	FVector Direction;
+	const FHexHero* Hero = DeprojectMousePositionToWorld(Origin, Direction) ? Heroes->FindHeroAlongRay(Planet->GetLayer(), Origin, Direction) : nullptr;
+	if (!Hero)
+	{
+		Hero = Heroes->FindHeroAt(Planet->GetLayer(), MouseCell);
+	}
+	if (Hero && Heroes->GetSelectedId() != Hero->Id)
+	{
+		Heroes->Select(Hero->Id);
+		UE_LOG(LogHexHero, Log, TEXT("Heroes: %s is chosen"), *Hero->Name);
+	}
+}
+
+void AHexPlanetPlayerController::SendHeroToMouse()
+{
+	const AHexPlanet* Planet = GetPlanet();
+	UHexHeroes* Heroes = GetHeroes();
+	const FHexHero* Hero = Heroes ? Heroes->GetSelected() : nullptr;
+	if (!Hero || IsBrushArmed() || MouseCell == INDEX_NONE)
+	{
+		return;
+	}
+	if (Hero->Layer != Planet->GetLayer())
+	{
+		OnHeroMessage(FString::Printf(TEXT("%s is on the other layer"), *Hero->Name));
+		return;
+	}
+	FString Message;
+	if (!Heroes->Send(Hero->Id, MouseCell, Message) && !Message.IsEmpty())
+	{
+		OnHeroMessage(Message);
+	}
+}
+
+void AHexPlanetPlayerController::ShowHero(int32 Id)
+{
+	UHexHeroes* Heroes = GetHeroes();
+	const FHexHero* Hero = Heroes ? Heroes->FindHero(Id) : nullptr;
+	if (!Hero)
+	{
+		return;
+	}
+	Heroes->Select(Id);
+	if (AHexPlanetCameraPawn* CameraPawn = GetCameraPawn())
+	{
+		CameraPawn->ShowCell(Hero->Layer, Hero->Cell);
+	}
+}
+
+void AHexPlanetPlayerController::SelectNextHero()
+{
+	UHexHeroes* Heroes = GetHeroes();
+	if (const FHexHero* Hero = Heroes ? Heroes->SelectNext() : nullptr)
+	{
+		ShowHero(Hero->Id);
+	}
+}
+
+void AHexPlanetPlayerController::EndHeroTurn()
+{
+	UHexHeroes* Heroes = GetHeroes();
+	if (Heroes && !Heroes->GetHeroes().IsEmpty())
+	{
+		Heroes->EndTurn();
+		OnHeroMessage(FString::Printf(TEXT("Day %d"), Heroes->GetDay()));
 	}
 }
 
@@ -100,6 +216,11 @@ void AHexPlanetPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReaso
 			ViewportClient->RemoveViewportWidgetContent(Palette.ToSharedRef());
 		}
 
+		if (HeroPanel.IsValid())
+		{
+			ViewportClient->RemoveViewportWidgetContent(HeroPanel.ToSharedRef());
+		}
+
 		if (TravelScreen.IsValid())
 		{
 			ViewportClient->RemoveViewportWidgetContent(TravelScreen.ToSharedRef());
@@ -107,6 +228,7 @@ void AHexPlanetPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReaso
 	}
 
 	TravelScreen.Reset();
+	HeroPanel.Reset();
 	Dialog.Reset();
 	HoverInfo.Reset();
 	Palette.Reset();
@@ -300,7 +422,8 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 		const AHexPlanet* ShownPlanet = CameraPawn ? CameraPawn->GetPlanet() : nullptr;
 		const bool bSaved = !CameraPawn || CameraPawn->IsLastViewSaved();
 		DebugOverlay->SetWarning(ShownPlanet && !ShownPlanet->IsSaved() ? FString::Printf(TEXT("Planet not saved (%s)"), *SaveKeys)
-			: ShownPlanet && ShownPlanet->HasUnsavedLevels() ? FString::Printf(TEXT("%s not saved (%s)"), ShownPlanet->HasUnsavedCells() ? TEXT("Levels") : TEXT("Entrances"), *SaveKeys)
+			: ShownPlanet && ShownPlanet->HasUnsavedLevels() ? FString::Printf(TEXT("%s not saved (%s)"), ShownPlanet->HasUnsavedCells() ? TEXT("Levels")
+				: ShownPlanet->GetHeroes() && ShownPlanet->GetHeroes()->IsEdited() ? TEXT("Heroes") : TEXT("Entrances"), *SaveKeys)
 			: bSaved ? FString() : FString::Printf(TEXT("View not saved (%s)"), *SaveKeys));
 	}
 
@@ -329,6 +452,29 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 	}
 
 	Planet->SetHoveredCell(Cell, IsBrushArmed() ? Painter->GetOutlineSize() : 0);
+
+	// the heroes: the way of the one chosen to the cell under the cursor shows while no tool of the brush is chosen, and the camera glides
+	// after it while it walks
+	UHexHeroes* Heroes = Planet->GetHeroes();
+	if (HeroPanel.IsValid())
+	{
+		HeroPanel->SetHeroes(Heroes);
+	}
+	if (Heroes)
+	{
+		if (BoundHeroes.Get() != Heroes)
+		{
+			BoundHeroes = Heroes;
+			Heroes->OnMessage.AddUObject(this, &AHexPlanetPlayerController::OnHeroMessage);
+			Heroes->OnHeroTravelled.AddUObject(this, &AHexPlanetPlayerController::OnHeroTravelled);
+		}
+		Heroes->SetHoverCell(Planet->GetLayer(), IsBrushArmed() || MapMenu.IsValid() || Dialog.IsValid() ? INDEX_NONE : Cell);
+		FVector3d FollowDirection;
+		if (AHexPlanetCameraPawn* FollowPawn = GetCameraPawn(); FollowPawn && Heroes->GetFollowDirection(Planet->GetLayer(), FollowDirection))
+		{
+			FollowPawn->Follow(FVector(FollowDirection));
+		}
+	}
 	// the walls of the underground dissolve in front of the point under the cursor, as in a game seen from above (M_HexUndergroundWall)
 	const int32 WallFade = CVarPlanetWallFade.GetValueOnGameThread();
 	if (WallFade == 2)
@@ -351,7 +497,13 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 
 	if (HoverInfo.IsValid())
 	{
-		HoverInfo->SetInfo(!HoverInfoVariable || HoverInfoVariable->GetBool() ? Planet->GetCellDebugText(Cell) : FString());
+		FString Info = !HoverInfoVariable || HoverInfoVariable->GetBool() ? Planet->GetCellDebugText(Cell) : FString();
+		const FString HeroText = Heroes && !Info.IsEmpty() ? Heroes->GetCellText(Planet->GetLayer(), Cell) : FString();
+		if (!HeroText.IsEmpty())
+		{
+			Info += TEXT("\n") + HeroText;
+		}
+		HoverInfo->SetInfo(Info);
 	}
 }
 

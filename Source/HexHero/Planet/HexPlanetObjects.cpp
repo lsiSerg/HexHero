@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "HexPlanetObjects.h"
+#include "HexHeroes.h"
 #include "HexPlanetRivers.h"
 #include "Async/ParallelFor.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
@@ -996,6 +997,8 @@ void UHexPlanetObjects::SetFadeFocus(const FLinearColor& Center)
 
 void UHexPlanetObjects::SetCells(const TMap<int32, FHexCellObjects>& Changes)
 {
+	// what blocks a hero may have changed
+	UHexHeroes::NoteMapChanged();
 	TArray<int32> Changed;
 	for (const TPair<int32, FHexCellObjects>& Each : Changes)
 	{

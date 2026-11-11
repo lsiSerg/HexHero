@@ -754,6 +754,17 @@ void AHexPlanetCameraPawn::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 			EnhancedInputComponent->BindAction(InputConfig->JumpBookmarkAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnJumpBookmark);
 		}
 
+		// the heroes, whose actions are missing until Tools/create_input_assets.py has made them
+		if (InputConfig->HeroSelectAction && InputConfig->HeroSendAction && InputConfig->NextHeroAction && InputConfig->EndTurnAction)
+		{
+			EnhancedInputComponent->BindAction(InputConfig->HeroSelectAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnHeroSelectStarted);
+			EnhancedInputComponent->BindAction(InputConfig->HeroSelectAction, ETriggerEvent::Completed, this, &AHexPlanetCameraPawn::OnHeroSelectCompleted);
+			EnhancedInputComponent->BindAction(InputConfig->HeroSendAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnHeroSendStarted);
+			EnhancedInputComponent->BindAction(InputConfig->HeroSendAction, ETriggerEvent::Completed, this, &AHexPlanetCameraPawn::OnHeroSendCompleted);
+			EnhancedInputComponent->BindAction(InputConfig->NextHeroAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnNextHero);
+			EnhancedInputComponent->BindAction(InputConfig->EndTurnAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnEndTurn);
+		}
+
 		// painting the levels, whose actions are missing until Tools/create_input_assets.py has made them
 		if (InputConfig->PaintModeAction && InputConfig->PaintLevelAction && InputConfig->BrushSizeAction && InputConfig->UndoAction && InputConfig->RedoAction)
 		{
@@ -1293,6 +1304,98 @@ void AHexPlanetCameraPawn::OnMiddleCompleted()
 	{
 		MoveInertia = CameraConfig ? CameraConfig->DragInertia : 0.6f;
 	}
+}
+
+bool AHexPlanetCameraPawn::IsClickAt(const FVector2D& Start) const
+{
+	const APlayerController* PlayerController = Cast<APlayerController>(GetController());
+	float MouseX = 0.0f;
+	float MouseY = 0.0f;
+	return PlayerController && PlayerController->GetMousePosition(MouseX, MouseY) && FVector2D::Distance(Start, FVector2D(MouseX, MouseY)) <= Settings()->ClickTolerance;
+}
+
+void AHexPlanetCameraPawn::OnHeroSelectStarted()
+{
+	const APlayerController* PlayerController = Cast<APlayerController>(GetController());
+	float MouseX = 0.0f;
+	float MouseY = 0.0f;
+	bHeroSelectDown = !IsTravelling() && PlayerController && PlayerController->GetMousePosition(MouseX, MouseY);
+	HeroSelectStart = FVector2D(MouseX, MouseY);
+}
+
+void AHexPlanetCameraPawn::OnHeroSelectCompleted()
+{
+	AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController());
+	if (bHeroSelectDown && PlayerController && !IsTravelling() && IsClickAt(HeroSelectStart))
+	{
+		PlayerController->SelectHeroAtMouse();
+	}
+	bHeroSelectDown = false;
+}
+
+void AHexPlanetCameraPawn::OnHeroSendStarted()
+{
+	const APlayerController* PlayerController = Cast<APlayerController>(GetController());
+	float MouseX = 0.0f;
+	float MouseY = 0.0f;
+	bHeroSendDown = !IsTravelling() && PlayerController && PlayerController->GetMousePosition(MouseX, MouseY);
+	HeroSendStart = FVector2D(MouseX, MouseY);
+}
+
+void AHexPlanetCameraPawn::OnHeroSendCompleted()
+{
+	AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController());
+	if (bHeroSendDown && PlayerController && !IsTravelling() && IsClickAt(HeroSendStart))
+	{
+		PlayerController->SendHeroToMouse();
+	}
+	bHeroSendDown = false;
+}
+
+void AHexPlanetCameraPawn::OnNextHero()
+{
+	if (AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController()); PlayerController && !IsTravelling())
+	{
+		PlayerController->SelectNextHero();
+	}
+}
+
+void AHexPlanetCameraPawn::OnEndTurn()
+{
+	if (AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController()); PlayerController && !IsTravelling())
+	{
+		PlayerController->EndHeroTurn();
+	}
+}
+
+bool AHexPlanetCameraPawn::ShowCell(EHexPlanetLayer Layer, int32 Cell)
+{
+	if (IsTravelling() || !Planet || !Planet->IsBuilt() || !Planet->GetGrid().GetCells().IsValidIndex(Cell))
+	{
+		return false;
+	}
+	if (Layer == Planet->GetLayer())
+	{
+		return FocusCell(Cell);
+	}
+	// the cell has the same index and place on both layers
+	FHexPlanetCameraPlacement Placement = GetPlacement();
+	const FVector3d Center = Planet->GetGrid().GetCells()[Cell].Center;
+	Placement.Latitude = FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(Center.Z, -1.0, 1.0)));
+	Placement.Longitude = FMath::RadiansToDegrees(FMath::Atan2(Center.Y, Center.X));
+	AngularVelocity = FVector::ZeroVector;
+	return TravelTo(Layer, Placement);
+}
+
+void AHexPlanetCameraPawn::Follow(const FVector& Direction)
+{
+	// the player keeps the camera while moving it
+	if (IsTravelling() || bDragging || bMiddleDown || !MoveInput.IsNearlyZero() || Direction.IsNearlyZero())
+	{
+		return;
+	}
+	FocusDirection = Direction.GetSafeNormal();
+	bFocusing = true;
 }
 
 void AHexPlanetCameraPawn::OnTurnStarted()

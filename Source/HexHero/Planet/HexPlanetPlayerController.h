@@ -10,9 +10,11 @@
 class AHexPlanet;
 class SHexDebugOverlay;
 class SHexDialog;
+class SHexHeroPanel;
 class SHexHoverInfo;
 class SHexMapMenu;
 class SHexPlanetPalette;
+class UHexHeroes;
 class UHexPlanetPainter;
 
 /**
@@ -41,6 +43,12 @@ class AHexPlanetPlayerController : public APlayerController
 
 	/** Black screen of a trip between the layers */
 	TSharedPtr<SWidget> TravelScreen;
+
+	/** Panel of the heroes of the planet, at the bottom right */
+	TSharedPtr<SHexHeroPanel> HeroPanel;
+
+	/** The heroes whose messages and trips this controller listens to */
+	TWeakObjectPtr<UHexHeroes> BoundHeroes;
 
 	/** Cell under the cursor in the last tick */
 	int32 MouseCell = INDEX_NONE;
@@ -102,6 +110,21 @@ public:
 	/** Returns the cell under the cursor in the last tick, on the layer shown */
 	int32 GetMouseCell() const { return MouseCell; }
 
+	/** Chooses the hero under the mouse, by its body or its cell, as a click of the left button does while no tool of the brush is chosen */
+	void SelectHeroAtMouse();
+
+	/** Sends the hero chosen to the cell under the mouse, as a click of the right button does while no tool of the brush is chosen */
+	void SendHeroToMouse();
+
+	/** Chooses the next hero and shows it */
+	void SelectNextHero();
+
+	/** Ends the day of the heroes */
+	void EndHeroTurn();
+
+	/** Chooses a hero and shows it: the camera glides to it, or travels to its layer */
+	void ShowHero(int32 Id);
+
 	/** Shows or hides the black screen of a trip between the layers, over every widget, as the fade of the camera does not cover them */
 	void SetTravelScreen(bool bShown);
 
@@ -148,6 +171,15 @@ private:
 
 	/** Returns the planet of the pawn, or null */
 	AHexPlanet* GetPlanet() const;
+
+	/** Returns the heroes of the planet once it is built, or null */
+	UHexHeroes* GetHeroes() const;
+
+	/** Shows a line of the heroes on the screen, as why one does not go */
+	void OnHeroMessage(const FString& Message);
+
+	/** The camera goes with the hero chosen when it goes through an entrance or exit */
+	void OnHeroTravelled(int32 Id);
 
 	/** Returns the brush, made on the surface of the planet when first needed, or null without one */
 	UHexPlanetPainter* GetPainter();

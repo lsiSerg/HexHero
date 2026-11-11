@@ -32,6 +32,7 @@ class UHierarchicalInstancedStaticMeshComponent;
 class UHexBiomeConfig;
 class UHexPlanetCloudConfig;
 class UHexPlanetConfig;
+class UHexHeroes;
 class UHexPlanetFlocks;
 class UHexPlanetMotes;
 class UHexPlanetObjects;
@@ -145,10 +146,15 @@ class AHexPlanet : public AActor
 	UPROPERTY(Transient)
 	TObjectPtr<UTextureCube> SkyCubemap;
 
-	/** The light around the hero (UHexPlanetConfig::bHeroLight), for now over the point where the view through the middle of the screen meets the
-	 *  tops of the passages, which UpdateHeroLight moves every frame; hidden with the layer */
+	/** The lights around the heroes of the layer (UHexPlanetConfig::bHeroLight), one over each of those nearest the view, or one over the point
+	 *  where the view through the middle of the screen meets the tops of the passages on a planet without heroes, made as they are needed,
+	 *  which UpdateHeroLight moves every frame; hidden with the layer */
 	UPROPERTY(Transient)
-	TObjectPtr<UPointLightComponent> HeroLight;
+	TArray<TObjectPtr<UPointLightComponent>> HeroLights;
+
+	/** The heroes of the planet and their turns, an object of the surface that serves both layers (GetHeroes), made when the surface is built */
+	UPROPERTY(Transient)
+	TObjectPtr<UHexHeroes> Heroes;
 
 	/** Lays the haze of the air over every view, unbound, with HazeMaterial */
 	UPROPERTY(VisibleAnywhere, Category="Components")
@@ -592,6 +598,9 @@ public:
 	/** Returns the rivers and bridges */
 	UHexPlanetRivers* GetRivers() const { return Rivers; }
 
+	/** Returns the heroes of the planet, of both layers, which the surface holds, or null before it is built */
+	UHexHeroes* GetHeroes() const;
+
 	/** Rebuilds the valleys of the rivers, which UHexPlanetRivers changed, and marks the planet as edited; bByStep as for MarkLevelsEdited */
 	void OnRiversChanged(bool bByStep = false);
 
@@ -962,19 +971,24 @@ private:
 	 *  texture again when the walls have more samples than it holds */
 	void UpdateWallGlow();
 
-	/** The light around the hero (HeroLight), made when the layer is built, and placed over the focus of the camera every frame */
-	void CreateHeroLight();
-	void UpdateHeroLight(const FVector3d& Focus);
+	/** The lights around the heroes (HeroLights): makes one, and every frame places one over each light of the layer, a point of the ground
+	 *  with in its W how far the light reaches there, the first ShadowLights of DA_HexHeroes with shadows, and gives the motes and the fog where
+	 *  they stand */
+	UPointLightComponent* MakeHeroLight();
+	void UpdateHeroLight(TConstArrayView<FVector4d> Lights);
 
 	/** The focus of the camera in the frame drawn, where the light of the hero stands, which the fog clears around (FogFocus of
 	 *  M_HexUndergroundFog), and whether there is one */
 	FVector3d HeroFocus = FVector3d::ZeroVector;
 	bool bHasHeroFocus = false;
 
-	/** The shade of the land away from the hero (UHexPlanetConfig::bHeroShade): gives the haze, the water and the clouds where the hero stands and
-	 *  how far its light reaches (HeroFocus of their materials), 0 under the forced light of L, which takes the shade away */
-	void UpdateHeroShade(const FVector3d& Focus);
-	FLinearColor AppliedHeroShade = FLinearColor(0.0f, 0.0f, 0.0f, -1.0f);
+	/** The shade of the land away from the heroes (UHexPlanetConfig::bHeroShade): gives the haze, the water and the clouds where the heroes of the
+	 *  layer stand and how far their lights reach (HeroFocus0 to HeroFocus7 of their materials), and HeroShade, 0 under the forced light of L,
+	 *  which takes the shade away; only when they changed, or a material was made since (bHeroShadeDirty) */
+	void UpdateHeroShade(TConstArrayView<FVector4d> Lights);
+	TArray<FLinearColor> AppliedHeroShade;
+	bool bAppliedHeroShadeOn = false;
+	mutable bool bHeroShadeDirty = true;
 
 	/** Gives a material that draws the shade the HeroShade values of the config and the light field */
 	void SetHeroShadeParameters(UMaterialInstanceDynamic* Target) const;

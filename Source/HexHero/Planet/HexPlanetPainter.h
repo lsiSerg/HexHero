@@ -43,6 +43,9 @@ enum class EHexPaintTool : uint8
 	WallHeight,
 	/** Gives the walls along those voids back the height of their style */
 	WallAuto,
+	/** Puts a hero of the class and player chosen on a cell of either layer, where it stands when a game starts, or takes the one there away
+	 *  with Ctrl (UHexHeroes); it is no step of Undo */
+	Hero,
 };
 
 /** What a click of the brush in relief mode does to the mountains and hills under it, once per cell and stroke */
@@ -90,16 +93,20 @@ enum class EHexPaintTab : uint8
 	Rivers,
 	/** The entrances to the underground and their networks */
 	Entrances,
+	/** The heroes that stand on the surface when a game starts */
+	Heroes,
 	/** Void and passages underground, carving and the cave biomes */
 	Maze,
 	/** How the passages join the entrances of their networks, and generating them again */
 	Links,
 	/** The cave objects of the underground: stalagmites, mushrooms, crystals, bones and the rest, painted, erased and generated again */
 	CaveObjects,
+	/** The heroes that stand underground when a game starts */
+	CaveHeroes,
 };
 
 /** Number of tabs of the palette */
-constexpr int32 NumPaintTabs = 8;
+constexpr int32 NumPaintTabs = 10;
 
 /** Old and new levels, biomes, relief, objects, rivers and entrances of the cells of one step of Undo, a stroke or a button */
 struct FHexPaintStep
@@ -319,6 +326,19 @@ public:
 	bool IsPlacingEntrances() const { return Tool == EHexPaintTool::Entrance; }
 	void SetEntranceTool() { SetTool(EHexPaintTool::Entrance, EHexPaintTab::Entrances); }
 
+	/** Returns true while a click puts a hero of the class and player chosen on a cell of the layer painted; Ctrl takes one away */
+	bool IsPlacingHeroes() const { return Tool == EHexPaintTool::Hero; }
+	void SetHeroTool() { SetTool(EHexPaintTool::Hero, GetHeroesTab()); }
+
+	/** Returns the tab of the heroes of the layer painted */
+	EHexPaintTab GetHeroesTab() const { return Target == EHexPlanetLayer::Underground ? EHexPaintTab::CaveHeroes : EHexPaintTab::Heroes; }
+
+	/** The class and the player of the heroes a click places, indices into DA_HexHeroes */
+	int32 GetHeroClass() const { return HeroClass; }
+	void SetHeroClass(int32 InClass) { HeroClass = FMath::Max(InClass, 0); }
+	int32 GetHeroPlayer() const { return HeroPlayer; }
+	void SetHeroPlayer(int32 InPlayer) { HeroPlayer = FMath::Max(InPlayer, 0); }
+
 	/** Returns true while the brush carves passages underground */
 	bool IsCarving() const { return Tool == EHexPaintTool::Carve; }
 	void SetCarveTool() { SetTool(EHexPaintTool::Carve, EHexPaintTab::Maze); }
@@ -384,7 +404,8 @@ public:
 	 *  cell, a way, a side or a point, whatever its size */
 	bool UsesBrushSize() const
 	{
-		return Tool != EHexPaintTool::Entrance && Tool != EHexPaintTool::Carve && Tool != EHexPaintTool::River && Tool != EHexPaintTool::Bridge && Tool != EHexPaintTool::Placed;
+		return Tool != EHexPaintTool::Entrance && Tool != EHexPaintTool::Carve && Tool != EHexPaintTool::River && Tool != EHexPaintTool::Bridge && Tool != EHexPaintTool::Placed
+			&& Tool != EHexPaintTool::Hero;
 	}
 
 	/** Returns how many rings of cells the outline of the brush shows: its size, or one cell for the tools that ignore the size */
@@ -439,7 +460,7 @@ private:
 
 	/** The tool each tab had last, by EHexPaintTab */
 	EHexPaintTool TabTools[NumPaintTabs] = {EHexPaintTool::Level, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None,
-		EHexPaintTool::Level, EHexPaintTool::None, EHexPaintTool::None};
+		EHexPaintTool::None, EHexPaintTool::Level, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None};
 
 	bool bActive = false;
 	bool bPainting = false;
@@ -469,6 +490,8 @@ private:
 	EHexReliefTool ReliefTool = EHexReliefTool::Version;
 	int32 BrushSize = 1;
 	int32 Network = 0;
+	int32 HeroClass = 0;
+	int32 HeroPlayer = 0;
 
 	/** Last cell under the cursor in the stroke, and the cell the stroke of the carving brush began at */
 	int32 LastCell = INDEX_NONE;
@@ -518,6 +541,9 @@ private:
 
 	/** Puts an entrance of the network on a cell, or takes one away, at once, as part of the stroke */
 	void PaintEntrance(int32 Cell);
+
+	/** Puts a hero of the class and player chosen on a cell, or takes the one there away, at once */
+	void PaintHero(int32 Cell);
 
 	/** Makes the stroke of the carving brush the passage along the shortest way from where it began to a cell */
 	void PaintCarve(int32 Cell);

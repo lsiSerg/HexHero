@@ -438,6 +438,54 @@ struct FHexEntrance
 	bool operator==(const FHexEntrance& Other) const { return Cell == Other.Cell && Network == Other.Network; }
 };
 
+/**
+ *  A hero of a planet as a line of heroes.json: where it stands when a game starts. Its class is the Id of a class of DA_HexHeroes and its
+ *  layer Surface or Underground; the cell is the same index on both layers
+ */
+USTRUCT()
+struct FHexHeroLine
+{
+	GENERATED_BODY()
+
+	/** Number of the hero on its planet, which never changes, so Git sees a hero that moved as one changed line */
+	UPROPERTY()
+	int32 Id = 0;
+
+	UPROPERTY()
+	FString Name;
+
+	UPROPERTY()
+	FString Class;
+
+	/** Index of its player in Players of DA_HexHeroes */
+	UPROPERTY()
+	int32 Player = 0;
+
+	UPROPERTY()
+	FString Layer;
+
+	UPROPERTY()
+	int32 Cell = 0;
+
+	bool operator==(const FHexHeroLine& Other) const
+	{
+		return Id == Other.Id && Name == Other.Name && Class == Other.Class && Player == Other.Player && Layer == Other.Layer && Cell == Other.Cell;
+	}
+};
+
+/** heroes.json of a planet, at the root of its folder: the heroes that stand on it when a game starts, a line each, which Git can merge */
+USTRUCT()
+struct FHexHeroesFile
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	int32 Version = 1;
+
+	UPROPERTY()
+	TArray<FHexHeroLine> Heroes;
+};
+
 /** A letter of levels.txt and the level it stands for */
 struct FHexLevelLetter
 {
@@ -640,6 +688,24 @@ namespace HexPlanetFile
 	/** Writes entrances.json of the folder of a planet, even empty; leaving out the entrances that cannot be used is for the caller
 	 *  (HexPlanetUnderground::GetSavedEntrances) */
 	bool SaveEntrances(const FString& PlanetFolder, TConstArrayView<FHexEntrance> Entrances, FString& OutError);
+
+	/** heroes.json holds the heroes of a planet where they stand when a game starts, at the root of its folder */
+	constexpr const TCHAR* HeroesFile = TEXT("heroes.json");
+
+	/** Writes heroes as the text of heroes.json, a line each, sorted by Id */
+	FString EncodeHeroes(TConstArrayView<FHexHeroLine> Heroes);
+
+	/** Reads the text of heroes.json */
+	bool DecodeHeroes(const FString& Text, TArray<FHexHeroLine>& OutHeroes, FString& OutError);
+
+	/** Returns true if the folder of a planet has heroes.json */
+	bool HasHeroes(const FString& PlanetFolder);
+
+	/** Reads heroes.json of the folder of a planet */
+	bool LoadHeroes(const FString& PlanetFolder, TArray<FHexHeroLine>& OutHeroes, FString& OutError);
+
+	/** Writes heroes.json of the folder of a planet, or deletes it when there are none, so a planet without heroes has no such file */
+	bool SaveHeroes(const FString& PlanetFolder, TConstArrayView<FHexHeroLine> Heroes, FString& OutError);
 
 	/** biomes.txt holds one letter per cell in the order of FHexSphereGrid, the PlanetLetter of its biome on the surface and its
 	 *  UndergroundLetter underground, in lines of LevelsLineLength */

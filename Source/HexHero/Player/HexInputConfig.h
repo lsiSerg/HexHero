@@ -125,6 +125,23 @@ public:
 	UPROPERTY(EditAnywhere, Category="Input")
 	TObjectPtr<UInputAction> LayerAction;
 
+	/** Chooses the hero under the mouse with a click, a press and a release at one place; the same button drags the planet while it is held
+	 *  and moved (the developer chose the left button to choose and the right one to send on 2026-11-10) */
+	UPROPERTY(EditAnywhere, Category="Input|Heroes")
+	TObjectPtr<UInputAction> HeroSelectAction;
+
+	/** Sends the hero chosen to the cell under the mouse with a click; the same button turns the camera while it is held and moved */
+	UPROPERTY(EditAnywhere, Category="Input|Heroes")
+	TObjectPtr<UInputAction> HeroSendAction;
+
+	/** Chooses the next hero and shows it */
+	UPROPERTY(EditAnywhere, Category="Input|Heroes")
+	TObjectPtr<UInputAction> NextHeroAction;
+
+	/** Ends the day: every hero gets its points of movement back */
+	UPROPERTY(EditAnywhere, Category="Input|Heroes")
+	TObjectPtr<UInputAction> EndTurnAction;
+
 	/**
 	 *  Returns the keys of one action from the mapping context as the legend shows them, or nothing if it has none.
 	 *  A key chorded with another action comes after the key of that action, as in Shift+F

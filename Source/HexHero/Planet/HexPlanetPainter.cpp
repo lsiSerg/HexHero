@@ -2,6 +2,7 @@
 
 #include "HexPlanetPainter.h"
 #include "HexHero.h"
+#include "HexHeroes.h"
 #include "HexPlanet.h"
 #include "HexPlanetConfig.h"
 #include "HexBiomeConfig.h"
@@ -139,6 +140,8 @@ FText UHexPlanetPainter::GetTabName(EHexPaintTab Tab)
 	case EHexPaintTab::Objects: return LOCTEXT("TabObjects", "Objects");
 	case EHexPaintTab::Rivers: return LOCTEXT("TabRivers", "Rivers");
 	case EHexPaintTab::Entrances: return LOCTEXT("TabEntrances", "Entrances");
+	case EHexPaintTab::Heroes:
+	case EHexPaintTab::CaveHeroes: return LOCTEXT("TabHeroes", "Heroes");
 	case EHexPaintTab::Maze: return LOCTEXT("TabMaze", "Maze");
 	case EHexPaintTab::Links: return LOCTEXT("TabLinks", "Links");
 	default: return LOCTEXT("TabCaveObjects", "Objects");
@@ -705,6 +708,16 @@ void UHexPlanetPainter::ContinueStroke(int32 Cell)
 		LastCell = Cell;
 		return;
 	}
+	// a hero goes on the cell pressed alone
+	if (Tool == EHexPaintTool::Hero)
+	{
+		if (LastCell == INDEX_NONE)
+		{
+			PaintHero(Cell);
+		}
+		LastCell = Cell;
+		return;
+	}
 
 	const TArray<FHexSphereCell>& Cells = Planet->GetGrid().GetCells();
 	const int32 NumBefore = Stroke.NewLevels.Num();
@@ -881,6 +894,28 @@ void UHexPlanetPainter::PaintAround(int32 Cell)
 
 		Stroke.OldLevels.FindOrAdd(Painted, Planet->GetCellLevel(Painted));
 		Stroke.NewLevels.Add(Painted, NewLevel);
+	}
+}
+
+void UHexPlanetPainter::PaintHero(int32 Cell)
+{
+	UHexHeroes* Heroes = Planet ? Planet->GetHeroes() : nullptr;
+	if (!Heroes)
+	{
+		return;
+	}
+	if (IsBackwards())
+	{
+		if (const FHexHero* Hero = Heroes->FindHeroAt(Target, Cell))
+		{
+			Heroes->RemoveHero(Hero->Id);
+		}
+		return;
+	}
+	FString Problem;
+	if (Heroes->AddHero(Target, Cell, HeroClass, HeroPlayer, Problem) == 0 && GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(INDEX_NONE, 3.0f, FColor::Yellow, FString::Printf(TEXT("No hero stands there: %s"), *Problem));
 	}
 }
 

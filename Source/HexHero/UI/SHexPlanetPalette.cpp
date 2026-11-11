@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SHexPlanetPalette.h"
+#include "HexHeroConfig.h"
 #include "HexPlanetFile.h"
 #include "HexPlanetPainter.h"
 #include "HexPlanetUnderground.h"
@@ -27,8 +28,8 @@ namespace
 	const FLinearColor KeyColor(0.7f, 0.7f, 0.7f);
 
 	/** The tabs of each layer, in the order of their buttons */
-	const EHexPaintTab SurfaceTabs[] = {EHexPaintTab::Ground, EHexPaintTab::Relief, EHexPaintTab::Objects, EHexPaintTab::Rivers, EHexPaintTab::Entrances};
-	const EHexPaintTab UndergroundTabs[] = {EHexPaintTab::Maze, EHexPaintTab::Links, EHexPaintTab::CaveObjects};
+	const EHexPaintTab SurfaceTabs[] = {EHexPaintTab::Ground, EHexPaintTab::Relief, EHexPaintTab::Objects, EHexPaintTab::Rivers, EHexPaintTab::Entrances, EHexPaintTab::Heroes};
+	const EHexPaintTab UndergroundTabs[] = {EHexPaintTab::Maze, EHexPaintTab::Links, EHexPaintTab::CaveObjects, EHexPaintTab::CaveHeroes};
 }
 
 void SHexPlanetPalette::Construct(const FArguments& InArgs)
@@ -445,6 +446,43 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 	EntranceBody->AddSlot().AutoHeight()[MakeHelp(FText::Format(LOCTEXT("EntranceHelp", "Click a cell of plains or hills to put an entrance of the chosen network there, or give it that network; Ctrl+click takes one away. Its exit is the same cell underground, which this does not carve: a red marker cannot be used. {0} over an entrance goes down."),
 		FText::FromString(InArgs._LayerKeys)))];
 
+	// Heroes, on either layer: the player and the class of the heroes a click places
+	const UHexHeroConfig* HeroConfig = UHexHeroConfig::Load();
+	const auto MakeHeroBody = [&]()
+	{
+		TSharedRef<SVerticalBox> Body = SNew(SVerticalBox);
+		Body->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("HeroPlayers", "Player"), 0.0f)];
+		TSharedRef<SUniformGridPanel> Players = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
+		for (int32 Player = 0; Player < HeroConfig->Players.Num(); ++Player)
+		{
+			Players->AddSlot(Player % 2, Player / 2)
+			[
+				MakeButton(
+					MakeSwatch(HeroConfig->Players[Player].Color, SwatchSize * 0.75f, SwatchSize * 0.75f, 6.0f, FText::FromString(HeroConfig->Players[Player].Name), Small, FText::GetEmpty()),
+					[Player](UHexPlanetPainter& Each) { Each.SetHeroPlayer(Player); Each.SetHeroTool(); },
+					[Player](const UHexPlanetPainter& Each) { return Each.IsPlacingHeroes() && Each.GetHeroPlayer() == Player; })
+			];
+		}
+		Body->AddSlot().AutoHeight()[Players];
+		Body->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("HeroClasses", "Class"))];
+		TSharedRef<SUniformGridPanel> Classes = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
+		for (int32 Class = 0; Class < HeroConfig->Classes.Num(); ++Class)
+		{
+			Classes->AddSlot(Class % 2, Class / 2)
+			[
+				MakeButton(
+					MakeLabel(FText::FromString(HeroConfig->Classes[Class].DisplayName)),
+					[Class](UHexPlanetPainter& Each) { Each.SetHeroClass(Class); Each.SetHeroTool(); },
+					[Class](const UHexPlanetPainter& Each) { return Each.IsPlacingHeroes() && Each.GetHeroClass() == Class; })
+			];
+		}
+		Body->AddSlot().AutoHeight()[Classes];
+		Body->AddSlot().AutoHeight()[MakeHelp(LOCTEXT("HeroHelp", "Click a cell a hero can stand on to put one of the chosen player and class there; Ctrl+click takes one away. That is where it stands when a game starts, which the save key writes. With Move the planet, a left click chooses a hero and a right click sends it."))];
+		return Body;
+	};
+	TSharedRef<SVerticalBox> HeroBody = MakeHeroBody();
+	TSharedRef<SVerticalBox> CaveHeroBody = MakeHeroBody();
+
 	// Maze: the void and passages underground, carving, and the cave biomes
 	TSharedRef<SVerticalBox> Maze = SNew(SVerticalBox);
 	{
@@ -684,9 +722,11 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 			+ SWidgetSwitcher::Slot()[Objects]
 			+ SWidgetSwitcher::Slot()[RiverBody]
 			+ SWidgetSwitcher::Slot()[EntranceBody]
+			+ SWidgetSwitcher::Slot()[HeroBody]
 			+ SWidgetSwitcher::Slot()[Maze]
 			+ SWidgetSwitcher::Slot()[Links]
 			+ SWidgetSwitcher::Slot()[CaveObjects]
+			+ SWidgetSwitcher::Slot()[CaveHeroBody]
 		]
 
 		// Undo and Redo of the layer painted

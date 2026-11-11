@@ -84,21 +84,41 @@ float3 hazeColor = HazeColor.rgb;
 '''
 
 # The land away from the hero lies in shade, as if under clouds (bHeroShade of DA_HexPlanet, the surface), as the developer decided on 2026-11-10:
-# around the hero it is day, and the rest is much lighter than the dark underground, never night. HeroFocus is where the hero stands, for now the
-# focus of the camera, and in its alpha how far its light reaches on the ground (AHexPlanet::UpdateHeroShade; 0 under the forced light of L, when
-# there is no shade); within HeroShadeStart of that reach it is day, and from HeroShadeEnd of it the color keeps HeroShadeBrightness of its light
+# around each hero it is day, and the rest is much lighter than the dark underground, never night. HeroFocus0 to HeroFocus7 are where the heroes of
+# the layer stand, those nearest the view (the focus of the camera alone on a planet without heroes), each with in its alpha how far its light
+# reaches on the ground, 0 for none, and HeroShade is 0 under the forced light of L, when there is no shade (AHexPlanet::UpdateHeroShade);
+# within HeroShadeStart of the reach of the nearest it is day, and from HeroShadeEnd of it the color keeps HeroShadeBrightness of its light
 # and HeroShadeSaturation of its colors. Around what lights the land, the entrances and the auroras, the shade lifts by LightField, a cubemap by
 # the direction from the center (AHexPlanet::UpdateLightField). The haze lays it over the opaque scene, and the water and the clouds, drawn after
 # it, over themselves, each at its own point (shadePos, shadeSpace for the space past the planet), so what glows by itself, as the auroras, keeps
 # its light. It changes shadeColor
+HERO_LIGHTS = 8
+
+
+def hero_lights(name, prefix):
+    """The HLSL of an array of the lights of the heroes of a layer, from the inputs <prefix>0 to <prefix>7 of a custom node: where each stands and
+    in its alpha how far its light reaches on the ground, 0 for none (MaxHeroLights of HexHeroes.h)"""
+    return 'float4 %s[%d] = {%s};' % (name, HERO_LIGHTS, ', '.join('%s%d' % (prefix, index) for index in range(HERO_LIGHTS)))
+
+
 HERO_SHADE_CODE = r'''
-if (HeroFocus.w > 0.0)
+if (HeroShade > 0.5)
 {
     float shadeLift = 0.0;
     if (!shadeSpace)
     {
-        float shadeStart = HeroFocus.w * HeroShadeStart;
-        shadeLift = 1.0 - smoothstep(shadeStart, max(HeroFocus.w * HeroShadeEnd, shadeStart + 1.0), distance(shadePos, HeroFocus.xyz));
+        // how far the nearest hero stands, as a share of how far its light reaches
+        SHADE_LIGHTS
+        float shadeNear = 1.0e9;
+        for (int shadeIndex = 0; shadeIndex < HERO_LIGHT_COUNT; shadeIndex++)
+        {
+            float4 shadeLight = shadeLights[shadeIndex];
+            if (shadeLight.w > 0.0)
+            {
+                shadeNear = min(shadeNear, distance(shadePos, shadeLight.xyz) / shadeLight.w);
+            }
+        }
+        shadeLift = 1.0 - smoothstep(HeroShadeStart, max(HeroShadeEnd, HeroShadeStart + 1.0e-3), shadeNear);
         shadeLift = max(shadeLift, LightField.SampleLevel(LightFieldSampler, normalize(shadePos), 0.0).r);
     }
     float shadeLuma = dot(shadeColor, float3(0.2126, 0.7152, 0.0722));
@@ -106,8 +126,9 @@ if (HeroFocus.w > 0.0)
     shadeColor = lerp(shaded, shadeColor, shadeLift);
 }
 '''
+HERO_SHADE_CODE = HERO_SHADE_CODE.replace('SHADE_LIGHTS', hero_lights('shadeLights', 'HeroFocus')).replace('HERO_LIGHT_COUNT', str(HERO_LIGHTS))
 HERO_SHADE_PARAMETERS = ['HeroShadeStart', 'HeroShadeEnd', 'HeroShadeBrightness', 'HeroShadeSaturation']
-for _name in HERO_SHADE_PARAMETERS + ['HeroFocus', 'LightField']:
+for _name in HERO_SHADE_PARAMETERS + ['HeroFocus0', 'HeroShade ', 'LightField']:
     assert _name in HERO_SHADE_CODE, _name
 
 CLOUD_CODE = r'''
@@ -1603,6 +1624,12 @@ def add_vector4(library, material, name, value, y):
     return append
 
 
+def add_hero_lights(library, material, prefix, y):
+    """The inputs <prefix>0 to <prefix>7 of a custom node that reads the lights of the heroes (hero_lights), none by default"""
+    return [('%s%d' % (prefix, index), add_vector4(library, material, '%s%d' % (prefix, index), unreal.LinearColor(0.0, 0.0, 0.0, 0.0), y + index * 25), '')
+        for index in range(HERO_LIGHTS)]
+
+
 def add_config_parameters(
 library, material, config_class, names, y):
     """Parameters named as values of a config class, with its defaults: AHexPlanet::ApplyConfig sets them from the config asset."""
@@ -1629,10 +1656,10 @@ def add_cloud_parameters(library, material, y, extra=()):
 
 
 def add_hero_shade_parameters(library, material, y):
-    """The inputs of HERO_SHADE_CODE: where the hero stands and how far its light reaches, which AHexPlanet::UpdateHeroShade gives every frame,
-    LightField, which AHexPlanet::UpdateLightField makes, and the HeroShade values of DA_HexPlanet, which AHexPlanet::SetHeroShadeParameters
-    gives by name, as these materials take the configs of the air and the water"""
-    return [('HeroFocus', add_vector4(library, material, 'HeroFocus', unreal.LinearColor(0.0, 0.0, 0.0, 0.0), y), ''),
+    """The inputs of HERO_SHADE_CODE: where the heroes stand and how far their lights reach, and whether there is shade at all, which
+    AHexPlanet::UpdateHeroShade gives every frame, LightField, which AHexPlanet::UpdateLightField makes, and the HeroShade values of DA_HexPlanet,
+    which AHexPlanet::SetHeroShadeParameters gives by name, as these materials take the configs of the air and the water"""
+    return add_hero_lights(library, material, 'HeroFocus', y - 25 * HERO_LIGHTS) + [('HeroShade', add_scalar(library, material, 'HeroShade', 0.0, y), ''),
         # black until the field is built, when the whole shade shows
         ('LightField', add_texture(library, material, DEFAULT_CUBE, 'LightField', unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_COLOR, y + 25), '')
         ] + add_config_parameters(library, material, unreal.HexPlanetConfig, HERO_SHADE_PARAMETERS, y + 50)
@@ -2211,6 +2238,98 @@ def build_flock_material():
     library.recompile_material(material)
     assets.save_asset(FLOCK_MATERIAL)
     return material
+
+
+# A hero on the map (UHexHeroes): the color of its vertices, and by their alpha the color of its player, PlayerColor, on its cloth, the cloak,
+# the banner and the cloth under the saddle (HeroColorShare of DA_HexHeroes), which also glows a little in that color (HeroGlow), so a hero reads
+# in the shade and in the dark of the underground. The values come from UHexHeroes, which makes an instance for each hero
+HERO_CODE = r"""
+float clothTone = max(max(VertexRGB.r, VertexRGB.g), VertexRGB.b);
+return lerp(VertexRGB.rgb, PlayerColor.rgb * clothTone, saturate(VertexA * HeroColorShare));
+"""
+HERO_GLOW_CODE = r"""
+float clothTone = max(max(VertexRGB.r, VertexRGB.g), VertexRGB.b);
+return PlayerColor.rgb * clothTone * saturate(VertexA * HeroColorShare) * HeroGlow;
+"""
+# The ring under the hero chosen and the marks of its way: unlit, MarkColor times the color of the instance, which a mesh that is no instance
+# has white, bright by the red of a vertex, so its rim is dark and sets it off any ground, and covering by its alpha, breathing by MarkPulse
+HERO_MARK_CODE = r"""
+return MarkColor.rgb * float3(InstanceR, InstanceG, InstanceB) * VertexRGB.r * MarkBrightness;
+"""
+HERO_MARK_OPACITY_CODE = r"""
+return VertexA * (1.0 - MarkPulse * (0.5 + 0.5 * sin(Time * MarkPulseSpeed * 6.2831853)));
+"""
+HERO_MARK_OFFSET_CODE = r"""
+float grow = clamp(distance(CameraPos, ObjectPos) / max(MarkFarStart, 1.0), 1.0, max(MarkFarScale, 1.0));
+return (WorldPos - ObjectPos) * (grow - 1.0);
+"""
+HERO_MATERIAL = FOLDER + '/M_HexPlanetHero'
+HERO_MARK_MATERIAL = FOLDER + '/M_HexPlanetHeroMark'
+HERO_PATH_MATERIAL = FOLDER + '/M_HexPlanetHeroPath'
+
+
+def build_hero_materials():
+    library = unreal.MaterialEditingLibrary
+    assets = unreal.EditorAssetLibrary
+
+    def open_material(path):
+        material = unreal.load_asset(path) if assets.does_asset_exist(path) else unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+            path.split('/')[-1], FOLDER, unreal.Material, unreal.MaterialFactoryNew())
+        clear_expressions(material)
+        return material
+
+    material = open_material(HERO_MATERIAL)
+    # the flag is a sheet seen from both its sides
+    material.set_editor_property('two_sided', True)
+    vertex_color = library.create_material_expression(material, unreal.MaterialExpressionVertexColor, -1000, 0)
+    inputs = [('VertexRGB', vertex_color, ''), ('VertexA', vertex_color, 'A'),
+        ('PlayerColor', add_vector(library, material, 'PlayerColor', unreal.LinearColor(0.75, 0.06, 0.05, 1.0), 100), ''),
+        ('HeroColorShare', add_scalar(library, material, 'HeroColorShare', 1.0, 150), ''),
+        ('HeroGlow', add_scalar(library, material, 'HeroGlow', 0.25, 200), '')]
+    library.connect_material_property(add_custom(library, material, HERO_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, inputs, 0), '',
+        unreal.MaterialProperty.MP_BASE_COLOR)
+    library.connect_material_property(add_custom(library, material, HERO_GLOW_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, inputs, 400), '',
+        unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    roughness = add_config_parameters(library, material, unreal.HexPlanetConfig, ['Roughness'], 700)[0][1]
+    library.connect_material_property(roughness, '', unreal.MaterialProperty.MP_ROUGHNESS)
+    library.recompile_material(material)
+    assets.save_asset(HERO_MATERIAL)
+
+    # the marks of a way are the same material drawn over whatever stands in front of them, as walls and crowns would hide a way
+    for path, through in ((HERO_MARK_MATERIAL, False), (HERO_PATH_MATERIAL, True)):
+        material = open_material(path)
+        material.set_editor_property('blend_mode', unreal.BlendMode.BLEND_TRANSLUCENT)
+        material.set_editor_property('shading_model', unreal.MaterialShadingModel.MSM_UNLIT)
+        material.set_editor_property('two_sided', True)
+        material.set_editor_property('used_with_instanced_static_meshes', True)
+        material.set_editor_property('disable_depth_test', through)
+        vertex_color = library.create_material_expression(material, unreal.MaterialExpressionVertexColor, -1000, 0)
+        instance = []
+        for index, name in enumerate(('InstanceR', 'InstanceG', 'InstanceB')):
+            data = library.create_material_expression(material, unreal.MaterialExpressionPerInstanceCustomData, -1000, 300 + index * 50)
+            data.set_editor_property('data_index', index)
+            data.set_editor_property('const_default_value', 1.0)
+            instance.append((name, data, ''))
+        color = add_custom(library, material, HERO_MARK_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, [('VertexRGB', vertex_color, ''),
+            ('MarkColor', add_vector(library, material, 'MarkColor', unreal.LinearColor(1.0, 1.0, 1.0, 1.0), 100), ''),
+            ('MarkBrightness', add_scalar(library, material, 'MarkBrightness', 2.0, 150), '')] + instance, 0)
+        library.connect_material_property(color, '', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+        opacity = add_custom(library, material, HERO_MARK_OPACITY_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT1, [('VertexA', vertex_color, 'A'),
+            ('Time', library.create_material_expression(material, unreal.MaterialExpressionTime, -1000, 600), ''),
+            ('MarkPulse', add_scalar(library, material, 'MarkPulse', 0.0, 650), ''),
+            ('MarkPulseSpeed', add_scalar(library, material, 'MarkPulseSpeed', 0.6, 700), '')], 600)
+        library.connect_material_property(opacity, '', unreal.MaterialProperty.MP_OPACITY)
+        # a mark grows around its middle as the camera leaves it (FarStart, FarScale of DA_HexHeroes), so a way still shows from afar; a ring
+        # is scaled with its hero by UHexHeroes, and leaves MarkFarScale at 1
+        grow = add_custom(library, material, HERO_MARK_OFFSET_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, [
+            ('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1000, 900), ''),
+            ('ObjectPos', library.create_material_expression(material, unreal.MaterialExpressionObjectPositionWS, -1000, 950), ''),
+            ('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1000, 1000), ''),
+            ('MarkFarStart', add_scalar(library, material, 'MarkFarStart', 1800.0, 1050), ''),
+            ('MarkFarScale', add_scalar(library, material, 'MarkFarScale', 1.0, 1100), '')], 900)
+        library.connect_material_property(grow, '', unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
+        library.recompile_material(material)
+        assets.save_asset(path)
 
 
 def add_texture(library, material, path, name, sampler_type, y):
@@ -3390,12 +3509,22 @@ float3 fogDir = -normalize(CameraVector);
 bool fogSpace = SceneDepth > 1e6;
 float fogEnd = fogSpace ? 1e9 : length(WorldPos - CameraPos);
 float darkAmount = FogMax * (1.0 - exp(-max(min(fogEnd, 1e6) - FogStart, 0.0) * FogDensity));
-// away from the hero (FogFocus, where the light of the hero stands, its alpha how far that light reaches on the floor, 0 without it) the air
-// thickens into the dark, while what glows still shows through
-if (FogFocus.w > 0.0 && !fogSpace)
+// away from the heroes (FogFocus0 to FogFocus7, where the light of each stands, its alpha how far that light reaches on the floor, 0 for none;
+// FogFocusOn is 0 under the forced light) the air thickens into the dark, by how far the nearest stands as a share of the reach of its light,
+// while what glows still shows through
+if (FogFocusOn > 0.5 && !fogSpace)
 {
-    float focusStart = FogFocus.w * FogFocusStart;
-    float focusFog = FogFocusMax * smoothstep(focusStart, max(FogFocus.w * FogFocusEnd, focusStart + 1.0), distance(WorldPos, FogFocus.xyz));
+    FOG_LIGHTS
+    float focusNear = 1.0e9;
+    for (int focusIndex = 0; focusIndex < HERO_LIGHT_COUNT; focusIndex++)
+    {
+        float4 focusLight = fogLights[focusIndex];
+        if (focusLight.w > 0.0)
+        {
+            focusNear = min(focusNear, distance(WorldPos, focusLight.xyz) / focusLight.w);
+        }
+    }
+    float focusFog = FogFocusMax * smoothstep(FogFocusStart, max(FogFocusEnd, FogFocusStart + 1.0e-3), focusNear);
     darkAmount = 1.0 - (1.0 - darkAmount) * (1.0 - focusFog);
 }
 float mistTop = PlanetRadius + LevelHeight - FogMistTop;
@@ -3424,6 +3553,7 @@ return lerp(fogColor, fogSpace ? FogSpaceColor.rgb : FogColor.rgb, fogSpace ? 1.
 '''
 UNDERGROUND_FOG_PARAMETERS = ['LevelHeight', 'FogColor', 'FogStart', 'FogDensity', 'FogMax', 'FogSpaceColor', 'FogMistColor', 'FogMistTop', 'FogMistDepth',
     'FogMistDensity', 'FogMistMax', 'FogFocusStart', 'FogFocusEnd', 'FogFocusMax']
+UNDERGROUND_FOG_CODE = UNDERGROUND_FOG_CODE.replace('FOG_LIGHTS', hero_lights('fogLights', 'FogFocus')).replace('HERO_LIGHT_COUNT', str(HERO_LIGHTS))
 for _name in UNDERGROUND_FOG_PARAMETERS:
     assert _name in UNDERGROUND_FOG_CODE, _name
 
@@ -3445,9 +3575,9 @@ def build_underground_fog():
         ('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1000, -200), ''),
         ('CameraVector', library.create_material_expression(material, unreal.MaterialExpressionCameraVectorWS, -1000, -150), ''),
         ('PlanetRadius', add_scalar(library, material, 'PlanetRadius', 0.0, -50), ''),
-        # where the light of the hero stands and how far it reaches, which AHexPlanet::UpdateHeroLight gives every frame
-        ('FogFocus', add_vector4(library, material, 'FogFocus', unreal.LinearColor(0.0, 0.0, 0.0, 0.0), -100), '')
-        ] + add_config_parameters(library, material, unreal.HexPlanetConfig, UNDERGROUND_FOG_PARAMETERS, 0)
+        # where the lights of the heroes stand and how far they reach, which AHexPlanet::UpdateHeroLight gives every frame
+        ('FogFocusOn', add_scalar(library, material, 'FogFocusOn', 0.0, -100), '')
+        ] + add_hero_lights(library, material, 'FogFocus', -350) + add_config_parameters(library, material, unreal.HexPlanetConfig, UNDERGROUND_FOG_PARAMETERS, 0)
     custom = add_custom(library, material, UNDERGROUND_FOG_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, connections, 0)
     library.connect_material_property(custom, '', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
     library.recompile_material(material)
@@ -4239,13 +4369,23 @@ float3 offset = moteCenter + (ViewRight * (UV.x - 0.5) + ViewUp * (0.5 - UV.y)) 
 return offset * min(1.0, MoteWpoBound / max(length(offset), 1e-3));
 '''
 MOTE_CODE = MOTE_COMMON_CODE + r'''
-// away from the light of the hero (HeroLight, where it stands and how far it reaches in alpha, 0 without it) a mote keeps MoteDarkShare of its
-// light, as dust shows in the light, and in it it takes MoteLightTint of the way to its color; a spore glows by itself
-if (MoteAnchored < 0.5 && HeroLight.w > 0.0)
+// away from the lights of the heroes (HeroLight0 to HeroLight7, where each stands and how far it reaches in alpha, 0 for none; HeroLightOn is 0
+// under the forced light) a mote keeps MoteDarkShare of its light, as dust shows in the light, and in the nearest it takes MoteLightTint of the
+// way to its color; a spore glows by itself
+if (MoteAnchored < 0.5 && HeroLightOn > 0.5)
 {
-    float toLight = distance(moteCenter, HeroLight.xyz) / HeroLight.w;
-    float inLight = saturate(1.0 - toLight * toLight);
-    inLight *= inLight;
+    MOTE_LIGHTS
+    float inLight = 0.0;
+    for (int lightIndex = 0; lightIndex < HERO_LIGHT_COUNT; lightIndex++)
+    {
+        float4 moteLight = moteLights[lightIndex];
+        if (moteLight.w > 0.0)
+        {
+            float toLight = distance(moteCenter, moteLight.xyz) / moteLight.w;
+            float litBy = saturate(1.0 - toLight * toLight);
+            inLight = max(inLight, litBy * litBy);
+        }
+    }
     moteColor *= lerp(MoteDarkShare, 1.0, inLight);
     moteColor = lerp(moteColor, HeroLightColor.rgb * max(max(moteColor.r, moteColor.g), moteColor.b), MoteLightTint * inLight);
 }
@@ -4260,6 +4400,7 @@ return moteColor * disc * disc * twinkle * moteFade * deep * moteNear * moteFar;
 MOTE_PARAMETERS = ['LevelHeight', 'MoteBox', 'MoteHeightBelow', 'MoteHeightAbove', 'MoteSize', 'MoteMinPixels', 'MoteColor', 'MoteBrightness', 'MoteDrift',
     'MoteWobble', 'MoteWobbleSpeed', 'MoteTwinkle', 'MoteEdgeFade', 'MoteNearFade', 'MoteFadeStart', 'MoteFadeEnd', 'AbyssDepthHalf', 'SporeSize',
     'SporeMinPixels', 'SporeBrightness', 'SporeRise', 'SporeLife', 'SporeSwirl', 'MoteDarkShare', 'MoteLightTint', 'HeroLightColor']
+MOTE_CODE = MOTE_CODE.replace('MOTE_LIGHTS', hero_lights('moteLights', 'HeroLight')).replace('HERO_LIGHT_COUNT', str(HERO_LIGHTS))
 for _name in MOTE_PARAMETERS:
     assert _name in MOTE_CODE or _name in MOTE_OFFSET_CODE, _name
 
@@ -4335,8 +4476,8 @@ def build_mote_material():
             ('MoteAnchored', add_scalar(library, material, 'MoteAnchored', 0.0, y + 700), ''),
             ('MoteWpoBound', add_scalar(library, material, 'MoteWpoBound', bound, y + 750), ''),
             ('PlanetRadius', add_scalar(library, material, 'PlanetRadius', 11503.0, y + 800), ''),
-            ('HeroLight', add_vector4(library, material, 'HeroLight', unreal.LinearColor(0.0, 0.0, 0.0, 0.0), y + 825), ''),
-            ] + add_config_parameters(library, material, unreal.HexPlanetConfig, MOTE_PARAMETERS, y + 850)
+            ('HeroLightOn', add_scalar(library, material, 'HeroLightOn', 0.0, y + 825), ''),
+            ] + add_hero_lights(library, material, 'HeroLight', y + 2000) + add_config_parameters(library, material, unreal.HexPlanetConfig, MOTE_PARAMETERS, y + 850)
 
     custom = add_custom(library, material, MOTE_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, inputs(0, True), 0)
     library.connect_material_property(custom, '', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
@@ -4383,6 +4524,21 @@ def main():
         build_flock_material()
         unreal.log('PLANET flock assets created')
         return
+    # with heroes only the materials of the heroes, their ring and the marks of their ways
+    if 'heroes' in sys.argv[1:]:
+        build_hero_materials()
+        unreal.log('PLANET hero assets created')
+        return
+    # with lights only the materials that take the lights of the heroes: the haze, the water and the clouds with the shade of the surface, and
+    # the fog and the motes of the underground
+    if 'lights' in sys.argv[1:]:
+        build_water()
+        build_clouds()
+        build_haze()
+        build_underground_fog()
+        build_mote_material()
+        unreal.log('PLANET light assets created')
+        return
     material = build_material()
     water_material = build_water()
     water_grid_material = build_water_grid()
@@ -4393,6 +4549,7 @@ def main():
     build_floe_material()
     build_foliage_material(build_parameter_collection())
     build_flock_material()
+    build_hero_materials()
     build_underground()
     wire_material = build_wireframe()
     build_level(material, water_material, water_grid_material, wire_material)

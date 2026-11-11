@@ -106,6 +106,13 @@ public:
 	/** Glides the camera to a cell, and optionally to a distance from it. Returns false before the planet is built or if there is no such cell */
 	bool FocusCell(int32 Cell, TOptional<float> Distance = {});
 
+	/** Shows a cell of a layer: glides to it on the layer shown, else travels to its layer with the camera over it, as when a hero is chosen
+	 *  from its panel or goes through an entrance. Returns false during a trip or without such a cell */
+	bool ShowCell(EHexPlanetLayer Layer, int32 Cell);
+
+	/** Glides after a direction from the center of the planet, as after a hero that walks, unless the player moves the camera */
+	void Follow(const FVector& Direction);
+
 	/** Returns where the camera is */
 	FHexPlanetCameraPlacement GetPlacement() const;
 
@@ -261,6 +268,24 @@ private:
 
 	/** Bookmarks saved on a planet that is not saved yet, by slot, which SaveView writes under its folder once it is */
 	TMap<int32, FHexPlanetBookmark> UnsavedBookmarks;
+
+	/** The heroes, which the player controller moves: a click of the left button chooses one and a click of the right button sends it, a press
+	 *  and a release within ClickTolerance of each other, as held and moved the buttons drag the planet and turn the camera */
+	void OnHeroSelectStarted();
+	void OnHeroSelectCompleted();
+	void OnHeroSendStarted();
+	void OnHeroSendCompleted();
+	void OnNextHero();
+	void OnEndTurn();
+
+	/** Returns true if the mouse is within ClickTolerance of where a button went down */
+	bool IsClickAt(const FVector2D& Start) const;
+
+	/** Where those buttons went down, in pixels of the viewport, and whether each is held since */
+	FVector2D HeroSelectStart = FVector2D::ZeroVector;
+	FVector2D HeroSendStart = FVector2D::ZeroVector;
+	bool bHeroSelectDown = false;
+	bool bHeroSendDown = false;
 
 	/** Painting the levels, which the player controller does */
 	void OnTogglePaintMode();
