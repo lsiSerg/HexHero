@@ -17,11 +17,11 @@
 
 namespace
 {
-	const float PanelWidth = 280.0f;
-	const FLinearColor PanelColor(0.02f, 0.02f, 0.02f, 0.8f);
-	const FLinearColor ChosenColor(1.0f, 0.75f, 0.1f, 1.0f);
-	const FLinearColor ButtonColor(0.3f, 0.3f, 0.3f, 1.0f);
-	const FLinearColor DimColor(0.75f, 0.75f, 0.75f);
+	const float HeroPanelWidth = 280.0f;
+	const FLinearColor HeroPanelColor(0.02f, 0.02f, 0.02f, 0.8f);
+	const FLinearColor HeroChosenColor(1.0f, 0.75f, 0.1f, 1.0f);
+	const FLinearColor HeroButtonColor(0.3f, 0.3f, 0.3f, 1.0f);
+	const FLinearColor HeroDimColor(0.75f, 0.75f, 0.75f);
 }
 
 void SHexHeroPanel::Construct(const FArguments& InArgs)
@@ -48,12 +48,12 @@ void SHexHeroPanel::Construct(const FArguments& InArgs)
 		.Padding(16.0f)
 		[
 			SNew(SBox)
-			.WidthOverride(PanelWidth)
+			.WidthOverride(HeroPanelWidth)
 			.Visibility_Lambda([this]() { return Heroes.IsValid() && !Heroes->GetHeroes().IsEmpty() ? EVisibility::Visible : EVisibility::Collapsed; })
 			[
 				SNew(SBorder)
 				.BorderImage(White)
-				.BorderBackgroundColor(PanelColor)
+				.BorderBackgroundColor(HeroPanelColor)
 				.Padding(10.0f)
 				[
 					SNew(SVerticalBox)
@@ -87,7 +87,7 @@ void SHexHeroPanel::Construct(const FArguments& InArgs)
 						SNew(STextBlock)
 						.Font(Small)
 						.AutoWrapText(true)
-						.ColorAndOpacity(DimColor)
+						.ColorAndOpacity(HeroDimColor)
 						.Text_Lambda([this, NextHeroKeys]()
 						{
 							const FHexHero* Hero = Heroes.IsValid() ? Heroes->GetSelected() : nullptr;
@@ -119,7 +119,7 @@ void SHexHeroPanel::Construct(const FArguments& InArgs)
 						.IsFocusable(false)
 						.HAlign(HAlign_Center)
 						.ContentPadding(FMargin(6.0f, 4.0f))
-						.ButtonColorAndOpacity(ButtonColor)
+						.ButtonColorAndOpacity(HeroButtonColor)
 						.ToolTipText(LOCTEXT("EndTurnTip", "The next day begins, and every hero gets its points of movement back"))
 						.OnClicked_Lambda([this]()
 						{
@@ -196,7 +196,7 @@ void SHexHeroPanel::RebuildList()
 			SNew(SButton)
 			.IsFocusable(false)
 			.ContentPadding(FMargin(6.0f, 4.0f))
-			.ButtonColorAndOpacity_Lambda([WeakHeroes, Id]() { return WeakHeroes.IsValid() && WeakHeroes->GetSelectedId() == Id ? ChosenColor : ButtonColor; })
+			.ButtonColorAndOpacity_Lambda([WeakHeroes, Id]() { return WeakHeroes.IsValid() && WeakHeroes->GetSelectedId() == Id ? HeroChosenColor : HeroButtonColor; })
 			.OnClicked_Lambda([this, Id]()
 			{
 				OnHeroChosen.ExecuteIfBound(Id);
@@ -235,7 +235,7 @@ void SHexHeroPanel::RebuildList()
 					[
 						SNew(STextBlock)
 						.Font(Small)
-						.ColorAndOpacity(DimColor)
+						.ColorAndOpacity(HeroDimColor)
 						.Text_Lambda([WeakHeroes, Id]()
 						{
 							const FHexHero* Each = WeakHeroes.IsValid() ? WeakHeroes->FindHero(Id) : nullptr;
