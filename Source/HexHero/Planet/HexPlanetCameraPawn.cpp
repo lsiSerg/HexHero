@@ -17,6 +17,8 @@
 #include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
 #include "HexHero.h"
+#include "HexBattleArena.h"
+#include "HexBattleConfig.h"
 #include "HexCameraConfig.h"
 #include "HexCameraPawn.h"
 #include "HexHeroes.h"
@@ -737,6 +739,10 @@ void AHexPlanetCameraPawn::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 		EnhancedInputComponent->BindAction(InputConfig->MapMenuAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnBackToWorldMap);
 		EnhancedInputComponent->BindAction(InputConfig->CopyCameraAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnCopyCamera);
 		EnhancedInputComponent->BindAction(InputConfig->KeyLegendAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnToggleKeyLegend);
+		if (InputConfig->CheatSheetAction)
+		{
+			EnhancedInputComponent->BindAction(InputConfig->CheatSheetAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnToggleCheatSheet);
+		}
 		EnhancedInputComponent->BindAction(InputConfig->SaveViewAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnSaveView);
 		EnhancedInputComponent->BindAction(InputConfig->ToggleGridAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnToggleGrid);
 		EnhancedInputComponent->BindAction(InputConfig->FreeCameraAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnToggleFreeCamera);
@@ -841,6 +847,13 @@ void AHexPlanetCameraPawn::Tick(float DeltaTime)
 				TravelTo(SavedLayer, SavedPlacement, true);
 			}
 		}
+	}
+
+	// while a battle is fought on its own field the camera of the planet waits, and its input moves the camera of the field
+	if (bBattleShown)
+	{
+		UpdateBattleCamera(DeltaTime);
+		return;
 	}
 
 	// the forced light of L, by the key or the console, lights the sun of the layer shown, which AHexPlanet does for its sky and ground
@@ -951,7 +964,8 @@ void AHexPlanetCameraPawn::Tick(float DeltaTime)
 	{
 		bEdgeScrollHeld = false;
 	}
-	const FVector2D EdgeInput = bTurning || bDragging || bEdgeScrollHeld || (MarksController && MarksController->IsCursorOnUi()) ? FVector2D::ZeroVector
+	// nor while it follows a hero that walks, as the edge never takes the camera over (TakeFollow)
+	const FVector2D EdgeInput = bTurning || bDragging || bEdgeScrollHeld || (IsFollowing() && !bFollowTaken) || (MarksController && MarksController->IsCursorOnUi()) ? FVector2D::ZeroVector
 		: AHexCameraPawn::GetEdgeScrollInput(Cast<APlayerController>(GetController()), EdgeScrollCurve, Settings()->EdgeScrollMargin);
 
 	if (!EdgeInput.IsNearlyZero())
@@ -1209,13 +1223,92 @@ bool AHexPlanetCameraPawn::GetMouseDirection(FVector& OutDirection) const
 	return true;
 }
 
+void AHexPlanetCameraPawn::UpdateBattleCamera(float DeltaTime)
+{
+	AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController());
+	AHexBattleArena* Arena = PlayerController ? PlayerController->GetBattleArena() : nullptr;
+	if (!Arena || !Arena->IsShowing())
+	{
+		return;
+	}
+	float MouseX = 0.0f;
+	float MouseY = 0.0f;
+	const bool bMouse = PlayerController->GetMousePosition(MouseX, MouseY);
+	// the ground grabbed stays under the cursor
+	if (bBattleDragging)
+	{
+		FVector Origin;
+		FVector Direction;
+		FVector Under;
+		if (PlayerController->DeprojectMousePositionToWorld(Origin, Direction) && Arena->GetGroundPoint(Origin, Direction, Under))
+		{
+			Arena->DragCamera(BattleGrab, Under);
+		}
+	}
+	// the keys and the edges of the screen move it, Q and E and the right button held turn it
+	const FVector2D EdgeInput = bTurning || bBattleDragging || PlayerController->IsCursorOnUi() ? FVector2D::ZeroVector
+		: AHexCameraPawn::GetEdgeScrollInput(PlayerController, EdgeScrollCurve, Settings()->EdgeScrollMargin);
+	const FVector2D Pan(FMath::Clamp(MoveInput.X + EdgeInput.X, -1.0, 1.0), FMath::Clamp(MoveInput.Y + EdgeInput.Y, -1.0, 1.0));
+	const UHexBattleConfig* BattleConfig = UHexBattleConfig::Load();
+	float Turn = TurnKeyInput * BattleConfig->CameraTurnSpeed * DeltaTime;
+	if (bTurning && bMouse)
+	{
+		Turn += (MouseX - LastTurnMouseX) * BattleConfig->CameraMouseTurnSpeed;
+		LastTurnMouseX = MouseX;
+	}
+	Arena->MoveCamera(Pan, Turn, DeltaTime);
+}
+
+bool AHexPlanetCameraPawn::StartBattleDrag()
+{
+	AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController());
+	AHexBattleArena* Arena = bBattleShown && PlayerController ? PlayerController->GetBattleArena() : nullptr;
+	if (!Arena)
+	{
+		return false;
+	}
+	FVector Origin;
+	FVector Direction;
+	// not on the buttons of the panel, whose clicks are their own
+	bBattleDragging = !PlayerController->IsCursorOnUi() && PlayerController->DeprojectMousePositionToWorld(Origin, Direction) && Arena->GetGroundPoint(Origin, Direction, BattleGrab);
+	return true;
+}
+
+bool AHexPlanetCameraPawn::IsFollowing() const
+{
+	// Follow is asked for every frame while the hero chosen walks
+	return GFrameCounter <= FollowFrame + 2;
+}
+
+void AHexPlanetCameraPawn::TakeFollow()
+{
+	if (IsFollowing())
+	{
+		bFollowTaken = true;
+		bFocusing = false;
+	}
+}
+
 void AHexPlanetCameraPawn::OnMove(const FInputActionValue& Value)
 {
 	MoveInput = Value.Get<FVector2D>();
+	if (!MoveInput.IsNearlyZero())
+	{
+		TakeFollow();
+	}
 }
 
 void AHexPlanetCameraPawn::OnZoom(const FInputActionValue& Value)
 {
+	// the wheel brings the camera of a battle nearer
+	if (bBattleShown)
+	{
+		if (AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController()); PlayerController && PlayerController->GetBattleArena())
+		{
+			PlayerController->GetBattleArena()->ZoomCamera(Value.Get<float>());
+		}
+		return;
+	}
 	// a trip keeps the distance it goes with
 	if (IsTravelling())
 	{
@@ -1229,14 +1322,28 @@ void AHexPlanetCameraPawn::OnZoom(const FInputActionValue& Value)
 void AHexPlanetCameraPawn::OnTurnKeys(const FInputActionValue& Value)
 {
 	TurnKeyInput = Value.Get<float>();
+	if (TurnKeyInput != 0.0f)
+	{
+		TakeFollow();
+	}
 }
 
 void AHexPlanetCameraPawn::OnDragStarted()
 {
+	// on the field of a battle the left button held drags its ground
+	if (StartBattleDrag())
+	{
+		return;
+	}
 	// nothing is grabbed while the screen is black between the layers
 	if (IsTravelling())
 	{
 		return;
+	}
+	// the person takes the camera from a hero it followed, but with a click on a mark at the edge of the screen, which shows what it marks
+	if (const AHexPlanetPlayerController* Marks = Cast<AHexPlanetPlayerController>(GetController()); !(Marks && Marks->IsCursorOnUi()))
+	{
+		TakeFollow();
 	}
 
 	// while a tool of the brush is chosen the left button paints, and the camera moves with the keys, the edges of the screen and the other buttons
@@ -1265,6 +1372,11 @@ void AHexPlanetCameraPawn::OnDragStarted()
 
 void AHexPlanetCameraPawn::OnDragCompleted()
 {
+	if (bBattleShown)
+	{
+		bBattleDragging = false;
+		return;
+	}
 	AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController());
 	if (PlayerController)
 	{
@@ -1300,10 +1412,15 @@ void AHexPlanetCameraPawn::OnDragCompleted()
 
 void AHexPlanetCameraPawn::OnMiddleStarted()
 {
+	if (StartBattleDrag())
+	{
+		return;
+	}
 	if (IsTravelling())
 	{
 		return;
 	}
+	TakeFollow();
 
 	const APlayerController* PlayerController = Cast<APlayerController>(GetController());
 	float MouseX = 0.0f;
@@ -1322,6 +1439,11 @@ void AHexPlanetCameraPawn::OnMiddleStarted()
 
 void AHexPlanetCameraPawn::OnMiddleCompleted()
 {
+	if (bBattleShown)
+	{
+		bBattleDragging = false;
+		return;
+	}
 	const APlayerController* PlayerController = Cast<APlayerController>(GetController());
 	float MouseX = 0.0f;
 	float MouseY = 0.0f;
@@ -1373,6 +1495,11 @@ void AHexPlanetCameraPawn::OnHeroSelectCompleted()
 		PlayerController->ClickGame(bDouble);
 	}
 	bHeroSelectDown = false;
+}
+
+const FPostProcessSettings& AHexPlanetCameraPawn::GetCameraPostProcess() const
+{
+	return Camera->PostProcessSettings;
 }
 
 void AHexPlanetCameraPawn::OnHeroSendStarted()
@@ -1455,8 +1582,14 @@ void AHexPlanetCameraPawn::HoldEdgeScroll()
 
 void AHexPlanetCameraPawn::Follow(const FVector& Direction)
 {
-	// the player keeps the camera while moving it
-	if (IsTravelling() || bDragging || bMiddleDown || !MoveInput.IsNearlyZero() || Direction.IsNearlyZero())
+	// a walk that begins after the camera was free is followed again
+	if (!IsFollowing())
+	{
+		bFollowTaken = false;
+	}
+	FollowFrame = GFrameCounter;
+	// the person keeps the camera once it moved it, until the hero stops
+	if (IsTravelling() || bFollowTaken || bDragging || bMiddleDown || !MoveInput.IsNearlyZero() || Direction.IsNearlyZero())
 	{
 		return;
 	}
@@ -1488,6 +1621,7 @@ void AHexPlanetCameraPawn::OnTurnStarted()
 	bTurning = PlayerController && PlayerController->GetMousePosition(LastTurnMouseX, MouseY);
 	bTurnDown = bTurning;
 	TurnStart = FVector2D(LastTurnMouseX, MouseY);
+	TakeFollow();
 }
 
 void AHexPlanetCameraPawn::OnTurnCompleted()
@@ -1666,6 +1800,14 @@ void AHexPlanetCameraPawn::OnToggleKeyLegend()
 	if (AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController()))
 	{
 		PlayerController->ToggleKeyLegend();
+	}
+}
+
+void AHexPlanetCameraPawn::OnToggleCheatSheet()
+{
+	if (AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController()))
+	{
+		PlayerController->ToggleCheatSheet();
 	}
 }
 

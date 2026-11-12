@@ -36,7 +36,22 @@ struct FHexCastleLine
 	UPROPERTY()
 	int32 Owner = -1;
 
-	bool operator==(const FHexCastleLine& Other) const { return Id == Other.Id && Faction == Other.Faction && Layer == Other.Layer && Cells == Other.Cells && Owner == Other.Owner; }
+	/** What is built in it when a game starts, the level of each building by its Id, and its garrison then, each written only when set;
+	 *  without them a castle has the StartLevel of each building and, of nobody, NeutralGarrisonWeeks of what its dwellings offer */
+	UPROPERTY()
+	TMap<FString, int32> Built;
+
+	UPROPERTY()
+	TArray<FHexStackLine> Garrison;
+
+	/** Whether the line sets the garrison, also to none */
+	bool bGarrisonSet = false;
+
+	bool operator==(const FHexCastleLine& Other) const
+	{
+		return Id == Other.Id && Faction == Other.Faction && Layer == Other.Layer && Cells == Other.Cells && Owner == Other.Owner && Built.OrderIndependentCompareEqual(Other.Built)
+			&& Garrison == Other.Garrison;
+	}
 };
 
 /** castles.json of a planet, at the root of its folder: its castles, a line each, which Git can merge */
@@ -72,6 +87,11 @@ struct FHexCastle
 
 	/** The level of each building of its faction, 0 for not built */
 	TArray<int32> Levels;
+
+	/** What castles.json says is built in it and guards it when a game starts, by building and as stacks; empty for the defaults */
+	TMap<FName, int32> StartLevels;
+	TArray<FHexStack> StartGarrison;
+	bool bStartGarrison = false;
 
 	/** How many creatures of each level its dwellings offer to hire now */
 	TArray<int32> Available;
@@ -167,6 +187,10 @@ public:
 	bool CanBuild(const FHexCastle& Castle, int32 Building, FString* OutWhy = nullptr) const;
 	bool Build(int32 CastleId, int32 Building, FString& OutMessage);
 
+	/** The hero that guards a castle or stands beside it buys a catapult there for CatapultCost, which shoots at the walls of a castle it
+	 *  attacks. Returns false and why not */
+	bool BuyCatapult(int32 CastleId, int32 HeroId, FString& OutMessage);
+
 	/** Returns how many creatures of a level the owner of a castle can hire now: what its dwelling offers and what it can pay for */
 	int32 GetHireMax(const FHexCastle& Castle, int32 Creature) const;
 
@@ -182,6 +206,19 @@ public:
 
 	/** Returns the hero that is in a castle and guards it, or null, and where it stands there, in the yard */
 	const FHexHero* FindGuard(const FHexCastle& Castle) const;
+
+	/** Stacks as lines of a file, by the Ids of their faction and creature, and back; a line that names no creature is left out */
+	TArray<FHexStackLine> MakeStackLines(TConstArrayView<FHexStack> Stacks) const;
+	TArray<FHexStack> ParseStackLines(TConstArrayView<FHexStackLine> Lines) const;
+
+	/** Makes what is built in a castle and its garrison now what it has when a game starts, which castles.json keeps (hex.Castle start) */
+	bool KeepAsStart(int32 CastleId);
+
+	/** Builds every building of a castle to about half of its levels, rounded up, for nothing, for trying the game (hex.Cheat buildhalf) */
+	int32 BuildHalf(int32 CastleId);
+
+	/** The DefenseFactor of the level of the fort of a castle, 1 without one */
+	float GetFortFactor(const FHexCastle& Castle) const;
 	bool GetGuardPoint(const FHexCastle& Castle, FVector3d& OutPoint) const;
 
 	/** Says that an army or who stands where changed, so the panel of a castle is made again */
@@ -193,6 +230,13 @@ public:
 
 	/** The gate of a castle nearest a point and the place of its hero in the yard, on the ground, for the way shown into it */
 	bool FindGate(const FHexCastle& Castle, const FVector3d& Towards, FVector3d& OutGate, FVector3d& OutYard, int32* OutIndex = nullptr) const;
+
+	/** The cells outside a castle before its gates, and the cell of the castle each gate is in, by which a hero sent into it walks to the
+	 *  nearest gate whichever of its cells was clicked, as the developer asked on 2026-11-12 */
+	void GetGateCells(const FHexCastle& Castle, TArray<int32>& OutOutside, TArray<int32>& OutInside) const;
+
+	/** How many of a creature its dwelling offers a week */
+	int32 GetWeeklyGrowth(const FHexCastle& Castle, int32 Creature) const { return GetGrowth(Castle, Creature); }
 
 	/** A cheat: lets every castle build as much as it can pay for in a day (hex.Cheat build) */
 	void SetUnlimitedBuilds(bool bOn) { bUnlimitedBuilds = bOn; ++Revision; }
@@ -239,6 +283,10 @@ public:
 	FOnHexCastleOpened OnCastleOpened;
 
 private:
+
+	/** A battle for a castle takes its garrison and gives it to who wins */
+	friend class UHexBattles;
+
 
 	UPROPERTY(Transient)
 	TObjectPtr<AHexPlanet> Surface;

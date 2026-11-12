@@ -59,6 +59,9 @@ class AHexPlanetCameraPawn : public APawn
 	UPROPERTY(VisibleAnywhere, Category="Components")
 	TObjectPtr<UCameraComponent> Camera;
 
+	/** A battle is shown (SetBattleShown) */
+	bool bBattleShown = false;
+
 	/** Planet the camera orbits */
 	UPROPERTY(Transient)
 	TObjectPtr<AHexPlanet> Planet;
@@ -165,6 +168,13 @@ public:
 	/** Returns true while a trip between the layers runs */
 	bool IsTravelling() const { return TravelPhase != ETravelPhase::None; }
 
+	/** While a battle is shown the camera of the planet waits where it is, and takes no input but the clicks the controller gives the field */
+	void SetBattleShown(bool bShown) { bBattleShown = bShown; bDragging = false; bTurning = false; bBattleDragging = false; }
+	bool IsBattleShown() const { return bBattleShown; }
+
+	/** The post process of the camera, which the field of a battle takes for its own */
+	const FPostProcessSettings& GetCameraPostProcess() const;
+
 	/** Returns the layer the camera shows, the surface until it has its planet */
 	EHexPlanetLayer GetShownLayer() const;
 
@@ -221,6 +231,21 @@ private:
 	/** True while the camera glides to a cell */
 	bool bFocusing = false;
 
+	/** While a battle is shown its field takes the camera input (UpdateBattleCamera): the point of its ground grabbed by the left or middle
+	 *  button held, and the turn of the right one */
+	bool bBattleDragging = false;
+	FVector BattleGrab = FVector::ZeroVector;
+	void UpdateBattleCamera(float DeltaTime);
+	bool StartBattleDrag();
+
+	/** The camera follows the hero chosen while it walks (Follow), until the person moves it with the keys, a drag or the right button, which
+	 *  takes it over until the hero stops, as the developer asked on 2026-11-12; the edge of the screen never takes it over and scrolls only
+	 *  once the person has. FollowFrame is the frame Follow was last asked for */
+	bool bFollowTaken = false;
+	uint64 FollowFrame = 0;
+	bool IsFollowing() const;
+	void TakeFollow();
+
 	/** The edge of the screen does not scroll until the mouse has moved EdgeScrollHoldDistance from EdgeHoldMouse, where it was when a glide
 	 *  was asked for (HoldEdgeScroll), so the cursor left at the edge does not stop that glide */
 	bool bEdgeScrollHeld = false;
@@ -274,6 +299,7 @@ private:
 	void OnBackToWorldMap();
 	void OnCopyCamera();
 	void OnToggleKeyLegend();
+	void OnToggleCheatSheet();
 
 	/** The bookmarks of the camera, the slot as the value of the action, 1 to 9 and 10 for the key 0 */
 	void OnSaveBookmark(const FInputActionValue& Value);

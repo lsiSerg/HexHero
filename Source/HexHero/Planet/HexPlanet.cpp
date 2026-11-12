@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "HexPlanet.h"
+#include "HexCastles.h"
+#include "HexSites.h"
 #include "HexHero.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
@@ -2503,6 +2505,12 @@ void AHexPlanet::Tick(float DeltaTime)
 		Heroes->Update(DeltaTime, ViewTarget ? &ViewPoint : nullptr);
 	}
 
+	// while a battle is fought far away on its own field the layer waits hidden
+	if (bBattleHidden)
+	{
+		return;
+	}
+
 	// a hidden layer streams only the pieces a trip to it asks for, without building any at once on the game thread, and does nothing else
 	// of a frame, so a camera below the surface does not build its pieces
 	if (!bPresented)
@@ -2628,6 +2636,24 @@ void AHexPlanet::Tick(float DeltaTime)
 	}
 
 	UpdateDebugView();
+}
+
+void AHexPlanet::SetBattleHidden(bool bHide)
+{
+	if (bBattleHidden == bHide)
+	{
+		return;
+	}
+	bBattleHidden = bHide;
+	SetActorHiddenInGame(bHide || !bPresented);
+	if (HazeVolume)
+	{
+		HazeVolume->bEnabled = !bHide;
+	}
+	if (SkyLight)
+	{
+		SkyLight->SetVisibility(!bHide);
+	}
 }
 
 void AHexPlanet::SetGridVisible(bool bVisible)
@@ -5602,7 +5628,7 @@ namespace
 	}
 }
 
-int32 AHexPlanet::FitEntrances(int32 OnlyCell, bool bMountains)
+int32 AHexPlanet::FitEntrances(int32 OnlyCell, bool bMountains, TMap<int32, int32>* OutOldCaveLevels, TMap<int32, int32>* OutOldCaveBiomes)
 {
 	AHexPlanet* SurfacePlanet = GetLayerPlanet(EHexPlanetLayer::Surface);
 	AHexPlanet* Underground = GetLayerPlanet(EHexPlanetLayer::Underground);
@@ -5827,8 +5853,19 @@ int32 AHexPlanet::FitEntrances(int32 OnlyCell, bool bMountains)
 			});
 			if (Rock != INDEX_NONE && !Wedge.IsEmpty())
 			{
+				for (const TPair<int32, int32>& Each : Wedge)
+				{
+					if (OutOldCaveLevels && !OutOldCaveLevels->Contains(Each.Key))
+					{
+						OutOldCaveLevels->Add(Each.Key, Underground->GetCellLevel(Each.Key));
+					}
+					if (OutOldCaveBiomes && !OutOldCaveBiomes->Contains(Each.Key))
+					{
+						OutOldCaveBiomes->Add(Each.Key, Underground->GetCellBiome(Each.Key));
+					}
+				}
 				Underground->SetCellLevels(Wedge);
-				Underground->MarkLevelsEdited();
+				Underground->MarkLevelsEdited(OutOldCaveLevels != nullptr);
 				++NumWalls;
 			}
 			else

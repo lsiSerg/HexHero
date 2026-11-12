@@ -1064,6 +1064,18 @@ namespace
 	}
 }
 
+FString HexPlanetFile::EncodeStackLines(TConstArrayView<FHexStackLine> Stacks)
+{
+	FString Text = TEXT("[");
+	for (int32 Index = 0; Index < Stacks.Num(); ++Index)
+	{
+		const FHexStackLine& Stack = Stacks[Index];
+		Text += FString::Printf(TEXT("%s{\"faction\": \"%s\", \"creature\": \"%s\", \"upgraded\": %s, \"count\": %d}"), Index == 0 ? TEXT("") : TEXT(", "),
+			*EscapeJsonText(Stack.Faction), *EscapeJsonText(Stack.Creature), Stack.Upgraded ? TEXT("true") : TEXT("false"), Stack.Count);
+	}
+	return Text + TEXT("]");
+}
+
 FString HexPlanetFile::EncodeHeroes(TConstArrayView<FHexHeroLine> Heroes, TConstArrayView<int32> AiPlayers)
 {
 	TArray<FHexHeroLine> Sorted(Heroes);
@@ -1087,8 +1099,9 @@ FString HexPlanetFile::EncodeHeroes(TConstArrayView<FHexHeroLine> Heroes, TConst
 	for (int32 Index = 0; Index < Sorted.Num(); ++Index)
 	{
 		const FHexHeroLine& Hero = Sorted[Index];
-		Text += FString::Printf(TEXT("%s\n\t\t{\"id\": %d, \"name\": \"%s\", \"class\": \"%s\", \"player\": %d, \"layer\": \"%s\", \"cell\": %d}"), Index == 0 ? TEXT("") : TEXT(","),
-			Hero.Id, *EscapeJsonText(Hero.Name), *EscapeJsonText(Hero.Class), Hero.Player, *EscapeJsonText(Hero.Layer), Hero.Cell);
+		Text += FString::Printf(TEXT("%s\n\t\t{\"id\": %d, \"name\": \"%s\", \"class\": \"%s\", \"player\": %d, \"layer\": \"%s\", \"cell\": %d%s}"), Index == 0 ? TEXT("") : TEXT(","),
+			Hero.Id, *EscapeJsonText(Hero.Name), *EscapeJsonText(Hero.Class), Hero.Player, *EscapeJsonText(Hero.Layer), Hero.Cell,
+			Hero.Army.IsEmpty() ? TEXT("") : *(TEXT(", \"army\": ") + EncodeStackLines(Hero.Army)));
 	}
 	Text += Sorted.IsEmpty() ? TEXT("]\n}\n") : TEXT("\n\t]\n}\n");
 	return Text;

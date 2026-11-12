@@ -13,6 +13,36 @@ class UStaticMesh;
 constexpr int32 NumCreatureLevels = 7;
 constexpr int32 NumArmySlots = 7;
 
+/** What a creature can do in a battle besides walking and striking, as bits of FHexCreatureStats::Abilities (HexBattle), by its role, as the
+ *  developer chose on 2026-11-12 the roles of the creatures of the two factions after references of the genre; which creature has which is
+ *  Claude's */
+UENUM(meta=(Bitflags, UseEnumValuesAsMaskValuesInEditor="false"))
+enum class EHexAbility : uint8
+{
+	/** Strikes twice, and shoots twice */
+	DoubleStrike,
+	/** Strikes back twice a round */
+	RetaliateTwice,
+	/** What it strikes does not strike back */
+	NoRetaliation,
+	/** Strikes in melee as hard as it shoots */
+	NoMeleePenalty,
+	/** Its shot hits the enemies around the stack it shoots too */
+	AreaShot,
+	/** Heals and raises its own by the damage it deals, never above how many it began the battle with */
+	LifeDrain,
+	/** Strikes harder the further it ran to strike, ChargeBonusPerHex of DA_HexBattle a hex */
+	Charge,
+	/** Its strike goes on into the stack behind the one it strikes, friend or foe */
+	Breath,
+	/** Has no morale */
+	Undead,
+	/** Its wounded creature heals at the start of its turn */
+	Regenerate,
+	/** Each of its turns takes ManaDrainPerTurn of DA_HexBattle from the hero of the other side */
+	ManaDrain,
+};
+
 /** What a creature is in a battle and what one of it costs; the basic and the upgraded version of a creature have one each */
 USTRUCT(BlueprintType)
 struct FHexCreatureStats
@@ -44,7 +74,24 @@ struct FHexCreatureStats
 	UPROPERTY(EditAnywhere, Category="Creature", meta=(ClampMin=0))
 	int32 Gold = 10;
 
-	/** How much one of it counts when two armies are weighed against each other, until there are battles (UHexCastles::Resolve) */
+	/** What it can do in a battle besides walking and striking, bits of EHexAbility */
+	UPROPERTY(EditAnywhere, Category="Battle", meta=(Bitmask, BitmaskEnum="/Script/HexHero.EHexAbility"))
+	int32 Abilities = 0;
+
+	/** Shots a creature that shoots (FHexCreature::bShoots) has in a battle */
+	UPROPERTY(EditAnywhere, Category="Battle", meta=(ClampMin=0))
+	int32 Shots = 0;
+
+	/** Its own morale and luck, added to those of its army (HexBattle): a chance of another turn, or of losing one, and of double damage */
+	UPROPERTY(EditAnywhere, Category="Battle", meta=(ClampMin=-3, ClampMax=3))
+	int32 Morale = 0;
+
+	UPROPERTY(EditAnywhere, Category="Battle", meta=(ClampMin=-3, ClampMax=3))
+	int32 Luck = 0;
+
+	bool HasAbility(EHexAbility Ability) const { return (Abilities & (1 << int32(Ability))) != 0; }
+
+	/** How much one of it counts when two armies are weighed against each other: by the AI, which chooses what to go for */
 	float GetPower() const;
 };
 
@@ -248,6 +295,11 @@ public:
 	/** How many buildings a castle builds or upgrades in a day */
 	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=1))
 	int32 BuildsPerDay = 1;
+
+	/** What a catapult costs, which the hero that guards a castle or stands beside it buys there, as the developer asked on 2026-11-12; it
+	 *  shoots at the walls of the castles that hero attacks (Siege of DA_HexBattle) */
+	UPROPERTY(EditAnywhere, Category="Rules")
+	TMap<FName, int32> CatapultCost = {{TEXT("Gold"), 1000}, {TEXT("Wood"), 5}};
 
 	/** What hex.Cheat resources gives the person who plays when it names no amount: this much gold and this much of every other resource */
 	UPROPERTY(EditAnywhere, Category="Rules|Cheats", meta=(ClampMin=0))

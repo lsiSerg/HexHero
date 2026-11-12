@@ -63,6 +63,8 @@ ACTIONS = [
     # the planet goes between its surface and its underground, through the entrance under the mouse (AHexPlanetCameraPawn::TravelTo)
     ("layer_action", "IA_HexLayer", "Underground and back", BOOLEAN, [("U", False, False)]),
     ("key_legend_action", "IA_HexKeyLegend", "This legend", BOOLEAN, [("H", False, False)]),
+    # the sheet of the cheats and console commands over the screen, as the developer asked on 2026-11-12
+    ("cheat_sheet_action", "IA_HexCheatSheet", "Cheats and commands", BOOLEAN, [("H", False, False, "IA_HexCtrl")]),
     # painting the levels of the planet; a number key gives its level through a scalar, 1 deep sea to 5 mountains
     ("paint_mode_action", "IA_HexPaintMode", "Paint levels", BOOLEAN, [("B", False, False)]),
     ("paint_level_action", "IA_HexPaintLevel", "Brush level", AXIS1D, [("One", False, False, 1.0), ("Two", False, False, 2.0), ("Three", False, False, 3.0), ("Four", False, False, 4.0), ("Five", False, False, 5.0)]),
@@ -101,6 +103,7 @@ LEGEND_CATEGORIES = {
     "IA_HexWireframeTarget": "Wireframe",
     "IA_HexMapMenu": "Menus",
     "IA_HexKeyLegend": "Menus",
+    "IA_HexCheatSheet": "Menus",
     "IA_HexPaintMode": "Painting",
     "IA_HexPaintLevel": "Painting",
     "IA_HexBrushSize": "Painting",
@@ -117,7 +120,8 @@ LEGEND_CATEGORIES = {
 
 # actions added after the legend was made, whose lines an existing legend gets if it lacks them
 ADDED_LEGEND_ACTIONS = {"IA_HexPaintMode", "IA_HexPaintLevel", "IA_HexBrushSize", "IA_HexUndo", "IA_HexRedo", "IA_HexForcedLight", "IA_HexLayer",
-                        "IA_HexSaveBookmark", "IA_HexJumpBookmark", "IA_HexPlayMode", "IA_HexHeroSelect", "IA_HexHeroSend", "IA_HexNextHero", "IA_HexEndTurn", "IA_HexSkipHero"}
+                        "IA_HexSaveBookmark", "IA_HexJumpBookmark", "IA_HexPlayMode", "IA_HexHeroSelect", "IA_HexHeroSend", "IA_HexNextHero", "IA_HexEndTurn", "IA_HexSkipHero",
+                        "IA_HexCheatSheet"}
 
 # lines of the legend whose action kept its name but changed what it does: its label becomes the new description only while it still holds an
 # old one, so a label edited by hand stays

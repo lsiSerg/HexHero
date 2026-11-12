@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "HexCastles.h"
+#include "HexCheats.h"
 #include "HexHero.h"
 #include "HexHeroConfig.h"
 #include "HexHeroes.h"
@@ -42,8 +43,26 @@ namespace
 			{
 				Cells += FString::Printf(TEXT("%s%d"), Cells.IsEmpty() ? TEXT("") : TEXT(", "), Cell);
 			}
-			Text += FString::Printf(TEXT("%s\n\t\t{\"id\": %d, \"faction\": \"%s\", \"layer\": \"%s\", \"cells\": [%s], \"owner\": %d}"), Index == 0 ? TEXT("") : TEXT(","),
-				Line.Id, *Line.Faction, *Line.Layer, *Cells, Line.Owner);
+			// what is built and who guards it when a game starts, only when set
+			FString Start;
+			if (!Line.Built.IsEmpty())
+			{
+				TArray<FString> Names;
+				Line.Built.GetKeys(Names);
+				Names.Sort();
+				FString Built;
+				for (const FString& Name : Names)
+				{
+					Built += FString::Printf(TEXT("%s\"%s\": %d"), Built.IsEmpty() ? TEXT("") : TEXT(", "), *Name, Line.Built[Name]);
+				}
+				Start += FString::Printf(TEXT(", \"built\": {%s}"), *Built);
+			}
+			if (Line.bGarrisonSet || !Line.Garrison.IsEmpty())
+			{
+				Start += TEXT(", \"garrison\": ") + HexPlanetFile::EncodeStackLines(Line.Garrison);
+			}
+			Text += FString::Printf(TEXT("%s\n\t\t{\"id\": %d, \"faction\": \"%s\", \"layer\": \"%s\", \"cells\": [%s], \"owner\": %d%s}"), Index == 0 ? TEXT("") : TEXT(","),
+				Line.Id, *Line.Faction, *Line.Layer, *Cells, Line.Owner, *Start);
 		}
 		Text += Sorted.IsEmpty() ? TEXT("]\n}\n") : TEXT("\n\t]\n}\n");
 		return Text;
@@ -167,8 +186,95 @@ TArray<FHexCastleLine> UHexCastles::MakeLines() const
 		Line.Layer = GetPlanetLayerName(Castle.Layer);
 		Line.Cells = {Castle.Cells[0], Castle.Cells[1], Castle.Cells[2]};
 		Line.Owner = Castle.StartOwner;
+		for (const TPair<FName, int32>& Each : Castle.StartLevels)
+		{
+			Line.Built.Add(Each.Key.ToString(), Each.Value);
+		}
+		Line.Garrison = MakeStackLines(Castle.StartGarrison);
+		Line.bGarrisonSet = Castle.bStartGarrison;
 	}
 	return Lines;
+}
+
+TArray<FHexStackLine> UHexCastles::MakeStackLines(TConstArrayView<FHexStack> Stacks) const
+{
+	TArray<FHexStackLine> Lines;
+	for (const FHexStack& Stack : Stacks)
+	{
+		if (Stack.Count > 0 && Config->Factions.IsValidIndex(Stack.Faction) && Config->Factions[Stack.Faction].Creatures.IsValidIndex(Stack.Creature))
+		{
+			Lines.Add({Config->Factions[Stack.Faction].Id.ToString(), Config->Factions[Stack.Faction].Creatures[Stack.Creature].Id.ToString(), Stack.bUpgraded, Stack.Count});
+		}
+	}
+	return Lines;
+}
+
+TArray<FHexStack> UHexCastles::ParseStackLines(TConstArrayView<FHexStackLine> Lines) const
+{
+	TArray<FHexStack> Stacks;
+	for (const FHexStackLine& Line : Lines)
+	{
+		const int32 Faction = Config->FindFaction(Line.Faction);
+		const int32 Creature = Faction != INDEX_NONE ? Config->Factions[Faction].Creatures.IndexOfByPredicate([&Line](const FHexCreature& Each) { return Each.Id.ToString() == Line.Creature; })
+			: INDEX_NONE;
+		if (Creature == INDEX_NONE || Line.Count <= 0)
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("Castles: a stack of %s %s is left out, as DA_HexCastles has no such creature"), *Line.Faction, *Line.Creature);
+			continue;
+		}
+		AddToArmy(Stacks, {Faction, Creature, Line.Upgraded, Line.Count});
+	}
+	return Stacks;
+}
+
+bool UHexCastles::KeepAsStart(int32 CastleId)
+{
+	FHexCastle* Castle = FindCastleMutable(CastleId);
+	if (!Castle)
+	{
+		return false;
+	}
+	const FHexFaction& Faction = Config->Factions[Castle->Faction];
+	Castle->StartLevels.Reset();
+	for (int32 Index = 0; Index < Faction.Buildings.Num() && Index < Castle->Levels.Num(); ++Index)
+	{
+		Castle->StartLevels.Add(Faction.Buildings[Index].Id, Castle->Levels[Index]);
+	}
+	Castle->StartGarrison = Castle->Garrison;
+	Castle->bStartGarrison = true;
+	bEdited = SortCastleLines(MakeLines()) != SavedLines;
+	++Revision;
+	return true;
+}
+
+int32 UHexCastles::BuildHalf(int32 CastleId)
+{
+	FHexCastle* Castle = FindCastleMutable(CastleId);
+	if (!Castle)
+	{
+		return 0;
+	}
+	const FHexFaction& Faction = Config->Factions[Castle->Faction];
+	int32 Built = 0;
+	for (int32 Index = 0; Index < Faction.Buildings.Num() && Index < Castle->Levels.Num(); ++Index)
+	{
+		const FHexBuilding& Building = Faction.Buildings[Index];
+		// the dwellings of the four lower levels whole and the fifth begun; the hall and the fort to the middle of their levels
+		const int32 Wanted = Building.Type == EHexBuildingType::Dwelling ? (Building.Creature < 4 ? Building.Levels.Num() : Building.Creature == 4 ? 1 : 0)
+			: (Building.Levels.Num() + 1) / 2;
+		if (Castle->Levels[Index] < Wanted)
+		{
+			Built += Wanted - Castle->Levels[Index];
+			Castle->Levels[Index] = Wanted;
+		}
+	}
+	for (int32 Creature = 0; Creature < NumCreatureLevels; ++Creature)
+	{
+		Castle->Available[Creature] = FMath::Max(Castle->Available[Creature], GetGrowth(*Castle, Creature));
+	}
+	bDirty[int32(Castle->Layer)] = true;
+	++Revision;
+	return Built;
 }
 
 void UHexCastles::SetLines(const TArray<FHexCastleLine>& Lines)
@@ -188,6 +294,12 @@ void UHexCastles::SetLines(const TArray<FHexCastleLine>& Lines)
 		Castle.Id = Line.Id;
 		Castle.Faction = Config->FindFaction(Line.Faction);
 		Castle.StartOwner = Line.Owner >= 0 ? Line.Owner : int32(INDEX_NONE);
+		for (const TPair<FString, int32>& Each : Line.Built)
+		{
+			Castle.StartLevels.Add(FName(*Each.Key), Each.Value);
+		}
+		Castle.StartGarrison = ParseStackLines(Line.Garrison);
+		Castle.bStartGarrison = Line.bGarrisonSet || !Line.Garrison.IsEmpty();
 		bool bValid = Castle.Id > 0 && Castle.Faction != INDEX_NONE && Line.Cells.Num() == 3 && ParsePlanetLayer(Line.Layer, Castle.Layer);
 		if (bValid)
 		{
@@ -382,7 +494,9 @@ void UHexCastles::ResetCastle(FHexCastle& Castle) const
 	Castle.Levels.Reset();
 	for (const FHexBuilding& Building : Faction.Buildings)
 	{
-		Castle.Levels.Add(FMath::Clamp(Building.StartLevel, 0, Building.Levels.Num()));
+		// as castles.json has it, else as the building starts
+		const int32* Start = Castle.StartLevels.Find(Building.Id);
+		Castle.Levels.Add(FMath::Clamp(Start ? *Start : Building.StartLevel, 0, Building.Levels.Num()));
 	}
 	// a week of what its dwellings offer, and for a castle of nobody a guard of some weeks of it
 	Castle.Available.Init(0, NumCreatureLevels);
@@ -391,10 +505,15 @@ void UHexCastles::ResetCastle(FHexCastle& Castle) const
 	{
 		const int32 Growth = GetGrowth(Castle, Creature);
 		Castle.Available[Creature] = Growth;
-		if (Castle.Owner == INDEX_NONE && Growth > 0 && Config->NeutralGarrisonWeeks > 0.0f)
+		if (!Castle.bStartGarrison && Castle.Owner == INDEX_NONE && Growth > 0 && Config->NeutralGarrisonWeeks > 0.0f)
 		{
 			AddToArmy(Castle.Garrison, {Castle.Faction, Creature, false, FMath::Max(FMath::RoundToInt32(Growth * Config->NeutralGarrisonWeeks), 1)});
 		}
+	}
+	// the garrison castles.json gives it
+	if (Castle.bStartGarrison)
+	{
+		Castle.Garrison = Castle.StartGarrison;
 	}
 }
 
@@ -630,6 +749,84 @@ bool UHexCastles::FindGate(const FHexCastle& Castle, const FVector3d& Towards, F
 	return true;
 }
 
+void UHexCastles::GetGateCells(const FHexCastle& Castle, TArray<int32>& OutOutside, TArray<int32>& OutInside) const
+{
+	OutOutside.Reset();
+	OutInside.Reset();
+	const AHexPlanet* Planet = GetPlanet(Castle.Layer);
+	if (!Planet || !Planet->IsBuilt() || !Config)
+	{
+		return;
+	}
+	FGround Ground;
+	MakeGround(*Planet, Castle, Ground);
+	const TArray<FHexSphereCell>& Cells = Planet->GetGrid().GetCells();
+	const auto IsCastle = [&Castle](int32 Cell) { return Cell == Castle.Cells[0] || Cell == Castle.Cells[1] || Cell == Castle.Cells[2]; };
+	const int32 NumGates = FMath::Clamp(Config->NumGates, 1, 6);
+	for (int32 Gate = 0; Gate < NumGates; ++Gate)
+	{
+		const double Angle = FMath::DegreesToRadians(double(Config->GateAngle) + 360.0 * Gate / NumGates);
+		const FVector2D Along(FMath::Cos(Angle), FMath::Sin(Angle));
+		// the cell of the castle the gate is in, and the cell outside before it, a cell radius past the wall
+		const FVector3d In = FVector3d(PlaceOn(*Planet, Castle, Ground, Along * (double(Config->WallRadius) * 0.8), 0.0f, 1.0f).GetLocation());
+		const FVector3d Out = FVector3d(PlaceOn(*Planet, Castle, Ground, Along * (double(Config->WallRadius) + 1.0), 0.0f, 1.0f).GetLocation());
+		int32 Inside = Planet->GetGrid().FindCell(In.GetSafeNormal());
+		if (!IsCastle(Inside))
+		{
+			continue;
+		}
+		int32 Outside = Planet->GetGrid().FindCell(Out.GetSafeNormal());
+		if (IsCastle(Outside) || !Cells.IsValidIndex(Outside) || !Cells[Inside].Neighbors.Contains(Outside))
+		{
+			// the cell outside beside the gate nearest the point before it
+			Outside = INDEX_NONE;
+			double Nearest = TNumericLimits<double>::Max();
+			for (const int32 Neighbor : Cells[Inside].Neighbors)
+			{
+				const double Distance = FVector3d::DistSquared(Cells[Neighbor].Center, Out.GetSafeNormal());
+				if (!IsCastle(Neighbor) && Distance < Nearest)
+				{
+					Nearest = Distance;
+					Outside = Neighbor;
+				}
+			}
+		}
+		if (Outside != INDEX_NONE)
+		{
+			OutOutside.Add(Outside);
+			OutInside.Add(Inside);
+		}
+	}
+}
+
+bool UHexCastles::BuyCatapult(int32 CastleId, int32 HeroId, FString& OutMessage)
+{
+	const FHexCastle* Castle = FindCastle(CastleId);
+	FHexHero* Hero = Heroes ? Heroes->FindHeroMutable(HeroId) : nullptr;
+	UHexSites* Sites = Heroes ? Heroes->GetSites() : nullptr;
+	const FHexHero* Visitor = Castle ? FindVisitor(*Castle) : nullptr;
+	if (!Castle || !Hero || !Sites || !Visitor || Visitor->Id != HeroId || Hero->Player != Castle->Owner)
+	{
+		OutMessage = TEXT("Only a hero of the owner in the castle or beside it buys a catapult there");
+		return false;
+	}
+	if (Hero->bCatapult)
+	{
+		OutMessage = FString::Printf(TEXT("%s has a catapult already"), *Hero->Name);
+		return false;
+	}
+	if (!Sites->CanPay(Castle->Owner, Config->CatapultCost))
+	{
+		OutMessage = FString::Printf(TEXT("A catapult costs %s"), *Sites->DescribeCost(Config->CatapultCost));
+		return false;
+	}
+	Sites->Pay(Castle->Owner, Config->CatapultCost);
+	Hero->bCatapult = true;
+	++Revision;
+	OutMessage = FString::Printf(TEXT("%s has a catapult"), *Hero->Name);
+	return true;
+}
+
 const FHexHero* UHexCastles::FindGuard(const FHexCastle& Castle) const
 {
 	const int32 Id = Castle.Id;
@@ -761,12 +958,17 @@ float UHexCastles::GetPower(TConstArrayView<FHexStack> Army) const
 	return Power;
 }
 
-float UHexCastles::GetDefense(const FHexCastle& Castle) const
+float UHexCastles::GetFortFactor(const FHexCastle& Castle) const
 {
 	const FHexFaction& Faction = Config->Factions[Castle.Faction];
 	const int32 Fort = Faction.FindBuilding(EHexBuildingType::Fort);
 	const int32 FortLevel = GetLevel(Castle, EHexBuildingType::Fort);
-	const float Factor = Faction.Buildings.IsValidIndex(Fort) && Faction.Buildings[Fort].Levels.IsValidIndex(FortLevel - 1) ? Faction.Buildings[Fort].Levels[FortLevel - 1].DefenseFactor : 1.0f;
+	return Faction.Buildings.IsValidIndex(Fort) && Faction.Buildings[Fort].Levels.IsValidIndex(FortLevel - 1) ? Faction.Buildings[Fort].Levels[FortLevel - 1].DefenseFactor : 1.0f;
+}
+
+float UHexCastles::GetDefense(const FHexCastle& Castle) const
+{
+	const float Factor = GetFortFactor(Castle);
 	// the hero in the castle guards it with its army
 	const FHexHero* Guard = FindGuard(Castle);
 	const float GuardPower = Guard ? GetPower(Guard->Army) * (1.0f + Config->HeroDefenseBonus * float(FMath::Max(Guard->Defense, 0))) : 0.0f;
@@ -1386,6 +1588,24 @@ namespace
 			const bool bMoved = Castles->MoveStack(GetInt(1, 0), Hero ? Hero->Id : 0, Args[3].Equals(TEXT("tohero"), ESearchCase::IgnoreCase), GetInt(4, 0), Message);
 			UE_LOG(LogHexHero, Log, TEXT("hex.Castle: %s"), bMoved ? TEXT("the stack is moved") : *Message);
 		}
+		else if (Action == TEXT("start") && Args.Num() >= 2)
+		{
+			// what is built in a castle and its garrison now become what it has when a game starts, which the save keeps; all for every castle
+			int32 Kept = 0;
+			TArray<int32> Ids;
+			for (const FHexCastle& Castle : Castles->GetCastles())
+			{
+				if (Args[1].Equals(TEXT("all"), ESearchCase::IgnoreCase) || Castle.Id == FCString::Atoi(*Args[1]))
+				{
+					Ids.Add(Castle.Id);
+				}
+			}
+			for (const int32 Id : Ids)
+			{
+				Kept += Castles->KeepAsStart(Id) ? 1 : 0;
+			}
+			UE_LOG(LogHexHero, Log, TEXT("hex.Castle: %d castles start as they are now"), Kept);
+		}
 		else if (Action == TEXT("open") && Args.Num() >= 2)
 		{
 			Castles->OnCastleOpened.Broadcast(GetInt(1, 0));
@@ -1409,14 +1629,33 @@ namespace
 		UHexHeroes* Heroes = Planet ? Planet->GetHeroes() : nullptr;
 		UHexCastles* Castles = Heroes ? Heroes->GetCastles() : nullptr;
 		UHexSites* Sites = Heroes ? Heroes->GetSites() : nullptr;
-		if (!Castles || !Castles->GetConfig() || !Sites || !Sites->GetConfig() || Args.IsEmpty())
+		// with nothing after it, or help, it lists what there is, as the developer asked on 2026-11-12
+		if (Args.IsEmpty() || Args[0].Equals(TEXT("help"), ESearchCase::IgnoreCase) || Args[0] == TEXT("?"))
 		{
-			UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat <resources [Amount] [Player]|build [on|off]|buildall [Castle|all]>, on a built planet"));
+			HexCheats::LogHelp();
+			return;
+		}
+		if (!Castles || !Castles->GetConfig() || !Sites || !Sites->GetConfig())
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat works on a built planet; hex.Cheat help lists the cheats"));
 			return;
 		}
 		const FString Action = Args[0].ToLower();
 		FString Message;
-		if (Action == TEXT("resources"))
+		if (Action == TEXT("reveal"))
+		{
+			// the whole of both layers explored for the person who plays, or the player named
+			const int32 Player = Args.IsValidIndex(1) && Args[1].IsNumeric() ? FCString::Atoi(*Args[1]) : Heroes->GetShroudPlayer();
+			const int32 Cells = Heroes->RevealAll(Player);
+			Message = FString::Printf(TEXT("Cheat: player %d has explored the whole map, %d cells more"), Player, Cells);
+		}
+		else if (Action == TEXT("enemies"))
+		{
+			const bool bOn = Args.IsValidIndex(1) ? Args[1].Equals(TEXT("on"), ESearchCase::IgnoreCase) || Args[1] == TEXT("1") : !HexCheats::AreEnemiesMarked();
+			HexCheats::SetEnemiesMarked(bOn);
+			Message = bOn ? TEXT("Cheat: the enemies are marked") : TEXT("Cheat off: the enemies are not marked");
+		}
+		else if (Action == TEXT("resources"))
 		{
 			// to the person who plays, or to the player named: the amount named of each, or what DA_HexCastles gives
 			const bool bAmount = Args.IsValidIndex(1) && Args[1].IsNumeric();
@@ -1460,9 +1699,65 @@ namespace
 			Castles->NoteChanged();
 			Message = FString::Printf(TEXT("Cheat: everything built in %d %s, %d levels"), Count, Count == 1 ? TEXT("castle") : TEXT("castles"), Built);
 		}
+		else if (Action == TEXT("units") && Args.Num() >= 4)
+		{
+			// creatures for the hero chosen, or the one named: units <Faction> <Level 1-7> <Count> [up] [Hero], as the developer asked on 2026-11-12
+			const int32 Faction = Castles->GetConfig()->FindFaction(Args[1]);
+			const bool bUpgraded = Args.IsValidIndex(4) && Args[4].Equals(TEXT("up"), ESearchCase::IgnoreCase);
+			const FString HeroText = Args.IsValidIndex(bUpgraded ? 5 : 4) ? Args[bUpgraded ? 5 : 4] : FString();
+			const FHexHero* Hero = HeroText.IsEmpty() ? Heroes->GetSelected() : Heroes->FindHeroByText(HeroText);
+			const FHexStack Stack{Faction, FCString::Atoi(*Args[2]) - 1, bUpgraded, FCString::Atoi(*Args[3])};
+			const FHexCreatureStats* Stats = Faction != INDEX_NONE ? Castles->GetConfig()->GetStats(Stack) : nullptr;
+			if (!Hero || !Stats)
+			{
+				UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat units <Faction> <Level 1-7> <Count> [up] [Hero]: no such %s"), Hero ? TEXT("creature") : TEXT("hero, and none is chosen"));
+				return;
+			}
+			if (!Heroes->AddUnits(Hero->Id, Stack))
+			{
+				Message = FString::Printf(TEXT("Cheat: the army of %s has no room for %s"), *Hero->Name, *Stats->DisplayName);
+			}
+			else
+			{
+				Message = FString::Printf(TEXT("Cheat: %s gets %d %s"), *Hero->Name, Stack.Count, *Stats->DisplayName);
+			}
+		}
+		else if (Action == TEXT("catapult"))
+		{
+			// a catapult for the hero chosen, or the one named, for nothing
+			const FHexHero* Hero = Args.IsValidIndex(1) ? Heroes->FindHeroByText(Args[1]) : Heroes->GetSelected();
+			if (!Hero || !Heroes->SetCatapult(Hero->Id, true))
+			{
+				UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat catapult [Hero]: no such hero, and none is chosen"));
+				return;
+			}
+			Message = FString::Printf(TEXT("Cheat: %s has a catapult"), *Hero->Name);
+		}
+		else if (Action == TEXT("buildhalf"))
+		{
+			// to the middle of the levels, in the castle named, the one chosen, or with all in every castle
+			const bool bAll = Args.IsValidIndex(1) && Args[1].Equals(TEXT("all"), ESearchCase::IgnoreCase);
+			const int32 Named = Args.IsValidIndex(1) && Args[1].IsNumeric() ? FCString::Atoi(*Args[1]) : Heroes->GetSelectedCastleId();
+			int32 Built = 0;
+			int32 Count = 0;
+			TArray<int32> Ids;
+			for (const FHexCastle& Castle : Castles->GetCastles())
+			{
+				if (bAll || Castle.Id == Named)
+				{
+					Ids.Add(Castle.Id);
+				}
+			}
+			for (const int32 Id : Ids)
+			{
+				Built += Castles->BuildHalf(Id);
+				++Count;
+			}
+			Message = FString::Printf(TEXT("Cheat: %d %s built to the middle, %d levels"), Count, Count == 1 ? TEXT("castle") : TEXT("castles"), Built);
+		}
 		else
 		{
-			UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat: unknown action %s"), *Args[0]);
+			UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat: unknown action %s; hex.Cheat help lists the cheats"), *Args[0]);
 			return;
 		}
 		UE_LOG(LogHexHero, Log, TEXT("hex.Cheat: %s"), *Message);
@@ -1473,7 +1768,7 @@ namespace
 	}
 
 	FAutoConsoleCommandWithWorldAndArgs CheatCommand(TEXT("hex.Cheat"),
-		TEXT("Cheats for trying the game: resources [Amount] [Player] gives the person who plays, or the player named, that much of every resource, or without an amount CheatGold and CheatResources of DA_HexCastles; build [on|off] lets every castle build without the limit of one building a day, or switches that; buildall [Castle|all] builds every building to its last level for nothing, in the castle named, else in the one chosen, else in every castle of the person who plays, and with all in every castle."),
+		TEXT("Cheats for trying the game; help, or nothing after it, lists them all (also hex.Cheat.Help and Ctrl+H): reveal [Player] explores both layers for the person who plays; enemies [on|off] marks every neutral stack and hero of another player; resources [Amount] [Player] gives the person who plays, or the player named, that much of every resource, or without an amount CheatGold and CheatResources of DA_HexCastles; build [on|off] lets every castle build without the limit of one building a day, or switches that; buildall [Castle|all] builds every building to its last level for nothing, in the castle named, else in the one chosen, else in every castle of the person who plays, and with all in every castle; buildhalf <Castle|all> builds to the middle (the hall and the fort to half their levels, the four lower dwellings upgraded, the fifth built); units <Faction> <Level 1-7> <Count> [up] [Hero] gives the hero chosen, or the one named, that many creatures."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&RunCheatCommand));
 
 	FAutoConsoleCommandWithWorldAndArgs CastleCommand(TEXT("hex.Castle"),

@@ -15,6 +15,8 @@ class UHexHeroConfig;
 class UHexCastles;
 class UHexSites;
 class UHexShroud;
+class UHexBattles;
+class UHexNeutrals;
 class UInstancedStaticMeshComponent;
 class UProceduralMeshComponent;
 class UMaterialInstanceDynamic;
@@ -24,7 +26,7 @@ class UStaticMeshComponent;
 /**
  *  A hero on the map of the planet: a leader who walks its cells, on the surface or underground. It does not fight itself: its Attack and
  *  Defense are added to those of every unit of its army, its Spell Power is the strength of its spells and its Knowledge its mana, as the
- *  developer described on 2026-11-10; nothing fights, casts or levels up yet, so of these only the movement is played
+ *  developer described on 2026-11-10; they count in battles (UHexBattles), and nothing levels up yet
  */
 struct FHexHero
 {
@@ -67,9 +69,15 @@ struct FHexHero
 	/** How fast it walks now, in cells a second: it sets out and stops smoothly (WalkStartTime, WalkStopTime) */
 	float Speed = 0.0f;
 
-	/** The creatures it leads, up to NumArmySlots stacks of them (UHexCastles): hired in castles, and until there are battles what decides
-	 *  whether it takes a castle that is guarded */
+	/** The creatures it leads, up to NumArmySlots stacks of them (UHexCastles): hired in castles, which fight its battles (UHexBattles) */
 	TArray<FHexStack> Army;
+
+	/** It has a catapult, bought in a castle (UHexCastles::BuyCatapult), which shoots at the walls of a castle it attacks; lost when it is
+	 *  destroyed there */
+	bool bCatapult = false;
+
+	/** The army it starts with, as heroes.json has it, empty for the default of its player (UHexCastles::MakeStartArmy) */
+	TArray<FHexStack> StartArmy;
 
 	/** The castle it is in and guards, 0 for none: it stands in the yard of that castle, on the cell of it that it went in by */
 	int32 CastleId = 0;
@@ -205,6 +213,10 @@ public:
 	/** What each player explored (the fog of war) */
 	UHexShroud* GetShroud() const { return Shroud; }
 
+	/** The battles, and the neutral stacks of the map, which a hero fights (UHexBattles, UHexNeutrals) */
+	UHexBattles* GetBattles() const { return Battles; }
+	UHexNeutrals* GetNeutrals() const { return Neutrals; }
+
 	/** Whether the fog of war hides what is not explored: while the game is played, with bShroud of the config, unless hex.PlanetShroud is 0 */
 	bool IsShroudOn() const;
 
@@ -230,6 +242,20 @@ public:
 
 	/** Gives a hero points of movement, or takes them with a negative amount, for trying the game (hex.Hero points) */
 	bool AddMovePoints(int32 Id, float Amount);
+
+	/** Gives a hero creatures, joined to a stack of their kind or in a slot of their own, for trying the game (hex.Cheat units). Returns
+	 *  false when its army has no room */
+	bool AddUnits(int32 Id, const FHexStack& Stack);
+
+	/** Gives a hero a catapult, or takes it, for trying the game (hex.Cheat catapult). Returns false without such a hero */
+	bool SetCatapult(int32 Id, bool bHas);
+
+	/** A player has explored the whole of both layers, the passages underground, for trying the game (hex.Cheat reveal). Returns the cells
+	 *  that were not explored before */
+	int32 RevealAll(int32 Player);
+
+	/** Makes the army of a hero now the one it starts with, which heroes.json keeps (hex.Hero startarmy) */
+	bool KeepArmyAsStart(int32 Id);
 
 	/** Whether the game moves the heroes of a player by itself, as the Heroes tab of the palette sets and heroes.json keeps: such a hero gathers
 	 *  what its player has seen, takes mines and walks to open the map (MoveAi) */
@@ -316,6 +342,26 @@ public:
 	 *  chooses it; on a cell it points the hero chosen there, so its way shows; a second click on that cell sets it walking; and while it
 	 *  walks any click stops it. OutMessage says why nothing came of it */
 	EClick Click(EHexPlanetLayer Layer, int32 Cell, const FHexHero* Under, FString& OutMessage);
+
+	/** What a click there, or sending the hero chosen there, would do, for the cursor of the game, as the developer asked on 2026-11-12: choose
+	 *  a hero or castle of the person; walk there today or on a later day; nothing, as no way leads there; attack a neutral stack, a hero of
+	 *  another player or a castle that is defended; go into a castle or take one nobody defends; visit a mine or mill or take a pile; go
+	 *  through an entrance (bMouth: the cell is that of the mouth under the cursor, on the other layer); or swap places with a hero of its own
+	 *  beside the castle it guards */
+	enum class EOrder : uint8
+	{
+		None,
+		Choose,
+		Move,
+		MoveLater,
+		Blocked,
+		Attack,
+		Castle,
+		Visit,
+		Portal,
+		Swap,
+	};
+	EOrder GetOrderAt(EHexPlanetLayer Layer, int32 Cell, const FHexHero* Under, bool bMouth);
 
 	/** Points a hero to a cell of a layer, INDEX_NONE for nowhere; its way shows while it is the one chosen */
 	bool SetTarget(int32 Id, EHexPlanetLayer Layer, int32 Cell);
@@ -454,11 +500,19 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UHexCastles> Castles;
 
-	/** The castles hire into the armies of the heroes and take from them what an attack costs */
+	/** The castles hire into the armies of the heroes and take from them what an attack costs, and a battle gives them what is left */
 	friend class UHexCastles;
+	friend class UHexBattles;
+	friend class UHexNeutrals;
 
 	UPROPERTY()
 	TObjectPtr<UHexShroud> Shroud;
+
+	UPROPERTY()
+	TObjectPtr<UHexBattles> Battles;
+
+	UPROPERTY()
+	TObjectPtr<UHexNeutrals> Neutrals;
 
 	/** The body of each hero by its Id, a component of the planet of its layer, and its material */
 	UPROPERTY(Transient)
@@ -601,7 +655,14 @@ private:
 
 	/** Returns what the cheapest way to the site of a cell costs with its visit, from the ways found for a hero, and the node of the cell
 	 *  beside it that way ends on, which may be where the hero stands; for a pile the way onto its cell. A negative value without a way */
-	float GetSiteWayCost(const HexHeroPath::FField& Ways, EHexPlanetLayer Layer, int32 SiteCell, int32* OutNode = nullptr) const;
+	float GetSiteWayCost(const HexHeroPath::FField& Ways, EHexPlanetLayer Layer, int32 SiteCell, int32* OutNode = nullptr, int32 ForPlayer = INDEX_NONE) const;
+
+	/** The cell of the castle on a cell that a hero beside it at From goes in by: the one clicked if it lies beside From, else another of the
+	 *  castle that does; any other cell as it is */
+	int32 GetCastleEntryCell(EHexPlanetLayer Layer, int32 From, int32 SiteCell) const;
+
+	/** Whether a cell holds what a hero of a player fights rather than walks onto: a neutral stack, or a hero of another player out of a castle */
+	bool IsFoeAt(int32 Player, EHexPlanetLayer Layer, int32 Cell) const;
 
 	/** Sends a hero the game moves to the best of the sites its player has seen and wants (UHexSites::GetGoal) within the reach of its kind.
 	 *  Returns true if it went for one or waits for tomorrow to go on, bOutSent whether it set out */

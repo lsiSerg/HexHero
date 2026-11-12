@@ -6,6 +6,8 @@
 #include "HexHeroes.h"
 #include "HexSiteConfig.h"
 #include "HexSites.h"
+#include "HexUnitTooltip.h"
+#include "Widgets/SToolTip.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Styling/CoreStyle.h"
 #include "Widgets/Input/SButton.h"
@@ -289,10 +291,24 @@ void SHexCastlePanel::RebuildBody()
 		{
 			Price += FString::Printf(TEXT(" and %d %s"), Each.CostResourceAmount, *Each.CostResource.ToString().ToLower());
 		}
-		const TSharedRef<SVerticalBox> Left = SNew(SVerticalBox)
-			+ SVerticalBox::Slot().AutoHeight()[MakeText(FString::Printf(TEXT("%s: %d to hire"), *Stats.DisplayName, Offered), Font, Offered > 0 ? CastleTextColor : CastleDimColor)]
-			+ SVerticalBox::Slot().AutoHeight()[MakeText(FString::Printf(TEXT("%s each. Attack %d, defense %d, damage %d-%d, health %d, speed %d"), *Price, Stats.Attack, Stats.Defense,
-				Stats.DamageMin, Stats.DamageMax, Stats.Health, Stats.Speed), Small, CastleDimColor)];
+		// the cursor on it shows the panel of the creature that a battle shows, as the developer asked on 2026-11-12
+		FHexUnitTooltipData Data = HexUnitTooltip::FromStats(Stats);
+		Data.Subtitle = Faction.DisplayName;
+		Data.TitleColor = CastleHeadColor;
+		Data.bFlies = Each.bFlies;
+		Data.Extra = FString::Printf(TEXT("%s each; %d offered, %d more a week"), *Price, Offered, Castles->GetWeeklyGrowth(*Castle, Creature));
+		const TSharedRef<SWidget> Left = SNew(SBorder).BorderImage(FCoreStyle::Get().GetBrush(TEXT("NoBorder"))).Padding(0.0f)
+			.ToolTip(SNew(SToolTip).BorderImage(FCoreStyle::Get().GetBrush(TEXT("NoBorder")))
+				[
+					SNew(SBorder).BorderImage(FCoreStyle::Get().GetBrush(TEXT("GenericWhiteBox"))).BorderBackgroundColor(FLinearColor(0.02f, 0.02f, 0.03f, 0.92f))
+					.Padding(FMargin(10.0f, 7.0f))[HexUnitTooltip::Make(Data)]
+				])
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight()[MakeText(FString::Printf(TEXT("%s: %d to hire"), *Stats.DisplayName, Offered), Font, Offered > 0 ? CastleTextColor : CastleDimColor)]
+				+ SVerticalBox::Slot().AutoHeight()[MakeText(FString::Printf(TEXT("%s each. Attack %d, defense %d, damage %d-%d, health %d, speed %d"), *Price, Stats.Attack, Stats.Defense,
+					Stats.DamageMin, Stats.DamageMax, Stats.Health, Stats.Speed), Small, CastleDimColor)]
+			];
 		const int32 Target = bToHero ? VisitorId : 0;
 		const FString Tip = Most > 0 ? FString::Printf(TEXT("Up to %d"), Most) : FString(Offered > 0 ? TEXT("Not enough to pay for one") : TEXT("None offered until next week"));
 		AddRow(Left, SNew(SHorizontalBox)
@@ -308,6 +324,20 @@ void SHexCastlePanel::RebuildBody()
 	if (!bAnyDwelling)
 	{
 		Body->AddSlot().AutoHeight()[MakeText(TEXT("No dwelling is built yet."), Small, CastleDimColor)];
+	}
+
+	// a catapult for the hero there, as the developer asked on 2026-11-12, which shoots at the walls of the castles it attacks
+	if (Visitor)
+	{
+		AddSection(TEXT("War machines"));
+		FString Why;
+		const bool bHas = Visitor->bCatapult;
+		const bool bCanPay = Sites->CanPay(Castle->Owner, Config->CatapultCost);
+		const FString Tip = bHas ? FString::Printf(TEXT("%s has one"), *Visitor->Name) : bCanPay ? FString() : TEXT("Not enough to pay for it");
+		AddRow(SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight()[MakeText(FString::Printf(TEXT("Catapult for %s%s"), *Visitor->Name, bHas ? TEXT(": has one") : TEXT("")), Font, bHas ? CastleDimColor : CastleTextColor)]
+			+ SVerticalBox::Slot().AutoHeight()[MakeText(FString::Printf(TEXT("%s. Shoots at the walls of a castle it attacks"), *Sites->DescribeCost(Config->CatapultCost)), Small, CastleDimColor)],
+			MakeButton(TEXT("Buy"), !bHas && bCanPay, Tip, [CastleId, VisitorId](UHexCastles& Do, FString& Message) { Do.BuyCatapult(CastleId, VisitorId, Message); }));
 	}
 
 	// the garrison, and the army of the hero beside the castle

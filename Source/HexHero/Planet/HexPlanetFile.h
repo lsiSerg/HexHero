@@ -465,6 +465,28 @@ struct FHexEntrance
 	}
 };
 
+/** A stack of creatures as part of a line of heroes.json or castles.json: its creature by the Ids of its faction and of the creature in
+ *  DA_HexCastles, whether it is the upgraded version, and how many */
+USTRUCT()
+struct FHexStackLine
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FString Faction;
+
+	UPROPERTY()
+	FString Creature;
+
+	UPROPERTY()
+	bool Upgraded = false;
+
+	UPROPERTY()
+	int32 Count = 0;
+
+	bool operator==(const FHexStackLine& Other) const { return Faction == Other.Faction && Creature == Other.Creature && Upgraded == Other.Upgraded && Count == Other.Count; }
+};
+
 /**
  *  A hero of a planet as a line of heroes.json: where it stands when a game starts. Its class is the Id of a class of DA_HexHeroes and its
  *  layer Surface or Underground; the cell is the same index on both layers
@@ -494,9 +516,14 @@ struct FHexHeroLine
 	UPROPERTY()
 	int32 Cell = 0;
 
+	/** The army it starts with, written only when one is set; without it a hero starts with HeroStartWeeks of the first dwellings of the
+	 *  faction of its player (UHexCastles::MakeStartArmy) */
+	UPROPERTY()
+	TArray<FHexStackLine> Army;
+
 	bool operator==(const FHexHeroLine& Other) const
 	{
-		return Id == Other.Id && Name == Other.Name && Class == Other.Class && Player == Other.Player && Layer == Other.Layer && Cell == Other.Cell;
+		return Id == Other.Id && Name == Other.Name && Class == Other.Class && Player == Other.Player && Layer == Other.Layer && Cell == Other.Cell && Army == Other.Army;
 	}
 };
 
@@ -760,6 +787,9 @@ namespace HexPlanetFile
 
 	/** Writes heroes as the text of heroes.json, a line each, sorted by Id */
 	FString EncodeHeroes(TConstArrayView<FHexHeroLine> Heroes, TConstArrayView<int32> AiPlayers = TConstArrayView<int32>());
+
+	/** Returns stacks as a JSON array on one line, as a field of a line of heroes.json or castles.json */
+	FString EncodeStackLines(TConstArrayView<FHexStackLine> Stacks);
 
 	/** Reads the text of heroes.json, and the players the game moves by itself when asked for them */
 	bool DecodeHeroes(const FString& Text, TArray<FHexHeroLine>& OutHeroes, FString& OutError, TArray<int32>* OutAiPlayers = nullptr);

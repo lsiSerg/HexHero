@@ -706,8 +706,9 @@ public:
 	 *  a mountain where none stands behind it, and a neighbor of its exit a void, for the wall, where none lies behind that, under the
 	 *  mountain where it can be. The cell is the one behind the way the mouth was turned by hand, else the one most to the north that may:
 	 *  nothing stands on it, no entrance is before it, and the cells around it still reach each other, underground without a passage one
-	 *  cell wide. Returns how many cells it changed; outside the steps of Undo */
-	int32 FitEntrances(int32 OnlyCell = INDEX_NONE, bool bMountains = true);
+	 *  cell wide. Returns how many cells it changed. Outside the steps of Undo, unless OutOldCaveLevels is given, which then takes the levels
+	 *  and OutOldCaveBiomes the biomes the cells of the underground had before it changed them, for the step that put the entrance */
+	int32 FitEntrances(int32 OnlyCell = INDEX_NONE, bool bMountains = true, TMap<int32, int32>* OutOldCaveLevels = nullptr, TMap<int32, int32>* OutOldCaveBiomes = nullptr);
 
 	/** Returns the sides of the surface that lie low (HexPlanetSurface::FParams::LowSides): between the cell of each entrance and the mountain
 	 *  it is built into, so the ground before its mouth stays flat, as the developer asked on 2026-11-12, rather than rising to the mountain */
@@ -775,6 +776,11 @@ public:
 
 	/** Returns true once the planet is built, a few frames after it begins to play; until then the grid is empty and the radius 0 */
 	bool IsBuilt() const { return bBuilt; }
+
+	/** Hides the layer, its sky light and its air while a battle is fought on its own field (AHexBattleArena), and shows it again; meanwhile it
+	 *  streams and changes nothing for the camera, which is far away */
+	void SetBattleHidden(bool bHidden);
+	bool IsBattleHidden() const { return bBattleHidden; }
 
 	/** Returns how much of a cell shows through the fog of war now, 1 while there is none */
 	float GetShroudShown(int32 Cell) const { return bShroudOn && ShroudShown.IsValidIndex(Cell) ? ShroudShown[Cell] : 1.0f; }
@@ -900,6 +906,9 @@ private:
 
 	/** True once BuildPlanet ran */
 	bool bBuilt = false;
+
+	/** A battle is fought on its own field and the layer waits hidden (SetBattleHidden) */
+	bool bBattleHidden = false;
 
 	/** Frames ticked before the build, so the loading screen has been drawn when the build holds the game thread */
 	int32 FramesBeforeBuild = 0;

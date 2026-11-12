@@ -37,7 +37,8 @@ public class HexHero : ModuleRules
 			"HexHero/Player",
 			"HexHero/UI",
 			"HexHero/Planet",
-			"HexHero/Hero"
+			"HexHero/Hero",
+			"HexHero/Battle"
 		});
 
 		// Uncomment if you are using Slate UI

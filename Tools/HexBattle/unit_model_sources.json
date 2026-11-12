@@ -1,0 +1,11 @@
+{
+ "note": "CC0 models by Quaternius, as served by poly.pizza; fetch_unit_models.ps1 downloads them to Saved/ModelSources/units, blender_build_units.py builds the figures of the battles from them and from the knight of the heroes (Tools/HexPlanetHeroes/rider_model_sources.json)",
+ "models": [
+  {"file": "wODZYCgX5Z.glb", "title": "Skeleton", "page": "https://poly.pizza/m/wODZYCgX5Z", "url": "https://static.poly.pizza/b1ea7fcc-7d7f-4e93-aac5-507358399a7b.glb", "license": "CC0 1.0", "units": "BoneWarrior, AshMage"},
+  {"file": "VlXjG0N8Eg.glb", "title": "Zombie", "page": "https://poly.pizza/m/VlXjG0N8Eg", "url": "https://static.poly.pizza/c4002f69-6979-42e8-ad6e-2f4e14fc3a9d.glb", "license": "CC0 1.0", "units": "Decayed"},
+  {"file": "Iip30bDHmu.glb", "title": "Ghost", "page": "https://poly.pizza/m/Iip30bDHmu", "url": "https://static.poly.pizza/810f60a2-6e45-4c4e-a0d5-da91cd7288bd.glb", "license": "CC0 1.0", "units": "Shade"},
+  {"file": "LlwD0QNUPj.glb", "title": "Dragon Evolved", "page": "https://poly.pizza/m/LlwD0QNUPj", "url": "https://static.poly.pizza/90ed3740-d8c4-4910-88ce-ac2ed426022d.glb", "license": "CC0 1.0", "units": "Glowwing"},
+  {"file": "VBvzjFIYws.glb", "title": "Dragon", "page": "https://poly.pizza/m/VBvzjFIYws", "url": "https://static.poly.pizza/9714f533-5d2d-4cfd-b8f1-c8dfff64a672.glb", "license": "CC0 1.0", "units": "BoneSerpent"},
+  {"file": "y9KWOVG21R.glb", "title": "Hooded Adventurer", "page": "https://poly.pizza/m/y9KWOVG21R", "url": "https://static.poly.pizza/3186b8e9-afd5-4d48-846c-b2b530cd23e2.glb", "license": "CC0 1.0", "units": "Huntsman, Pilgrim, BloodDrinker"}
+ ]
+}

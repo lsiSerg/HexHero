@@ -31,8 +31,9 @@ namespace
 	const FLinearColor KeyColor(0.7f, 0.7f, 0.7f);
 
 	/** The tabs of each layer, in the order of their buttons */
-	const EHexPaintTab SurfaceTabs[] = {EHexPaintTab::Ground, EHexPaintTab::Relief, EHexPaintTab::Objects, EHexPaintTab::Rivers, EHexPaintTab::Entrances, EHexPaintTab::Heroes, EHexPaintTab::Sites, EHexPaintTab::Castles};
-	const EHexPaintTab UndergroundTabs[] = {EHexPaintTab::Maze, EHexPaintTab::Links, EHexPaintTab::CaveObjects, EHexPaintTab::CaveHeroes, EHexPaintTab::CaveSites};
+	const EHexPaintTab SurfaceTabs[] = {EHexPaintTab::Ground, EHexPaintTab::Relief, EHexPaintTab::Objects, EHexPaintTab::Rivers, EHexPaintTab::Entrances, EHexPaintTab::Heroes, EHexPaintTab::Sites, EHexPaintTab::Castles,
+		EHexPaintTab::Neutrals};
+	const EHexPaintTab UndergroundTabs[] = {EHexPaintTab::Maze, EHexPaintTab::Links, EHexPaintTab::CaveObjects, EHexPaintTab::CaveHeroes, EHexPaintTab::CaveSites, EHexPaintTab::CaveNeutrals};
 }
 
 void SHexPlanetPalette::Construct(const FArguments& InArgs)
@@ -581,6 +582,79 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 	TSharedRef<SVerticalBox> SiteBody = MakeSiteBody();
 	TSharedRef<SVerticalBox> CaveSiteBody = MakeSiteBody();
 
+	// Neutrals, on either layer: the faction, the creature by its level, whether upgraded and how many a click places
+	const UHexCastleConfig* NeutralCastles = UHexCastleConfig::Load();
+	const auto MakeNeutralBody = [&]()
+	{
+		TSharedRef<SVerticalBox> Body = SNew(SVerticalBox);
+		Body->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("NeutralFactions", "Creatures of"), 0.0f)];
+		TSharedRef<SUniformGridPanel> Factions = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
+		for (int32 Faction = 0; Faction < NeutralCastles->Factions.Num(); ++Faction)
+		{
+			Factions->AddSlot(Faction % 2, Faction / 2)
+			[
+				MakeButton(
+					MakeSwatch(NeutralCastles->Factions[Faction].Color, SwatchSize * 0.75f, SwatchSize * 0.75f, 6.0f, FText::FromString(NeutralCastles->Factions[Faction].DisplayName), Small, FText::GetEmpty()),
+					[Faction](UHexPlanetPainter& Each) { Each.SetNeutralFaction(Faction); Each.SetNeutralTool(); },
+					[Faction](const UHexPlanetPainter& Each) { return Each.IsPlacingNeutrals() && Each.GetNeutralFaction() == Faction; })
+			];
+		}
+		Body->AddSlot().AutoHeight()[Factions];
+		Body->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("NeutralLevels", "Creature"))];
+		TSharedRef<SUniformGridPanel> Levels = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
+		for (int32 Level = 0; Level < NumCreatureLevels; ++Level)
+		{
+			Levels->AddSlot(Level % 2, Level / 2)
+			[
+				MakeButton(
+					SNew(STextBlock).Font(Small).Text_Lambda([WeakPainter, NeutralCastles, Level]()
+					{
+						const int32 Faction = WeakPainter.IsValid() ? WeakPainter->GetNeutralFaction() : 0;
+						const bool bUpgraded = WeakPainter.IsValid() && WeakPainter->IsNeutralUpgraded();
+						return NeutralCastles->Factions.IsValidIndex(Faction) && NeutralCastles->Factions[Faction].Creatures.IsValidIndex(Level)
+							? FText::FromString(FString::Printf(TEXT("%d %s"), Level + 1, *NeutralCastles->Factions[Faction].Creatures[Level].GetStats(bUpgraded).DisplayName))
+							: FText::AsNumber(Level + 1);
+					}),
+					[Level](UHexPlanetPainter& Each) { Each.SetNeutralLevel(Level); Each.SetNeutralTool(); },
+					[Level](const UHexPlanetPainter& Each) { return Each.IsPlacingNeutrals() && Each.GetNeutralLevel() == Level; })
+			];
+		}
+		Body->AddSlot().AutoHeight()[Levels];
+		Body->AddSlot().AutoHeight().Padding(0.0f, 3.0f, 0.0f, 0.0f)
+		[
+			MakeButton(MakeLabel(LOCTEXT("NeutralUpgraded", "Upgraded")),
+				[](UHexPlanetPainter& Each) { Each.SetNeutralUpgraded(!Each.IsNeutralUpgraded()); Each.SetNeutralTool(); },
+				[](const UHexPlanetPainter& Each) { return Each.IsNeutralUpgraded(); })
+		];
+		Body->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("NeutralCount", "How many"))];
+		TSharedRef<SUniformGridPanel> Counts = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
+		const int32 Amounts[] = {3, 8, 15, 30, 60, 120};
+		for (int32 Index = 0; Index < UE_ARRAY_COUNT(Amounts); ++Index)
+		{
+			const int32 Amount = Amounts[Index];
+			Counts->AddSlot(Index % 3, Index / 3)
+			[
+				MakeButton(MakeLabel(FText::AsNumber(Amount)),
+					[Amount](UHexPlanetPainter& Each) { Each.SetNeutralCount(Amount); Each.SetNeutralTool(); },
+					[Amount](const UHexPlanetPainter& Each) { return Each.IsPlacingNeutrals() && Each.GetNeutralCount() == Amount; })
+			];
+		}
+		Body->AddSlot().AutoHeight()[Counts];
+		Body->AddSlot().AutoHeight()[MakeHelp(LOCTEXT("NeutralHelp", "Click a cell a hero can stand on to put a stack of neutral creatures there; Ctrl+click takes one away, and Undo takes either back. A stack fills its cell: in the game a hero sent onto it fights it, and the one that loses leaves the map."))];
+		Body->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("NeutralGenerate", "Scatter over the planet"), 8.0f)];
+		const TSharedRef<SButton> Generate = MakeButton(MakeLabel(LOCTEXT("GenerateNeutrals", "Generate")), [](UHexPlanetPainter& Each) { Each.GenerateNeutrals(); }, nullptr,
+			[](const UHexPlanetPainter& Each) { return !Each.IsPainting(); });
+		Generate->SetToolTipText(LOCTEXT("GenerateNeutralsTip", "Scatters neutral stacks over both layers in place of all there are, by NeutralGeneration of DA_HexBattle: beside mines and mills and in the narrow places of the ways, stronger the further they stand from where the heroes start. Each press gives another layout; one step of Undo"));
+		Body->AddSlot().AutoHeight()[Generate];
+		const TSharedRef<SButton> Clear = MakeButton(MakeLabel(LOCTEXT("ClearNeutrals", "Remove all")), [](UHexPlanetPainter& Each) { Each.GenerateNeutrals(true); }, nullptr,
+			[](const UHexPlanetPainter& Each) { return !Each.IsPainting(); });
+		Clear->SetToolTipText(LOCTEXT("ClearNeutralsTip", "Takes every neutral stack off both layers; one step of Undo"));
+		Body->AddSlot().AutoHeight().Padding(0.0f, 3.0f, 0.0f, 0.0f)[Clear];
+		return Body;
+	};
+	TSharedRef<SVerticalBox> NeutralBody = MakeNeutralBody();
+	TSharedRef<SVerticalBox> CaveNeutralBody = MakeNeutralBody();
+
 	// Castles, on the surface: the faction of the castle a click places, and who has it when a game starts
 	const UHexCastleConfig* CastleConfig = UHexCastleConfig::Load();
 	TSharedRef<SVerticalBox> CastleBody = SNew(SVerticalBox);
@@ -871,6 +945,8 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 			+ SWidgetSwitcher::Slot()[CaveHeroBody]
 			+ SWidgetSwitcher::Slot()[CaveSiteBody]
 			+ SWidgetSwitcher::Slot()[CastleBody]
+			+ SWidgetSwitcher::Slot()[NeutralBody]
+			+ SWidgetSwitcher::Slot()[CaveNeutralBody]
 		]
 
 		// Undo and Redo of the layer painted

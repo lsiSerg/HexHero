@@ -21,6 +21,13 @@
 #include "SHexCastlePanel.h"
 #include "SHexHeroPanel.h"
 #include "SHexEdgeMarkers.h"
+#include "SHexBattlePanel.h"
+#include "SHexCheatSheet.h"
+#include "SHexGameCursor.h"
+#include "GenericPlatform/ICursor.h"
+#include "HexCameraPawn.h"
+#include "HexBattleArena.h"
+#include "HexBattles.h"
 #include "SHexModeBar.h"
 #include "SHexHoverInfo.h"
 #include "HexHeroes.h"
@@ -41,6 +48,29 @@ namespace
 
 	TAutoConsoleVariable<int32> CVarPlanetHoverCell(TEXT("hex.PlanetHoverCell"), -1,
 		TEXT("A cell taken to be under the cursor in place of the one the mouse is over, for screenshots of its outline and of what a click on it does; -1 for the mouse"));
+
+	/** hex.Cursor: logs the cursor of the game and that of the system, as a run from -ExecCmds has no eyes on the screen */
+	void RunCursorCommand(const TArray<FString>& Args, UWorld* World)
+	{
+		const AHexPlanetPlayerController* Controller = World ? Cast<AHexPlanetPlayerController>(World->GetFirstPlayerController()) : nullptr;
+		const TSharedPtr<ICursor> Platform = FSlateApplication::IsInitialized() ? FSlateApplication::Get().GetPlatformCursor() : nullptr;
+		UE_LOG(LogHexHero, Log, TEXT("hex.Cursor: %s, the cursor of the controller %d, of the system %d"), Controller ? *Controller->DescribeGameCursor() : TEXT("no controller of the planet"),
+			Controller ? int32(Controller->CurrentMouseCursor.GetValue()) : -1, Platform.IsValid() ? int32(Platform->GetType()) : -1);
+	}
+
+	FAutoConsoleCommandWithWorldAndArgs CursorCommand(TEXT("hex.Cursor"), TEXT("Logs the cursor of the game the controller of the planet chose and that of the system"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&RunCursorCommand));
+
+	void RunCheatSheetCommand(const TArray<FString>& Args, UWorld* World)
+	{
+		if (AHexPlanetPlayerController* Controller = World ? Cast<AHexPlanetPlayerController>(World->GetFirstPlayerController()) : nullptr)
+		{
+			Controller->ToggleCheatSheet();
+		}
+	}
+
+	FAutoConsoleCommandWithWorldAndArgs CheatSheetCommand(TEXT("hex.CheatSheet"), TEXT("Shows or hides the sheet of the cheats over the screen, as Ctrl+H does"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&RunCheatSheetCommand));
 
 	TAutoConsoleVariable<float> CVarPlanetWallFadeScreenY(TEXT("hex.PlanetWallFadeScreenY"), 0.5f,
 		TEXT("Where hex.PlanetWallFade 2 puts the point the walls dissolve in front of, as a share of the height of the screen from its top"));
@@ -118,6 +148,12 @@ void AHexPlanetPlayerController::BeginPlay()
 			})
 			.IsBlocked_Lambda([WeakThis]() { return WeakThis.IsValid() && (WeakThis->MapMenu.IsValid() || WeakThis->Dialog.IsValid()); });
 		ViewportClient->AddViewportWidgetContent(EdgeMarkers.ToSharedRef(), 100);
+
+		// the cursor of the game over everything, and the sheet of the cheats under it
+		SAssignNew(GameCursor, SHexGameCursor);
+		ViewportClient->AddViewportWidgetContent(GameCursor.ToSharedRef(), 1000);
+		SAssignNew(CheatSheet, SHexCheatSheet).Visibility(EVisibility::Collapsed);
+		ViewportClient->AddViewportWidgetContent(CheatSheet.ToSharedRef(), 900);
 
 		// the panel of a castle, shown while a person looks into one of its own
 		SAssignNew(CastlePanel, SHexCastlePanel)
@@ -213,6 +249,10 @@ bool AHexPlanetPlayerController::IsPlayMode() const
 
 void AHexPlanetPlayerController::SetPlayMode(bool bOn)
 {
+	if (IsBattleShown())
+	{
+		return;
+	}
 	UHexHeroes* Heroes = GetHeroes();
 	if (!Heroes || Heroes->IsPlaying() == bOn)
 	{
@@ -237,8 +277,118 @@ void AHexPlanetPlayerController::SetPlayMode(bool bOn)
 	ShowHero(Heroes->GetSelectedId());
 }
 
+bool AHexPlanetPlayerController::IsBattleShown() const
+{
+	return BattleArena.IsValid() && BattleArena->IsShowing();
+}
+
+void AHexPlanetPlayerController::OnBattleShown()
+{
+	UHexHeroes* Heroes = GetHeroes();
+	UHexBattles* Battles = Heroes ? Heroes->GetBattles() : nullptr;
+	UGameViewportClient* ViewportClient = GetWorld() ? GetWorld()->GetGameViewport() : nullptr;
+	if (!Battles || !ViewportClient)
+	{
+		return;
+	}
+	if (!BattleArena.IsValid())
+	{
+		FActorSpawnParameters Parameters;
+		Parameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		BattleArena = GetWorld()->SpawnActor<AHexBattleArena>(AHexBattleArena::StaticClass(), FTransform::Identity, Parameters);
+	}
+	AHexPlanetCameraPawn* CameraPawn = GetCameraPawn();
+	if (CastlePanel.IsValid() && CastlePanel->IsOpen())
+	{
+		CastlePanel->Close();
+	}
+	BattleArena->Show(Battles, CameraPawn ? CameraPawn->GetCameraPostProcess() : FPostProcessSettings());
+	SetViewTarget(BattleArena.Get());
+	if (const UHexPlanetLayers* LayerSet = UHexPlanetLayers::Get(GetWorld()))
+	{
+		for (const EHexPlanetLayer Layer : {EHexPlanetLayer::Surface, EHexPlanetLayer::Underground})
+		{
+			if (AHexPlanet* Each = LayerSet->GetPlanet(Layer))
+			{
+				Each->SetBattleHidden(true);
+			}
+		}
+	}
+	if (CameraPawn)
+	{
+		CameraPawn->SetBattleShown(true);
+	}
+	// the widgets of the planet leave the screen meanwhile
+	HiddenForBattle.Reset();
+	const TPair<TSharedPtr<SWidget>, int32> Widgets[] = {{HeroPanel, 0}, {EdgeMarkers, 100}, {ModeBar, 0}, {HoverInfo, 0}, {CastlePanel, 0}};
+	for (const TPair<TSharedPtr<SWidget>, int32>& Each : Widgets)
+	{
+		if (Each.Key.IsValid())
+		{
+			ViewportClient->RemoveViewportWidgetContent(Each.Key.ToSharedRef());
+			HiddenForBattle.Add(Each);
+		}
+	}
+	TWeakObjectPtr<AHexPlanetPlayerController> WeakThis(this);
+	SAssignNew(BattlePanel, SHexBattlePanel)
+		.Arena(BattleArena)
+		.OnProject([WeakThis](const FVector& World, FVector2D& OutScreen)
+		{
+			return WeakThis.IsValid() && WeakThis->ProjectWorldLocationToScreen(World, OutScreen, false);
+		});
+	ViewportClient->AddViewportWidgetContent(BattlePanel.ToSharedRef(), 50);
+	UE_LOG(LogHexHero, Log, TEXT("Battle: shown on its field"));
+}
+
+void AHexPlanetPlayerController::OnBattleClosed()
+{
+	UGameViewportClient* ViewportClient = GetWorld() ? GetWorld()->GetGameViewport() : nullptr;
+	if (BattleArena.IsValid())
+	{
+		BattleArena->Hide();
+	}
+	if (ViewportClient && BattlePanel.IsValid())
+	{
+		ViewportClient->RemoveViewportWidgetContent(BattlePanel.ToSharedRef());
+	}
+	BattlePanel.Reset();
+	for (const TPair<TSharedPtr<SWidget>, int32>& Each : HiddenForBattle)
+	{
+		if (ViewportClient && Each.Key.IsValid())
+		{
+			ViewportClient->AddViewportWidgetContent(Each.Key.ToSharedRef(), Each.Value);
+		}
+	}
+	HiddenForBattle.Reset();
+	if (const UHexPlanetLayers* LayerSet = UHexPlanetLayers::Get(GetWorld()))
+	{
+		for (const EHexPlanetLayer Layer : {EHexPlanetLayer::Surface, EHexPlanetLayer::Underground})
+		{
+			if (AHexPlanet* Each = LayerSet->GetPlanet(Layer))
+			{
+				Each->SetBattleHidden(false);
+			}
+		}
+	}
+	if (AHexPlanetCameraPawn* CameraPawn = GetCameraPawn())
+	{
+		CameraPawn->SetBattleShown(false);
+		SetViewTarget(CameraPawn);
+	}
+	UE_LOG(LogHexHero, Log, TEXT("Battle: back on the planet"));
+}
+
 void AHexPlanetPlayerController::ClickGame(bool bDouble)
 {
+	// a click on the field of a battle, but on its buttons, is an order
+	if (IsBattleShown())
+	{
+		if (!(BattlePanel.IsValid() && BattlePanel->IsCursorOnButtons()))
+		{
+			BattleArena->Click();
+		}
+		return;
+	}
 	const AHexPlanet* Planet = GetPlanet();
 	UHexHeroes* Heroes = GetHeroes();
 	// a person plays on its turn alone
@@ -322,7 +472,75 @@ void AHexPlanetPlayerController::ClickGame(bool bDouble)
 
 bool AHexPlanetPlayerController::IsCursorOnUi() const
 {
-	return (EdgeMarkers.IsValid() && EdgeMarkers->IsCursorOnMarks()) || (CastlePanel.IsValid() && CastlePanel->IsUnderCursor());
+	return (EdgeMarkers.IsValid() && EdgeMarkers->IsCursorOnMarks()) || (CastlePanel.IsValid() && CastlePanel->IsUnderCursor())
+		|| (BattlePanel.IsValid() && BattlePanel->IsCursorOnButtons());
+}
+
+void AHexPlanetPlayerController::UpdateGameCursor(bool bRay, const FVector& Origin, const FVector& Direction)
+{
+	if (!GameCursor.IsValid())
+	{
+		return;
+	}
+	EHexCursor Cursor = EHexCursor::Default;
+	float Angle = 0.0f;
+	const bool bBlocked = MapMenu.IsValid() || Dialog.IsValid() || (CheatSheet.IsValid() && CheatSheet->GetVisibility().IsVisible()) || IsCursorOnUi()
+		|| AHexCameraPawn::IsCursorOnClickable(this);
+	if (bBlocked)
+	{
+		Cursor = EHexCursor::Default;
+	}
+	else if (IsBattleShown())
+	{
+		FVector From;
+		FVector To;
+		Cursor = BattleArena->GetCursor(From, To);
+		FVector2D FromScreen;
+		FVector2D ToScreen;
+		// the sword points from the hex it strikes from to the one it strikes, as they lie on the screen
+		if (Cursor == EHexCursor::BattleStrike && ProjectWorldLocationToScreen(From, FromScreen) && ProjectWorldLocationToScreen(To, ToScreen))
+		{
+			const FVector2D Way = ToScreen - FromScreen;
+			Angle = FMath::RadiansToDegrees(FMath::Atan2(Way.Y, Way.X));
+		}
+	}
+	else if (const AHexPlanet* Planet = GetPlanet(); Planet && IsPlayMode() && !IsBrushArmed())
+	{
+		UHexHeroes* Heroes = GetHeroes();
+		bool bCastle = false;
+		if (int32 Id = 0; EdgeMarkers.IsValid() && EdgeMarkers->GetHovered(bCastle, Id))
+		{
+			Cursor = EHexCursor::Choose;
+		}
+		else if (Heroes && MouseCell != INDEX_NONE)
+		{
+			const FHexHero* Under = bRay ? Heroes->FindHeroAlongRay(Planet->GetLayer(), Origin, Direction) : nullptr;
+			EHexPlanetLayer Layer = Planet->GetLayer();
+			int32 Cell = MouseCell;
+			const bool bMouth = !Under && FindMouthUnderCursor(Layer, Cell);
+			switch (Heroes->GetOrderAt(Layer, Cell, Under, bMouth))
+			{
+			case UHexHeroes::EOrder::Choose: Cursor = EHexCursor::Choose; break;
+			case UHexHeroes::EOrder::Move: Cursor = EHexCursor::Move; break;
+			case UHexHeroes::EOrder::MoveLater: Cursor = EHexCursor::MoveLater; break;
+			case UHexHeroes::EOrder::Blocked: Cursor = EHexCursor::Blocked; break;
+			case UHexHeroes::EOrder::Attack: Cursor = EHexCursor::Attack; break;
+			case UHexHeroes::EOrder::Castle: Cursor = EHexCursor::Castle; break;
+			case UHexHeroes::EOrder::Visit: Cursor = EHexCursor::Visit; break;
+			case UHexHeroes::EOrder::Portal: Cursor = EHexCursor::Portal; break;
+			case UHexHeroes::EOrder::Swap: Cursor = EHexCursor::Swap; break;
+			default: break;
+			}
+		}
+	}
+	GameCursor->SetCursor(Cursor, Angle);
+	// the cursor of the system hides while the game draws its own
+	const EMouseCursor::Type System = GameCursor->UsesSystemCursor() ? EMouseCursor::Default : EMouseCursor::None;
+	if (CurrentMouseCursor != System)
+	{
+		CurrentMouseCursor = System;
+		FSlateApplication::Get().QueryCursor();
+	}
 }
 
 bool AHexPlanetPlayerController::LocateForMarker(const FVector3d& Point, EHexPlanetLayer Layer, FVector2D& OutScreen, FVector2D& OutDirection) const
@@ -469,6 +687,12 @@ void AHexPlanetPlayerController::OnHeroSent(int32 Id)
 
 void AHexPlanetPlayerController::OrderGame()
 {
+	// the right button keeps the spell chosen on the field
+	if (IsBattleShown())
+	{
+		BattleArena->Cancel();
+		return;
+	}
 	const AHexPlanet* Planet = GetPlanet();
 	UHexHeroes* Heroes = GetHeroes();
 	if (!Planet || !Heroes || !Heroes->IsPersonTurn() || IsBrushArmed() || MouseCell == INDEX_NONE)
@@ -512,6 +736,12 @@ void AHexPlanetPlayerController::OrderGame()
 
 void AHexPlanetPlayerController::SkipHero()
 {
+	// on the field of a battle the key that leaves a hero for today has the stack wait
+	if (IsBattleShown())
+	{
+		BattleArena->OrderWait();
+		return;
+	}
 	if (CastlePanel.IsValid())
 	{
 		CastlePanel->Close();
@@ -525,6 +755,12 @@ void AHexPlanetPlayerController::SkipHero()
 
 void AHexPlanetPlayerController::WalkHero()
 {
+	// and the key that sends a hero has it defend
+	if (IsBattleShown())
+	{
+		BattleArena->OrderDefend();
+		return;
+	}
 	UHexHeroes* Heroes = GetHeroes();
 	if (!Heroes || !Heroes->IsPlaying())
 	{
@@ -590,6 +826,10 @@ void AHexPlanetPlayerController::ShowHero(int32 Id)
 
 void AHexPlanetPlayerController::SelectNextHero()
 {
+	if (IsBattleShown())
+	{
+		return;
+	}
 	if (CastlePanel.IsValid())
 	{
 		CastlePanel->Close();
@@ -603,6 +843,10 @@ void AHexPlanetPlayerController::SelectNextHero()
 
 void AHexPlanetPlayerController::EndHeroTurn()
 {
+	if (IsBattleShown())
+	{
+		return;
+	}
 	if (CastlePanel.IsValid())
 	{
 		CastlePanel->Close();
@@ -668,8 +912,20 @@ void AHexPlanetPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReaso
 		{
 			ViewportClient->RemoveViewportWidgetContent(TravelScreen.ToSharedRef());
 		}
+
+		if (GameCursor.IsValid())
+		{
+			ViewportClient->RemoveViewportWidgetContent(GameCursor.ToSharedRef());
+		}
+
+		if (CheatSheet.IsValid())
+		{
+			ViewportClient->RemoveViewportWidgetContent(CheatSheet.ToSharedRef());
+		}
 	}
 
+	GameCursor.Reset();
+	CheatSheet.Reset();
 	TravelScreen.Reset();
 	HeroPanel.Reset();
 	EdgeMarkers.Reset();
@@ -686,6 +942,11 @@ void AHexPlanetPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReaso
 
 void AHexPlanetPlayerController::OpenMapMenu()
 {
+	// a battle is fought to its end first
+	if (IsBattleShown())
+	{
+		return;
+	}
 	UGameViewportClient* ViewportClient = GetWorld()->GetGameViewport();
 
 	if (MapMenu.IsValid() || !ViewportClient)
@@ -833,6 +1094,25 @@ void AHexPlanetPlayerController::ToggleKeyLegend()
 	}
 }
 
+FString AHexPlanetPlayerController::DescribeGameCursor() const
+{
+	if (!GameCursor.IsValid())
+	{
+		return TEXT("no cursor of the game");
+	}
+	const UEnum* Cursors = StaticEnum<EHexCursor>();
+	return FString::Printf(TEXT("the game cursor %s%s"), Cursors ? *Cursors->GetNameStringByValue(int64(GameCursor->GetGameCursor())) : TEXT("?"),
+		GameCursor->UsesSystemCursor() ? TEXT(" (without a picture, the system cursor shows)") : TEXT(""));
+}
+
+void AHexPlanetPlayerController::ToggleCheatSheet()
+{
+	if (CheatSheet.IsValid())
+	{
+		CheatSheet->SetVisibility(CheatSheet->GetVisibility().IsVisible() ? EVisibility::Collapsed : EVisibility::HitTestInvisible);
+	}
+}
+
 void AHexPlanetPlayerController::UpdateLegend()
 {
 	// the legend asset lists the keys of both levels, of which each binds only some, once the pawn is possessed
@@ -875,6 +1155,21 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 
 	if (!Planet || !Planet->IsBuilt())
 	{
+		UpdateGameCursor(false, FVector::ZeroVector, FVector::ZeroVector);
+		return;
+	}
+
+	// a battle on its field takes the mouse, and the planet waits
+	if (IsBattleShown())
+	{
+		FVector Origin;
+		FVector Direction;
+		const bool bRay = DeprojectMousePositionToWorld(Origin, Direction);
+		if (bRay)
+		{
+			BattleArena->SetHover(Origin, Direction);
+		}
+		UpdateGameCursor(bRay, Origin, Direction);
 		return;
 	}
 
@@ -959,6 +1254,11 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 			Heroes->OnHeroTravelled.AddUObject(this, &AHexPlanetPlayerController::OnHeroTravelled);
 			Heroes->OnHeroChosen.AddUObject(this, &AHexPlanetPlayerController::OnHeroChosen);
 			Heroes->OnHeroSent.AddUObject(this, &AHexPlanetPlayerController::OnHeroSent);
+			if (UHexBattles* Battles = Heroes->GetBattles())
+			{
+				Battles->OnShown.AddUObject(this, &AHexPlanetPlayerController::OnBattleShown);
+				Battles->OnClosed.AddUObject(this, &AHexPlanetPlayerController::OnBattleClosed);
+			}
 		}
 		FVector3d FollowDirection;
 		if (AHexPlanetCameraPawn* FollowPawn = GetCameraPawn(); FollowPawn && Heroes->GetFollowDirection(Planet->GetLayer(), FollowDirection))
@@ -966,6 +1266,7 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 			FollowPawn->Follow(FVector(FollowDirection));
 		}
 	}
+	UpdateGameCursor(Cell != INDEX_NONE, Origin, Direction);
 	// the walls of the underground dissolve in front of the point under the cursor, as in a game seen from above (M_HexUndergroundWall)
 	const int32 WallFade = CVarPlanetWallFade.GetValueOnGameThread();
 	if (WallFade == 2)
@@ -1231,6 +1532,10 @@ bool AHexPlanetPlayerController::IsBrushArmed() const
 
 void AHexPlanetPlayerController::TravelToLayer(EHexPlanetLayer Layer)
 {
+	if (IsBattleShown())
+	{
+		return;
+	}
 	if (AHexPlanetCameraPawn* CameraPawn = GetCameraPawn(); CameraPawn && CameraPawn->GetShownLayer() != Layer && !CameraPawn->IsTravelling())
 	{
 		CameraPawn->TravelTo(Layer);
@@ -1262,6 +1567,10 @@ void AHexPlanetPlayerController::SetTravelScreen(bool bShown)
 
 void AHexPlanetPlayerController::SetPaintMode(bool bOn)
 {
+	if (IsBattleShown())
+	{
+		return;
+	}
 	UHexPlanetPainter* Brush = GetPainter();
 	UGameViewportClient* ViewportClient = GetWorld()->GetGameViewport();
 

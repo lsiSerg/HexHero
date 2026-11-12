@@ -9,6 +9,7 @@
 #include "HexPlanetSurface.h"
 #include "UObject/Object.h"
 #include "HexCastles.h"
+#include "HexNeutrals.h"
 #include "HexPlanetPainter.generated.h"
 
 class AHexPlanet;
@@ -57,6 +58,9 @@ enum class EHexPaintTool : uint8
 	/** Puts a castle of the faction and the owner chosen on the cell clicked and the two around its corner nearest the cursor, or takes the
 	 *  one there away with Ctrl (UHexCastles), as a step of Undo */
 	Castle,
+	/** Puts a neutral stack of the creature and count chosen on a cell of either layer, or takes the one there away with Ctrl (UHexNeutrals),
+	 *  as a step of Undo */
+	Neutral,
 };
 
 /** What a click of the brush in relief mode does to the mountains and hills under it, once per cell and stroke */
@@ -120,10 +124,13 @@ enum class EHexPaintTab : uint8
 	CaveSites,
 	/** The castles of the surface */
 	Castles,
+	/** The neutral stacks of the surface and of the underground */
+	Neutrals,
+	CaveNeutrals,
 };
 
 /** Number of tabs of the palette */
-constexpr int32 NumPaintTabs = 13;
+constexpr int32 NumPaintTabs = 15;
 
 /** Old and new levels, biomes, relief, objects, rivers and entrances of the cells of one step of Undo, a stroke or a button */
 struct FHexPaintStep
@@ -143,6 +150,13 @@ struct FHexPaintStep
 	TMap<int32, float> OldWalls;
 	TMap<int32, float> NewWalls;
 
+	/** The cells of the underground a step of the surface changed with its own, the wall made under the mountain an entrance it put is built
+	 *  into (AHexPlanet::FitEntrances), before and after, as the developer asked on 2026-11-12 for that wall to be undone with its entrance */
+	TMap<int32, int32> OldCaveLevels;
+	TMap<int32, int32> NewCaveLevels;
+	TMap<int32, int32> OldCaveBiomes;
+	TMap<int32, int32> NewCaveBiomes;
+
 	/** All the entrances before and after, when the step changed them (AHexPlanet::SetEntrances) */
 	bool bEntrances = false;
 	TArray<FHexEntrance> OldEntrances;
@@ -157,6 +171,11 @@ struct FHexPaintStep
 	bool bSites = false;
 	TArray<FHexSiteLine> OldSites;
 	TArray<FHexSiteLine> NewSites;
+
+	/** All the neutral stacks before and after, as lines of neutrals.json, when the step placed or took away one (UHexNeutrals::SetLines) */
+	bool bNeutrals = false;
+	TArray<FHexNeutralLine> OldNeutrals;
+	TArray<FHexNeutralLine> NewNeutrals;
 
 	/** All the castles before and after, as lines of castles.json, when the step placed or took away one (UHexCastles::SetLines) */
 	bool bCastles = false;
@@ -175,9 +194,9 @@ struct FHexPaintStep
 	/** Returns true if the step changes nothing */
 	bool IsEmpty() const
 	{
-		return NewLevels.IsEmpty() && NewBiomes.IsEmpty() && NewRelief.IsEmpty() && NewObjects.IsEmpty() && NewRivers.IsEmpty() && NewWalls.IsEmpty()
+		return NewLevels.IsEmpty() && NewBiomes.IsEmpty() && NewRelief.IsEmpty() && NewObjects.IsEmpty() && NewRivers.IsEmpty() && NewWalls.IsEmpty() && NewCaveLevels.IsEmpty()
 			&& !(bEntrances && OldEntrances != NewEntrances) && !(bSeedOffset && OldSeedOffset != NewSeedOffset) && !(bHeroes && OldHeroes != NewHeroes)
-			&& !(bSites && OldSites != NewSites) && !(bCastles && OldCastles != NewCastles);
+			&& !(bSites && OldSites != NewSites) && !(bCastles && OldCastles != NewCastles) && !(bNeutrals && OldNeutrals != NewNeutrals);
 	}
 };
 
@@ -397,6 +416,23 @@ public:
 	int32 GetCastleOwner() const { return CastleOwner; }
 	void SetCastleOwner(int32 InOwner) { CastleOwner = FMath::Max(InOwner, -1); }
 
+	/** Returns true while the brush places neutral stacks, and what it places: a creature of a faction by its level from 0, upgraded or not,
+	 *  so many of it */
+	bool IsPlacingNeutrals() const { return Tool == EHexPaintTool::Neutral; }
+	void SetNeutralTool() { SetTool(EHexPaintTool::Neutral, Target == EHexPlanetLayer::Underground ? EHexPaintTab::CaveNeutrals : EHexPaintTab::Neutrals); }
+	int32 GetNeutralFaction() const { return NeutralFaction; }
+	void SetNeutralFaction(int32 InFaction) { NeutralFaction = FMath::Max(InFaction, 0); }
+	int32 GetNeutralLevel() const { return NeutralLevel; }
+	void SetNeutralLevel(int32 InLevel) { NeutralLevel = FMath::Clamp(InLevel, 0, NumCreatureLevels - 1); }
+	int32 GetNeutralCount() const { return NeutralCount; }
+	void SetNeutralCount(int32 InCount) { NeutralCount = FMath::Max(InCount, 1); }
+	bool IsNeutralUpgraded() const { return bNeutralUpgraded; }
+	void SetNeutralUpgraded(bool bOn) { bNeutralUpgraded = bOn; }
+
+	/** Scatters neutral stacks over both layers in place of all there are (UHexNeutrals::Generate), or takes them all away, as one step of
+	 *  Undo; false if nothing changed */
+	bool GenerateNeutrals(bool bClear = false);
+
 	/** The kind of the sites a click places, an index into DA_HexSites */
 	int32 GetSiteKind() const { return SiteKind; }
 	void SetSiteKind(int32 InKind) { SiteKind = FMath::Max(InKind, 0); }
@@ -470,7 +506,7 @@ public:
 	bool UsesBrushSize() const
 	{
 		return Tool != EHexPaintTool::Entrance && Tool != EHexPaintTool::EntranceTurn && Tool != EHexPaintTool::EntranceRemove && Tool != EHexPaintTool::Carve && Tool != EHexPaintTool::River && Tool != EHexPaintTool::Bridge && Tool != EHexPaintTool::Placed
-			&& Tool != EHexPaintTool::Hero && Tool != EHexPaintTool::Site && Tool != EHexPaintTool::Castle;
+			&& Tool != EHexPaintTool::Hero && Tool != EHexPaintTool::Site && Tool != EHexPaintTool::Castle && Tool != EHexPaintTool::Neutral;
 	}
 
 	/** Returns how many rings of cells the outline of the brush shows: its size, or one cell for the tools that ignore the size */
@@ -525,7 +561,8 @@ private:
 
 	/** The tool each tab had last, by EHexPaintTab */
 	EHexPaintTool TabTools[NumPaintTabs] = {EHexPaintTool::Level, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None,
-		EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::Level, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None};
+		EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::Level, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None,
+		EHexPaintTool::None, EHexPaintTool::None};
 
 	bool bActive = false;
 	bool bPainting = false;
@@ -560,6 +597,10 @@ private:
 	int32 CastleFaction = 0;
 	int32 CastleOwner = 0;
 	int32 SiteKind = 0;
+	int32 NeutralFaction = 0;
+	int32 NeutralLevel = 0;
+	int32 NeutralCount = 10;
+	bool bNeutralUpgraded = false;
 
 	/** Last cell under the cursor in the stroke, and the cell the stroke of the carving brush began at */
 	int32 LastCell = INDEX_NONE;
@@ -632,6 +673,7 @@ private:
 	/** Puts a mine or a pile of the kind chosen on a cell, or takes the one there away, at once, as part of the stroke */
 	void PaintSite(int32 Cell);
 	void PaintCastle(int32 Cell);
+	void PaintNeutral(int32 Cell);
 
 	/** Makes the stroke of the carving brush the passage along the shortest way from where it began to a cell */
 	void PaintCarve(int32 Cell);
@@ -643,6 +685,9 @@ private:
 	void Apply(const TMap<int32, int32>& Levels, const TMap<int32, int32>& Biomes, const HexPlanetSurface::FReliefOverrides& Relief = {},
 		const TMap<int32, FHexCellObjects>& Objects = {}, const TMap<uint64, uint8>& Rivers = {}, const TArray<FHexEntrance>* Entrances = nullptr,
 		const int32* SeedOffset = nullptr, const TMap<int32, float>& Walls = {});
+
+	/** Gives the underground the cells of it a step of the surface changed (FHexPaintStep::OldCaveLevels and the rest) */
+	void ApplyCave(const TMap<int32, int32>& Levels, const TMap<int32, int32>& Biomes);
 
 	/** Puts into a step that the walls along a cell go back to the height of its style, where the step changes what the cell is to the walls (a
 	 *  passage, or a void of another style, AHexPlanet::GetWallStyle) and a height set by hand stands for them, so painting a lake or lava lowers

@@ -219,9 +219,10 @@ public:
 	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=0.05, ClampMax=5))
 	float SiteWalkTime = 0.7f;
 
-	/** A castle opens the fog of war for its owner too, this many times as far as a hero, as the developer asked on 2026-11-11 */
+	/** A castle opens the fog of war for its owner too, this many times as far as a hero, as the developer asked on 2026-11-11 (3 then;
+	 *  1.5 since 2026-11-12, as 15 steps opened 18% of Small at the start), rounded to whole steps */
 	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=0, ClampMax=10))
-	float CastleSightFactor = 3.0f;
+	float CastleSightFactor = 1.5f;
 
 	/** A player the game moves by itself (the Heroes tab of the palette, kept in heroes.json) sends its heroes to open the map, each to the
 	 *  nearest cell from which it sees ground its player has not explored: seconds a hero of such a player stands before it sets out again */

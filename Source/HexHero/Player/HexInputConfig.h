@@ -95,6 +95,10 @@ public:
 	UPROPERTY(EditAnywhere, Category="Input")
 	TObjectPtr<UInputAction> KeyLegendAction;
 
+	/** Shows and hides the sheet of the cheats and console commands over the screen (Ctrl+H) */
+	UPROPERTY(EditAnywhere, Category="Input")
+	TObjectPtr<UInputAction> CheatSheetAction;
+
 	/** Turns painting the levels of the planet on or off, with its palette */
 	UPROPERTY(EditAnywhere, Category="Input|Painting")
 	TObjectPtr<UInputAction> PaintModeAction;

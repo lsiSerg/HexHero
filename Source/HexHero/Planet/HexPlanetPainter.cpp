@@ -146,6 +146,8 @@ FText UHexPlanetPainter::GetTabName(EHexPaintTab Tab)
 	case EHexPaintTab::Sites:
 	case EHexPaintTab::CaveSites: return LOCTEXT("TabSites", "Mines");
 	case EHexPaintTab::Castles: return LOCTEXT("TabCastles", "Castles");
+	case EHexPaintTab::Neutrals:
+	case EHexPaintTab::CaveNeutrals: return LOCTEXT("TabNeutrals", "Neutrals");
 	case EHexPaintTab::Maze: return LOCTEXT("TabMaze", "Maze");
 	case EHexPaintTab::Links: return LOCTEXT("TabLinks", "Links");
 	default: return LOCTEXT("TabCaveObjects", "Objects");
@@ -721,12 +723,12 @@ void UHexPlanetPainter::ContinueStroke(int32 Cell)
 		LastCell = Cell;
 		return;
 	}
-	// a hero goes on the cell pressed alone, and so do a mine, a pile and a castle
-	if (Tool == EHexPaintTool::Hero || Tool == EHexPaintTool::Site || Tool == EHexPaintTool::Castle)
+	// a hero goes on the cell pressed alone, and so do a mine, a pile, a castle and a neutral stack
+	if (Tool == EHexPaintTool::Hero || Tool == EHexPaintTool::Site || Tool == EHexPaintTool::Castle || Tool == EHexPaintTool::Neutral)
 	{
 		if (LastCell == INDEX_NONE)
 		{
-			Tool == EHexPaintTool::Hero ? PaintHero(Cell) : Tool == EHexPaintTool::Site ? PaintSite(Cell) : PaintCastle(Cell);
+			Tool == EHexPaintTool::Hero ? PaintHero(Cell) : Tool == EHexPaintTool::Site ? PaintSite(Cell) : Tool == EHexPaintTool::Neutral ? PaintNeutral(Cell) : PaintCastle(Cell);
 		}
 		LastCell = Cell;
 		return;
@@ -970,6 +972,69 @@ void UHexPlanetPainter::PaintSite(int32 Cell)
 	Stroke.NewSites = Sites->MakeLines();
 }
 
+void UHexPlanetPainter::PaintNeutral(int32 Cell)
+{
+	UHexHeroes* Heroes = Planet ? Planet->GetHeroes() : nullptr;
+	UHexNeutrals* Neutrals = Heroes ? Heroes->GetNeutrals() : nullptr;
+	if (!Neutrals)
+	{
+		return;
+	}
+	// the stacks before, for Undo
+	if (!Stroke.bNeutrals)
+	{
+		Stroke.bNeutrals = true;
+		Stroke.OldNeutrals = Neutrals->MakeLines();
+	}
+	if (IsBackwards())
+	{
+		Neutrals->RemoveAt(Target, Cell);
+	}
+	else
+	{
+		FString Problem;
+		if (Neutrals->Add(Target, Cell, FHexStack{NeutralFaction, NeutralLevel, bNeutralUpgraded, NeutralCount}, Problem) == 0 && GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(INDEX_NONE, 3.0f, FColor::Yellow, FString::Printf(TEXT("No stack stands there: %s"), *Problem));
+		}
+	}
+	Stroke.NewNeutrals = Neutrals->MakeLines();
+}
+
+bool UHexPlanetPainter::GenerateNeutrals(bool bClear)
+{
+	UHexHeroes* Heroes = Planet ? Planet->GetHeroes() : nullptr;
+	UHexNeutrals* Neutrals = Heroes ? Heroes->GetNeutrals() : nullptr;
+	if (bPainting || !Neutrals || Heroes->IsPlaying())
+	{
+		return false;
+	}
+	FHexPaintStep Step;
+	Step.bNeutrals = true;
+	Step.OldNeutrals = Neutrals->MakeLines();
+	FString Report = TEXT("all taken away");
+	if (bClear)
+	{
+		Neutrals->Clear();
+	}
+	else
+	{
+		Neutrals->Generate(Report);
+	}
+	Step.NewNeutrals = Neutrals->MakeLines();
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(INDEX_NONE, 6.0f, FColor::White, FString::Printf(TEXT("Neutrals: %s"), *Report));
+	}
+	if (Step.IsEmpty())
+	{
+		return false;
+	}
+	AddStep(MoveTemp(Step));
+	UpdateSavedState();
+	return true;
+}
+
 void UHexPlanetPainter::PaintCastle(int32 Cell)
 {
 	UHexHeroes* Heroes = Planet ? Planet->GetHeroes() : nullptr;
@@ -1138,12 +1203,27 @@ void UHexPlanetPainter::PaintEntrance(int32 Cell)
 	}
 	Stroke.NewEntrances = New;
 	Planet->SetEntrances(New, true);
-	// and the wall its exit is built into: the cell under the mountain becomes void, outside the steps of Undo, as a step holds one layer.
-	// The mountain itself is of the stroke: raised here too, it left the tile of the stroke standing as a grey hex, as nothing was built
-	// again to take it away
+	// and the wall its exit is built into: the cell under the mountain becomes void, in the same step, which keeps what it changed
+	// underground apart from the cells of its own layer, so Undo takes it back with the entrance. The mountain itself is of the stroke:
+	// raised here too, it left the tile of the stroke standing as a grey hex, as nothing was built again to take it away
 	if (!bRemove)
 	{
-		Planet->FitEntrances(Cell, false);
+		TMap<int32, int32> OldCaveLevels;
+		TMap<int32, int32> OldCaveBiomes;
+		Planet->FitEntrances(Cell, false, &OldCaveLevels, &OldCaveBiomes);
+		if (const AHexPlanet* Underground = OldCaveLevels.IsEmpty() ? nullptr : Planet->GetLayerPlanet(EHexPlanetLayer::Underground))
+		{
+			for (const TPair<int32, int32>& Each : OldCaveLevels)
+			{
+				if (!Stroke.OldCaveLevels.Contains(Each.Key))
+				{
+					Stroke.OldCaveLevels.Add(Each.Key, Each.Value);
+					Stroke.OldCaveBiomes.Add(Each.Key, OldCaveBiomes.FindRef(Each.Key));
+				}
+				Stroke.NewCaveLevels.Add(Each.Key, Underground->GetCellLevel(Each.Key));
+				Stroke.NewCaveBiomes.Add(Each.Key, Underground->GetCellBiome(Each.Key));
+			}
+		}
 	}
 	UE_LOG(LogHexHero, Log, TEXT("Painter: %s the entrance of network %c on cell %d, %d entrances"), bRemove ? TEXT("took away") : TEXT("put"),
 		HexPlanetFile::GetNetworkLetter(bRemove ? Old[Index].Network : Network), Cell, New.Num());
@@ -1586,6 +1666,7 @@ void UHexPlanetPainter::Undo()
 	FHexPaintStep Step = GetLayerState().UndoSteps.Pop();
 	Apply(Step.OldLevels, Step.OldBiomes, Step.OldRelief, Step.OldObjects, Step.OldRivers, Step.bEntrances ? &Step.OldEntrances : nullptr,
 		Step.bSeedOffset ? &Step.OldSeedOffset : nullptr, Step.OldWalls);
+	ApplyCave(Step.OldCaveLevels, Step.OldCaveBiomes);
 	if (UHexHeroes* Heroes = Step.bHeroes && Planet ? Planet->GetHeroes() : nullptr)
 	{
 		Heroes->SetLines(Step.OldHeroes);
@@ -1597,6 +1678,10 @@ void UHexPlanetPainter::Undo()
 	if (UHexHeroes* Heroes = Step.bCastles && Planet ? Planet->GetHeroes() : nullptr)
 	{
 		Heroes->GetCastles()->SetLines(Step.OldCastles);
+	}
+	if (UHexHeroes* Heroes = Step.bNeutrals && Planet ? Planet->GetHeroes() : nullptr)
+	{
+		Heroes->GetNeutrals()->SetLines(Step.OldNeutrals);
 	}
 	GetLayerState().RedoSteps.Add(MoveTemp(Step));
 	UpdateSavedState();
@@ -1612,6 +1697,7 @@ void UHexPlanetPainter::Redo()
 	FHexPaintStep Step = GetLayerState().RedoSteps.Pop();
 	Apply(Step.NewLevels, Step.NewBiomes, Step.NewRelief, Step.NewObjects, Step.NewRivers, Step.bEntrances ? &Step.NewEntrances : nullptr,
 		Step.bSeedOffset ? &Step.NewSeedOffset : nullptr, Step.NewWalls);
+	ApplyCave(Step.NewCaveLevels, Step.NewCaveBiomes);
 	if (UHexHeroes* Heroes = Step.bHeroes && Planet ? Planet->GetHeroes() : nullptr)
 	{
 		Heroes->SetLines(Step.NewHeroes);
@@ -1623,6 +1709,10 @@ void UHexPlanetPainter::Redo()
 	if (UHexHeroes* Heroes = Step.bCastles && Planet ? Planet->GetHeroes() : nullptr)
 	{
 		Heroes->GetCastles()->SetLines(Step.NewCastles);
+	}
+	if (UHexHeroes* Heroes = Step.bNeutrals && Planet ? Planet->GetHeroes() : nullptr)
+	{
+		Heroes->GetNeutrals()->SetLines(Step.NewNeutrals);
 	}
 	GetLayerState().UndoSteps.Add(MoveTemp(Step));
 	UpdateSavedState();
@@ -1997,6 +2087,16 @@ void UHexPlanetPainter::Apply(const TMap<int32, int32>& Levels, const TMap<int32
 		Planet->MarkLevelsEdited(true);
 	}
 	UpdatePreview(int32(Target));
+}
+
+void UHexPlanetPainter::ApplyCave(const TMap<int32, int32>& Levels, const TMap<int32, int32>& Biomes)
+{
+	AHexPlanet* Underground = Levels.IsEmpty() || !Planet ? nullptr : Planet->GetLayerPlanet(EHexPlanetLayer::Underground);
+	if (Underground)
+	{
+		Underground->SetCells(Levels, Biomes);
+		Underground->MarkLevelsEdited(true);
+	}
 }
 
 void UHexPlanetPainter::OnLevelsRebuilt(int32 Layer)

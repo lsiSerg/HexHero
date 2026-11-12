@@ -70,6 +70,31 @@ namespace
 		return Creature;
 	}
 
+	/** The bits of abilities */
+	int32 Bits(std::initializer_list<EHexAbility> Abilities)
+	{
+		int32 Mask = 0;
+		for (const EHexAbility Ability : Abilities)
+		{
+			Mask |= 1 << int32(Ability);
+		}
+		return Mask;
+	}
+
+	/** What a creature can do in a battle, by its role, as the developer chose the roles on 2026-11-12 after references of the genre: the
+	 *  abilities of its basic version and what its upgraded one has more, the shots of one that shoots (twice as many upgraded), its own
+	 *  morale and the luck of its upgraded version; Claude's choice */
+	FHexCreature With(FHexCreature Creature, int32 BaseAbilities, int32 UpgradedAbilities, int32 Shots = 0, int32 Morale = 0, int32 UpgradedLuck = 0)
+	{
+		Creature.Base.Abilities = BaseAbilities;
+		Creature.Upgraded.Abilities = BaseAbilities | UpgradedAbilities;
+		Creature.Base.Shots = Shots;
+		Creature.Upgraded.Shots = Shots * 2;
+		Creature.Base.Morale = Creature.Upgraded.Morale = Morale;
+		Creature.Upgraded.Luck = UpgradedLuck;
+		return Creature;
+	}
+
 	FHexBuilding MakeHall()
 	{
 		FHexBuilding Hall;
@@ -198,14 +223,16 @@ TArray<FHexFaction> MakeDefaultFactions()
 		Order.Id = TEXT("Dawn");
 		Order.DisplayName = TEXT("Order of Dawn");
 		Order.Color = FLinearColor(0.1f, 0.25f, 0.75f, 1.0f);
+		// the roles of the levels: a spearman, a shooter, a flyer that strikes back twice, a swordsman, a mage that shoots, a rider who charges
+		// and a winged guard of high morale
 		Order.Creatures = {
-			MakeCreature(Make, TEXT("Sentinel"), TEXT("Sentinel"), TEXT("Shieldbearer"), 0, 1.15f, 0.9f, 4),
-			MakeCreature(Make, TEXT("Huntsman"), TEXT("Huntsman"), TEXT("Master huntsman"), 1, 0.8f, 1.1f, 4, true),
-			MakeCreature(Make, TEXT("Glowwing"), TEXT("Glowwing"), TEXT("Sunwing"), 2, 1.0f, 0.95f, 7, false, true),
-			MakeCreature(Make, TEXT("Oathsworn"), TEXT("Oathsworn"), TEXT("Oathblade"), 3, 1.1f, 1.05f, 5),
-			MakeCreature(Make, TEXT("Pilgrim"), TEXT("Pilgrim"), TEXT("Seer"), 4, 0.75f, 1.15f, 5, true),
-			MakeCreature(Make, TEXT("DawnRider"), TEXT("Dawn rider"), TEXT("Dawn herald"), 5, 1.05f, 1.1f, 8),
-			MakeCreature(Make, TEXT("SkyWarden"), TEXT("Sky warden"), TEXT("Eternal warden"), 6, 1.1f, 1.1f, 12, false, true)};
+			With(MakeCreature(Make, TEXT("Sentinel"), TEXT("Sentinel"), TEXT("Shieldbearer"), 0, 1.15f, 0.9f, 4), 0, Bits({EHexAbility::RetaliateTwice})),
+			With(MakeCreature(Make, TEXT("Huntsman"), TEXT("Huntsman"), TEXT("Master huntsman"), 1, 0.8f, 1.1f, 4, true), 0, Bits({EHexAbility::DoubleStrike}), 12),
+			With(MakeCreature(Make, TEXT("Glowwing"), TEXT("Glowwing"), TEXT("Sunwing"), 2, 1.0f, 0.95f, 7, false, true), Bits({EHexAbility::RetaliateTwice}), 0),
+			With(MakeCreature(Make, TEXT("Oathsworn"), TEXT("Oathsworn"), TEXT("Oathblade"), 3, 1.1f, 1.05f, 5), 0, Bits({EHexAbility::DoubleStrike})),
+			With(MakeCreature(Make, TEXT("Pilgrim"), TEXT("Pilgrim"), TEXT("Seer"), 4, 0.75f, 1.15f, 5, true), Bits({EHexAbility::NoMeleePenalty}), 0, 12),
+			With(MakeCreature(Make, TEXT("DawnRider"), TEXT("Dawn rider"), TEXT("Dawn herald"), 5, 1.05f, 1.1f, 8), Bits({EHexAbility::Charge}), 0),
+			With(MakeCreature(Make, TEXT("SkyWarden"), TEXT("Sky warden"), TEXT("Eternal warden"), 6, 1.1f, 1.1f, 12, false, true), 0, Bits({EHexAbility::RetaliateTwice}), 0, 1)};
 		Order.Buildings = {MakeHall(), MakeFort(),
 			MakeDwelling(Make, TEXT("Guardhouse"), TEXT("Shield hall"), 0),
 			MakeDwelling(Make, TEXT("Hunters' lodge"), TEXT("Masters' lodge"), 1),
@@ -228,14 +255,17 @@ TArray<FHexFaction> MakeDefaultFactions()
 		Decay.DisplayName = TEXT("Realm of Decay");
 		Decay.Color = FLinearColor(0.3f, 0.6f, 0.2f, 1.0f);
 		Decay.WallStyle = 1.0f;
+		// the roles of the levels, all undead: a skeleton, a slow tough zombie, a spirit that heals itself and eats mana, a blood drinker
+		// nothing strikes back, a mage whose shot hits an area, a dark rider who charges and a bone dragon whose breath goes on
+		const int32 Undead = Bits({EHexAbility::Undead});
 		Decay.Creatures = {
-			MakeCreature(Make, TEXT("BoneWarrior"), TEXT("Bone warrior"), TEXT("Bone guard"), 0, 0.9f, 1.0f, 4),
-			MakeCreature(Make, TEXT("Decayed"), TEXT("Decayed"), TEXT("Decay bearer"), 1, 1.35f, 0.85f, 3),
-			MakeCreature(Make, TEXT("Shade"), TEXT("Shade"), TEXT("Mana eater"), 2, 0.9f, 1.0f, 7, false, true),
-			MakeCreature(Make, TEXT("BloodDrinker"), TEXT("Blood drinker"), TEXT("Eternal blood drinker"), 3, 1.0f, 1.1f, 6, false, true),
-			MakeCreature(Make, TEXT("AshMage"), TEXT("Ash mage"), TEXT("Ash lord"), 4, 0.8f, 1.2f, 5, true),
-			MakeCreature(Make, TEXT("DecayRider"), TEXT("Decay rider"), TEXT("Abyss rider"), 5, 1.15f, 1.15f, 7),
-			MakeCreature(Make, TEXT("BoneSerpent"), TEXT("Bone serpent"), TEXT("Dusk serpent"), 6, 1.0f, 1.0f, 10, false, true)};
+			With(MakeCreature(Make, TEXT("BoneWarrior"), TEXT("Bone warrior"), TEXT("Bone guard"), 0, 0.9f, 1.0f, 4), Undead, 0),
+			With(MakeCreature(Make, TEXT("Decayed"), TEXT("Decayed"), TEXT("Decay bearer"), 1, 1.35f, 0.85f, 3), Undead, 0),
+			With(MakeCreature(Make, TEXT("Shade"), TEXT("Shade"), TEXT("Mana eater"), 2, 0.9f, 1.0f, 7, false, true), Undead | Bits({EHexAbility::Regenerate}), Bits({EHexAbility::ManaDrain})),
+			With(MakeCreature(Make, TEXT("BloodDrinker"), TEXT("Blood drinker"), TEXT("Eternal blood drinker"), 3, 1.0f, 1.1f, 6, false, true), Undead | Bits({EHexAbility::NoRetaliation}), Bits({EHexAbility::LifeDrain})),
+			With(MakeCreature(Make, TEXT("AshMage"), TEXT("Ash mage"), TEXT("Ash lord"), 4, 0.8f, 1.2f, 5, true), Undead | Bits({EHexAbility::AreaShot}), 0, 12),
+			With(MakeCreature(Make, TEXT("DecayRider"), TEXT("Decay rider"), TEXT("Abyss rider"), 5, 1.15f, 1.15f, 7), Undead | Bits({EHexAbility::Charge}), 0, 0, 0, 2),
+			With(MakeCreature(Make, TEXT("BoneSerpent"), TEXT("Bone serpent"), TEXT("Dusk serpent"), 6, 1.0f, 1.0f, 10, false, true), Undead | Bits({EHexAbility::Breath}), 0)};
 		Decay.Buildings = {MakeHall(), MakeFort(),
 			MakeDwelling(Make, TEXT("Bone yard"), TEXT("Guards' crypt"), 0),
 			MakeDwelling(Make, TEXT("Rot pit"), TEXT("Bearers' pit"), 1),
@@ -267,6 +297,32 @@ void UHexCastleConfig::PostLoad()
 	if (Factions.IsEmpty())
 	{
 		Factions = MakeDefaultFactions();
+		return;
+	}
+	// a config saved before the battles has its creatures without what they do in one: they take it from the defaults of the class by the Ids
+	// of their faction and creature while they still hold none of it, so what was tuned by hand stays
+	const TArray<FHexFaction> Defaults = MakeDefaultFactions();
+	const auto IsBare = [](const FHexCreatureStats& Stats) { return Stats.Abilities == 0 && Stats.Shots == 0 && Stats.Morale == 0 && Stats.Luck == 0; };
+	for (FHexFaction& Faction : Factions)
+	{
+		const FHexFaction* Default = Defaults.FindByPredicate([&Faction](const FHexFaction& Each) { return Each.Id == Faction.Id; });
+		for (FHexCreature& Creature : Faction.Creatures)
+		{
+			const FHexCreature* Made = Default ? Default->Creatures.FindByPredicate([&Creature](const FHexCreature& Each) { return Each.Id == Creature.Id; }) : nullptr;
+			if (!Made || !IsBare(Creature.Base) || !IsBare(Creature.Upgraded))
+			{
+				continue;
+			}
+			for (const bool bUpgraded : {false, true})
+			{
+				FHexCreatureStats& Stats = bUpgraded ? Creature.Upgraded : Creature.Base;
+				const FHexCreatureStats& From = Made->GetStats(bUpgraded);
+				Stats.Abilities = From.Abilities;
+				Stats.Shots = From.Shots;
+				Stats.Morale = From.Morale;
+				Stats.Luck = From.Luck;
+			}
+		}
 	}
 }
 

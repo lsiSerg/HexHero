@@ -2,9 +2,9 @@
 	"version": 1,
 	"ai": [1],
 	"heroes": [
-		{"id": 1, "name": "Bohdan", "class": "Knight", "player": 0, "layer": "Surface", "cell": 3904},
-		{"id": 2, "name": "Veles", "class": "Wizard", "player": 1, "layer": "Surface", "cell": 3943},
-		{"id": 3, "name": "Lada", "class": "Wizard", "player": 0, "layer": "Surface", "cell": 3874},
-		{"id": 4, "name": "Ostap", "class": "Knight", "player": 1, "layer": "Surface", "cell": 3964}
+		{"id": 1, "name": "Bohdan", "class": "Knight", "player": 0, "layer": "Surface", "cell": 3904, "army": [{"faction": "Dawn", "creature": "Sentinel", "upgraded": false, "count": 24}, {"faction": "Dawn", "creature": "Huntsman", "upgraded": false, "count": 10}, {"faction": "Dawn", "creature": "Oathsworn", "upgraded": false, "count": 4}]},
+		{"id": 2, "name": "Veles", "class": "Wizard", "player": 1, "layer": "Surface", "cell": 3943, "army": [{"faction": "Decay", "creature": "BoneWarrior", "upgraded": false, "count": 32}, {"faction": "Decay", "creature": "Decayed", "upgraded": false, "count": 12}, {"faction": "Decay", "creature": "Shade", "upgraded": false, "count": 3}]},
+		{"id": 3, "name": "Lada", "class": "Wizard", "player": 0, "layer": "Surface", "cell": 3874, "army": [{"faction": "Dawn", "creature": "Sentinel", "upgraded": false, "count": 16}, {"faction": "Dawn", "creature": "Huntsman", "upgraded": false, "count": 8}, {"faction": "Dawn", "creature": "Glowwing", "upgraded": false, "count": 3}]},
+		{"id": 4, "name": "Ostap", "class": "Knight", "player": 1, "layer": "Surface", "cell": 3964, "army": [{"faction": "Decay", "creature": "BoneWarrior", "upgraded": false, "count": 28}, {"faction": "Decay", "creature": "Decayed", "upgraded": false, "count": 10}, {"faction": "Decay", "creature": "BloodDrinker", "upgraded": false, "count": 3}]}
 	]
 }

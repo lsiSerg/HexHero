@@ -2,7 +2,10 @@
 
 #include "SHexEdgeMarkers.h"
 #include "HexCastles.h"
+#include "HexCheats.h"
 #include "HexHeroConfig.h"
+#include "HexNeutrals.h"
+#include "HexUiConfig.h"
 #include "HexHeroes.h"
 #include "HexPlanet.h"
 #include "Fonts/FontMeasure.h"
@@ -307,6 +310,67 @@ int32 SHexEdgeMarkers::OnPaint(const FPaintArgs& Args, const FGeometry& Allotted
 	{
 		FSlateDrawElement::MakeBox(OutDrawElements, Layer, AllottedGeometry.ToPaintGeometry(Size, FSlateLayoutTransform(Middle - Size * 0.5)), Brush, ESlateDrawEffect::None, Color);
 	};
+
+	// hex.Cheat enemies: a line up from each neutral stack and hero of another player on the layer shown, with its name over it, under the
+	// fog of war too, as the developer asked on 2026-11-12, but not behind the curve of the planet (OnLocate)
+	if (const UHexHeroes* Source = Heroes.Get(); Source && OnLocate && HexCheats::AreEnemiesMarked() && !(IsBlocked.IsBound() && IsBlocked.Get()))
+	{
+		const UHexUiConfig* Ui = UHexUiConfig::Load();
+		const float Scale = FMath::Max(AllottedGeometry.Scale, 0.01f);
+		const FSlateFontInfo EnemyFont = FCoreStyle::GetDefaultFontStyle("Bold", 9);
+		const auto MarkAt = [&](EHexPlanetLayer At, int32 Cell, const FString& Text, const FLinearColor& Color)
+		{
+			const AHexPlanet* Planet = Source->GetLayerPlanet(At);
+			if (!Planet || !Planet->GetGrid().GetCells().IsValidIndex(Cell))
+			{
+				return;
+			}
+			const FVector3d Point = Planet->GetGrid().GetCells()[Cell].Center * Planet->GetCellTopRadius(Cell);
+			FVector2D Screen;
+			FVector2D Direction;
+			if (!OnLocate(Point, At, Screen, Direction))
+			{
+				return;
+			}
+			const FVector2D Foot = Screen / Scale;
+			const FVector2D Top = Foot - FVector2D(0.0, Ui->EnemyMarkHeight);
+			FSlateDrawElement::MakeLines(OutDrawElements, LayerId, AllottedGeometry.ToPaintGeometry(), {Foot, Top}, ESlateDrawEffect::None, MarkDark, true, 4.0f);
+			FSlateDrawElement::MakeLines(OutDrawElements, LayerId + 1, AllottedGeometry.ToPaintGeometry(), {Foot, Top}, ESlateDrawEffect::None, Color, true, 2.0f);
+			Box(LayerId + 1, Foot, FVector2D(8.0), GetRoundBrush(8.0f), Color);
+			const FVector2D TextSize = Measure->Measure(Text, EnemyFont);
+			const FVector2D BoxSize = TextSize + FVector2D(10.0, 5.0);
+			const FVector2D LabelMiddle = Top - FVector2D(0.0, BoxSize.Y * 0.5);
+			Box(LayerId + 2, LabelMiddle, BoxSize, White, LabelBack);
+			Box(LayerId + 2, LabelMiddle + FVector2D(0.0, BoxSize.Y * 0.5 - 1.0), FVector2D(BoxSize.X, 2.0), White, Color);
+			FSlateDrawElement::MakeText(OutDrawElements, LayerId + 3, AllottedGeometry.ToPaintGeometry(TextSize, FSlateLayoutTransform(LabelMiddle - TextSize * 0.5)), Text, EnemyFont,
+				ESlateDrawEffect::None, FLinearColor::White);
+		};
+		if (const UHexNeutrals* Neutrals = Source->GetNeutrals())
+		{
+			for (const FHexNeutral& Each : Neutrals->GetNeutrals())
+			{
+				const FString Name = Neutrals->GetCreatureName(Each.Stack);
+				MarkAt(Each.Layer, Each.Cell, FString::Printf(TEXT("%d %s"), Each.Stack.Count, Each.Stack.Count == 1 ? *Name : *UHexNeutrals::Plural(Name)), Ui->NeutralMarkColor);
+			}
+		}
+		const TArray<FHexHeroPlayer>& Players = Source->GetConfig() ? Source->GetConfig()->Players : TArray<FHexHeroPlayer>();
+		for (const FHexHero& Hero : Source->GetHeroes())
+		{
+			if (Hero.Player == Source->GetShroudPlayer())
+			{
+				continue;
+			}
+			int32 Creatures = 0;
+			for (const FHexStack& Stack : Hero.Army)
+			{
+				Creatures += Stack.Count;
+			}
+			const FHexHeroPlayer* Owner = Players.IsValidIndex(Hero.Player) ? &Players[Hero.Player] : nullptr;
+			MarkAt(Hero.Layer, Hero.Cell, FString::Printf(TEXT("%s (%s): %d creatures"), *Hero.Name, Owner ? *Owner->Name : TEXT("?"), Creatures),
+				Owner ? Owner->Color : FLinearColor::White);
+		}
+		LayerId += 4;
+	}
 
 	// the one chosen and the one under the cursor over the others
 	TArray<int32> Order;

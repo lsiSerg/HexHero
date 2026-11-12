@@ -11,6 +11,8 @@ class AHexPlanet;
 class SHexDebugOverlay;
 class SHexDialog;
 class SHexCastlePanel;
+class SHexBattlePanel;
+class AHexBattleArena;
 class SHexHeroPanel;
 class SHexModeBar;
 class SHexHoverInfo;
@@ -58,8 +60,27 @@ class AHexPlanetPlayerController : public APlayerController
 	/** The buttons Edit and Play at the top left */
 	TSharedPtr<SHexModeBar> ModeBar;
 
+	/** The cursor of the game, drawn over everything while the cursor of the system is hidden, and the sheet of the cheats (Ctrl+H) */
+	TSharedPtr<class SHexGameCursor> GameCursor;
+	TSharedPtr<class SHexCheatSheet> CheatSheet;
+
+	/** Chooses the cursor of the game for what lies under the mouse, as the developer asked on 2026-11-12: on the field of a battle what a click
+	 *  does there, on the planet while it is played what sending the hero chosen there does (UHexHeroes::GetOrderAt) */
+	void UpdateGameCursor(bool bRay, const FVector& Origin, const FVector& Direction);
+
 	/** The heroes whose messages and trips this controller listens to */
 	TWeakObjectPtr<UHexHeroes> BoundHeroes;
+
+	/** The field of a battle, made the first time one is shown, and its panel while it is */
+	TWeakObjectPtr<AHexBattleArena> BattleArena;
+	TSharedPtr<SHexBattlePanel> BattlePanel;
+
+	/** The widgets of the planet that are taken off the screen while a battle is shown, and their Z order */
+	TArray<TPair<TSharedPtr<SWidget>, int32>> HiddenForBattle;
+
+	/** A battle comes onto its field, or leaves it: the camera, the planet and the widgets change places with it */
+	void OnBattleShown();
+	void OnBattleClosed();
 
 	/** Cell under the cursor in the last tick */
 	int32 MouseCell = INDEX_NONE;
@@ -84,6 +105,12 @@ public:
 
 	/** Shows or hides the legend of the keys */
 	void ToggleKeyLegend();
+
+	/** Shows or hides the sheet of the cheats and console commands over the screen (Ctrl+H), as the developer asked on 2026-11-12 */
+	void ToggleCheatSheet();
+
+	/** Says which cursor of the game is chosen, for hex.Cursor */
+	FString DescribeGameCursor() const;
 
 	/** Asks for the name of the planet and saves it, warning before it writes over another planet; then runs OnSaved */
 	void OpenSavePlanetDialog(TFunction<void()> OnSaved);
@@ -225,6 +252,15 @@ private:
 
 	/** Shows a line of the heroes on the screen, as why one does not go */
 	void OnHeroMessage(const FString& Message);
+
+public:
+
+	/** Whether a battle is shown on its field */
+	bool IsBattleShown() const;
+	AHexBattleArena* GetBattleArena() const { return BattleArena.Get(); }
+
+private:
+
 
 	/** The camera goes with the hero chosen when it goes through an entrance or exit */
 	void OnHeroTravelled(int32 Id);
