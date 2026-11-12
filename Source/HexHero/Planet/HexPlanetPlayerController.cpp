@@ -109,13 +109,15 @@ void AHexPlanetPlayerController::BeginPlay()
 			.GoKeys(InputConfig && InputConfig->HeroSendAction ? InputConfig->GetKeysText(InputConfig->HeroSendAction) : FString());
 		ViewportClient->AddViewportWidgetContent(HeroPanel.ToSharedRef());
 
-		// the marks at the edges of the screen that point to the heroes and castles out of view
+		// the marks at the edges of the screen that point to the heroes and castles out of view, over every other widget of the game, so a click
+		// on a mark that lies over a button is the mark's; below the black of a trip, and gone while the menu or a dialog is open
 		SAssignNew(EdgeMarkers, SHexEdgeMarkers)
 			.OnLocate([WeakThis](const FVector3d& Point, EHexPlanetLayer Layer, FVector2D& OutScreen, FVector2D& OutDirection)
 			{
 				return WeakThis.IsValid() && WeakThis->LocateForMarker(Point, Layer, OutScreen, OutDirection);
-			});
-		ViewportClient->AddViewportWidgetContent(EdgeMarkers.ToSharedRef(), -1);
+			})
+			.IsBlocked_Lambda([WeakThis]() { return WeakThis.IsValid() && (WeakThis->MapMenu.IsValid() || WeakThis->Dialog.IsValid()); });
+		ViewportClient->AddViewportWidgetContent(EdgeMarkers.ToSharedRef(), 100);
 
 		// the panel of a castle, shown while a person looks into one of its own
 		SAssignNew(CastlePanel, SHexCastlePanel)

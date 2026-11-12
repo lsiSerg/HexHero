@@ -13,8 +13,11 @@ class UHexHeroes;
  *  for each on the layer shown that does not show in the view, on the edge in its direction, a round one with a banner for a hero and a square one with
  *  battlements for a castle, in the color of the player, larger and ringed for the one chosen. The mark under the cursor shows the name of
  *  its hero or castle; marks that lie in a heap move apart along the edge while the cursor is on them, so their names do not cover each other,
- *  and the mark of the one chosen always keeps the others off itself. It takes no input itself: the controller asks it what lies under the
- *  cursor when the button is clicked (GetHovered), and a click there chooses and shows that hero or castle
+ *  and the mark of the one chosen always keeps the others off itself. It handles no input itself: the controller asks it what lies under the
+ *  cursor when the button is clicked (GetHovered), and a click there chooses and shows that hero or castle. It stands over every other
+ *  widget of the game and, while the cursor is on its marks, is hit there, so a click on a mark over a button, such as Edit and Play at the
+ *  top left, does not press the button, as the developer asked on 2026-11-12 ("іконки напрямків - найвищий рівень по вводу"): Slate gives the
+ *  click to the marks, which leave it unhandled, so it goes on up to the viewport and the game, as anywhere else on the screen
  */
 class SHexEdgeMarkers : public SLeafWidget
 {
@@ -26,6 +29,8 @@ public:
 
 	SLATE_BEGIN_ARGS(SHexEdgeMarkers) {}
 		SLATE_ARGUMENT(FLocate, OnLocate)
+		/** True while the marks must not show, as while the menu or a dialog is open, which they would stand over */
+		SLATE_ATTRIBUTE(bool, IsBlocked)
 	SLATE_END_ARGS()
 
 	void Construct(const FArguments& InArgs);
@@ -63,6 +68,10 @@ private:
 
 	TWeakObjectPtr<UHexHeroes> Heroes;
 	FLocate OnLocate;
+	TAttribute<bool> IsBlocked;
+
+	/** Hit while the cursor is on the marks, else let through */
+	EVisibility GetMarksVisibility() const;
 	TArray<FMark> Marks;
 
 	/** The mark under the cursor, and the one the heap that moved apart is held around, by index, or INDEX_NONE */

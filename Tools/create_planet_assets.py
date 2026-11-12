@@ -2533,12 +2533,18 @@ return MarkColor.rgb * float3(InstanceR, InstanceG, InstanceB) * VertexRGB.r * M
 """
 # A mark may run: an instance whose fourth custom value, Travel, or sixth, Shrink, is not 0 moves Travel along its own Z over a cycle of
 # 1 / MarkTravelSpeed seconds, from the share Phase of that cycle, growing smaller by Shrink of its size and fading in and out on its way, as
-# the hoops that run from the hoop of an entrance a way goes through do (UHexHeroes::UpdatePath, PathPortal* of DA_HexHeroes)
+# the hoops that run from the hoop of an entrance a way goes through do (UHexHeroes::UpdatePath, PathPortal* of DA_HexHeroes). A mark behind
+# the curve of the planet is hidden, as the auroras are: the line from the camera dips below the sea on its way there (PlanetRadius of
+# MPC_HexPlanet, the layer shown), as the developer found on 2026-11-12 the ring and the way shining through the planet from its other side,
+# where the fog of war leaves the ground undrawn, so nothing in front of them writes depth
 HERO_MARK_OPACITY_CODE = r"""
 float run = frac(Time * MarkTravelSpeed + Phase);
 float running = step(0.001, abs(Travel) + Shrink);
 float shown = lerp(1.0, smoothstep(0.0, 0.18, run) * (1.0 - smoothstep(0.5, 1.0, run)), running);
-return VertexA * MarkOpacity * shown * (1.0 - MarkPulse * (0.5 + 0.5 * sin(Time * MarkPulseSpeed * 6.2831853)));
+float3 toPoint = WorldPos - CameraPos;
+float along = saturate(dot(-CameraPos, toPoint) / max(dot(toPoint, toPoint), 1.0));
+float clear = PlanetRadius > 0.0 ? smoothstep(PlanetRadius - 3.0, PlanetRadius + 1.0, length(CameraPos + toPoint * along)) : 1.0;
+return VertexA * MarkOpacity * shown * clear * (1.0 - MarkPulse * (0.5 + 0.5 * sin(Time * MarkPulseSpeed * 6.2831853)));
 """
 HERO_MARK_OFFSET_CODE = r"""
 float grow = clamp(distance(CameraPos, ObjectPos) / max(MarkFarStart, 1.0), 1.0, max(MarkFarScale, 1.0));
@@ -2619,6 +2625,7 @@ def build_hero_materials():
 
     # the marks of a way are the same material: both test the depth, so a way lies on the ground under the hero and whatever stands on it
     # (until 2026-11-11 a way was drawn over everything); UHexHeroes gives the marks of a way their own MarkOpacity and MarkDepthBias
+    collection = unreal.load_asset(PARAMETER_COLLECTION)
     for path, through in ((HERO_MARK_MATERIAL, False), (HERO_PATH_MATERIAL, False)):
         material = open_material(path)
         material.set_editor_property('blend_mode', unreal.BlendMode.BLEND_TRANSLUCENT)
@@ -2641,6 +2648,9 @@ def build_hero_materials():
             data.set_editor_property('const_default_value', 0.0)
             running.append((name, data, ''))
         travel_speed = ('MarkTravelSpeed', add_scalar(library, material, 'MarkTravelSpeed', 0.7, 1550), '')
+        radius = library.create_material_expression(material, unreal.MaterialExpressionCollectionParameter, -1000, 800)
+        radius.set_editor_property('collection', collection)
+        radius.set_editor_property('parameter_name', 'PlanetRadius')
         color = add_custom(library, material, HERO_MARK_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, [('VertexRGB', vertex_color, ''),
             ('MarkColor', add_vector(library, material, 'MarkColor', unreal.LinearColor(1.0, 1.0, 1.0, 1.0), 100), ''),
             ('MarkBrightness', add_scalar(library, material, 'MarkBrightness', 2.0, 150), '')] + instance, 0)
@@ -2649,7 +2659,10 @@ def build_hero_materials():
             ('Time', library.create_material_expression(material, unreal.MaterialExpressionTime, -1000, 600), ''),
             ('MarkOpacity', add_scalar(library, material, 'MarkOpacity', 1.0, 625), ''),
             ('MarkPulse', add_scalar(library, material, 'MarkPulse', 0.0, 650), ''),
-            ('MarkPulseSpeed', add_scalar(library, material, 'MarkPulseSpeed', 0.6, 700), ''), travel_speed] + running, 600)
+            ('MarkPulseSpeed', add_scalar(library, material, 'MarkPulseSpeed', 0.6, 700), ''), travel_speed] + running + [
+            ('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1000, 750), ''),
+            ('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1000, 775), ''),
+            ('PlanetRadius', radius, '')], 600)
         library.connect_material_property(opacity, '', unreal.MaterialProperty.MP_OPACITY)
         # a mark grows around its middle as the camera leaves it (FarStart, FarScale of DA_HexHeroes), so a way still shows from afar; a ring
         # is scaled with its hero by UHexHeroes, and leaves MarkFarScale at 1

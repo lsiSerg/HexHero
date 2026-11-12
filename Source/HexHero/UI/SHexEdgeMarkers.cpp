@@ -49,9 +49,15 @@ namespace
 void SHexEdgeMarkers::Construct(const FArguments& InArgs)
 {
 	OnLocate = InArgs._OnLocate;
-	// it takes no input: the controller asks it what lies under the cursor
-	SetVisibility(EVisibility::HitTestInvisible);
+	IsBlocked = InArgs._IsBlocked;
+	// hit only while the cursor is on the marks, so what lies under them takes no click there; the click itself it leaves to the game
+	SetVisibility(TAttribute<EVisibility>::CreateSP(this, &SHexEdgeMarkers::GetMarksVisibility));
 	SetCanTick(true);
+}
+
+EVisibility SHexEdgeMarkers::GetMarksVisibility() const
+{
+	return IsCursorOnMarks() ? EVisibility::Visible : EVisibility::HitTestInvisible;
 }
 
 FVector2D SHexEdgeMarkers::GetEdgePoint(float Along, FVector2D& OutInward) const
@@ -104,7 +110,7 @@ void SHexEdgeMarkers::Tick(const FGeometry& AllottedGeometry, const double InCur
 	// what the person who plays has that does not show in the view
 	TArray<FMark> Found;
 	const UHexHeroes* Source = Heroes.Get();
-	const AHexPlanet* Planet = Source && Source->IsPlaying() && Source->GetConfig() && OnLocate ? Source->GetLayerPlanet(EHexPlanetLayer::Surface) : nullptr;
+	const AHexPlanet* Planet = Source && Source->IsPlaying() && Source->GetConfig() && OnLocate && !IsBlocked.Get(false) ? Source->GetLayerPlanet(EHexPlanetLayer::Surface) : nullptr;
 	if (Planet)
 	{
 		const int32 Player = Source->GetShroudPlayer();
