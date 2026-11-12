@@ -525,6 +525,11 @@ float gridLine = saturate((U - (1.0 - width)) / pixel) * saturate(1.5 - pixel * 
 # faces K turns of a side and whose corner K lies half a turn further, so the side and the corner nearest a pixel are found by its angle, in
 # ints, as fmod and exp2 of floats may land just under a whole number and drop to the one before. The first 12 cells are the pentagons.
 # It needs pixel from GRID_LINE_CODE
+# The cells the hero chosen reaches today (AHexPlanet::SetReach, as the developer asked on 2026-11-12) are in CellReach, a pixel per cell as
+# CellMarks: red the bits of the sides of the edge of those cells, green 1 in them. Their edge is a line as an outline is (ReachLine*), with a
+# soft glow of its color that fades inwards over ReachGlowWidth of a cell, the ground outside them takes ReachOutsideShade of
+# ReachOutsideColor and the ground in them ReachInsideTint of ReachInsideColor, all times ReachShown, which the planet eases in and out.
+# It gives reachLine, reachGlow, reachTone and reachToneColor
 MARK_CODE = r'''
 float2 markCell = round(CellUV);
 float4 markPixel = CellMarks.Load(int3(markCell, 0));
@@ -535,7 +540,12 @@ float waterHidden = markPixel.b;
 uint holeBits = MARK_HOLE_BITS;
 float markLine = 0.0;
 float3 markColor = MarkPrimaryColor.rgb;
-if (any(markBits > 0u) || holeBits > 0u)
+float4 reachPixel = CellReach.Load(int3(markCell, 0));
+uint reachBits = ReachShown > 0.0 ? (uint)round(reachPixel.r * 255.0) : 0u;
+float reachInside = reachPixel.g;
+float reachLine = 0.0;
+float reachGlow = 0.0;
+if (any(markBits > 0u) || holeBits > 0u || reachBits > 0u)
 {
     int sides = markCell.y < 0.5 && markCell.x < 11.5 ? 5 : 6;
     float sideTurn = 6.2831853 / sides;
@@ -554,7 +564,17 @@ if (any(markBits > 0u) || holeBits > 0u)
     float hole = max((float)((holeBits >> side) & 1u), (float)((holeBits >> other) & 1u) * miter);
     markLine = band * max(max(primary, secondary), hole) * MarkOpacity;
     markColor = primary > 0.0 ? MarkPrimaryColor.rgb : secondary > 0.0 ? NeighborOutlineColor.rgb : WaterHideOutlineColor.rgb;
+    float reachSide = (float)((reachBits >> side) & 1u);
+    float reachOther = (float)((reachBits >> other) & 1u);
+    float reachWidth = max(ReachLineWidth, pixel * ReachLineMinPixels);
+    reachLine = saturate((U - (1.0 - reachWidth)) / pixel) * max(reachSide, reachOther * saturate((towardsOther - (1.0 - reachWidth)) / pixel)) * ReachLineOpacity * ReachShown;
+    float glowWidth = max(ReachGlowWidth, 1e-3);
+    float glowSide = saturate((U - (1.0 - glowWidth)) / glowWidth);
+    float glowOther = saturate((towardsOther - (1.0 - glowWidth)) / glowWidth);
+    reachGlow = max(reachSide * glowSide * glowSide, reachOther * glowOther * glowOther) * reachInside * ReachGlowOpacity * ReachShown;
 }
+float3 reachToneColor = lerp(ReachOutsideColor.rgb, ReachInsideColor.rgb, reachInside);
+float reachTone = lerp(ReachOutsideShade, ReachInsideTint, reachInside) * ReachShown;
 '''
 
 # the surface from the texture layers of the biomes (TA_Biome_Color with height in alpha, TA_Biome_Normal), projected from the three planes of
@@ -1305,9 +1325,14 @@ float seaFade = lerp(saturate(1.0 + PeakShare / GridSeaFade), 1.0, waterHidden);
 float opacity = GridOpacity * (1.0 - smoothstep(GridFadeStart, max(GridFadeEnd, GridFadeStart + 1e-3), PeakShare)) * seaFade * (1.0 - riverShown);
 float3 color = lerp(albedo, albedo * GridDarkness, gridLine * opacity);
 // under the sea the outline is hidden at once, as clear water would show it on the seabed, apart from the one M_HexPlanetWaterGrid draws
-float markOpacity = markLine * lerp(smoothstep(-0.01, 0.0, PeakShare), 1.0, waterHidden);
+float aboveSea = lerp(smoothstep(-0.01, 0.0, PeakShare), 1.0, waterHidden);
+float markOpacity = markLine * aboveSea;
+// what the hero chosen reaches today, on the land alone, as the water over the seabed takes no tone
+color = lerp(color, reachToneColor, reachTone * aboveSea);
+float reachCover = max(reachLine, reachGlow) * aboveSea;
+color = lerp(color, ReachLineColor.rgb, reachCover);
 // the alpha of the vertex colors lights only the tiles of painting, as on the surface it holds which way a river flows (RIVER_CODE)
-OutEmissive = lerp(color * (Ambient + Glow * Alpha * PreviewTile), markColor * MarkGlow, markOpacity);
+OutEmissive = lerp(lerp(color * (Ambient + Glow * Alpha * PreviewTile), ReachLineColor.rgb * ReachLineGlow, reachCover), markColor * MarkGlow, markOpacity);
 color = lerp(color, markColor, markOpacity);
 return color * lerp(cloudShadow, 1.0, markOpacity);
 '''
@@ -1644,8 +1669,10 @@ CUT_CODE = CUT_CODE.replace('LOD_MASK\n', '')
 # and the outlines of marked cells of the sea, in their colors (MARK_CODE)
 WATER_GRID_CODE = GRID_LINE_CODE + MARK_CODE.replace('MARK_HOLE_BITS', '(uint)round(markPixel.a * 255.0)') + '''
 float lineOpacity = gridLine * GridOpacity * (1.0 - WaterGridDarkness);
-float opacity = lerp(lineOpacity, 1.0, markLine);
-OutColor = markColor * markLine / max(opacity, 1e-4);
+// the half of the edge of what the hero chosen reaches that lies on the sea
+float reachCover = reachLine * (1.0 - markLine);
+float opacity = lerp(lerp(lineOpacity, 1.0, reachCover), 1.0, markLine);
+OutColor = (markColor * markLine + ReachLineColor.rgb * reachCover) / max(opacity, 1e-4);
 return opacity * Visible;
 '''
 
@@ -1736,7 +1763,9 @@ NOISE = '/Game/HexMap/Textures/T_HexNoise'
 DEFAULT_CUBE = '/Engine/EngineResources/GrayTextureCube'
 # AHexPlanet gives the materials its CellMarks, read with Load, so the default only has to be a 2D texture
 DEFAULT_MARKS = '/Engine/EngineResources/Black'
-MARK_PARAMETERS = ['NeighborOutlineColor', 'WaterHideOutlineColor', 'MarkWidth', 'MarkMinPixels', 'MarkGlow', 'MarkOpacity']
+MARK_PARAMETERS = ['NeighborOutlineColor', 'WaterHideOutlineColor', 'MarkWidth', 'MarkMinPixels', 'MarkGlow', 'MarkOpacity',
+    'ReachLineColor', 'ReachLineWidth', 'ReachLineMinPixels', 'ReachLineOpacity', 'ReachLineGlow', 'ReachGlowWidth', 'ReachGlowOpacity',
+    'ReachOutsideColor', 'ReachOutsideShade', 'ReachInsideColor', 'ReachInsideTint']
 WATER_MATERIAL = FOLDER + '/M_HexPlanetWater'
 WIRE_MATERIAL = FOLDER + '/M_HexPlanetWireframe'
 WATER_GRID_MATERIAL = FOLDER + '/M_HexPlanetWaterGrid'
@@ -2481,17 +2510,35 @@ float marked = step(6.5, UV.y) * (1.0 - step(7.5, UV.y));
 float wave = Time * HeroFlagWaveSpeed - UV.x * 4.0;
 return (AxisX * sin(wave) + AxisZ * (0.35 * sin(wave * 1.7 + 1.0))) * (UV.x * HeroFlagWave * marked);
 """
+# A hero that goes through an entrance dissolves in the glow of its mouth, as the developer asked on 2026-11-12: by HeroFade, which UHexHeroes
+# sets from 0 to 1, it goes in grains of the world HeroFadeGrain across, each at its own share by a hash, and the grains about to go, and all
+# of it a little, glow in HeroFadeColor, the color of the network, by HeroFadeGlow. So the material is masked, for every hero at any time
+HERO_GRAIN_CODE = r"""
+float3 grainCell = floor(WorldPos / max(HeroFadeGrain, 0.1));
+return frac(sin(dot(grainCell, float3(12.9898, 78.233, 37.719))) * 43758.5453);
+"""
+HERO_MASK_CODE = r"""
+return HeroFade <= 0.001 ? 1.0 : step(HeroFade, Grain);
+"""
 HERO_GLOW_CODE = r"""
 float clothTone = max(max(VertexRGB.r, VertexRGB.g), VertexRGB.b);
-return PlayerColor.rgb * clothTone * saturate(VertexA * HeroColorShare) * HeroGlow;
+float going = step(0.001, HeroFade) * (1.0 - smoothstep(0.0, 0.3, Grain - HeroFade));
+return PlayerColor.rgb * clothTone * saturate(VertexA * HeroColorShare) * HeroGlow
+    + HeroFadeColor.rgb * HeroFadeGlow * (going + 0.25 * HeroFade);
 """
 # The ring under the hero chosen and the marks of its way: unlit, MarkColor times the color of the instance, which a mesh that is no instance
 # has white, bright by the red of a vertex, so its rim is dark and sets it off any ground, and covering by its alpha, breathing by MarkPulse
 HERO_MARK_CODE = r"""
 return MarkColor.rgb * float3(InstanceR, InstanceG, InstanceB) * VertexRGB.r * MarkBrightness;
 """
+# A mark may run: an instance whose fourth custom value, Travel, or sixth, Shrink, is not 0 moves Travel along its own Z over a cycle of
+# 1 / MarkTravelSpeed seconds, from the share Phase of that cycle, growing smaller by Shrink of its size and fading in and out on its way, as
+# the hoops that run from the hoop of an entrance a way goes through do (UHexHeroes::UpdatePath, PathPortal* of DA_HexHeroes)
 HERO_MARK_OPACITY_CODE = r"""
-return VertexA * MarkOpacity * (1.0 - MarkPulse * (0.5 + 0.5 * sin(Time * MarkPulseSpeed * 6.2831853)));
+float run = frac(Time * MarkTravelSpeed + Phase);
+float running = step(0.001, abs(Travel) + Shrink);
+float shown = lerp(1.0, smoothstep(0.0, 0.18, run) * (1.0 - smoothstep(0.5, 1.0, run)), running);
+return VertexA * MarkOpacity * shown * (1.0 - MarkPulse * (0.5 + 0.5 * sin(Time * MarkPulseSpeed * 6.2831853)));
 """
 HERO_MARK_OFFSET_CODE = r"""
 float grow = clamp(distance(CameraPos, ObjectPos) / max(MarkFarStart, 1.0), 1.0, max(MarkFarScale, 1.0));
@@ -2499,9 +2546,16 @@ float3 fromMiddle = WorldPos - ObjectPos;
 // a piece of the line of a way grows in its width alone (MarkAlong), or it would overshoot the marks at its ends
 float3 along = normalize(AxisX);
 fromMiddle -= along * dot(fromMiddle, along) * MarkAlong;
+// a mark that runs: along its own Z, smaller on its way
+float run = frac(Time * MarkTravelSpeed + Phase);
+float running = step(0.001, abs(Travel) + Shrink);
+float size = 1.0 - Shrink * run * running;
+// one that runs against its Z runs into what it stands before, the rock around the mouth of an entrance, and is drawn over it: nearer the
+// camera along the view by twice as far as it has run
+float sunk = max(-Travel, 0.0) * run * running;
 // drawn MarkDepthBias nearer the camera along the view, which moves nothing on the screen: bumps of the ground do not cut a flat mark, and
 // what stands higher than that still hides it
-return fromMiddle * (grow - 1.0) + normalize(CameraPos - WorldPos) * MarkDepthBias;
+return fromMiddle * (grow * size - 1.0) + normalize(AxisZ) * (Travel * run * running) + normalize(CameraPos - WorldPos) * (MarkDepthBias + sunk * 2.0);
 """
 HERO_MATERIAL = FOLDER + '/M_HexPlanetHero'
 HERO_MARK_MATERIAL = FOLDER + '/M_HexPlanetHeroMark'
@@ -2530,6 +2584,17 @@ def build_hero_materials():
         ('HeroGlow', add_scalar(library, material, 'HeroGlow', 0.25, 200), '')]
     library.connect_material_property(add_custom(library, material, HERO_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, inputs, 0), '',
         unreal.MaterialProperty.MP_BASE_COLOR)
+    # it dissolves in the mouth of an entrance
+    material.set_editor_property('blend_mode', unreal.BlendMode.BLEND_MASKED)
+    fade = add_scalar(library, material, 'HeroFade', 0.0, 1500)
+    grain = add_custom(library, material, HERO_GRAIN_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT1, [
+        ('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1000, 1450), '')]
+        + add_config_parameters(library, material, unreal.HexHeroConfig, ['HeroFadeGrain'], 1550), 1450)
+    library.connect_material_property(add_custom(library, material, HERO_MASK_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT1,
+        [('HeroFade', fade, ''), ('Grain', grain, '')], 1650), '', unreal.MaterialProperty.MP_OPACITY_MASK)
+    inputs = inputs + [('HeroFade', fade, ''), ('Grain', grain, ''),
+        ('HeroFadeColor', add_vector(library, material, 'HeroFadeColor', unreal.LinearColor(1.0, 0.55, 0.1, 1.0), 1700), '')] \
+        + add_config_parameters(library, material, unreal.HexHeroConfig, ['HeroFadeGlow'], 1750)
     library.connect_material_property(add_custom(library, material, HERO_GLOW_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, inputs, 400), '',
         unreal.MaterialProperty.MP_EMISSIVE_COLOR)
     roughness = add_config_parameters(library, material, unreal.HexPlanetConfig, ['Roughness'], 700)[0][1]
@@ -2568,6 +2633,14 @@ def build_hero_materials():
             data.set_editor_property('data_index', index)
             data.set_editor_property('const_default_value', 1.0)
             instance.append((name, data, ''))
+        # how a mark runs, 0 for one that stays
+        running = []
+        for index, name in enumerate(('Travel', 'Phase', 'Shrink')):
+            data = library.create_material_expression(material, unreal.MaterialExpressionPerInstanceCustomData, -1000, 1400 + index * 50)
+            data.set_editor_property('data_index', 3 + index)
+            data.set_editor_property('const_default_value', 0.0)
+            running.append((name, data, ''))
+        travel_speed = ('MarkTravelSpeed', add_scalar(library, material, 'MarkTravelSpeed', 0.7, 1550), '')
         color = add_custom(library, material, HERO_MARK_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, [('VertexRGB', vertex_color, ''),
             ('MarkColor', add_vector(library, material, 'MarkColor', unreal.LinearColor(1.0, 1.0, 1.0, 1.0), 100), ''),
             ('MarkBrightness', add_scalar(library, material, 'MarkBrightness', 2.0, 150), '')] + instance, 0)
@@ -2576,7 +2649,7 @@ def build_hero_materials():
             ('Time', library.create_material_expression(material, unreal.MaterialExpressionTime, -1000, 600), ''),
             ('MarkOpacity', add_scalar(library, material, 'MarkOpacity', 1.0, 625), ''),
             ('MarkPulse', add_scalar(library, material, 'MarkPulse', 0.0, 650), ''),
-            ('MarkPulseSpeed', add_scalar(library, material, 'MarkPulseSpeed', 0.6, 700), '')], 600)
+            ('MarkPulseSpeed', add_scalar(library, material, 'MarkPulseSpeed', 0.6, 700), ''), travel_speed] + running, 600)
         library.connect_material_property(opacity, '', unreal.MaterialProperty.MP_OPACITY)
         # a mark grows around its middle as the camera leaves it (FarStart, FarScale of DA_HexHeroes), so a way still shows from afar; a ring
         # is scaled with its hero by UHexHeroes, and leaves MarkFarScale at 1
@@ -2586,6 +2659,13 @@ def build_hero_materials():
         axis_x.set_editor_property('transform_source_type', unreal.MaterialVectorCoordTransformSource.TRANSFORMSOURCE_LOCAL)
         axis_x.set_editor_property('transform_type', unreal.MaterialVectorCoordTransform.TRANSFORM_WORLD)
         library.connect_material_expressions(axis, '', axis_x, '')
+        up = library.create_material_expression(material, unreal.MaterialExpressionConstant3Vector, -1300, 1260)
+        up.set_editor_property('constant', unreal.LinearColor(0.0, 0.0, 1.0, 0.0))
+        axis_z = library.create_material_expression(material, unreal.MaterialExpressionTransform, -1100, 1260)
+        axis_z.set_editor_property('transform_source_type', unreal.MaterialVectorCoordTransformSource.TRANSFORMSOURCE_LOCAL)
+        axis_z.set_editor_property('transform_type', unreal.MaterialVectorCoordTransform.TRANSFORM_WORLD)
+        library.connect_material_expressions(up, '', axis_z, '')
+        time_node = library.create_material_expression(material, unreal.MaterialExpressionTime, -1000, 1320)
         grow = add_custom(library, material, HERO_MARK_OFFSET_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, [
             ('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1000, 900), ''),
             ('ObjectPos', library.create_material_expression(material, unreal.MaterialExpressionObjectPositionWS, -1000, 950), ''),
@@ -2594,7 +2674,7 @@ def build_hero_materials():
             ('MarkFarScale', add_scalar(library, material, 'MarkFarScale', 1.0, 1100), ''),
             ('MarkAlong', add_scalar(library, material, 'MarkAlong', 0.0, 1150), ''),
             ('MarkDepthBias', add_scalar(library, material, 'MarkDepthBias', 0.0, 1175), ''),
-            ('AxisX', axis_x, '')], 900)
+            ('AxisX', axis_x, ''), ('AxisZ', axis_z, ''), ('Time', time_node, ''), travel_speed] + running, 900)
         library.connect_material_property(grow, '', unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
         library.recompile_material(material)
         assets.save_asset(path)
@@ -2963,6 +3043,9 @@ def add_mark_inputs(library, material, y):
     connections.append(('CellMarks', add_texture(library, material, DEFAULT_MARKS, 'CellMarks', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, y + 200), ''))
     # OutlineColor or BrushOutlineColor, which AHexPlanet::SetHoveredCell gives
     connections.append(('MarkPrimaryColor', add_vector(library, material, 'MarkPrimaryColor', unreal.LinearColor(1.0, 1.0, 1.0, 1.0), y + 225), ''))
+    # what the hero chosen reaches today, and how much of it shows (AHexPlanet::SetReach)
+    connections.append(('CellReach', add_texture(library, material, DEFAULT_MARKS, 'CellReach', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, y + 150), ''))
+    connections.append(('ReachShown', add_scalar(library, material, 'ReachShown', 0.0, y + 175), ''))
     return connections + add_config_parameters(library, material, unreal.HexPlanetConfig, MARK_PARAMETERS, y + 250)
 
 
@@ -3986,11 +4069,15 @@ float3 linkGlow = 0.0;
 float opacity = GridOpacity * (1.0 - smoothstep(0.0, AbyssGridFade, depthBelow - 0.5));
 // no grid line on the water of a pool
 float3 color = lerp(albedo, albedo * GridDarkness, gridLine * opacity * (1.0 - puddle));
+// what the hero chosen reaches today
+color = lerp(color, reachToneColor, reachTone);
+float reachCover = max(reachLine, reachGlow);
+color = lerp(color, ReachLineColor.rgb, reachCover);
 OutRoughness = roughness;
 // the floor of a void gives way to the mist and reflects nothing, as the uniform light of the sky would lay a grey sheen over the dark, but a lake
 // and a pool reflect as water does, a little; 0.5 is the specular of the engine for everything else
 OutSpecular = lerp(lerp(0.5 * (1.0 - mistShare * AbyssFloorHide), CavePuddleSpecular, puddle), LakeSpecular, lakeFloor);
-OutEmissive = lerp(color * (Ambient + Glow * Alpha * PreviewTile + glowLight) + glowAdd + mistLight + AbyssLipColor.rgb * lip + linkGlow + extraEmissive, markColor * MarkGlow, markLine);
+OutEmissive = lerp(lerp(color * (Ambient + Glow * Alpha * PreviewTile + glowLight) + glowAdd + mistLight + AbyssLipColor.rgb * lip + linkGlow + extraEmissive, ReachLineColor.rgb * ReachLineGlow, reachCover), markColor * MarkGlow, markLine);
 return lerp(color, markColor, markLine);
 '''
 UNDERGROUND_PARAMETERS = ['LevelHeight', 'HexRadius', 'CoarseDistance', 'CoarseBand', 'AbyssFadeStart', 'AbyssFadeEnd', 'AbyssDarkness', 'AbyssColor', 'AbyssBrightness',
@@ -4228,18 +4315,27 @@ MARKER_CODE = r'''
 float3 n = normalize(VertexNormal);
 float3 planes = pow(abs(n), TriplanarSharpness);
 planes /= planes.x + planes.y + planes.z;
-float3 pos = WorldPos / BiomeTileSize;
-float3 dx = PosDdx / BiomeTileSize;
-float3 dy = PosDdy / BiomeTileSize;
 float layer = round(RockLayer);
+// at the size and in the tint of the layer (LayerParams, as the ground draws it), so a rock built into a mountain is of its stone: without
+// them it differed from the mountain, as the developer found on 2026-11-12
+float4 look = LayerParams.Load(int3(layer, 0, 0));
+float tile = look.w > 0.5 ? look.w : BiomeTileSize;
+float3 pos = WorldPos / tile;
+float3 dx = PosDdx / tile;
+float3 dy = PosDdy / tile;
 float3 rock = Colors.SampleGrad(ColorsSampler, float3(pos.yz, layer), dx.yz, dy.yz).rgb * planes.x
     + Colors.SampleGrad(ColorsSampler, float3(pos.xz, layer), dx.xz, dy.xz).rgb * planes.y
     + Colors.SampleGrad(ColorsSampler, float3(pos.xy, layer), dx.xy, dy.xy).rgb * planes.z;
+rock *= look.w > 0.5 ? look.rgb : float3(1.0, 1.0, 1.0);
 float glowMask = saturate(VertexAlpha);
 float breathe = 1.0 - MarkerPulse + MarkerPulse * sin(Time * MarkerPulseSpeed + InstanceRandom * 6.2831853);
 // the steps of stairs are worked stone (the green of their vertices), MarkerStoneColor broken by the grain of the rock
 float rockLuma = dot(rock, float3(0.3, 0.59, 0.11));
 rock = lerp(rock, MarkerStoneColor.rgb * (0.75 + 0.5 * saturate(rockLuma * 4.0)), saturate(VertexGreen));
+// underground as light as the rock of the walls (CaveWallColor, which AHexPlanet::UpdateMarkers gives)
+rock *= MarkerRockTint.rgb;
+// darker where the mesh baked shade into the corners of its geometry, its feet and the inside of its mouth (the blue of its vertices)
+rock *= 1.0 - MarkerShade * saturate(VertexBlue);
 float3 albedo = rock * (1.0 - glowMask * MarkerRockDarkening);
 // the rock gives light of its own as the ground does (Ambient), and some of the glow of its network, so its stones do not stand black, and the
 // stairs of an exit take the daylight of the shaft over them by the red of their vertices, most on the top
@@ -4394,6 +4490,8 @@ def build_marker_materials():
         MARKER_MATERIAL.split('/')[-1], FOLDER, unreal.Material, unreal.MaterialFactoryNew())
     clear_expressions(material)
     material.set_editor_property('used_with_instanced_static_meshes', True)
+    # from both sides, so a face of a generated rock that is wound the wrong way shows as rock and not as a hole
+    material.set_editor_property('two_sided', True)
     position = library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1100, 0)
     position_ddx = library.create_material_expression(material, unreal.MaterialExpressionDDX, -900, 0)
     position_ddy = library.create_material_expression(material, unreal.MaterialExpressionDDY, -900, 50)
@@ -4404,13 +4502,15 @@ def build_marker_materials():
     vertex_color = library.create_material_expression(material, unreal.MaterialExpressionVertexColor, -900, 175)
     connections = [('WorldPos', position, ''), ('PosDdx', position_ddx, ''), ('PosDdy', position_ddy, ''),
         ('VertexNormal', library.create_material_expression(material, unreal.MaterialExpressionVertexNormalWS, -1000, 100), ''),
-        ('RockLayer', rock_layer, ''), ('VertexAlpha', vertex_color, 'A'), ('VertexRed', vertex_color, 'R'), ('VertexGreen', vertex_color, 'G'),
+        ('RockLayer', rock_layer, ''), ('VertexAlpha', vertex_color, 'A'), ('VertexRed', vertex_color, 'R'), ('VertexGreen', vertex_color, 'G'), ('VertexBlue', vertex_color, 'B'),
+        ('MarkerRockTint', add_vector(library, material, 'MarkerRockTint', unreal.LinearColor(1.0, 1.0, 1.0, 1.0), 425), ''),
+        ('LayerParams', add_texture(library, material, DEFAULT_MARKS, 'LayerParams', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 450), ''),
         ('NetworkColor', add_network_color(library, material, 400), ''),
         ('Time', library.create_material_expression(material, unreal.MaterialExpressionTime, -900, 200), ''),
         ('InstanceRandom', library.create_material_expression(material, unreal.MaterialExpressionPerInstanceRandom, -900, 225), ''),
         ('Colors', add_texture(library, material, COLORS, 'Colors', unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, 250), '')
         ] + add_config_parameters(library, material, unreal.HexPlanetConfig, ['BiomeTileSize', 'TriplanarSharpness', 'MarkerGlow', 'MarkerPulse',
-            'MarkerPulseSpeed', 'MarkerRockDarkening', 'MarkerRockLight', 'Ambient', 'ShaftColor', 'MarkerDaylight', 'MarkerStoneColor'], 300)
+            'MarkerPulseSpeed', 'MarkerRockDarkening', 'MarkerRockLight', 'Ambient', 'ShaftColor', 'MarkerDaylight', 'MarkerStoneColor', 'MarkerShade'], 300)
     connections = force_ambient(library, material, connections, 800)
     custom = add_custom(library, material, MARKER_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, connections, 0,
         ('OutEmissive', unreal.CustomMaterialOutputType.CMOT_FLOAT3))
@@ -5142,6 +5242,11 @@ def main():
         return
     # with underground only the materials of the underground, the cave objects and the motes, and with markers too those of the markers of the
     # entrances, which otherwise are saved again with the same graphs, as binary churn in LFS
+    if 'markers' in sys.argv[1:] and 'underground' not in sys.argv[1:]:
+        # with markers alone only the materials of the markers of the entrances
+        build_marker_materials()
+        unreal.log('PLANET marker materials created')
+        return
     if 'underground' in sys.argv[1:]:
         build_underground('markers' in sys.argv[1:])
         unreal.log('PLANET underground assets created')

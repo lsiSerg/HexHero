@@ -943,7 +943,15 @@ void AHexPlanetCameraPawn::Tick(float DeltaTime)
 
 	// the keys and the mouse at the screen edge set the speed the planet rolls at, which it reaches and loses over the inertia of what moved it last, as on the flat map
 	FVector TargetVelocity = FVector::ZeroVector;
-	const FVector2D EdgeInput = bTurning || bDragging ? FVector2D::ZeroVector
+	// not while the cursor is on the marks at the edge of the screen or the panel of a castle, which lie over it and are clicked, nor until
+	// the mouse has moved since a glide was asked for
+	const AHexPlanetPlayerController* MarksController = Cast<AHexPlanetPlayerController>(GetController());
+	if (float HeldX = 0.0f, HeldY = 0.0f; bEdgeScrollHeld && (!MarksController || !MarksController->GetMousePosition(HeldX, HeldY)
+		|| FVector2D::Distance(FVector2D(HeldX, HeldY), EdgeHoldMouse) > double(Settings()->EdgeScrollHoldDistance)))
+	{
+		bEdgeScrollHeld = false;
+	}
+	const FVector2D EdgeInput = bTurning || bDragging || bEdgeScrollHeld || (MarksController && MarksController->IsCursorOnUi()) ? FVector2D::ZeroVector
 		: AHexCameraPawn::GetEdgeScrollInput(Cast<APlayerController>(GetController()), EdgeScrollCurve, Settings()->EdgeScrollMargin);
 
 	if (!EdgeInput.IsNearlyZero())
@@ -964,7 +972,10 @@ void AHexPlanetCameraPawn::Tick(float DeltaTime)
 
 		// turning the point under the camera towards a direction is turning around the axis across it
 		const FVector Direction = (Forward * Input.Y + Right * Input.X).GetClampedToMaxSize(1.0);
-		TargetVelocity = FVector::CrossProduct(Up, Direction) * (Settings()->MoveSpeed * CurrentDistance / Planet->GetRadius());
+		// faster with Shift held
+		const APlayerController* MoveController = Cast<APlayerController>(GetController());
+		const bool bFast = MoveController && (MoveController->IsInputKeyDown(EKeys::LeftShift) || MoveController->IsInputKeyDown(EKeys::RightShift));
+		TargetVelocity = FVector::CrossProduct(Up, Direction) * (Settings()->MoveSpeed * (bFast ? Settings()->ShiftMoveFactor : 1.0f) * CurrentDistance / Planet->GetRadius());
 	}
 
 	if (!bDragging && !bFocusing)
@@ -1428,7 +1439,18 @@ bool AHexPlanetCameraPawn::ShowCell(EHexPlanetLayer Layer, int32 Cell)
 	Placement.Latitude = FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(Center.Z, -1.0, 1.0)));
 	Placement.Longitude = FMath::RadiansToDegrees(FMath::Atan2(Center.Y, Center.X));
 	AngularVelocity = FVector::ZeroVector;
+	// nor does it scroll away from the cell on the other layer once it is there
+	HoldEdgeScroll();
 	return TravelTo(Layer, Placement);
+}
+
+void AHexPlanetCameraPawn::HoldEdgeScroll()
+{
+	float MouseX = 0.0f;
+	float MouseY = 0.0f;
+	const APlayerController* PlayerController = Cast<APlayerController>(GetController());
+	bEdgeScrollHeld = PlayerController && PlayerController->GetMousePosition(MouseX, MouseY);
+	EdgeHoldMouse = FVector2D(MouseX, MouseY);
 }
 
 void AHexPlanetCameraPawn::Follow(const FVector& Direction)
@@ -1450,6 +1472,7 @@ void AHexPlanetCameraPawn::FocusOn(const FVector& Direction, float Distance)
 	}
 	FocusDirection = Direction.GetSafeNormal();
 	bFocusing = true;
+	HoldEdgeScroll();
 	TargetDistance = FMath::Clamp(double(Distance), double(Settings()->MinDistance), GetMaxDistance());
 }
 
@@ -1497,6 +1520,7 @@ bool AHexPlanetCameraPawn::FocusCell(int32 Cell, TOptional<float> Distance)
 
 	FocusDirection = FVector(Planet->GetGrid().GetCells()[Cell].Center);
 	bFocusing = true;
+	HoldEdgeScroll();
 	// for hex.PlanetSetCamera, which also takes a heading
 	UE_LOG(LogHexHero, Log, TEXT("Planet: focus on cell %d at latitude %.4f, longitude %.4f"), Cell,
 		FMath::RadiansToDegrees(FMath::Asin(FocusDirection.Z)), FMath::RadiansToDegrees(FMath::Atan2(FocusDirection.Y, FocusDirection.X)));
@@ -1525,6 +1549,7 @@ void AHexPlanetCameraPawn::OnFocusCellUnderMouse()
 	{
 		FocusDirection = FVector(Planet->GetGrid().GetCells()[Cell].Center);
 		bFocusing = true;
+		HoldEdgeScroll();
 	}
 }
 

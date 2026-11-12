@@ -1,8 +1,7 @@
-"""Imports the markers of the entrances of the underground that generate_planet_kit.py wrote to Saved/HexPlanetMarkers: the rim of the pit on the
-surface and the stairs up a rock underground, drawn with M_HexPlanetMarker, the mouth of the pit, drawn with M_HexPlanetPit, which draws the shaft
-below it, and the shaft of daylight over an exit, drawn with M_HexPlanetShaft, all of create_planet_assets.py. EntranceMesh, EntranceHoleMesh,
-ExitMesh and ShaftMesh of DA_HexPlanet and DA_HexUnderground name them by default; the markers of before 2026-11-10, a cave mouth and a ring of
-standing stones (OLD_MARKERS), are deleted.
+"""Imports the markers of the entrances of the underground that generate_planet_entrances.py wrote to Saved/HexPlanetMarkers: the rocks with a
+cave mouth of the entrances of the surface and of the exits underground, drawn with M_HexPlanetMarker, and the shaft of daylight before an
+exit, drawn with M_HexPlanetShaft, both of create_planet_assets.py. EntranceMeshes, ExitMeshes and ShaftMesh of DA_HexPlanet and
+DA_HexUnderground name them by default; the markers of before (OLD_MARKERS) are deleted.
 
 Run with UnrealEditor-Cmd.exe <uproject> -run=pythonscript -script=<this file> -unattended -nullrhi, after create_planet_assets.py.
 It lives apart from the kit, whose import deletes its folder.
@@ -15,10 +14,15 @@ import unreal
 SOURCE_FOLDER = os.path.join(unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_saved_dir()), 'HexPlanetMarkers')
 DESTINATION = '/Game/HexPlanet/Markers'
 # each mesh and its material
-MARKERS = [('SM_PlanetEntranceRim', '/Game/HexPlanet/M_HexPlanetMarker'), ('SM_PlanetEntranceHole', '/Game/HexPlanet/M_HexPlanetPit'),
-    ('SM_PlanetExitStairs', '/Game/HexPlanet/M_HexPlanetMarker'), ('SM_PlanetExitShaft', '/Game/HexPlanet/M_HexPlanetShaft')]
-# the markers the ones above took the place of
-OLD_MARKERS = ['SM_PlanetCaveMouth', 'SM_PlanetExitRing']
+MARKERS = [('SM_PlanetEntranceCrag', '/Game/HexPlanet/M_HexPlanetMarker'), ('SM_PlanetEntranceMaw', '/Game/HexPlanet/M_HexPlanetMarker'),
+    ('SM_PlanetEntranceGate', '/Game/HexPlanet/M_HexPlanetMarker'), ('SM_PlanetEntranceTwin', '/Game/HexPlanet/M_HexPlanetMarker'),
+    ('SM_PlanetEntranceTrident', '/Game/HexPlanet/M_HexPlanetMarker'), ('SM_PlanetEntranceSpur', '/Game/HexPlanet/M_HexPlanetMarker'),
+    ('SM_PlanetEntranceSpurWide', '/Game/HexPlanet/M_HexPlanetMarker'), ('SM_PlanetExitNiche', '/Game/HexPlanet/M_HexPlanetMarker'),
+    ('SM_PlanetExitNicheCrystal', '/Game/HexPlanet/M_HexPlanetMarker'), ('SM_PlanetExitCave', '/Game/HexPlanet/M_HexPlanetMarker'),
+    ('SM_PlanetExitGate', '/Game/HexPlanet/M_HexPlanetMarker'), ('SM_PlanetExitTwin', '/Game/HexPlanet/M_HexPlanetMarker'), ('SM_PlanetExitShaft', '/Game/HexPlanet/M_HexPlanetShaft')]
+# the markers the ones above took the place of: a cave mouth and a ring of stones until 2026-11-10, then a pit and stairs up a rock
+OLD_MARKERS = ['SM_PlanetCaveMouth', 'SM_PlanetExitRing', 'SM_PlanetEntranceRim', 'SM_PlanetEntranceHole', 'SM_PlanetExitStairs', 'SM_PlanetExitBay',
+    'SM_PlanetExitBayGate', 'SM_PlanetEntranceHollow', 'SM_PlanetEntranceHollowWide', 'SM_PlanetExitNicheGate']
 
 
 def import_marker(name, material_path):

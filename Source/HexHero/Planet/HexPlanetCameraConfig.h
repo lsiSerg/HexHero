@@ -111,6 +111,17 @@ public:
 	UPROPERTY(EditAnywhere, Category="Camera", meta=(ClampMin=0.01))
 	float MoveSpeed = 1.0f;
 
+	/** A glide of the camera that was asked for, to a hero, a castle or a cell, is not stopped by the cursor it left at the edge of the screen:
+	 *  the edge scrolls again only once the mouse has moved this many pixels from where it was then. The developer found on 2026-11-12 that a
+	 *  click on a mark at the edge sent the camera off, the mark went away from under the cursor, and the scroll of the edge stopped the
+	 *  camera before it was there */
+	UPROPERTY(EditAnywhere, Category="Camera", meta=(ClampMin=0))
+	float EdgeScrollHoldDistance = 12.0f;
+
+	/** With Shift held the keys and the edges of the screen move it this many times as fast, as the developer asked on 2026-11-12 */
+	UPROPERTY(EditAnywhere, Category="Camera", meta=(ClampMin=1))
+	float ShiftMoveFactor = 2.5f;
+
 	/** Turn per second of the turn keys, in degrees */
 	UPROPERTY(EditAnywhere, Category="Camera", meta=(ClampMin=1))
 	float TurnSpeed = 90.0f;

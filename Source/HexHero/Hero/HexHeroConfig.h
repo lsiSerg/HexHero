@@ -139,18 +139,41 @@ public:
 	UPROPERTY(EditAnywhere, Category="Movement", meta=(ClampMin=0))
 	float WalkBobsPerCell = 2.0f;
 
-	/** How far from the middle of a cell with an entrance or exit a hero stands, in radii of a cell, beside the pit or the stairs on the side
-	 *  it came from, as the marker fills the middle of the cell */
-	UPROPERTY(EditAnywhere, Category="Movement", meta=(ClampMin=0, ClampMax=0.8))
-	float EntranceStandOff = 0.72f;
-
-	/** What going through an entrance or exit to the other layer costs a hero, in points of movement, as the developer set on 2026-11-11, and
-	 *  seconds the hero a person plays waits on the other side before it walks on, while the camera comes after it */
+	/** What going through an entrance to the other layer costs a hero, in points of movement, from the cell before its mouth to the cell
+	 *  before the mouth on the other layer: a point, as the developer decided on 2026-11-12 with the entrances built into mountains and
+	 *  walls, so a hero needs a point to go in (nothing earlier that day, while a hero stood on the entrance itself), and seconds the hero
+	 *  a person plays waits on the other side before it walks on, while the camera comes after it */
 	UPROPERTY(EditAnywhere, Category="Movement", meta=(ClampMin=0))
 	float EntranceCost = 1.0f;
 
 	UPROPERTY(EditAnywhere, Category="Movement", meta=(ClampMin=0, ClampMax=10))
 	float EntrancePause = 1.0f;
+
+	/** A hero that goes through an entrance walks from the middle of the cell before it into its mouth over EntranceWalkTime seconds,
+	 *  growing smaller down to EntranceShrink of its size, and out of the mouth on the other side as it grows again, as the developer asked
+	 *  on 2026-11-12, when it only vanished on its cell; where the person sees it */
+	UPROPERTY(EditAnywhere, Category="Movement", meta=(ClampMin=0, ClampMax=5))
+	float EntranceWalkTime = 0.55f;
+
+	UPROPERTY(EditAnywhere, Category="Movement", meta=(ClampMin=0.02, ClampMax=1))
+	float EntranceShrink = 0.75f;
+
+	/** And it dissolves in the glow of the mouth, as the developer asked on 2026-11-12, when at 0.3 of its size it grew too small ("занадто
+	 *  зменшується - може вийде розчиняти при проході через світіння"): from EntranceFadeStart of its walk into the mouth on it goes in grains
+	 *  HeroFadeGrain across, those about to go glowing HeroFadeGlow in the color of the network, and it comes out of the mouth on the other
+	 *  side the same way back (HeroFade of M_HexPlanetHero, HERO_MASK_CODE of create_planet_assets.py) */
+	UPROPERTY(EditAnywhere, Category="Movement", meta=(ClampMin=0, ClampMax=0.95))
+	float EntranceFadeStart = 0.1f;
+
+	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=0.1))
+	float HeroFadeGrain = 4.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=0))
+	float HeroFadeGlow = 8.0f;
+
+	/** The hero a person plays walks out of the mouth this long after the screen is no longer black from the trip of the camera */
+	UPROPERTY(EditAnywhere, Category="Movement", meta=(ClampMin=0, ClampMax=3))
+	float EntranceOutDelay = 0.2f;
 
 	/** Seconds a hero of a player the game moves waits at most for the camera to come to its layer, where the person who watches would see
 	 *  it on the layer that is not shown; the camera goes there first and then it sets out, as the developer asked on 2026-11-11 */
@@ -171,6 +194,11 @@ public:
 	 *  only the passages among them, as nobody walks the voids */
 	UPROPERTY(EditAnywhere, Category="Rules")
 	bool bShroud = true;
+
+	/** While the game is played the cells the hero chosen reaches today show on the ground, as the developer asked on 2026-11-12
+	 *  (UHexHeroes::UpdateReach; how they look is ReachLine* and the rest of the config of each layer) */
+	UPROPERTY(EditAnywhere, Category="Look")
+	bool bShowReach = true;
 
 	/** A hero a person moves may be sent over ground its player has not explored, as the developer decided on 2026-11-11, so the fog forbids no
 	 *  move: a step onto such a cell counts UnknownCost, that of open plains, whatever lies there. Its way is checked when it reaches the first
@@ -352,11 +380,16 @@ TSoftObjectPtr<UAnimSequence> ChosenAnimation = TSoftObjectPtr<UAnimSequence>(FS
 	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=1))
 	float PickHeight = 40.0f;
 
-	/** The ring on the ground under the hero chosen, RingRadius wide, which glows in the color of its player and breathes by RingPulse at
-	 *  RingPulseSpeed. It is a band of RingSegments pieces laid on the ground under it, so it follows the relief and no hill cuts it, as the
-	 *  developer found a flat ring did on 2026-11-11, drawn RingDepthBias nearer the camera */
+	/** The ring on the ground under the hero chosen, RingRadius wide, which glows in RingColor and breathes by RingPulse at RingPulseSpeed. It
+	 *  is a band of RingSegments pieces laid on the ground under it, so it follows the relief and no hill cuts it, as the developer found a
+	 *  flat ring did on 2026-11-11, drawn RingDepthBias nearer the camera */
 	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=1))
 	float RingRadius = 74.0f;
+
+	/** The color of the ring of what is chosen, a hero or a castle: that of the way of a hero (PathColor), as the developer asked on
+	 *  2026-11-12 ("поміняй селекшин на колір як пошук шляху"), after the color of the player until then */
+	UPROPERTY(EditAnywhere, Category="Look|Marks")
+	FLinearColor RingColor = FLinearColor(1.0f, 0.58f, 0.07f, 1.0f);
 
 	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=8, ClampMax=256))
 	int32 RingSegments = 64;
@@ -423,6 +456,42 @@ TSoftObjectPtr<UAnimSequence> ChosenAnimation = TSoftObjectPtr<UAnimSequence>(FS
 
 	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=1))
 	float PathEndRadius = 34.0f;
+
+	/** A way that goes through an entrance shows it, as the developer asked on 2026-11-12 ("візуалізірувати додатковою точкою та відрізком до
+	 *  прохода, може не точка я щось інше що буде символізувати прохід через гору - телепорт"): on the layer it leaves a line from the middle
+	 *  of the cell to the mouth and there a hoop with a swirl in it, a flat mesh of radius 1 that stands upright in the mouth, PathPortalRadius
+	 *  large with its middle PathPortalLift of that above the ground, and on the layer it comes to the same hoop in the mouth there and a line
+	 *  from it to the middle of the cell */
+	UPROPERTY(EditAnywhere, Category="Look|Marks")
+	TSoftObjectPtr<UStaticMesh> PathPortalMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Heroes/SM_PlanetHeroPortal.SM_PlanetHeroPortal")));
+
+	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=1))
+	float PathPortalRadius = 26.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=0))
+	float PathPortalLift = 1.05f;
+
+	/** And which way the way goes through it, as the developer asked on 2026-11-12 ("позначити напрям руху"; an arrow, then three hoops of
+	 *  three sizes that stood still were tried, which read as a heap to them: "потрібно анімувати з рухом та прозорістю"): PathPortalLayers
+	 *  more hoops run from the hoop along the way, one after the other, each over PathPortalTravel in PathPortalPulseTime seconds, growing
+	 *  smaller down to PathPortalLayerScale of the hoop and fading in and out on its way: out of the mouth where the way comes out of it,
+	 *  and the same mirrored where it goes in, from the hoop on into the passage, drawn over the rock they run into (the custom data of an
+	 *  instance, HERO_MARK_OFFSET_CODE). Slower and closer together since the developer asked so the same day (2 hoops in 1.4 s at first) */
+	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=0, ClampMax=8))
+	int32 PathPortalLayers = 4;
+
+	/** Those that run are plain hoops, without the swirl, which in several hoops at once was too much to read */
+	UPROPERTY(EditAnywhere, Category="Look|Marks")
+	TSoftObjectPtr<UStaticMesh> PathPortalRingMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Heroes/SM_PlanetHeroPortalRing.SM_PlanetHeroPortalRing")));
+
+	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=0))
+	float PathPortalTravel = 42.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=0.05, ClampMax=1))
+	float PathPortalLayerScale = 0.4f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=0.1))
+	float PathPortalPulseTime = 2.8f;
 
 	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=0))
 	float PathLift = 3.0f;

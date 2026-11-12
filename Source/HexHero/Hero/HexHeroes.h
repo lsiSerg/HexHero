@@ -81,8 +81,26 @@ struct FHexHero
 	float GlideTime = 1.0f;
 	bool bGliding = false;
 
+	/** Its size while it glides, from the first to the second, and now: smaller in the mouth of an entrance it goes through */
+	float GlideScaleFrom = 1.0f;
+	float GlideScaleTo = 1.0f;
+	float PassScale = 1.0f;
+
+	/** It is walking into the mouth of the entrance it goes through next */
+	bool bEnteringMouth = false;
+
+	/** It dissolves while it glides: 1 into the mouth of an entrance, -1 out of one, 0 not; how much of it is gone now, and the color of the
+	 *  network it goes through, in which it glows as it goes */
+	int8 GlideFade = 0;
+	float PassFade = 0.0f;
+	FLinearColor PassColor = FLinearColor::White;
+
 	/** The cells of its layer it left since it set out, which stay on the way shown until it stops */
 	TArray<int32> Trail;
+
+	/** The cell of its layer whose entrance or exit it came out of since it set out, or INDEX_NONE: the hoop in that mouth and the line from
+	 *  it stay on the way shown until it stops, as the developer found on 2026-11-12 that they went as soon as it had come through */
+	int32 CameOutCell = INDEX_NONE;
 	FVector3d GlidePoints[3] = {FVector3d::ZeroVector, FVector3d::ZeroVector, FVector3d::ZeroVector};
 	int32 GateStepFrom = INDEX_NONE;
 
@@ -125,7 +143,7 @@ struct FHexHero
 	int32 VisitCell = INDEX_NONE;
 
 	/** The side of a cell with an entrance or exit it stands on, beside the marker: the direction it came from, zero for the south */
-	FVector3d EntranceSide = FVector3d::ZeroVector;
+
 
 	/** Where it stands in the world and the direction it faces, along the ground; bPlaced once they were found on the built layer */
 	FVector3d Position = FVector3d::ZeroVector;
@@ -223,6 +241,9 @@ public:
 
 	const TArray<FHexHero>& GetHeroes() const { return Heroes; }
 
+	/** Returns the planet of a layer, or null while it is not there */
+	const AHexPlanet* GetLayerPlanet(EHexPlanetLayer Layer) const { return GetPlanet(Layer); }
+
 	/** Returns a hero by its Id, or null */
 	const FHexHero* FindHero(int32 Id) const;
 
@@ -299,7 +320,8 @@ public:
 	/** Points a hero to a cell of a layer, INDEX_NONE for nowhere; its way shows while it is the one chosen */
 	bool SetTarget(int32 Id, EHexPlanetLayer Layer, int32 Cell);
 
-	/** Sets a hero walking to the cell it was pointed to. Returns false and why it does not go */
+	/** Sets a hero walking to the cell it was pointed to. Returns false and why it does not go. One pointed nowhere that stands on an entrance
+	 *  or exit that can be used goes through it, as the developer asked on 2026-11-12, so the key takes it to and fro between the layers */
 	bool Go(int32 Id, FString& OutMessage);
 
 	/** Returns a line about the way shown: its cost and how many days it takes, or why there is none; empty without one */
@@ -414,6 +436,10 @@ private:
 		TWeakObjectPtr<UInstancedStaticMeshComponent> Dots;
 		TWeakObjectPtr<UInstancedStaticMeshComponent> End;
 		TWeakObjectPtr<UInstancedStaticMeshComponent> Lines;
+		/** The hoops in the mouths of the entrances a way goes through */
+		TWeakObjectPtr<UInstancedStaticMeshComponent> Portals;
+		/** The plain hoops that run from them along the way */
+		TWeakObjectPtr<UInstancedStaticMeshComponent> Rings;
 	};
 
 	UPROPERTY(Transient)
@@ -443,6 +469,8 @@ private:
 	{
 		bool bMoving = false;
 		bool bChosen = false;
+		/** How much of it its material draws as gone */
+		float Fade = 0.0f;
 	};
 	TMap<int32, FBodyState> BodyStates;
 
@@ -593,7 +621,19 @@ private:
 	/** bThroughUnknown lets the ways cross ground the player of the hero has not explored, each such cell at UnknownCost whatever lies there,
 	 *  as a person may send a hero there; without it they keep to what is explored, also on the other side of an entrance or exit they go
 	 *  through, as the heroes the game moves do */
-	void FindFieldFor(const FHexHero& Hero, HexHeroPath::FField& OutField, bool bThroughUnknown) const;
+	void FindFieldFor(const FHexHero& Hero, HexHeroPath::FField& OutField, bool bThroughUnknown, float MaxCost = -1.0f) const;
+
+	/** Shows on each layer the cells the hero chosen reaches today, with the mines, mills and castles it can visit, while the game is played,
+	 *  it is the turn of the person and the hero can take a step. As the developer asked on 2026-11-12 they are found when a hero is chosen
+	 *  and when it stops, so while it walks what was shown stays; also when its points or the map changed while it stands */
+	void UpdateReach();
+
+	/** What the cells shown were found for: the hero, where it stood, its points and the map */
+	int32 ReachHero = 0;
+	int32 ReachNode = INDEX_NONE;
+	float ReachPoints = -1.0f;
+	int32 ReachRevision = -1;
+	bool bReachShroud = false;
 
 	/** Whether a way of a hero, or the cell it ends at, lies on ground its player has not explored */
 	bool IsWayUnknown(const FHexHero& Hero, TConstArrayView<int32> Path, EHexPlanetLayer TargetLayer, int32 Target) const;
@@ -647,7 +687,7 @@ private:
 	void KeepChosen();
 
 	/** Returns where a hero stands on a cell, as a direction from the center of the planet: its middle, or beside the marker of a cell with
-	 *  an entrance or exit that can be used (EntranceStandOff) */
+	 *  an entrance or exit that can be used (AHexPlanet::GetEntrancePlace) */
 	FVector3d GetStandDirection(const AHexPlanet& Planet, const FHexHero& Hero, int32 Cell) const;
 
 	/** Finds where a hero stands in the world, on the ground of its layer once that is built */

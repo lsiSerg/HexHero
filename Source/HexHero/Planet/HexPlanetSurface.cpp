@@ -324,7 +324,8 @@ namespace
 		};
 		const uint8 Look = uint8(Level + 2 + (Each.IsPentagon() ? 8 : 0));
 
-		HexPlanetKit::FCellFrame Frame = HexPlanetKit::BuildFrame(Grid, Cell, GetTop, GetLevel, Context.CornerLow, Context.MassifSteps, Context.Relief, Context.Params.EdgeRule);
+		HexPlanetKit::FCellFrame Frame = HexPlanetKit::BuildFrame(Grid, Cell, GetTop, GetLevel, Context.CornerLow, Context.MassifSteps, Context.Relief, Context.Params.EdgeRule,
+			&Context.Params.LowSides);
 
 		// the piece by the neighbors on the same level, with direction D of the piece towards neighbor D
 		const HexPlanetSurface::FKitLevel* Loaded = Each.IsPentagon() ? nullptr : Context.Kit.Levels.Find(Level);
@@ -954,7 +955,7 @@ HexPlanetSurface::FBuild HexPlanetSurface::Build(const FHexSphereGrid& Grid, con
 	const bool bGivenRelief = Options.Relief.Num() == Cells.Num();
 	if (!bGivenCorners)
 	{
-		Result.CornerLow = HexPlanetKit::FindCornerHeights(Grid, [&](int32 Cell) { return Params.GetTop(Levels[Cell]); }, Params.EdgeRule);
+		Result.CornerLow = HexPlanetKit::FindCornerHeights(Grid, [&](int32 Cell) { return Params.GetTop(Levels[Cell]); }, Params.EdgeRule, &Params.LowSides);
 	}
 	if (!bGivenRelief)
 	{
@@ -1064,7 +1065,8 @@ HexPlanetSurface::FBuild HexPlanetSurface::Build(const FHexSphereGrid& Grid, con
 					const int32 NeighborSide = Cells[Neighbor].Neighbors.IndexOfByKey(Cell);
 					const auto GetLevel = [&Levels](int32 Other) { return int32(Levels[Other]); };
 					const auto GetTop = [&Params, &Levels](int32 Other) { return Params.GetTop(Levels[Other]); };
-					const HexPlanetKit::FCellFrame NeighborFrame = HexPlanetKit::BuildFrame(Grid, Neighbor, GetTop, GetLevel, Context.CornerLow, MassifSteps, Context.Relief, Params.EdgeRule);
+					const HexPlanetKit::FCellFrame NeighborFrame = HexPlanetKit::BuildFrame(Grid, Neighbor, GetTop, GetLevel, Context.CornerLow, MassifSteps, Context.Relief, Params.EdgeRule,
+						&Params.LowSides);
 					HexPlanetKit::FPlacement Ground;
 					Ground.FootDepth = Params.LevelHeight;
 					Ground.FadeHeight = Params.LevelHeight;

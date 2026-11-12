@@ -58,6 +58,13 @@ namespace HexPlanetUnderground
 		Pentagon,
 		/** Its exit underground is in the void */
 		ExitInVoid,
+		/** No mountain stands beside its cell, behind its mouth, into which it is built (AHexPlanet::GetEntranceProblem alone gives these
+		 *  three, as it knows how each stands) */
+		NoMountain,
+		/** No void lies beside the cell of its exit, behind its mouth, so no wall stands there to hold it */
+		NoWall,
+		/** The exit of an entrance before it in the list is built into the same wall */
+		SharedWall,
 	};
 
 	/** Returns a few words that say what is wrong */

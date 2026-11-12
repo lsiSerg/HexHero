@@ -53,6 +53,21 @@ class UHexPlanetWaterConfig;
  *  data in the background once the surface is built and builds its meshes only when it is first shown. Only the layer shown is drawn and does
  *  the work of a frame (SetPresented).
  */
+/** How the entrance or exit on a cell stands (AHexPlanet::GetEntranceSeat) */
+struct FHexEntranceSeat
+{
+	/** The way its mouth opens, along the ground */
+	FVector3d Front = FVector3d::ForwardVector;
+
+	/** Whether it is built into what stands behind it, the cell whose rock it then takes, and where it stands then, as a direction from the
+	 *  center of the planet: the middle of the side towards that cell, or the corner between the two cells behind it */
+	bool bEmbedded = false;
+	int32 Behind = INDEX_NONE;
+	/** The second cell behind it when it opens to a corner, else INDEX_NONE */
+	int32 Behind2 = INDEX_NONE;
+	FVector3d Anchor = FVector3d::UpVector;
+};
+
 UCLASS()
 class AHexPlanet : public AActor
 {
@@ -678,6 +693,52 @@ public:
 	/** Returns the text of the debug panel for a cell */
 	FString GetCellDebugText(int32 Cell) const;
 
+	/** Returns how the entrance or exit on a cell stands: the way its mouth opens, a side or a corner of the cell, and whether it is built
+	 *  into what stands behind it, a mountain of the surface or a void of the underground, along which a wall stands. Turned by hand
+	 *  (FHexEntrance::Side, bCorner) it opens that way and is built into the neighbor behind it, or into the two around the corner behind it,
+	 *  if they are such cells. Else it is built into the mountain or void beside it whose far side is open and lies most to the south, as
+	 *  the camera of the game looks north unless it is turned and so sees into the mouth, while the cell has a neighbor a hero can stand on,
+	 *  and without one it opens to a neighbor a hero can stand on, to the south where it can; a hash of the cell decides between equals */
+	FHexEntranceSeat GetEntranceSeat(int32 Cell) const;
+
+	/** Gives every entrance, or the one on OnlyCell, what it is built into, as the developer asked on 2026-11-12 for the planets saved before
+	 *  entrances were built into mountains and walls ("на старих картах збудуй нові проходи"): a neighbor of its cell on the surface becomes
+	 *  a mountain where none stands behind it, and a neighbor of its exit a void, for the wall, where none lies behind that, under the
+	 *  mountain where it can be. The cell is the one behind the way the mouth was turned by hand, else the one most to the north that may:
+	 *  nothing stands on it, no entrance is before it, and the cells around it still reach each other, underground without a passage one
+	 *  cell wide. Returns how many cells it changed; outside the steps of Undo */
+	int32 FitEntrances(int32 OnlyCell = INDEX_NONE, bool bMountains = true);
+
+	/** Returns the sides of the surface that lie low (HexPlanetSurface::FParams::LowSides): between the cell of each entrance and the mountain
+	 *  it is built into, so the ground before its mouth stays flat, as the developer asked on 2026-11-12, rather than rising to the mountain */
+	TSet<uint64> FindEntranceSides() const;
+
+	/** Builds the ground again where those sides are not the ones shown, after the entrances changed */
+	void UpdateEntranceSides();
+
+	/** Returns the turn the entrance or exit on a cell opens to now, from 0 to twice its sides: an even one towards the neighbor of half its
+	 *  number, an odd one towards the corner after it */
+	int32 GetEntranceTurn(int32 Cell) const;
+
+	/** Returns where a hero stands on the cell of an entrance or exit, before its mouth, as a direction from the center of the planet */
+	FVector3d GetEntrancePlace(int32 Cell) const;
+
+	/** Returns the point of the ground in the mouth of the entrance or exit on a cell: before the glowing end of the arch of one built into a
+	 *  mountain (EmbedMouthPlace), at the face of the wall around the niche of one built into a wall, and the middle of the cell for one built
+	 *  into nothing. There a hero goes in and comes out, and there the marks of a way through it stand (UHexHeroes) */
+	FVector3d GetEntranceMouth(int32 Cell) const;
+
+	/** Returns the color of the network of the entrance on a cell, white without one */
+	FLinearColor GetEntranceColor(int32 Cell) const;
+
+	/** Shows the cells the hero chosen reaches today, as the developer asked on 2026-11-12: a line along their edge with a soft light inside
+	 *  it, and the ground outside them a little darker (ReachLine* and the rest of the config, MARK_CODE). None hides it; it comes and goes
+	 *  over ReachFadeTime */
+	void SetReach(TConstArrayView<int32> Cells);
+
+	/** Returns how many cells are shown as reached now */
+	int32 CountReachCells() const { return bReachOn ? ReachInsideCount : 0; }
+
 	/** Returns how many cells CellMarks outlines now, in red or green (SetHoveredCell), for hex.PlanetLayerCheck */
 	int32 CountOutlinedCells() const { return MarkedCells.Num(); }
 
@@ -1104,6 +1165,25 @@ private:
 
 	/** Sends MarkPixels to CellMarks */
 	void UploadCellMarks();
+
+	/** Sends pixels in the layout of CellMarks to a texture of that layout */
+	static void UploadCellPixels(UTexture2D* Texture, const TArray<FColor>& Pixels);
+
+	/** One pixel per cell in the layout of CellMarks, of what the hero chosen reaches today (SetReach): red the bits of the sides of the
+	 *  edge of those cells, in both cells of a side, and green 255 in them */
+	UPROPERTY(Transient)
+	TObjectPtr<UTexture2D> CellReach;
+
+	/** Pixels of CellReach, the cells that hold any, how many are reached, whether it is to show and how much of it shows now */
+	TArray<FColor> ReachPixels;
+	TArray<int32> ReachTouched;
+	int32 ReachInsideCount = 0;
+	bool bReachOn = false;
+	float ReachShown = 0.0f;
+	float ReachApplied = -1.0f;
+
+	/** Eases ReachShown and gives it to the materials that draw the marks */
+	void UpdateReach(float DeltaTime);
 
 	/** Pieces of the kits, read once and shared with the rebuilds in the background */
 	TSharedPtr<const HexPlanetSurface::FKit> SurfaceKit;

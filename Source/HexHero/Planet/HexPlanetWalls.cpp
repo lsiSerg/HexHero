@@ -325,6 +325,9 @@ namespace
 		const double Thickness = Frame.Thickness;
 		const double Flare = Params.OuterFlare * Frame.Presence;
 		const auto At = [&Frame](double Share) { return GetRowHeight(Frame, Share); };
+		// over a niche for an exit the wall has no overhang, stalactites or canopy, which hid it from above, as the developer found
+		const double Open = 1.0 - Sample.Niche;
+		const double Overhang = Frame.Overhang * Open;
 
 		FLocal Local;
 		// the share of the height of the wall the row stands at, by which the stalactites taper and the flutes fade
@@ -339,9 +342,9 @@ namespace
 		// the top of the crest lies between its shoulders (GetRing), its offset only for its noise
 		case CrestOuter: Share = 0.91; Local = {FaceBase - Thickness * 0.66, At(Share), 1.0}; Kind = EKind::Crest; break;
 		case CrestTop: Share = 1.0; Local = {FaceBase - Thickness * 0.42 - Frame.Lean * Frame.Crest, At(Share), 0.5}; Kind = EKind::Crest; break;
-		case CrestInner: Share = 0.96; Local = {Face(At(Share)) + Frame.Overhang * 0.45, At(Share), 0.0}; Kind = EKind::Crest; break;
-		case InnerLip: Share = LipShare; Local = {Face(At(Share)) + Frame.Overhang, At(Share), 0.0}; break;
-		case InnerUnder: Share = UnderShare; Local = {Face(At(Share)) + Frame.Overhang * 0.3, At(Share), 0.0}; Local.Cavity = 0.45; break;
+		case CrestInner: Share = 0.96; Local = {Face(At(Share)) + Overhang * 0.45, At(Share), 0.0}; Kind = EKind::Crest; break;
+		case InnerLip: Share = LipShare; Local = {Face(At(Share)) + Overhang, At(Share), 0.0}; break;
+		case InnerUnder: Share = UnderShare; Local = {Face(At(Share)) + Overhang * 0.3, At(Share), 0.0}; Local.Cavity = 0.45 * Open; break;
 		case FloorStart: Local = {Foot, 0.12, 0.0}; Kind = EKind::Floor; break;
 		case FloorEnd: Local = {FMath::Max(Foot, Sample.Gap) + 2.0, 0.12, 0.0}; Kind = EKind::Floor; break;
 		case Buried: Local = {FMath::Max(Foot, Sample.Gap) + 6.0, -2.5, 0.0}; Kind = EKind::Floor; break;
@@ -384,7 +387,7 @@ namespace
 				const double Ridge = 1.0 - FMath::Abs(Noise(Sample.Position, Params.DetailScale, Offsets.Crest));
 				Local.Up += Frame.Base * Params.CrestNoise * (Ridge * Ridge - 0.5);
 			}
-			Local.Across += Bulge * 0.3 + (Row == CrestOuter ? -OuterRib * 0.5 : Row == CrestInner ? Frame.RibDepth * 0.5 * GetStalactite(Frame, Share) : 0.0);
+			Local.Across += Bulge * 0.3 + (Row == CrestOuter ? -OuterRib * 0.5 : Row == CrestInner ? Frame.RibDepth * 0.5 * Open * GetStalactite(Frame, Share) : 0.0);
 			break;
 		case EKind::Inner:
 		{
@@ -393,7 +396,7 @@ namespace
 			const double Stalactite = GetStalactite(Frame, Share);
 			const double Flute = 1.0 - FMath::SmoothStep(0.0, FMath::Max(Params.FluteWidth, 1e-3), Frame.Edge);
 			const double Fade = FMath::SmoothStep(Fillet, Fillet * 2.0 + 1.0, Local.Up) * (1.0 - FMath::SmoothStep(0.82, 0.95, Share));
-			Local.Across += Bulge + Frame.RibDepth * Stalactite - Frame.FluteDepth * Flute * Fade;
+			Local.Across += Bulge + Frame.RibDepth * Open * Stalactite - Frame.FluteDepth * Flute * Fade;
 			// between the stalactites, from the lowest of their tips up to the lip, the face lies in their shade
 			const double Zone = FMath::SmoothStep(Params.RibTipMin - 0.06, Params.RibTipMin + 0.06, Share) * (1.0 - FMath::SmoothStep(LipShare - 0.03, LipShare, Share));
 			Local.Rib = FMath::Clamp(Stalactite, 0.0, 1.0);
@@ -410,12 +413,27 @@ namespace
 			Local.Floor = 1.0;
 			break;
 		}
+		// a niche for an exit: under its arch the face and its foot stand back into the wall, in its shade and without stalactites, while the
+		// lip above overhangs it
+		// around it the wall stands out onto the passage, its face, its foot and the floor before it, so the exit stands out into its cell
+		const double Out = Params.NicheBulge * Sample.NicheOut;
+		if (Out > 0.0 && (Kind == EKind::Inner || Kind == EKind::Foot || Kind == EKind::Floor || Row == CrestInner))
+		{
+			Local.Across += Out;
+		}
+		if (Sample.Niche > 0.0 && (Kind == EKind::Inner || Kind == EKind::Foot))
+		{
+			const double Carve = Sample.Niche * (1.0 - FMath::SmoothStep(Sample.NicheTop * 0.8, FMath::Max(Sample.NicheTop, 1.0), Local.Up));
+			Local.Across -= FMath::Min(Params.NicheDepth, Thickness * 0.62 + Out) * Carve;
+			Local.Cavity = FMath::Max(Local.Cavity, Carve * (Kind == EKind::Foot ? 0.5 : 1.0));
+			Local.Rib *= 1.0 - Carve;
+		}
 		Local.FromSmooth = Local.Smooth * Frame.Presence;
 		// a canopy across a hollow: the top of the inner face stands from the line of the top, which reaches across it, and its underside goes back
 		// to the line itself from under the overhang down to BridgeUnder of the height, less as a lower wall narrows to its line
 		if (Kind == EKind::Inner || Row == CrestInner)
 		{
-			Local.FromTop = FMath::SmoothStep(Params.BridgeUnder, UnderShare, Share) * Frame.Presence;
+			Local.FromTop = FMath::SmoothStep(Params.BridgeUnder, UnderShare, Share) * Frame.Presence * Open;
 		}
 		return Local;
 	}
@@ -619,6 +637,11 @@ HexPlanetWalls::FParams HexPlanetWalls::FParams::FromConfig(const UHexPlanetConf
 	Params.FloorRadius = FloorRadius;
 	Params.Seed = Seed;
 	Params.Step = FMath::Max(Config.WallStep, 1.0f);
+	Params.NicheWidth = Config.WallNicheWidth;
+	Params.NicheHeight = Config.WallNicheHeight;
+	Params.NicheDepth = Config.WallNicheDepth;
+	Params.NicheBulge = Config.WallNicheBulge;
+	Params.NicheShoulder = Config.WallNicheShoulder;
 	Params.CornerCut = FMath::Clamp(Config.WallCornerCut, 0.0f, 1.0f);
 	Params.CornerRound = FMath::Max(Config.WallCornerRound, 0.0f);
 	Params.CornerCutVariation = FMath::Clamp(Config.WallCornerCutVariation, 0.0f, 0.5f);
@@ -714,7 +737,7 @@ double HexPlanetWalls::GetFloorRadius(const FParams& Params, const FVector3d& Di
 }
 
 void HexPlanetWalls::Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Levels, TFunctionRef<bool(int32)> CanHold, const FParams& Params, FWalls& Out,
-	TConstArrayView<uint8> VoidStyles, TConstArrayView<float> VoidHeights)
+	TConstArrayView<uint8> VoidStyles, TConstArrayView<float> VoidHeights, TConstArrayView<FNiche> Niches)
 {
 	Out = FWalls();
 	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
@@ -1112,6 +1135,57 @@ void HexPlanetWalls::Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Lev
 	// the index of each sample among all of them, line after line, by which it has its pixel in the texture of the pools of light on the walls;
 	// each line starts a row of its own, so a line whose length an edit changed moves the pixels of the lines after it only when it takes a row
 	// more or less (an edit already moves every sample of its own line, which is sampled evenly from its start)
+	// the niches of the exits built into a wall: around the sample of the line along the cell that is nearest the point of each, the middle
+	// of a side or a corner
+	for (const FNiche& Niche : Niches)
+	{
+		if (!Cells.IsValidIndex(Niche.Cell) || !Out.CellSamples.IsValidIndex(Niche.Cell) || Params.NicheWidth <= 0.0)
+		{
+			continue;
+		}
+		const FVector3d Middle = Niche.Point.GetSafeNormal() * Params.FloorRadius;
+		const double Side = FVector3d::Distance(Cells[Niche.Cell].Center, Cells[Cells[Niche.Cell].Neighbors[0]].Center) * Params.FloorRadius;
+		FIntPoint Nearest(INDEX_NONE, INDEX_NONE);
+		double NearestDistance = Side * 0.4;
+		for (const FIntPoint& At : Out.CellSamples[Niche.Cell])
+		{
+			const FSample& Sample = Out.Lines[At.X][At.Y];
+			const double Distance = FVector3d::Distance(Sample.Position.GetSafeNormal() * Params.FloorRadius, Middle);
+			if (Sample.Cell == Niche.Cell && Distance < NearestDistance)
+			{
+				NearestDistance = Distance;
+				Nearest = At;
+			}
+		}
+		if (Nearest.X == INDEX_NONE)
+		{
+			continue;
+		}
+		TArray<FSample>& Line = Out.Lines[Nearest.X];
+		const double Half = Params.NicheWidth * 0.5;
+		const double Reach = Half + FMath::Max(Params.NicheShoulder, 0.0);
+		for (const int32 Step : {1, -1})
+		{
+			double Along = 0.0;
+			int32 Index = Nearest.Y;
+			for (int32 Count = 0; Count < Line.Num() / 2 && Along <= Reach; ++Count)
+			{
+				FSample& Sample = Line[Index];
+				const double Share = Along / Half;
+				const double Tall = FMath::SmoothStep(Params.NicheMinHeight - 0.2, Params.NicheMinHeight, Sample.Height);
+				Sample.NicheOut = FMath::Max(Sample.NicheOut, (1.0 - FMath::SmoothStep(Half * 0.9, FMath::Max(Reach, Half + 1.0), Along)) * Tall);
+				if (Share <= 1.0)
+				{
+					Sample.Niche = FMath::Max(Sample.Niche, (1.0 - FMath::SmoothStep(0.8, 1.0, Share)) * Tall);
+					Sample.NicheTop = Params.NicheHeight * FMath::Sqrt(FMath::Max(1.0 - 0.75 * Share * Share, 0.05));
+				}
+				const int32 Next = ((Index + Step) % Line.Num() + Line.Num()) % Line.Num();
+				Along += FVector3d::Distance(Line[Next].Position, Sample.Position);
+				Index = Next;
+			}
+		}
+	}
+
 	Out.LineStarts.SetNum(Out.Lines.Num());
 	for (int32 Line = 0; Line < Out.Lines.Num(); ++Line)
 	{
@@ -1375,6 +1449,7 @@ uint32 HexPlanetWalls::HashChunk(const FWalls& Walls, int32 Chunk)
 			Hash = HashCombine(Hash, GetTypeHash(FMath::RoundToInt32(Sample.Gap * 16.0)));
 			Hash = HashCombine(Hash, GetTypeHash(FIntVector(FMath::RoundToInt32(Sample.Lava * 256.0), FMath::RoundToInt32(Sample.Lake * 256.0), FMath::RoundToInt32(Sample.Height * 1024.0))));
 			Hash = HashCombine(Hash, GetTypeHash(FMath::RoundToInt32(Sample.Jitter * 1024.0)));
+			Hash = HashCombine(Hash, GetTypeHash(FIntVector(FMath::RoundToInt32(Sample.Niche * 1024.0), FMath::RoundToInt32(Sample.NicheTop * 16.0), FMath::RoundToInt32(Sample.NicheOut * 1024.0))));
 			for (const double Reach : {Sample.InnerReach, Sample.OuterReach, Sample.SmoothInnerReach, Sample.SmoothOuterReach, Sample.TopInnerReach, Sample.TopOuterReach})
 			{
 				Hash = HashCombine(Hash, GetTypeHash(FMath::RoundToInt32(FMath::Min(Reach, 1e6) * 4.0)));

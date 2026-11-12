@@ -126,6 +126,34 @@ def target():
     return mesh
 
 
+def portal():
+    """A way through an entrance: a hoop with a swirl of three arms in it, which stands upright in the mouth, as a gate to another place"""
+    mesh = Mesh()
+    add_rings(mesh, [(0.74, 0.0, 0.0), (0.8, 0.0, 0.7), (0.85, 1.0, 1.0), (0.94, 1.0, 1.0), (0.97, 0.0, 0.7), (1.0, 0.0, 0.0)], 40)
+    mesh.begin_part()
+    steps = 14
+    for arm in range(3):
+        rows = []
+        for step in range(steps + 1):
+            share = step / steps
+            radius = 0.1 + 0.56 * share
+            angle = arm * 2.0 * math.pi / 3.0 + share * 2.6
+            half = 0.085 * (1.0 - 0.75 * share) + 0.012
+            along = (math.cos(angle), math.sin(angle))
+            rows.append([mesh.vertex(((radius + side * half) * along[0], (radius + side * half) * along[1], 0.0), (1.0, 1.0, 1.0), 1.0, normal=UP) for side in (-1.0, 1.0)])
+        for near, far in zip(rows, rows[1:]):
+            mesh.sheet(near[0], near[1], far[1])
+            mesh.sheet(near[0], far[1], far[0])
+    return mesh
+
+
+def portal_ring():
+    """The hoop of a way through an entrance alone, without its swirl: the hoops that run from it along the way"""
+    mesh = Mesh()
+    add_rings(mesh, [(0.74, 0.0, 0.0), (0.8, 0.0, 0.7), (0.85, 1.0, 1.0), (0.94, 1.0, 1.0), (0.97, 0.0, 0.7), (1.0, 0.0, 0.0)], 40)
+    return mesh
+
+
 def line():
     """A piece of the line of a way: a strip one unit long along X and one wide, bright in its middle with a dark rim along both sides"""
     mesh = Mesh()
@@ -140,7 +168,7 @@ def line():
 
 
 # the ring under the hero chosen is no mesh of these: UHexHeroes::BuildRing lays it on the ground around the hero
-MESHES = [('Hero', hero, 'hero'), ('HeroDot', dot, 'path'), ('HeroTarget', target, 'path'), ('HeroLine', line, 'path')]
+MESHES = [('Hero', hero, 'hero'), ('HeroDot', dot, 'path'), ('HeroTarget', target, 'path'), ('HeroLine', line, 'path'), ('HeroPortal', portal, 'path'), ('HeroPortalRing', portal_ring, 'path')]
 
 
 def main():

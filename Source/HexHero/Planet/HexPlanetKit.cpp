@@ -14,7 +14,7 @@ namespace
 	const double KitSqrt3 = FMath::Sqrt(3.0);
 }
 
-TArray<double> HexPlanetKit::FindCornerHeights(const FHexSphereGrid& Grid, TFunctionRef<double(int32)> GetTop, EHexEdgeRule Rule)
+TArray<double> HexPlanetKit::FindCornerHeights(const FHexSphereGrid& Grid, TFunctionRef<double(int32)> GetTop, EHexEdgeRule Rule, const TSet<uint64>* LowSides)
 {
 	// three cells meet at every corner
 	const bool bHighest = Rule == EHexEdgeRule::HigherHolds;
@@ -29,11 +29,29 @@ TArray<double> HexPlanetKit::FindCornerHeights(const FHexSphereGrid& Grid, TFunc
 			Heights[Corner] = bHighest ? FMath::Max(Heights[Corner], Top) : Heights[Corner] + Top / 3.0;
 		}
 	}
+	// both corners of a low side lie at the top of the lower of its two cells
+	for (const uint64 Key : LowSides ? *LowSides : TSet<uint64>())
+	{
+		const int32 One = int32(Key >> 32);
+		const int32 Other = int32(Key & 0xffffffffu);
+		if (!Grid.GetCells().IsValidIndex(One) || !Grid.GetCells().IsValidIndex(Other))
+		{
+			continue;
+		}
+		const double Low = FMath::Min(GetTop(One), GetTop(Other));
+		for (const int32 Corner : Grid.GetCells()[One].Corners)
+		{
+			if (Grid.GetCells()[Other].Corners.Contains(Corner))
+			{
+				Heights[Corner] = FMath::Min(Heights[Corner], Low);
+			}
+		}
+	}
 	return Heights;
 }
 
 HexPlanetKit::FCellFrame HexPlanetKit::BuildFrame(const FHexSphereGrid& Grid, int32 Cell, TFunctionRef<double(int32)> GetTop, TFunctionRef<int32(int32)> GetLevel,
-	TConstArrayView<double> CornerHeights, TConstArrayView<int32> MassifSteps, TConstArrayView<float> Relief, EHexEdgeRule Rule)
+	TConstArrayView<double> CornerHeights, TConstArrayView<int32> MassifSteps, TConstArrayView<float> Relief, EHexEdgeRule Rule, const TSet<uint64>* LowSides)
 {
 	const FHexSphereCell& Each = Grid.GetCells()[Cell];
 	const int32 NumSides = Each.Neighbors.Num();
@@ -72,7 +90,7 @@ HexPlanetKit::FCellFrame HexPlanetKit::BuildFrame(const FHexSphereGrid& Grid, in
 		const double NeighborSteps = GetLevel(Neighbor) == Level ? MassifSteps[Neighbor] : 0.0;
 		const double NextSteps = GetLevel(NextNeighbor) == Level ? MassifSteps[NextNeighbor] : 0.0;
 
-		Frame.SideMiddles.Add(GetSideMiddle(Frame.Top, GetTop(Neighbor), Rule));
+		Frame.SideMiddles.Add(LowSides && LowSides->Contains(GetSideKey(Cell, Neighbor)) ? FMath::Min(Frame.Top, GetTop(Neighbor)) : GetSideMiddle(Frame.Top, GetTop(Neighbor), Rule));
 		Frame.SameSides.Add(GetLevel(Neighbor) == Level);
 		// corner K lies between neighbors K and K + 1, and its three cells are all on the plateau when both of them share it with this one
 		const double SidePlateau = NeighborPlateau[Side];

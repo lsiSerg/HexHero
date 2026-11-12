@@ -132,6 +132,14 @@ public:
 	static FVector2D GetEdgeScrollInput(const APlayerController* PlayerController, const UCurveFloat* Curve, float Margin);
 
 	/**
+	 *  Returns true while the cursor is on a widget over the game that is clicked, dragged or typed into: a button, a check box, a spin box,
+	 *  a slider, a text box or a scroll bar, of any panel. What is clicked comes before the game, as the developer asked on 2026-11-12
+	 *  ("любе що клікається - вище по інпути, якщо нічого немає - можем скролитись"), so the edge of the screen does not scroll under it,
+	 *  while labels and the backgrounds of panels let it scroll
+	 */
+	static bool IsCursorOnClickable(const APlayerController* PlayerController);
+
+	/**
 	 *  Glides the camera until a hex is in the center of the screen, and optionally turns and zooms it.
 	 *  The turn is in degrees away from the default angle, and makes the camera free, as only the free camera stays turned.
 	 *  Returns false if the hex is not on the map

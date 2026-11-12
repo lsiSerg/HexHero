@@ -6,9 +6,10 @@
 #include "Widgets/SCompoundWidget.h"
 
 /**
- *  The two buttons at the top left of the planet that choose what the mouse does, as the developer asked on 2026-11-11: Edit, the brush with
- *  its palette below them, and Play, the game, in which heroes are chosen and sent. Each is lit while it is on and shows its key, and
- *  neither takes the keyboard
+ *  The buttons at the top left of the planet. Two choose what the mouse does, as the developer asked on 2026-11-11: Edit, the brush with
+ *  its palette below them, and Play, the game, in which heroes are chosen and sent; each is lit while it is on. The third, which the
+ *  developer asked for on 2026-11-12, takes the camera to the other layer, as its key does, and names the layer it goes to. Each shows its
+ *  key, and none takes the keyboard
  */
 class SHexModeBar : public SCompoundWidget
 {
@@ -21,6 +22,9 @@ public:
 		SLATE_ATTRIBUTE(bool, IsPlaying)
 		SLATE_ARGUMENT(FString, EditKeys)
 		SLATE_ARGUMENT(FString, PlayKeys)
+		SLATE_EVENT(FSimpleDelegate, OnLayer)
+		SLATE_ATTRIBUTE(bool, IsUnderground)
+		SLATE_ARGUMENT(FString, LayerKeys)
 	SLATE_END_ARGS()
 
 	void Construct(const FArguments& InArgs);

@@ -130,7 +130,9 @@ void HexHeroPath::FindLayerField(const FHexSphereGrid& Grid, int32 StartLayer, i
 		// no way runs over an entrance or exit it does not use, as the developer found on 2026-11-11 that a way lay across one: a cell
 		// with one is walked off only where the way starts on it or came up or down through it
 		const int32 CameFrom = OutField.Previous[Current.Cell];
-		const bool bWalksOn = LinkCost < 0.0f || Current.Cell == OutField.Start || (CameFrom != INDEX_NONE && CameFrom / NumCells != Layer);
+		// since 2026-11-12 the cell before an entrance is ground as any other, so a way runs on over it (until then a hero stood on the
+		// entrance itself, and a way that did not use it went around)
+		const bool bWalksOn = true || CameFrom == INDEX_NONE;
 		for (int32 Side = 0; bWalksOn && Side < Cell.Neighbors.Num(); ++Side)
 		{
 			const int32 Neighbor = Cell.Neighbors[Side];
@@ -143,7 +145,9 @@ void HexHeroPath::FindLayerField(const FHexSphereGrid& Grid, int32 StartLayer, i
 		}
 		if (LinkCost >= 0.0f)
 		{
-			Reach(Current.Cell, (1 - Layer) * NumCells + CellIndex, Current.Cost + FMath::Max(LinkCost, CostTolerance));
+			// what it is said to cost, nothing too: a node is reached again only by a cheaper way, so the search cannot circle through it,
+			// and a cost made up for it left the cells a hero reaches with its last point on the other layer out of what it reaches today
+			Reach(Current.Cell, (1 - Layer) * NumCells + CellIndex, Current.Cost + LinkCost);
 		}
 	}
 }

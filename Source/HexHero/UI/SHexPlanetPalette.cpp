@@ -446,6 +446,20 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 	TSharedRef<SVerticalBox> EntranceBody = SNew(SVerticalBox);
 	EntranceBody->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("Networks", "Networks of entrances"), 0.0f)];
 	EntranceBody->AddSlot().AutoHeight()[MakeChips(true)];
+	{
+		const TSharedRef<SButton> Turn = MakeButton(
+			MakeLabel(LOCTEXT("EntranceTurn", "Turn")),
+			[](UHexPlanetPainter& Each) { Each.SetEntranceTurnTool(); },
+			[](const UHexPlanetPainter& Each) { return Each.IsTurningEntrances(); });
+		Turn->SetToolTipText(LOCTEXT("EntranceTurnTip", "Click an entrance to turn its mouth to the next side of its cell; Ctrl+click turns it back. With a mountain behind it, it is built into the mountain"));
+		EntranceBody->AddSlot().AutoHeight().Padding(0.0f, 3.0f, 0.0f, 3.0f)[Turn];
+		const TSharedRef<SButton> Remove = MakeButton(
+			MakeLabel(LOCTEXT("EntranceRemove", "Remove")),
+			[](UHexPlanetPainter& Each) { Each.SetEntranceRemoveTool(); },
+			[](const UHexPlanetPainter& Each) { return Each.IsRemovingEntrances(); });
+		Remove->SetToolTipText(LOCTEXT("EntranceRemoveTip", "Click an entrance to take it away, as Ctrl+click with a network chosen does"));
+		EntranceBody->AddSlot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 3.0f)[Remove];
+	}
 	EntranceBody->AddSlot().AutoHeight()[MakeHelp(FText::Format(LOCTEXT("EntranceHelp", "Click a cell of plains or hills to put an entrance of the chosen network there, or give it that network; Ctrl+click takes one away. Its exit is the same cell underground, which this does not carve: a red marker cannot be used. {0} over an entrance goes down."),
 		FText::FromString(InArgs._LayerKeys)))];
 
@@ -657,6 +671,14 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 	{
 		Links->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("LinkNetworks", "Networks"), 0.0f)];
 		Links->AddSlot().AutoHeight()[MakeChips(false)];
+		{
+			const TSharedRef<SButton> Turn = MakeButton(
+				MakeLabel(LOCTEXT("ExitTurn", "Turn an exit")),
+				[](UHexPlanetPainter& Each) { Each.SetEntranceTurnTool(); },
+				[](const UHexPlanetPainter& Each) { return Each.IsTurningEntrances(); });
+			Turn->SetToolTipText(LOCTEXT("ExitTurnTip", "Click an exit to turn its mouth to the next side of its cell; Ctrl+click turns it back. With a void behind it, it is built into the wall there"));
+			Links->AddSlot().AutoHeight().Padding(0.0f, 3.0f, 0.0f, 3.0f)[Turn];
+		}
 		Links->AddSlot().AutoHeight()[MakeHelp(TAttribute<FText>::CreateLambda([WeakPainter]()
 		{
 			return WeakPainter.IsValid() ? WeakPainter->GetLinksText() : FText::GetEmpty();

@@ -20,6 +20,7 @@
 #include "HexCastles.h"
 #include "SHexCastlePanel.h"
 #include "SHexHeroPanel.h"
+#include "SHexEdgeMarkers.h"
 #include "SHexModeBar.h"
 #include "SHexHoverInfo.h"
 #include "HexHeroes.h"
@@ -108,6 +109,14 @@ void AHexPlanetPlayerController::BeginPlay()
 			.GoKeys(InputConfig && InputConfig->HeroSendAction ? InputConfig->GetKeysText(InputConfig->HeroSendAction) : FString());
 		ViewportClient->AddViewportWidgetContent(HeroPanel.ToSharedRef());
 
+		// the marks at the edges of the screen that point to the heroes and castles out of view
+		SAssignNew(EdgeMarkers, SHexEdgeMarkers)
+			.OnLocate([WeakThis](const FVector3d& Point, EHexPlanetLayer Layer, FVector2D& OutScreen, FVector2D& OutDirection)
+			{
+				return WeakThis.IsValid() && WeakThis->LocateForMarker(Point, Layer, OutScreen, OutDirection);
+			});
+		ViewportClient->AddViewportWidgetContent(EdgeMarkers.ToSharedRef(), -1);
+
 		// the panel of a castle, shown while a person looks into one of its own
 		SAssignNew(CastlePanel, SHexCastlePanel)
 			.OnMessage([WeakThis](const FString& Message)
@@ -138,7 +147,21 @@ void AHexPlanetPlayerController::BeginPlay()
 			.IsEditing_Lambda([WeakThis]() { return WeakThis.IsValid() && WeakThis->IsPaintModeOn(); })
 			.IsPlaying_Lambda([WeakThis]() { return WeakThis.IsValid() && WeakThis->IsPlayMode(); })
 			.EditKeys(InputConfig && InputConfig->PaintModeAction ? InputConfig->GetKeysText(InputConfig->PaintModeAction) : FString())
-			.PlayKeys(InputConfig && InputConfig->PlayModeAction ? InputConfig->GetKeysText(InputConfig->PlayModeAction) : FString());
+			.PlayKeys(InputConfig && InputConfig->PlayModeAction ? InputConfig->GetKeysText(InputConfig->PlayModeAction) : FString())
+			.OnLayer_Lambda([WeakThis]()
+			{
+				// to the other layer at the same place, as the key does away from an entrance
+				if (AHexPlanetCameraPawn* CameraPawn = WeakThis.IsValid() ? WeakThis->GetCameraPawn() : nullptr)
+				{
+					WeakThis->TravelToLayer(CameraPawn->GetShownLayer() == EHexPlanetLayer::Surface ? EHexPlanetLayer::Underground : EHexPlanetLayer::Surface);
+				}
+			})
+			.IsUnderground_Lambda([WeakThis]()
+			{
+				const AHexPlanetCameraPawn* CameraPawn = WeakThis.IsValid() ? WeakThis->GetCameraPawn() : nullptr;
+				return CameraPawn && CameraPawn->GetShownLayer() == EHexPlanetLayer::Underground;
+			})
+			.LayerKeys(InputConfig && InputConfig->LayerAction ? InputConfig->GetKeysText(InputConfig->LayerAction) : FString());
 		ViewportClient->AddViewportWidgetContent(ModeBar.ToSharedRef());
 	}
 }
@@ -226,6 +249,23 @@ void AHexPlanetPlayerController::ClickGame(bool bDouble)
 	{
 		return;
 	}
+	// a click on a mark at the edge of the screen chooses its hero or castle and shows it
+	if (bool bCastle = false; EdgeMarkers.IsValid())
+	{
+		if (int32 Id = 0; EdgeMarkers->GetHovered(bCastle, Id))
+		{
+			if (bCastle)
+			{
+				ShowCastle(Id);
+			}
+			else if (Heroes->CanChoose(Id))
+			{
+				Heroes->Select(Id);
+				ShowHero(Id);
+			}
+			return;
+		}
+	}
 	// a hero by its body, which stands over the cells behind it, else by its cell
 	FVector Origin;
 	FVector Direction;
@@ -264,11 +304,105 @@ void AHexPlanetPlayerController::ClickGame(bool bDouble)
 		return;
 	}
 	FString Message;
-	Heroes->Click(Planet->GetLayer(), MouseCell, Under, Message);
+	// a click on the mouth of an entrance, in its mountain or wall, points the hero through it: to its cell on the other layer
+	EHexPlanetLayer Layer = Planet->GetLayer();
+	int32 Cell = MouseCell;
+	if (!Under)
+	{
+		FindMouthUnderCursor(Layer, Cell);
+	}
+	Heroes->Click(Layer, Cell, Under, Message);
 	if (!Message.IsEmpty())
 	{
 		OnHeroMessage(Message);
 	}
+}
+
+bool AHexPlanetPlayerController::IsCursorOnUi() const
+{
+	return (EdgeMarkers.IsValid() && EdgeMarkers->IsCursorOnMarks()) || (CastlePanel.IsValid() && CastlePanel->IsUnderCursor());
+}
+
+bool AHexPlanetPlayerController::LocateForMarker(const FVector3d& Point, EHexPlanetLayer Layer, FVector2D& OutScreen, FVector2D& OutDirection) const
+{
+	const AHexPlanet* Planet = GetPlanet();
+	const AActor* ViewTarget = GetViewTarget();
+	OutDirection = FVector2D::ZeroVector;
+	if (!Planet || !ViewTarget || !PlayerCameraManager)
+	{
+		return true;
+	}
+	int32 SizeX = 0;
+	int32 SizeY = 0;
+	GetViewportSize(SizeX, SizeY);
+	const FVector Camera = ViewTarget->GetActorLocation();
+	const FRotationMatrix Axes(PlayerCameraManager->GetCameraRotation());
+	// in view: on the layer shown, on the side of the planet towards the camera, within the screen
+	const bool bFacing = FVector::DotProduct(Camera - FVector(Point), FVector(Point)) > 0.0;
+	const bool bProjected = bFacing && ProjectWorldLocationToScreen(FVector(Point), OutScreen, true);
+	const double Inset = 24.0;
+	if (bProjected && Layer == Planet->GetLayer() && OutScreen.X > Inset && OutScreen.Y > Inset && OutScreen.X < SizeX - Inset && OutScreen.Y < SizeY - Inset)
+	{
+		return true;
+	}
+	if (bProjected)
+	{
+		// off the screen on the near side: the way to where it would show
+		OutDirection = OutScreen - FVector2D(SizeX * 0.5, SizeY * 0.5);
+	}
+	if (OutDirection.IsNearlyZero())
+	{
+		// behind the planet, or right under the middle of the screen on the other layer: the way over the ground from what the camera looks at
+		const FVector3d Focus = Planet->FindViewFocus(FVector3d(Camera), FVector3d(Axes.GetUnitAxis(EAxis::X))).GetSafeNormal();
+		const FVector3d Target = Point.GetSafeNormal();
+		FVector3d Along = Target - Focus * FVector3d::DotProduct(Target, Focus);
+		if (Along.IsNearlyZero())
+		{
+			Along = FVector3d(Axes.GetUnitAxis(EAxis::Z));
+		}
+		OutDirection = FVector2D(FVector3d::DotProduct(Along, FVector3d(Axes.GetUnitAxis(EAxis::Y))), -FVector3d::DotProduct(Along, FVector3d(Axes.GetUnitAxis(EAxis::Z))));
+		if (OutDirection.IsNearlyZero())
+		{
+			OutDirection = FVector2D(0.0, -1.0);
+		}
+	}
+	return false;
+}
+
+bool AHexPlanetPlayerController::FindMouthUnderCursor(EHexPlanetLayer& OutLayer, int32& OutCell) const
+{
+	const AHexPlanet* Planet = GetPlanet();
+	const UHexHeroes* Heroes = GetHeroes();
+	if (!Planet || !Heroes || MouseCell == INDEX_NONE)
+	{
+		return false;
+	}
+	// of the entrances built into the cell under the cursor, a mountain may hold several, the one whose mouth is nearest the cursor
+	const TArray<FHexEntrance>& Entrances = Planet->GetEntrances();
+	double BestDistance = TNumericLimits<double>::Max();
+	bool bFound = false;
+	for (int32 Index = 0; Index < Entrances.Num(); ++Index)
+	{
+		const int32 Cell = Entrances[Index].Cell;
+		if (Planet->GetEntranceProblem(Index) != HexPlanetUnderground::EEntranceProblem::None || Heroes->IsHidden(Heroes->GetShroudPlayer(), Planet->GetLayer(), Cell))
+		{
+			continue;
+		}
+		const FHexEntranceSeat Seat = Planet->GetEntranceSeat(Cell);
+		if (!Seat.bEmbedded || (Seat.Behind != MouseCell && Seat.Behind2 != MouseCell))
+		{
+			continue;
+		}
+		const double Distance = FVector3d::DistSquared(Seat.Anchor, FVector3d(MouseSpot).GetSafeNormal());
+		if (Distance < BestDistance)
+		{
+			BestDistance = Distance;
+			OutCell = Cell;
+			OutLayer = Planet->GetLayer() == EHexPlanetLayer::Surface ? EHexPlanetLayer::Underground : EHexPlanetLayer::Surface;
+			bFound = true;
+		}
+	}
+	return bFound;
 }
 
 void AHexPlanetPlayerController::OnCastleOpened(int32 Id)
@@ -356,7 +490,19 @@ void AHexPlanetPlayerController::OrderGame()
 		return;
 	}
 	FString Message;
-	if (!Heroes->Send(Hero->Id, Planet->GetLayer(), MouseCell, Message) && !Message.IsEmpty())
+	// a mark at the edge of the screen is no ground to go to
+	if (bool bCastle = false; EdgeMarkers.IsValid())
+	{
+		if (int32 Id = 0; EdgeMarkers->GetHovered(bCastle, Id))
+		{
+			return;
+		}
+	}
+	// onto the mouth of an entrance it goes through it
+	EHexPlanetLayer Layer = Planet->GetLayer();
+	int32 Cell = MouseCell;
+	FindMouthUnderCursor(Layer, Cell);
+	if (!Heroes->Send(Hero->Id, Layer, Cell, Message) && !Message.IsEmpty())
 	{
 		OnHeroMessage(Message);
 	}
@@ -395,9 +541,17 @@ void AHexPlanetPlayerController::WalkHero()
 		return;
 	}
 	FString Message;
-	if (!Heroes->Go(Heroes->GetSelectedId(), Message) && !Message.IsEmpty())
+	if (!Heroes->Go(Heroes->GetSelectedId(), Message))
 	{
-		OnHeroMessage(Message);
+		if (!Message.IsEmpty())
+		{
+			OnHeroMessage(Message);
+		}
+		// with nowhere to go the key brings the camera to the hero chosen, as the developer asked on 2026-11-12
+		if (Heroes->IsPersonTurn())
+		{
+			ShowHero(Heroes->GetSelectedId());
+		}
 	}
 }
 
@@ -493,6 +647,11 @@ void AHexPlanetPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReaso
 			ViewportClient->RemoveViewportWidgetContent(HeroPanel.ToSharedRef());
 		}
 
+		if (EdgeMarkers.IsValid())
+		{
+			ViewportClient->RemoveViewportWidgetContent(EdgeMarkers.ToSharedRef());
+		}
+
 		if (CastlePanel.IsValid())
 		{
 			ViewportClient->RemoveViewportWidgetContent(CastlePanel.ToSharedRef());
@@ -511,6 +670,7 @@ void AHexPlanetPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReaso
 
 	TravelScreen.Reset();
 	HeroPanel.Reset();
+	EdgeMarkers.Reset();
 	CastlePanel.Reset();
 	ModeBar.Reset();
 	Dialog.Reset();
@@ -720,6 +880,7 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 	FVector Direction;
 	FVector MousePoint = FVector::ZeroVector;
 	int32 Cell = DeprojectMousePositionToWorld(Origin, Direction) ? Planet->FindCellAlongRay(Origin, Direction, &MousePoint) : INDEX_NONE;
+	MouseSpot = MousePoint;
 	// hex.PlanetHoverCell stands in for the mouse
 	if (const int32 Forced = CVarPlanetHoverCell.GetValueOnGameThread(); Planet->GetGrid().GetCells().IsValidIndex(Forced))
 	{
@@ -748,6 +909,11 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 	{
 		Painter->SetCursorPoint(MousePoint);
 	}
+	if (Painter)
+	{
+		// the arrow that shows where an entrance would stand and which way it would open
+		Painter->UpdateEntranceHint(bPainterOnPlanet ? Cell : int32(INDEX_NONE));
+	}
 
 	if (bPainterOnPlanet && Painter->IsPainting())
 	{
@@ -772,6 +938,10 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 	if (HeroPanel.IsValid())
 	{
 		HeroPanel->SetHeroes(Heroes);
+	}
+	if (EdgeMarkers.IsValid())
+	{
+		EdgeMarkers->SetHeroes(Heroes);
 	}
 	if (CastlePanel.IsValid())
 	{
@@ -1252,6 +1422,14 @@ void AHexPlanetPlayerController::RunPaintCommand(const TArray<FString>& Args)
 	else if (Action == TEXT("entrance"))
 	{
 		Brush->SetEntranceTool();
+	}
+	else if (Action == TEXT("unentrance"))
+	{
+		Brush->SetEntranceRemoveTool();
+	}
+	else if (Action == TEXT("turn"))
+	{
+		Brush->SetEntranceTurnTool();
 	}
 	else if (Action == TEXT("carve"))
 	{

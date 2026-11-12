@@ -1066,6 +1066,49 @@ public:
 	UPROPERTY(EditAnywhere, Category="Highlight", meta=(ClampMin=0, ClampMax=1))
 	float PlayMarkOpacity = 0.45f;
 
+	/** While the game is played the cells the hero chosen reaches today show, as the developer asked on 2026-11-12 (AHexPlanet::SetReach,
+	 *  MARK_CODE): a line along their edge, in this color, as wide as this share of a cell and at least so many pixels, covering so much
+	 *  of the ground and glowing by so much of its color */
+	UPROPERTY(EditAnywhere, Category="Highlight|Reach")
+	FLinearColor ReachLineColor = FLinearColor(1.0f, 0.82f, 0.4f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Highlight|Reach", meta=(ClampMin=0.005, ClampMax=0.5))
+	float ReachLineWidth = 0.035f;
+
+	UPROPERTY(EditAnywhere, Category="Highlight|Reach", meta=(ClampMin=0))
+	float ReachLineMinPixels = 1.5f;
+
+	UPROPERTY(EditAnywhere, Category="Highlight|Reach", meta=(ClampMin=0, ClampMax=1))
+	float ReachLineOpacity = 0.9f;
+
+	UPROPERTY(EditAnywhere, Category="Highlight|Reach", meta=(ClampMin=0))
+	float ReachLineGlow = 0.6f;
+
+	/** A soft light of that color lies inside the line and fades inwards over this share of a cell, covering at most so much at the line */
+	UPROPERTY(EditAnywhere, Category="Highlight|Reach", meta=(ClampMin=0, ClampMax=1))
+	float ReachGlowWidth = 0.45f;
+
+	UPROPERTY(EditAnywhere, Category="Highlight|Reach", meta=(ClampMin=0, ClampMax=1))
+	float ReachGlowOpacity = 0.3f;
+
+	/** The ground the hero does not reach today takes this share of this color, as a sheet of see-through black laid over it, and the ground
+	 *  it reaches that share of that color (0, none, by default) */
+	UPROPERTY(EditAnywhere, Category="Highlight|Reach")
+	FLinearColor ReachOutsideColor = FLinearColor(0.0f, 0.0f, 0.0f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Highlight|Reach", meta=(ClampMin=0, ClampMax=1))
+	float ReachOutsideShade = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category="Highlight|Reach")
+	FLinearColor ReachInsideColor = FLinearColor(1.0f, 0.9f, 0.6f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Highlight|Reach", meta=(ClampMin=0, ClampMax=1))
+	float ReachInsideTint = 0.0f;
+
+	/** Seconds over which all of it comes and goes */
+	UPROPERTY(EditAnywhere, Category="Highlight|Reach", meta=(ClampMin=0))
+	float ReachFadeTime = 0.25f;
+
 	/** Height above the sea at least of the tile of a painted cell of the sea, so it shows over the waves */
 	UPROPERTY(EditAnywhere, Category="Painting", meta=(ClampMin=0))
 	float PaintSeaLift = 8.0f;
@@ -1830,21 +1873,93 @@ public:
 	TArray<FLinearColor> NetworkColors = {FLinearColor(1.0f, 0.55f, 0.1f), FLinearColor(0.1f, 0.7f, 1.0f), FLinearColor(0.95f, 0.25f, 0.8f), FLinearColor(0.45f, 0.95f, 0.15f),
 		FLinearColor(0.6f, 0.4f, 1.0f), FLinearColor(1.0f, 0.22f, 0.18f), FLinearColor(0.15f, 0.95f, 0.75f), FLinearColor(1.0f, 0.9f, 0.25f)};
 
-	/** The markers of the entrances, as the way into a cave the developer chose on 2026-11-10, read from above from any side
-	 *  (Tools/HexPlanetKit/generate_planet_kit.py, import_planet_markers.py): on the surface a pit in the ground, a rim of broken rock with
-	 *  crystals that glow in the color of the network (EntranceMesh, M_HexPlanetMarker) round its mouth (EntranceHoleMesh, M_HexPlanetPit), which
-	 *  draws the shaft below it with stairs winding down into the dark (EntrancePit*); underground stone stairs winding up a rock to a glyph that
-	 *  glows in that color (ExitMesh) under a shaft of daylight falling from above (ShaftMesh, M_HexPlanetShaft, from the top of the rock), which
-	 *  lights the rock and the steps by the red of their vertices (MarkerDaylight). Scaled so their radius is MarkerSize and the shaft ShaftHeight
-	 *  high; their glow is MarkerGlow and that of the shaft ShaftBrightness */
+	/** The markers of the entrances (Tools/HexPlanetKit/generate_planet_entrances.py, import_planet_markers.py). As the developer asked on
+	 *  2026-11-12, in place of the pit of 2026-11-10, an entrance is a rock with a cave mouth and stalactites in it, and so is the exit below
+	 *  it, out of whose mouth the day falls: each stands in the back of its cell with its mouth towards the middle, turned to the open side
+	 *  of the cell (AHexPlanet::GetEntranceFront), and the hero stands before it, EntranceHeroPlace radii of a cell from the middle towards
+	 *  that side. EntranceMeshes are the versions of an entrance on the surface and ExitMeshes those of an exit underground, one for each by
+	 *  its cell, drawn with M_HexPlanetMarker: the rock of the cell, worked stone by the green of a vertex, darker by its blue, the shade the
+	 *  meshes bake into their corners (MarkerShade), glowing in the color of the network by its alpha (MarkerGlow) and lit by the day by its
+	 *  red (MarkerDaylight). A shaft of daylight falls before the mouth of an exit (ShaftMesh, M_HexPlanetShaft, ShaftPlace radii of a cell
+	 *  from the middle). Scaled so a unit of a mesh is MarkerSize and the shaft ShaftHeight high */
 	UPROPERTY(EditAnywhere, Category="Underground|Entrances")
-	TSoftObjectPtr<UStaticMesh> EntranceMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetEntranceRim.SM_PlanetEntranceRim")));
+	TArray<TSoftObjectPtr<UStaticMesh>> EntranceMeshes = {
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetEntranceCrag.SM_PlanetEntranceCrag"))),
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetEntranceMaw.SM_PlanetEntranceMaw"))),
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetEntranceGate.SM_PlanetEntranceGate"))),
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetEntranceTwin.SM_PlanetEntranceTwin"))),
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetEntranceTrident.SM_PlanetEntranceTrident")))};
 
 	UPROPERTY(EditAnywhere, Category="Underground|Entrances")
-	TSoftObjectPtr<UStaticMesh> EntranceHoleMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetEntranceHole.SM_PlanetEntranceHole")));
+	TArray<TSoftObjectPtr<UStaticMesh>> ExitMeshes = {
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetExitCave.SM_PlanetExitCave"))),
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetExitGate.SM_PlanetExitGate"))),
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetExitTwin.SM_PlanetExitTwin")))};
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0, ClampMax=0.8))
+	float EntranceHeroPlace = 0.3f;
+
+	/** An entrance beside a mountain is built into it, and an exit beside a void into the wall along it, as the developer asked on
+	 *  2026-11-12 (AHexPlanet::GetEntranceSeat), in the rock of that cell, its mouth away from it, and the cell before the mouth is ground
+	 *  as any other, on which a hero stands in the middle. On the surface it is an arch in a spur of the mountain
+	 *  (EmbeddedEntranceMeshes): the developer wanted an arch a path runs into from the ground, with the rock behind it part of the mountain,
+	 *  after a rock set against it read as a dome put beside it and a round hollow in the slope did not please either; it stands EmbedShift
+	 *  radii from the middle towards the mountain, and its rock runs on from there into the mountain and rises with it. Underground the wall
+	 *  itself has a niche for it (WallNiche*, HexPlanetWalls), under its overhang, on the middle of a side or at a corner of the cell, and
+	 *  EmbeddedExitMeshes are what stands in the niche, steps of rough stone up to an arch of daylight, with the shaft of daylight
+	 *  EmbedShaftPlace radii from the middle of the cell. An entrance with no mountain behind it, or an exit with no void, cannot be used and shows as a free rock (EntranceMeshes, ExitMeshes) in ProblemColor */
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances")
+	TArray<TSoftObjectPtr<UStaticMesh>> EmbeddedEntranceMeshes = {
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetEntranceSpur.SM_PlanetEntranceSpur"))),
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetEntranceSpurWide.SM_PlanetEntranceSpurWide")))};
 
 	UPROPERTY(EditAnywhere, Category="Underground|Entrances")
-	TSoftObjectPtr<UStaticMesh> ExitMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetExitStairs.SM_PlanetExitStairs")));
+	TArray<TSoftObjectPtr<UStaticMesh>> EmbeddedExitMeshes = {
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetExitNiche.SM_PlanetExitNiche"))),
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetExitNicheCrystal.SM_PlanetExitNicheCrystal")))};
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=-1, ClampMax=0.8))
+	float EmbedShaftPlace = -0.4f;
+
+	/** The niche a wall has for an exit built into it: how wide along the wall, how high its arch and how deep into the wall, in world
+	 *  units (HexPlanetWalls::FParams::Niche*) */
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0))
+	float WallNicheWidth = 80.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0))
+	float WallNicheHeight = 135.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0))
+	float WallNicheDepth = 48.0f;
+
+	/** Around the niche the wall stands out onto the passage by WallNicheBulge world units, easing back to its line over WallNicheShoulder
+	 *  beyond each side of the niche, so the exit stands out into its cell and the walls turn to meet it, as the developer asked on
+	 *  2026-11-12, when a niche flush with the wall did not show; what stands in the niche stands as far out */
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0))
+	float WallNicheBulge = 25.0f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0))
+	float WallNicheShoulder = 40.0f;
+
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0, ClampMax=1.5))
+	float EmbedShift = 0.72f;
+
+	/** How far from the middle of its cell towards the mountain the mouth of an entrance built into it lies, in radii of a cell: the edge of
+	 *  its arch, before the glowing end, where a hero goes in and the mark of a way through it stands (AHexPlanet::GetEntranceMouth) */
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0, ClampMax=1.5))
+	float EmbedMouthPlace = 0.64f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0, ClampMax=1))
+	float MarkerShade = 0.8f;
+
+	/** Underground the rock of an exit is as light as that of the walls, this share of CaveWallColor, as the developer found on 2026-11-12
+	 *  that its tone did not fit them */
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=0))
+	float MarkerWallTone = 0.55f;
+
+	UPROPERTY(EditAnywhere, Category="Underground|Entrances", meta=(ClampMin=-0.8, ClampMax=0.8))
+	float ShaftPlace = 0.15f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Entrances")
 	TSoftObjectPtr<UStaticMesh> ShaftMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Markers/SM_PlanetExitShaft.SM_PlanetExitShaft")));

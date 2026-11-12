@@ -193,6 +193,9 @@ namespace HexPlanetSurface
 		double RiverValleySlope = 20.0;
 		/** Where corners and sides lie between levels (UHexPlanetConfig::EdgeRule) */
 		EHexEdgeRule EdgeRule = EHexEdgeRule::Shared;
+		/** The sides that lie at the top of the lower of their cells whatever that rule (HexPlanetKit::GetSideKey): the ground before the mouths
+		 *  of the entrances built into mountains */
+		TSet<uint64> LowSides;
 
 		static FParams Make(const UHexPlanetConfig& Config, const FKit& Kit, double Radius);
 

@@ -122,6 +122,20 @@ namespace HexPlanetWalls
 		double FloorRiseScale = 150.0;
 		double FloorRiseDetail = 0.0;
 
+		/** A niche in a wall for an exit built into it (Build, Niches), as the developer asked on 2026-11-12 for an exit that is one with the
+		 *  wall: the inner face and its foot stand back into the wall by NicheDepth, at most most of its thickness, over NicheWidth along the
+		 *  line, under an arch NicheHeight high in its middle, so the lip of the wall overhangs it as anywhere, only where the wall is at least
+		 *  NicheMinHeight of its height */
+		double NicheWidth = 80.0;
+		double NicheHeight = 135.0;
+		double NicheDepth = 48.0;
+		/** Around the niche the wall stands out onto the passage by NicheBulge, its face, its foot and the floor before it, easing back to its
+		 *  line over NicheShoulder beyond each side of the niche, so the exit stands out into its cell and the walls turn to meet it, as the
+		 *  developer asked on 2026-11-12, when a niche flush with the wall did not show */
+		double NicheBulge = 45.0;
+		double NicheShoulder = 40.0;
+		double NicheMinHeight = 0.6;
+
 		/** Moves the noises, so another planet has other walls */
 		int32 Seed = 0;
 
@@ -163,6 +177,12 @@ namespace HexPlanetWalls
 		 *  wall a parapet as Height does */
 		double Jitter = 1.0;
 
+		/** How much of a niche for an exit is carved into the wall here (0 to 1, its sides eased), and how high its arch is here */
+		double Niche = 0.0;
+		double NicheTop = 0.0;
+		/** How much the wall stands out onto the passage around a niche here (0 to 1, FParams::NicheBulge) */
+		double NicheOut = 0.0;
+
 		/** How far the wall may reach from each line onto the passage and towards the chasm here, about the radius of the turn of that line on
 		 *  that side, so a wall does not fold over itself inside a tight turn */
 		double InnerReach = TNumericLimits<double>::Max();
@@ -171,6 +191,14 @@ namespace HexPlanetWalls
 		double SmoothOuterReach = TNumericLimits<double>::Max();
 		double TopInnerReach = TNumericLimits<double>::Max();
 		double TopOuterReach = TNumericLimits<double>::Max();
+	};
+
+	/** A niche for an exit built into a wall: the passage it stands on and where on the line of the walls along that cell it is, as a
+	 *  direction from the center of the planet, the middle of a side or a corner of the cell */
+	struct FNiche
+	{
+		int32 Cell = INDEX_NONE;
+		FVector3d Point = FVector3d::UnitZ();
 	};
 
 	/** Columns of the texture with a pixel per sample of the walls, line after line (AHexPlanet::WallGlowTexture); UVs are half floats, which hold
@@ -208,9 +236,10 @@ namespace HexPlanetWalls
 
 	/** Builds the lines of the walls along every side of a cell that CanHold towards a neighbor at least MinDrop levels lower; VoidStyles, a value
 	 *  per cell, says which voids are lava (1) or a lake (2), which light the wall, and VoidHeights, a value per cell, the factor on the height of
-	 *  the walls along each void (FSample::Height), 1 for all without it */
+	 *  the walls along each void (FSample::Height), 1 for all without it. Niches are the exits built into a wall: the wall gets a niche around the
+	 *  sample of the line along the cell of each that is nearest its point (FParams::Niche*) */
 	void Build(const FHexSphereGrid& Grid, TConstArrayView<int8> Levels, TFunctionRef<bool(int32)> CanHold, const FParams& Params, FWalls& Out,
-		TConstArrayView<uint8> VoidStyles = {}, TConstArrayView<float> VoidHeights = {});
+		TConstArrayView<uint8> VoidStyles = {}, TConstArrayView<float> VoidHeights = {}, TConstArrayView<FNiche> Niches = {});
 
 	/** Returns the height of a wall at a sample, without the rise and fall of its crest by the stalactites */
 	double GetHeight(const FSample& Sample, const FParams& Params);

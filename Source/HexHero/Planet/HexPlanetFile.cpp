@@ -987,7 +987,12 @@ FString HexPlanetFile::EncodeEntrances(TConstArrayView<FHexEntrance> Entrances)
 	FString Text = TEXT("{\n\t\"version\": 1,\n\t\"entrances\": [");
 	for (int32 Index = 0; Index < Sorted.Num(); ++Index)
 	{
-		Text += FString::Printf(TEXT("%s\n\t\t{\"cell\": %d, \"network\": \"%c\"}"), Index == 0 ? TEXT("") : TEXT(","), Sorted[Index].Cell, GetNetworkLetter(Sorted[Index].Network));
+		// the sides it was turned to only when it was, so the lines of the other entrances stay as they were
+		const FString Side = Sorted[Index].Side >= 0 ? FString::Printf(TEXT(", \"side\": %d%s"), Sorted[Index].Side, Sorted[Index].bCorner ? TEXT(", \"corner\": true") : TEXT("")) : FString();
+		const FString ExitSide = Sorted[Index].ExitSide >= 0
+			? FString::Printf(TEXT(", \"exitSide\": %d%s"), Sorted[Index].ExitSide, Sorted[Index].bExitCorner ? TEXT(", \"exitCorner\": true") : TEXT("")) : FString();
+		Text += FString::Printf(TEXT("%s\n\t\t{\"cell\": %d, \"network\": \"%c\"%s%s}"), Index == 0 ? TEXT("") : TEXT(","), Sorted[Index].Cell, GetNetworkLetter(Sorted[Index].Network),
+			*Side, *ExitSide);
 	}
 	Text += Sorted.IsEmpty() ? TEXT("]\n}\n") : TEXT("\n\t]\n}\n");
 	return Text;
@@ -1008,6 +1013,10 @@ bool HexPlanetFile::DecodeEntrances(const FString& Text, TArray<FHexEntrance>& O
 		FHexEntrance& Entrance = OutEntrances.AddDefaulted_GetRef();
 		Entrance.Cell = Line.Cell;
 		Entrance.Network = Line.Network.Len() == 1 ? GetNetworkIndex(Line.Network[0]) : INDEX_NONE;
+		Entrance.Side = Line.Side;
+		Entrance.ExitSide = Line.ExitSide;
+		Entrance.bCorner = Line.Corner;
+		Entrance.bExitCorner = Line.ExitCorner;
 	}
 	return true;
 }

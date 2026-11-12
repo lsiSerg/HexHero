@@ -157,12 +157,15 @@ void UHexHeroes::ResetHero(FHexHero& Hero) const
 	Hero.AiWait = Config->AiThinkTime;
 	Hero.bPlaced = false;
 	Hero.Facing = FVector3d::ZeroVector;
-	Hero.EntranceSide = FVector3d::ZeroVector;
 	// the creatures a hero of its player starts with
 	Hero.Army = Castles ? Castles->MakeStartArmy(Hero.Player) : TArray<FHexStack>();
 	Hero.CastleId = 0;
 	Hero.GlideStart = -1000.0;
 	Hero.bGliding = false;
+	Hero.GlideScaleFrom = Hero.GlideScaleTo = Hero.PassScale = 1.0f;
+	Hero.bEnteringMouth = false;
+	Hero.GlideFade = 0;
+	Hero.PassFade = 0.0f;
 	Hero.GateStepFrom = INDEX_NONE;
 }
 
@@ -1044,8 +1047,8 @@ UHexHeroes::EClick UHexHeroes::Click(EHexPlanetLayer Layer, int32 Cell, const FH
 	{
 		return Go(Hero->Id, OutMessage) ? EClick::Sent : EClick::None;
 	}
-	// its own cell is somewhere to go only through an entrance or exit
-	if (Cell == Hero->Cell && Layer == Hero->Layer && !IsUsableEntrance(*Planet, Cell))
+	// its own cell is nowhere to go; through the entrance it stands before it goes by a click on the mouth, which is its cell on the other layer
+	if (Cell == Hero->Cell && Layer == Hero->Layer)
 	{
 		Hero->TargetCell = INDEX_NONE;
 		return EClick::None;
@@ -1070,7 +1073,11 @@ bool UHexHeroes::SetTarget(int32 Id, EHexPlanetLayer Layer, int32 Cell)
 bool UHexHeroes::Go(int32 Id, FString& OutMessage)
 {
 	const FHexHero* Hero = FindHero(Id);
-	if (!Hero || Hero->TargetCell == INDEX_NONE || Hero->bWalking || IsPlayerAi(Hero->Player))
+	if (!Hero || Hero->bWalking || IsPlayerAi(Hero->Player))
+	{
+		return false;
+	}
+	if (Hero->TargetCell == INDEX_NONE)
 	{
 		return false;
 	}
@@ -1138,7 +1145,167 @@ bool UHexHeroes::IsWayUnknown(const FHexHero& Hero, TConstArrayView<int32> Path,
 	return bUnknown;
 }
 
-void UHexHeroes::FindFieldFor(const FHexHero& Hero, HexHeroPath::FField& OutField, bool bThroughUnknown) const
+void UHexHeroes::UpdateReach()
+{
+	const FHexHero* Hero = bPlaying && IsPersonTurn() && Config->bShowReach ? GetSelected() : nullptr;
+	if (Hero && Hero->Player != TurnPlayer)
+	{
+		Hero = nullptr;
+	}
+	const auto Hide = [this]()
+	{
+		if (ReachHero != 0)
+		{
+			ReachHero = 0;
+			for (int32 Layer = 0; Layer < NumPlanetLayers; ++Layer)
+			{
+				if (AHexPlanet* Planet = GetPlanet(EHexPlanetLayer(Layer)); Planet && Planet->IsBuilt())
+				{
+					Planet->SetReach({});
+				}
+			}
+		}
+	};
+	if (!Hero)
+	{
+		Hide();
+		return;
+	}
+	// while it walks what was shown stays, but not that of another hero
+	if (Hero->bWalking || Hero->bGliding)
+	{
+		if (ReachHero != Hero->Id)
+		{
+			Hide();
+		}
+		return;
+	}
+	const int32 Node = GetNode(Hero->Layer, Hero->Cell);
+	const bool bShroud = IsShroudOn();
+	if (ReachHero == Hero->Id && ReachNode == Node && ReachPoints == Hero->MovePoints && ReachRevision == MapRevision && bReachShroud == bShroud)
+	{
+		return;
+	}
+	const AHexPlanet* Planet = GetPlanet(Hero->Layer);
+	if (!Planet || !Planet->IsBuilt())
+	{
+		return;
+	}
+	const int32 NumCells = Planet->GetGrid().GetCells().Num();
+
+	HexHeroPath::FField Ways;
+	FindFieldFor(*Hero, Ways, !IsPlayerAi(Hero->Player), Hero->MovePoints);
+	TArray<int32> Cells[NumPlanetLayers];
+	TSet<int32> Added;
+	const auto Add = [&](int32 Layer, int32 Cell)
+	{
+		bool bAlready = false;
+		Added.Add(Layer * NumCells + Cell, &bAlready);
+		if (!bAlready)
+		{
+			Cells[Layer].Add(Cell);
+		}
+	};
+	int32 Steps = 0;
+	for (int32 Each = 0; Each < Ways.Costs.Num(); ++Each)
+	{
+		if (Ways.Costs[Each] >= 0.0f && Ways.Costs[Each] <= Hero->MovePoints + KINDA_SMALL_NUMBER)
+		{
+			Add(Each / NumCells, Each % NumCells);
+			Steps += Each % NumCells != Hero->Cell ? 1 : 0;
+		}
+	}
+	// the mines, mills and castles it can visit today from a cell it reaches, a castle with its three cells
+	for (int32 Layer = 0; Layer < NumPlanetLayers; ++Layer)
+	{
+		const AHexPlanet* Each = GetPlanet(EHexPlanetLayer(Layer));
+		if (!Each || Each->GetGrid().GetCells().Num() != NumCells)
+		{
+			continue;
+		}
+		const TArray<FHexSphereCell>& GridCells = Each->GetGrid().GetCells();
+		const int32 NumReached = Cells[Layer].Num();
+		for (int32 Index = 0; Index < NumReached; ++Index)
+		{
+			for (const int32 Neighbor : GridCells[Cells[Layer][Index]].Neighbors)
+			{
+				if (Added.Contains(Layer * NumCells + Neighbor) || IsHidden(Hero->Player, EHexPlanetLayer(Layer), Neighbor))
+				{
+					continue;
+				}
+				const FHexCastle* Castle = Castles ? Castles->FindCastleAt(EHexPlanetLayer(Layer), Neighbor) : nullptr;
+				if (!Castle && !(Sites && Sites->FindBlockerAt(EHexPlanetLayer(Layer), Neighbor)))
+				{
+					continue;
+				}
+				const float Cost = GetSiteWayCost(Ways, EHexPlanetLayer(Layer), Neighbor);
+				if (Cost < 0.0f || Cost > Hero->MovePoints + KINDA_SMALL_NUMBER)
+				{
+					continue;
+				}
+				++Steps;
+				if (Castle)
+				{
+					for (const int32 CastleCell : Castle->Cells)
+					{
+						Add(Layer, CastleCell);
+					}
+				}
+				else
+				{
+					Add(Layer, Neighbor);
+				}
+			}
+		}
+	}
+	// a cell another hero stands on beside one it reaches cuts no hole into what is shown, though nobody walks onto it
+	for (const FHexHero& Other : Heroes)
+	{
+		const int32 OtherNode = GetNode(Other.Layer, Other.Cell);
+		if (Other.Id == Hero->Id || Other.CastleId != 0 || Added.Contains(OtherNode) || IsHidden(Hero->Player, Other.Layer, Other.Cell))
+		{
+			continue;
+		}
+		const AHexPlanet* Each = GetPlanet(Other.Layer);
+		if (!Each || !Each->GetGrid().GetCells().IsValidIndex(Other.Cell))
+		{
+			continue;
+		}
+		for (const int32 Neighbor : Each->GetGrid().GetCells()[Other.Cell].Neighbors)
+		{
+			if (Ways.IsReached(GetNode(Other.Layer, Neighbor)))
+			{
+				Add(int32(Other.Layer), Other.Cell);
+				break;
+			}
+		}
+	}
+	// the castle it guards is one place with where it stands
+	if (const FHexCastle* Own = Hero->CastleId != 0 && Castles ? Castles->FindCastle(Hero->CastleId) : nullptr)
+	{
+		for (const int32 CastleCell : Own->Cells)
+		{
+			Add(int32(Own->Layer), CastleCell);
+		}
+	}
+
+	ReachHero = Hero->Id;
+	ReachNode = Node;
+	ReachPoints = Hero->MovePoints;
+	ReachRevision = MapRevision;
+	bReachShroud = bShroud;
+	for (int32 Layer = 0; Layer < NumPlanetLayers; ++Layer)
+	{
+		if (AHexPlanet* Each = GetPlanet(EHexPlanetLayer(Layer)); Each && Each->IsBuilt())
+		{
+			// a hero that can take no step today shows none
+			Each->SetReach(Steps > 0 ? TConstArrayView<int32>(Cells[Layer]) : TConstArrayView<int32>());
+		}
+	}
+	UE_LOG(LogHexHero, Verbose, TEXT("Heroes: %s reaches %d cells of the surface and %d of the underground today"), *Hero->Name, Steps > 0 ? Cells[0].Num() : 0, Steps > 0 ? Cells[1].Num() : 0);
+}
+
+void UHexHeroes::FindFieldFor(const FHexHero& Hero, HexHeroPath::FField& OutField, bool bThroughUnknown, float MaxCost) const
 {
 	const AHexPlanet* Planets[NumPlanetLayers] = {GetPlanet(EHexPlanetLayer::Surface), GetPlanet(EHexPlanetLayer::Underground)};
 	const int32 NumCells = Surface ? Surface->GetGrid().GetCells().Num() : 0;
@@ -1206,7 +1373,7 @@ void UHexHeroes::FindFieldFor(const FHexHero& Hero, HexHeroPath::FField& OutFiel
 		}
 		return FMath::Max(Config->EntranceCost, 0.0f);
 	};
-	HexHeroPath::FindLayerField(Planet->GetGrid(), int32(Hero.Layer), Hero.Cell, GetMaxMovePoints(Hero) * Config->PathMaxDays, GetCost, GetLink, OutField);
+	HexHeroPath::FindLayerField(Planet->GetGrid(), int32(Hero.Layer), Hero.Cell, MaxCost >= 0.0f ? MaxCost : GetMaxMovePoints(Hero) * Config->PathMaxDays, GetCost, GetLink, OutField);
 	UE_LOG(LogHexHero, Verbose, TEXT("Heroes: the ways of %s from cell %d found in %.2f ms"), *Hero.Name, Hero.Cell, (FPlatformTime::Seconds() - StartTime) * 1000.0);
 }
 
@@ -1496,7 +1663,7 @@ bool UHexHeroes::CheckRoute(FHexHero& Hero)
 
 	// its way holds: it walks on, to the next cell of it that is still under the fog
 	Hero.CheckCell = FindCheckCell(Hero, Hero.Route, Hero.CheckLayer);
-	Hero.bEnterAtEnd = Hero.VisitCell == INDEX_NONE && EndsWithStep(Hero, Hero.Route) && !IsHidden(Hero.Player, Hero.TargetLayer, Target) && IsUsableEntrance(*Planet, Target);
+	Hero.bEnterAtEnd = false;
 	UE_LOG(LogHexHero, Verbose, TEXT("Heroes: the way of %s to cell %d holds at cell %d, %.2f points left, checked next at cell %d"), *Hero.Name, Target, Hero.Cell,
 		Rest, Hero.CheckCell);
 	return true;
@@ -1540,8 +1707,40 @@ bool UHexHeroes::StartNextStep(FHexHero& Hero)
 	{
 		FString Message;
 		const bool bFollowed = IsPersonTurn() && Hero.Id == SelectedId;
+		const UWorld* World = Surface ? Surface->GetWorld() : nullptr;
+		// where the person sees it, it walks into the mouth first, growing smaller, and goes through when it is there
+		const AHexPlanet* Before = GetPlanet(Hero.Layer);
+		const bool bShown = World && Before && Config->EntranceWalkTime > 0.0f && IsCellSeen(Hero.Layer, Hero.Cell) && Hero.bPlaced;
+		const auto GetMouth = [&](const AHexPlanet& Planet) { return Planet.GetEntranceMouth(Hero.Cell); };
+		if (bShown && !Hero.bEnteringMouth && IsUsableEntrance(*Before, Hero.Cell) && !FindHeroAt(GetOtherLayer(Hero.Layer), Hero.Cell)
+			&& HexHeroPath::CanStep(FMath::Max(Config->EntranceCost, 0.0f), Hero.MovePoints, GetMaxMovePoints(Hero)))
+		{
+			const FVector3d Mouth = GetMouth(*Before);
+			Hero.bEnteringMouth = true;
+			Hero.GlideStart = World->GetTimeSeconds();
+			Hero.GlideTime = Config->EntranceWalkTime;
+			Hero.bGliding = true;
+			Hero.GlidePoints[0] = Hero.Position;
+			Hero.GlidePoints[1] = (Hero.Position + Mouth) * 0.5;
+			Hero.GlidePoints[2] = Mouth;
+			Hero.GlideScaleFrom = 1.0f;
+			Hero.GlideScaleTo = Config->EntranceShrink;
+			Hero.GlideFade = 1;
+			Hero.PassColor = Before->GetEntranceColor(Hero.Cell);
+			Hero.StepAlpha = 1.0f;
+			Hero.Speed = 0.0f;
+			Hero.WalkWait = Config->EntranceWalkTime;
+			return true;
+		}
+		const bool bWalkedIn = Hero.bEnteringMouth;
+		Hero.bEnteringMouth = false;
+		Hero.bGliding = false;
+		Hero.GlideScaleFrom = Hero.GlideScaleTo = Hero.PassScale = 1.0f;
+		Hero.GlideFade = 0;
+		Hero.PassFade = 0.0f;
 		if (!PassEntrance(Hero, Message, bFollowed))
 		{
+			Hero.bPlaced = false;
 			Hero.Route.Reset();
 			Hero.bEnterAtEnd = false;
 			if (!Hero.bOutOfPoints && !Message.IsEmpty())
@@ -1557,6 +1756,24 @@ bool UHexHeroes::StartNextStep(FHexHero& Hero)
 		Hero.StepAlpha = 1.0f;
 		Hero.Speed = 0.0f;
 		Hero.WalkWait = bFollowed ? Config->EntrancePause : 0.0f;
+		// and out of the mouth on the other side, growing again, once the camera is there
+		if (const AHexPlanet* After = GetPlanet(Hero.Layer); bWalkedIn && After && World)
+		{
+			const FVector3d Mouth = GetMouth(*After);
+			const FVector3d Middle = After->GetGrid().GetCells()[Hero.Cell].Center * After->FindGroundRadius(Hero.Cell, After->GetGrid().GetCells()[Hero.Cell].Center);
+			Hero.GlideStart = World->GetTimeSeconds() + double(Hero.WalkWait);
+			Hero.GlideTime = Config->EntranceWalkTime;
+			Hero.bGliding = true;
+			Hero.GlidePoints[0] = Mouth;
+			Hero.GlidePoints[1] = (Mouth + Middle) * 0.5;
+			Hero.GlidePoints[2] = Middle;
+			Hero.GlideScaleFrom = Config->EntranceShrink;
+			Hero.GlideScaleTo = 1.0f;
+			Hero.PassScale = Config->EntranceShrink;
+			Hero.GlideFade = -1;
+			Hero.PassFade = 1.0f;
+			Hero.WalkWait += Config->EntranceWalkTime;
+		}
 		return true;
 	}
 	const AHexPlanet* Planet = GetPlanet(Hero.Layer);
@@ -1578,12 +1795,6 @@ bool UHexHeroes::StartNextStep(FHexHero& Hero)
 	}
 	Hero.bOutOfPoints = false;
 	Hero.MovePoints = FMath::Max(Hero.MovePoints - Cost, 0.0f);
-	// it stops beside an entrance on the side it comes from
-	if (IsUsableEntrance(*Planet, Next))
-	{
-		const TArray<FHexSphereCell>& Cells = Planet->GetGrid().GetCells();
-		Hero.EntranceSide = Cells[Hero.Cell].Center - Cells[Next].Center;
-	}
 	// the cells it left stay on the way shown until it stops
 	if (!(Castles && Castles->FindCastleAt(Hero.Layer, Hero.Cell)))
 	{
@@ -1725,6 +1936,7 @@ bool UHexHeroes::PassEntrance(FHexHero& Hero, FString& OutMessage, bool bBroadca
 	RemoveBody(Hero.Id);
 	Hero.Layer = Other;
 	Hero.Trail.Reset();
+	Hero.CameOutCell = Hero.Cell;
 	Hero.FromCell = Hero.Cell;
 	Hero.bPlaced = false;
 	Hero.Facing = FVector3d::ZeroVector;
@@ -1851,7 +2063,7 @@ bool UHexHeroes::Send(int32 Id, EHexPlanetLayer TargetLayer, int32 Cell, FString
 		if (Hero->bWalking)
 		{
 			Hero->Route.Reset();
-			Hero->bEnterAtEnd = IsUsableEntrance(*Planet, Cell);
+			Hero->bEnterAtEnd = false;
 			return true;
 		}
 		Hero->TargetCell = INDEX_NONE;
@@ -1872,9 +2084,9 @@ bool UHexHeroes::Send(int32 Id, EHexPlanetLayer TargetLayer, int32 Cell, FString
 			++ListRevision;
 			return true;
 		}
-		const bool bTravelled = Travel(*Hero, OutMessage);
-		Hero->bOutOfPoints = false;
-		return bTravelled;
+		// the cell before an entrance is ground as any other since 2026-11-12: a hero goes through by being sent to the mouth, its cell on
+		// the other layer
+		return false;
 	}
 
 	// a hero a person moves may cross ground its player has not explored, which is taken to be open, and go through the underground
@@ -1903,7 +2115,7 @@ bool UHexHeroes::Send(int32 Id, EHexPlanetLayer TargetLayer, int32 Cell, FString
 
 	// over such ground the way is checked where the hero reaches the first cell of it that lies under the fog
 	Hero->CheckCell = FindCheckCell(*Hero, Path, Hero->CheckLayer);
-	Hero->bEnterAtEnd = !bVisit && EndsWithStep(*Hero, Path) && !IsHidden(Hero->Player, TargetLayer, Cell) && IsUsableEntrance(*TargetPlanet, Cell);
+	Hero->bEnterAtEnd = false;
 	Hero->Route = MoveTemp(Path);
 	if (!Hero->bWalking)
 	{
@@ -2009,18 +2221,7 @@ FVector3d UHexHeroes::GetStandDirection(const AHexPlanet& Planet, const FHexHero
 	{
 		return Place.GetSafeNormal();
 	}
-	if (Config->EntranceStandOff <= 0.0f || !IsUsableEntrance(Planet, Cell))
-	{
-		return Center;
-	}
-	FVector3d Side = ProjectToGround(Hero.EntranceSide, Center);
-	if (Side.IsNearlyZero())
-	{
-		Side = GetRestFacing(Center, Hero.Id);
-	}
-	// the middles of two neighbors are the root of three radii of a cell apart
-	const double CellRadius = FMath::Acos(FMath::Clamp(FVector3d::DotProduct(Center, Cells[Cells[Cell].Neighbors[0]].Center), -1.0, 1.0)) / FMath::Sqrt(3.0);
-	return (Center + Side * (CellRadius * Config->EntranceStandOff)).GetSafeNormal();
+	return Center;
 }
 
 void UHexHeroes::PlaceHero(FHexHero& Hero)
@@ -2060,10 +2261,25 @@ void UHexHeroes::PlaceHero(FHexHero& Hero)
 	const FHexCastle* Inside = Castles && Hero.CastleId != 0 ? Castles->FindCastle(Hero.CastleId) : nullptr;
 	FVector3d Yard;
 	FVector3d Walked = FVector3d::ZeroVector;
-	Hero.bGliding = Hero.bGliding && !bStep && Gliding < 1.0;
+	// one that walked into the mouth of an entrance stays there, small, until it goes through
+	Hero.bGliding = Hero.bGliding && !bStep && (Gliding < 1.0 || Hero.bEnteringMouth);
 	if (Hero.bGliding)
 	{
 		Hero.Position = AlongWay(Hero.GlidePoints, Gliding, Walked);
+		const float Share = float(FMath::Clamp(Gliding, 0.0, 1.0));
+		Hero.PassScale = FMath::Lerp(Hero.GlideScaleFrom, Hero.GlideScaleTo, Share);
+		// into the mouth it dissolves over the last of its walk, and out of one it is whole again as early
+		const float FadeStart = FMath::Clamp(Config->EntranceFadeStart, 0.0f, 0.95f);
+		Hero.PassFade = Hero.GlideFade > 0 ? FMath::SmoothStep(FadeStart, 1.0f, Share) : Hero.GlideFade < 0 ? 1.0f - FMath::SmoothStep(0.0f, 1.0f - FadeStart, Share) : 0.0f;
+	}
+	else
+	{
+		Hero.PassScale = Hero.GlideScaleFrom = Hero.GlideScaleTo = 1.0f;
+		Hero.GlideFade = 0;
+		Hero.PassFade = 0.0f;
+	}
+	if (Hero.bGliding)
+	{
 	}
 	else if (bStep && Hero.GateStepFrom != INDEX_NONE && Hero.FromCell == Hero.GateStepFrom)
 	{
@@ -2156,6 +2372,10 @@ void UHexHeroes::UpdateBody(FHexHero& Hero)
 			Instance->SetScalarParameterValue(TEXT("HeroGlow"), Config->HeroGlow);
 			Instance->SetScalarParameterValue(TEXT("HeroFlagWave"), Config->HeroFlagWave);
 			Instance->SetScalarParameterValue(TEXT("HeroFlagWaveSpeed"), Config->HeroFlagWaveSpeed);
+			Instance->SetScalarParameterValue(TEXT("HeroFadeGrain"), Config->HeroFadeGrain);
+			Instance->SetScalarParameterValue(TEXT("HeroFadeGlow"), Config->HeroFadeGlow);
+			Instance->SetScalarParameterValue(TEXT("HeroFade"), 0.0f);
+			BodyStates.FindOrAdd(Hero.Id).Fade = 0.0f;
 			Body->SetMaterial(0, Instance);
 			BodyMaterials.Add(Hero.Id, Instance);
 		}
@@ -2163,11 +2383,23 @@ void UHexHeroes::UpdateBody(FHexHero& Hero)
 		Bodies.Add(Hero.Id, Body);
 	}
 
+	// it dissolves in the mouth of an entrance it goes through
+	if (TObjectPtr<UMaterialInstanceDynamic>* Material = BodyMaterials.Find(Hero.Id))
+	{
+		FBodyState& Drawn = BodyStates.FindOrAdd(Hero.Id);
+		if (*Material && Drawn.Fade != Hero.PassFade)
+		{
+			Drawn.Fade = Hero.PassFade;
+			(*Material)->SetScalarParameterValue(TEXT("HeroFade"), Hero.PassFade);
+			(*Material)->SetVectorParameterValue(TEXT("HeroFadeColor"), Hero.PassColor);
+		}
+	}
+
 	const FVector3d Up = Hero.Position.GetSafeNormal();
 	USkeletalMeshComponent* Animated = Cast<USkeletalMeshComponent>(Body);
 	const FQuat Turn = Animated ? FRotator(0.0, double(Config->RiderYaw), 0.0).Quaternion() : FQuat::Identity;
 	const FTransform Transform(FRotationMatrix::MakeFromZX(FVector(Up), FVector(Hero.Facing)).ToQuat() * Turn, FVector(Hero.Position),
-		FVector(Config->HeroScale * Hero.ViewScale * (Animated ? Config->RiderScale : 1.0f)));
+		FVector(Config->HeroScale * Hero.ViewScale * Hero.PassScale * (Animated ? Config->RiderScale : 1.0f)));
 	if (UHexHeroAnimInstance* Anim = Animated ? Cast<UHexHeroAnimInstance>(Animated->GetAnimInstance()) : nullptr)
 	{
 		// it stands, sets out, walks and stops, and answers being chosen while it stands
@@ -2231,6 +2463,8 @@ UMaterialInstanceDynamic* UHexHeroes::GetPathMaterial()
 			PathMaterial->SetScalarParameterValue(TEXT("MarkOpacity"), Config->PathMarkOpacity);
 			PathMaterial->SetScalarParameterValue(TEXT("MarkDepthBias"), Config->PathDepthBias);
 			PathMaterial->SetScalarParameterValue(TEXT("MarkPulse"), 0.0f);
+			// the hoops that run from the hoop of an entrance a way goes through
+			PathMaterial->SetScalarParameterValue(TEXT("MarkTravelSpeed"), 1.0f / FMath::Max(Config->PathPortalPulseTime, 0.1f));
 			// the marks grow from afar in the material, as each is an instance
 			PathMaterial->SetScalarParameterValue(TEXT("MarkFarStart"), Config->FarStart);
 			PathMaterial->SetScalarParameterValue(TEXT("MarkFarScale"), Config->FarScale);
@@ -2308,7 +2542,7 @@ void UHexHeroes::UpdateRing()
 		}
 		if (RingMaterial)
 		{
-			RingMaterial->SetVectorParameterValue(TEXT("MarkColor"), Config->GetPlayer(bCastle ? Castle->Owner : Hero->Player).Color);
+			RingMaterial->SetVectorParameterValue(TEXT("MarkColor"), Config->RingColor);
 		}
 		// the band of the ring of a hero reaches from 0.7 to 1.06 of its radius
 		const UHexCastleConfig* CastleConfig = Castles ? Castles->GetConfig() : nullptr;
@@ -2332,8 +2566,10 @@ void UHexHeroes::UpdateRing()
 void UHexHeroes::BuildRing(const AHexPlanet& Planet, FLayerMarks& Each, const FVector3d& Center, int32 Cell, double Outer, double Width, int32 Segments)
 {
 	// the band across: how far out a row lies, from 0.7 at its inner edge to 1.06 at its outer, how bright it is and how much it covers, a
-	// bright band with a soft dark rim on both sides
-	static const float Rows[][3] = {{0.7f, 0.0f, 0.0f}, {0.77f, 0.0f, 0.55f}, {0.82f, 1.0f, 1.0f}, {0.94f, 1.0f, 1.0f}, {0.985f, 0.0f, 0.6f}, {1.06f, 0.0f, 0.0f}};
+	// bright band with a dark rim on both sides. Each change takes a hundredth of the radius, so its edges are sharp: over the wide steps
+	// it had until 2026-11-12 the ring looked a little blurred to the developer ("обводка має бути читкішою")
+	static const float Rows[][3] = {{0.7f, 0.0f, 0.0f}, {0.712f, 0.0f, 0.8f}, {0.772f, 0.0f, 0.8f}, {0.784f, 1.0f, 1.0f}, {0.958f, 1.0f, 1.0f}, {0.97f, 0.0f, 0.8f},
+		{1.048f, 0.0f, 0.8f}, {1.06f, 0.0f, 0.0f}};
 	const int32 NumRows = UE_ARRAY_COUNT(Rows);
 	const auto GetReach = [Outer, Width, NumRows](int32 Row) { return Outer - Width * double(Rows[NumRows - 1][0] - Rows[Row][0]) / double(Rows[NumRows - 1][0] - Rows[0][0]); };
 	const FVector3d Up = Center.GetSafeNormal();
@@ -2416,6 +2652,14 @@ void UHexHeroes::ClearMarks(EHexPlanetLayer Layer)
 	if (Each.Lines.IsValid() && Each.Lines->GetInstanceCount() > 0)
 	{
 		Each.Lines->ClearInstances();
+	}
+	if (Each.Portals.IsValid() && Each.Portals->GetInstanceCount() > 0)
+	{
+		Each.Portals->ClearInstances();
+	}
+	if (Each.Rings.IsValid() && Each.Rings->GetInstanceCount() > 0)
+	{
+		Each.Rings->ClearInstances();
 	}
 }
 
@@ -2563,7 +2807,8 @@ void UHexHeroes::UpdatePath()
 		Component->SetCastShadow(false);
 		Component->SetVisibleInRayTracing(false);
 		Component->bReceivesDecals = false;
-		Component->SetNumCustomDataFloats(3);
+		// its color, and for a mark that runs how far along its Z, from which share of the time, and how much smaller it grows
+		Component->SetNumCustomDataFloats(6);
 		if (Material)
 		{
 			Component->SetMaterial(0, Material);
@@ -2593,6 +2838,14 @@ void UHexHeroes::UpdatePath()
 		{
 			Each.End = MakeMarks(Owner, Config->PathEndMesh, GetPathMaterial(), 100);
 		}
+		if (!Each.Portals.IsValid())
+		{
+			Each.Portals = MakeMarks(Owner, Config->PathPortalMesh, GetPathMaterial(), 100);
+		}
+		if (!Each.Rings.IsValid())
+		{
+			Each.Rings = MakeMarks(Owner, Config->PathPortalRingMesh, GetPathMaterial(), 101);
+		}
 		return &Each;
 	};
 	// the cells of both layers have the same middles
@@ -2601,12 +2854,13 @@ void UHexHeroes::UpdatePath()
 	{
 		return Cells[MarkCell].Center * (GetGroundRadius(*Planets[int32(Layer)], MarkCell) + Config->PathLift);
 	};
-	const auto AddMark = [&](UInstancedStaticMeshComponent* Component, const FTransform& Transform, const FLinearColor& Color)
+	const auto AddMark = [&](UInstancedStaticMeshComponent* Component, const FTransform& Transform, const FLinearColor& Color, float Travel = 0.0f, float Phase = 0.0f,
+		float Shrink = 0.0f)
 	{
 		if (Component)
 		{
 			const int32 Instance = Component->AddInstance(Transform, true);
-			const float Data[3] = {Color.R, Color.G, Color.B};
+			const float Data[6] = {Color.R, Color.G, Color.B, Travel, Phase, Shrink};
 			Component->SetCustomData(Instance, MakeArrayView(Data), true);
 		}
 	};
@@ -2636,6 +2890,42 @@ void UHexHeroes::UpdatePath()
 					FVector(Delta.Size(), Config->PathLineWidth, 1.0)), Color);
 			}
 			Last = Next;
+		}
+	};
+
+	// A way through an entrance shows it: a line between the middle of its cell and its mouth, into it on the layer the way leaves and out
+	// of it on the layer it comes to, and a hoop that stands in the mouth, upright and facing out of it
+	const auto AddPortal = [&](EHexPlanetLayer Of, int32 PortalCell, bool bInto, const FLinearColor& Color)
+	{
+		FLayerMarks* Each = FindMarks(Of);
+		const AHexPlanet* OfPlanet = Planets[int32(Of)];
+		if (!Each || !OfPlanet || !Cells.IsValidIndex(PortalCell))
+		{
+			return;
+		}
+		FVector3d Mouth = OfPlanet->GetEntranceMouth(PortalCell);
+		const FVector3d MouthUp = Mouth.GetSafeNormal();
+		Mouth += MouthUp * double(Config->PathLift);
+		const FVector3d Middle = GetMarkPoint(Of, PortalCell);
+		if (FVector3d::DistSquared(Mouth, Middle) > 1.0)
+		{
+			AddLine(Of, *Each, bInto ? Middle : Mouth, PortalCell, bInto ? Mouth : Middle, PortalCell, Color);
+		}
+		const FVector3d Out = ProjectToGround(OfPlanet->GetEntranceSeat(PortalCell).Front, MouthUp);
+		if (!Out.IsNearlyZero())
+		{
+			// the hoop in the mouth, and hoops that run from it along the way, smaller and fading: out of the mouth where the way comes out,
+			// and on into the passage where the way goes in. The material moves them, along the Z of the hoop, which points out, and draws
+			// those that run into the rock over it
+			const FVector3d Hub = Mouth + MouthUp * double(Config->PathPortalRadius * Config->PathPortalLift);
+			AddMark(Each->Portals.Get(), GetMarkTransform(Hub, Out, Config->PathPortalRadius), Color);
+			const int32 NumLayers = FMath::Clamp(Config->PathPortalLayers, 0, 8);
+			const float Travel = FMath::Max(Config->PathPortalTravel, 0.0f);
+			for (int32 Layer = 0; Layer < NumLayers && Travel > 0.0f; ++Layer)
+			{
+				AddMark(Each->Rings.Get(), GetMarkTransform(Hub, Out, Config->PathPortalRadius), Color, bInto ? -Travel : Travel,
+					float(Layer) / float(NumLayers), 1.0f - FMath::Clamp(Config->PathPortalLayerScale, 0.05f, 1.0f));
+			}
 		}
 	};
 
@@ -2722,6 +3012,15 @@ void UHexHeroes::UpdatePath()
 		int32 Before = INDEX_NONE;
 		if (Hero->bWalking)
 		{
+			// the mouth it came out of since it set out stays on the way with the cells it left
+			if (PlanetCells.IsValidIndex(Hero->CameOutCell))
+			{
+				AddPortal(Hero->Layer, Hero->CameOutCell, false, Config->PathColor);
+				if (Hero->Trail.IsEmpty() && Hero->CameOutCell != Hero->Cell && PlanetCells[Hero->CameOutCell].Neighbors.Contains(Hero->Cell))
+				{
+					Before = Hero->CameOutCell;
+				}
+			}
 			for (const int32 Left : Hero->Trail)
 			{
 				if (!PlanetCells.IsValidIndex(Left))
@@ -2797,7 +3096,14 @@ void UHexHeroes::UpdatePath()
 			const FVector3d Point = GetMarkPoint(Layer, Path[Index]);
 			// the line from the point before, lying on the ground between them; through an entrance or exit the way goes on from the same
 			// cell of the other layer, which gets a mark of its own
-			if (!Through[Index] && FVector3d::DistSquared(Point, Previous) > 1.0)
+			if (Through[Index])
+			{
+				// through an entrance: to its mouth and a hoop in it on the layer the way leaves, and a hoop in the mouth and from it to the
+				// middle of the cell on the layer it comes to
+				AddPortal(Index > 0 ? Layers[Index - 1] : Hero->Layer, Path[Index], true, Color);
+				AddPortal(Layer, Path[Index], false, Color);
+			}
+			else if (FVector3d::DistSquared(Point, Previous) > 1.0)
 			{
 				AddLine(Layer, *Each, Previous, PreviousCell, Point, Path[Index], Color);
 			}
@@ -2825,10 +3131,7 @@ void UHexHeroes::UpdatePath()
 	{
 		HoverText += FString::Printf(TEXT(", to %s"), *Sites->GetCellText(TargetLayer, Path.Last()).RightChop(6));
 	}
-	else if (EndsWithStep(*Hero, Path) && !IsHidden(Hero->Player, TargetLayer, Path.Last()) && IsUsableEntrance(*TargetPlanet, Path.Last()))
-	{
-		HoverText += TargetLayer == EHexPlanetLayer::Surface ? TEXT(", then down into the underground") : TEXT(", then up to the surface");
-	}
+
 }
 
 FString UHexHeroes::GetCellText(EHexPlanetLayer Layer, int32 Cell) const
@@ -2973,6 +3276,14 @@ void UHexHeroes::Update(float DeltaTime, const FVector3d* ViewPoint)
 			// while the screen is black between the layers
 			Hero.WalkWait = FMath::Max(Hero.WalkWait - DeltaTime, 0.0f);
 			Hero.Speed = 0.0f;
+			// and one that is to walk out of the mouth of an entrance does so only once the screen is no longer black
+			const UWorld* TimeWorld = Surface ? Surface->GetWorld() : nullptr;
+			if (TimeWorld && bViewTravelling && IsPersonTurn() && Hero.Id == SelectedId && Hero.bGliding && Hero.GlideScaleFrom < Hero.GlideScaleTo)
+			{
+				const double Soonest = TimeWorld->GetTimeSeconds() + double(Config->EntranceOutDelay);
+				Hero.GlideStart = FMath::Max(Hero.GlideStart, Soonest);
+				Hero.WalkWait = FMath::Max(Hero.WalkWait, float(Hero.GlideStart - TimeWorld->GetTimeSeconds()) + Hero.GlideTime);
+			}
 		}
 		else if (Hero.bWalking)
 		{
@@ -3030,6 +3341,10 @@ void UHexHeroes::Update(float DeltaTime, const FVector3d* ViewPoint)
 		{
 			Hero.Trail.Reset();
 		}
+		if (!Hero.bWalking)
+		{
+			Hero.CameOutCell = INDEX_NONE;
+		}
 		Hero.ViewScale = ViewPoint && Hero.bPlaced ? float(FMath::Clamp(FVector3d::Distance(*ViewPoint, Hero.Position) / FMath::Max(double(Config->FarStart), 1.0), 1.0, double(FMath::Max(Config->FarScale, 1.0f)))) : 1.0f;
 		UpdateBody(Hero);
 	}
@@ -3061,6 +3376,7 @@ void UHexHeroes::Update(float DeltaTime, const FVector3d* ViewPoint)
 	// counted after the heroes and the game looked at it, so a hold of no time holds nothing
 	WatchHold = FMath::Max(WatchHold - DeltaTime, 0.0f);
 	UpdateRing();
+	UpdateReach();
 	UpdatePath();
 	Sites->Update();
 	Castles->Update();
@@ -3183,6 +3499,18 @@ void UHexHeroes::UpdateAi(float DeltaTime)
 	if (WatchHold > 0.0f)
 	{
 		return;
+	}
+	// nor while a hero walks in or out through the gate of a castle, which it does only where the person sees it: until 2026-11-12 the game
+	// went on AiThinkTime later, sent the hero on or ended the turn, and the developer saw it go into castles at once, without the gate
+	if (const UWorld* World = Surface ? Surface->GetWorld() : nullptr)
+	{
+		for (const FHexHero& Each : Heroes)
+		{
+			if (Each.bGliding && World->GetTimeSeconds() < Each.GlideStart + double(Each.GlideTime))
+			{
+				return;
+			}
+		}
 	}
 	// its heroes move one after the other: the one that moves goes on until it has no more to do, then the next, and then its turn ends.
 	// What the person who watches does not see takes no time, so several may move in a frame
@@ -3477,8 +3805,9 @@ bool UHexHeroes::MoveAi(int32 Id)
 		UE_LOG(LogHexHero, Log, TEXT("Heroes: %s, moved by the game, finds nothing more to explore from cell %d of the %s"), *Hero->Name, Hero->Cell, GetPlanetLayerName(Hero->Layer));
 		return false;
 	}
+	// through it: to the same cell of the other layer
 	FString Message;
-	return Send(Id, Best, Message);
+	return Send(Id, GetOtherLayer(Hero->Layer), Best, Message);
 }
 
 bool UHexHeroes::GetLights(EHexPlanetLayer Layer, const FVector3d& Focus, TArray<FHexHeroLight>& OutLights) const
@@ -3623,6 +3952,19 @@ namespace
 				UE_LOG(LogHexHero, Warning, TEXT("hex.Hero: %s"), Message.IsEmpty() ? TEXT("the hero stays") : *Message);
 			}
 		}
+		else if (Action.Equals(TEXT("through"), ESearchCase::IgnoreCase) && Args.Num() >= 2)
+		{
+			// as a click on the mouth of the entrance before that cell: to the same cell of the other layer than the hero is on
+			const FHexHero* Hero = Args.Num() >= 3 ? Heroes->FindHeroByText(Args[2]) : Heroes->GetSelected();
+			if (!Hero)
+			{
+				UE_LOG(LogHexHero, Warning, TEXT("hex.Hero: no hero is chosen"));
+			}
+			else if (!Heroes->Send(Hero->Id, GetOtherLayer(Hero->Layer), ParseHeroCell(Args[1], *Planet, World), Message))
+			{
+				UE_LOG(LogHexHero, Warning, TEXT("hex.Hero: %s"), Message.IsEmpty() ? TEXT("the hero stays") : *Message);
+			}
+		}
 		else if (Action.Equals(TEXT("play"), ESearchCase::IgnoreCase))
 		{
 			if (!Heroes->StartPlay(Message))
@@ -3693,6 +4035,6 @@ namespace
 	}
 
 	FAutoConsoleCommandWithWorldAndArgs HeroCommand(TEXT("hex.Hero"),
-		TEXT("Drives the heroes of the planet: list, play and stop (the game), add <Cell> [Class] [Player] on the layer shown, remove <Hero>, select <Hero>, next, click <Cell> (as the left button), target <Cell|off> and go (as a click and Space), send <Cell> [Hero], ways <Cell> [Rings] (logs the way of the hero chosen to each cell around one, or why it has none), ai <Player> [on|off] (the game moves the heroes of a player by itself), points <Amount> [Hero] (more points of movement for the hero chosen or named), skip [Hero] (leaves it for today), endturn, restart. A hero is its Id or its name; a cell is its number, focus for the one the camera looks at, or focus:<Steps>[:<Side>] for one that many steps from it."),
+		TEXT("Drives the heroes of the planet: list, play and stop (the game), add <Cell> [Class] [Player] on the layer shown, remove <Hero>, select <Hero>, next, click <Cell> (as the left button), target <Cell|off> and go (as a click and Space), send <Cell> [Hero], through <Cell> [Hero] (as a click on the mouth of the entrance before that cell), ways <Cell> [Rings] (logs the way of the hero chosen to each cell around one, or why it has none), ai <Player> [on|off] (the game moves the heroes of a player by itself), points <Amount> [Hero] (more points of movement for the hero chosen or named), skip [Hero] (leaves it for today), endturn, restart. A hero is its Id or its name; a cell is its number, focus for the one the camera looks at, or focus:<Steps>[:<Side>] for one that many steps from it."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&RunHeroCommand));
 }

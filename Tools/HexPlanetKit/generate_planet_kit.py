@@ -838,14 +838,13 @@ def main():
     # the markers of the entrances of the underground, in a folder of their own too, imported by import_planet_markers.py
     marker_folder = os.path.join(os.path.dirname(os.path.abspath(OUTPUT_FOLDER)), 'HexPlanetMarkers')
     os.makedirs(marker_folder, exist_ok=True)
-    write_marker(EntranceRim(7).get_triangles(), os.path.join(marker_folder, 'SM_PlanetEntranceRim.glb'), 'SM_PlanetEntranceRim')
-    write_marker(EntranceHole().get_triangles(), os.path.join(marker_folder, 'SM_PlanetEntranceHole.glb'), 'SM_PlanetEntranceHole')
-    write_marker(ExitStairs(19).get_triangles(), os.path.join(marker_folder, 'SM_PlanetExitStairs.glb'), 'SM_PlanetExitStairs')
-    write_shaft(Shaft(), os.path.join(marker_folder, 'SM_PlanetExitShaft.glb'), 'SM_PlanetExitShaft')
+    # the rocks of the entrances and exits and the shaft of daylight are written by generate_planet_entrances.py since 2026-11-12, which uses the
+    # helpers above; the pit and the stairs up a rock of before (EntranceRim, EntranceHole, ExitStairs) are no longer written
 
     with open(os.path.join(OUTPUT_FOLDER, 'kit.json'), 'w', encoding='utf-8') as file:
         json.dump(manifest, file, indent=2)
     print('Wrote %d pieces with %d triangles to %s' % (sum(len(names) for kit in manifest['kits'] for names in kit['meshes'].values()), triangles, OUTPUT_FOLDER))
 
 
-main()
+if __name__ == '__main__':
+    main()

@@ -221,6 +221,12 @@ private:
 	/** True while the camera glides to a cell */
 	bool bFocusing = false;
 
+	/** The edge of the screen does not scroll until the mouse has moved EdgeScrollHoldDistance from EdgeHoldMouse, where it was when a glide
+	 *  was asked for (HoldEdgeScroll), so the cursor left at the edge does not stop that glide */
+	bool bEdgeScrollHeld = false;
+	FVector2D EdgeHoldMouse = FVector2D::ZeroVector;
+	void HoldEdgeScroll();
+
 	/** Direction from the center of the planet to the cell the camera glides to */
 	FVector FocusDirection = FVector::ZeroVector;
 

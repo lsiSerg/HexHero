@@ -8,6 +8,7 @@ it, so it is only created, with the defaults of its class, and never changed her
 
 import json
 import os
+import sys
 
 import unreal
 
@@ -56,6 +57,10 @@ def main():
     assets = unreal.EditorAssetLibrary
     with open(os.path.join(SOURCE_FOLDER, 'heroes.json'), encoding='utf-8') as file:
         manifest = json.load(file)
+    # words after the file name import only the meshes whose names hold one, and no rider, so the others stay as they are
+    only = [word for word in sys.argv[1:] if not word.startswith('-')]
+    if only:
+        manifest['meshes'] = [entry for entry in manifest['meshes'] if any(word in entry['name'] for word in only)]
     materials = {}
     for key, path in MATERIALS.items():
         materials[key] = unreal.load_asset(path)
@@ -103,7 +108,8 @@ def main():
         assets.save_loaded_asset(mesh, only_if_is_dirty=False)
         unreal.log('HEROES %s: %d triangles' % (name, entry['triangles']))
 
-    import_rider(materials['hero'])
+    if not only:
+        import_rider(materials['hero'])
     config_path = '%s/%s' % (FOLDER, CONFIG)
     if not assets.does_asset_exist(config_path):
         unreal.AssetToolsHelpers.get_asset_tools().create_asset(CONFIG, FOLDER, unreal.HexHeroConfig, unreal.DataAssetFactory())

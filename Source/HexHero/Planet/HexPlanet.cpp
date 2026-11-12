@@ -725,6 +725,19 @@ namespace
 		TEXT("hex.PlanetSetBiome <Cell> <Letter> [Rings]: sets the biome of a cell of the planet by its PlanetLetter, and of the cells up to Rings around it, where their level allows it"),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&SetBiomeCommand));
 
+	void FitEntrancesCommand(const TArray<FString>& Args, UWorld* World)
+	{
+		if (AHexPlanet* Planet = GetShownPlanet(World))
+		{
+			const int32 Count = Planet->FitEntrances();
+			UE_LOG(LogHexHero, Log, TEXT("hex.PlanetFitEntrances: %d cells changed"), Count);
+		}
+	}
+
+	FAutoConsoleCommandWithWorldAndArgs FitEntrancesConsoleCommand(TEXT("hex.PlanetFitEntrances"),
+		TEXT("hex.PlanetFitEntrances: raises a mountain behind every entrance of the planet that has none, and makes a void behind every exit that has none, for the wall it is built into; the underground must have been shown once"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&FitEntrancesCommand));
+
 	FAutoConsoleCommandWithWorldAndArgs SetLevelConsoleCommand(TEXT("hex.PlanetSetLevel"),
 		TEXT("hex.PlanetSetLevel <Cell> <Level> [Rings] [ToCell]: sets the level of a cell of the planet, -2 deep sea to 2 mountains, and of the cells up to Rings around it, or of a line of cells to ToCell and Rings around it"),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&SetLevelCommand));
@@ -997,6 +1010,9 @@ struct AHexPlanet::FLevelRebuild
 	TArray<uint8> Frozen;
 	/** True to build every chunk, as the shape of the rivers changed */
 	bool bAll = false;
+	/** The low sides shown and to build, the ground before the mouths of the entrances (FindEntranceSides) */
+	TSet<uint64> OldLowSides;
+	TSet<uint64> LowSides;
 	/** The real coast by chunk as it was, which the task brings up to date with the chunks it builds, for the sea field */
 	TArray<TArray<FVector3f>> Coasts;
 
@@ -1605,6 +1621,7 @@ void AHexPlanet::FinishUndergroundData()
 		CellBiomes.Init(0, Levels.Num());
 	}
 	Entrances = MoveTemp(Work.Loaded.Entrances);
+	const bool bPlacedEntrances = Work.Loaded.bPlacedEntrances;
 	UndergroundReport = MoveTemp(Work.Loaded.Report);
 	const double BackgroundMs = Work.Ms;
 	UndergroundData.Reset();
@@ -1627,10 +1644,16 @@ void AHexPlanet::FinishUndergroundData()
 		UndergroundReport.IsGood() ? TEXT("good") : TEXT("with problems"), BackgroundMs, WaitMs >= 1.0 ? *FString::Printf(TEXT(", waited %.0f ms for it"), WaitMs) : TEXT(""),
 		Fitted > 0 ? *FString::Printf(TEXT(", %d cells took a biome their level allows"), Fitted) : TEXT(""));
 
-	// the entrances are known now, so the surface marks them and takes its objects off them
+	// the entrances are known now, so the surface marks them, takes its objects off them and lays the ground before their mouths flat
 	if (AHexPlanet* SurfacePlanet = GetLayerPlanet(EHexPlanetLayer::Surface))
 	{
 		SurfacePlanet->UpdateMarkers();
+		// entrances the generation placed stand on open ground: each gets the mountain it is built into
+		if (bPlacedEntrances)
+		{
+			FitEntrances();
+		}
+		SurfacePlanet->UpdateEntranceSides();
 	}
 	UpdateClearCells();
 }
@@ -1782,7 +1805,32 @@ HexPlanetUnderground::EEntranceProblem AHexPlanet::GetEntranceProblem(int32 Inde
 	{
 		return HexPlanetUnderground::EEntranceProblem::NoCell;
 	}
-	return HexPlanetUnderground::GetEntranceProblem(Underground->Grid, SurfacePlanet->Levels, Underground->Levels, Underground->Entrances, Index);
+	const HexPlanetUnderground::EEntranceProblem Problem = HexPlanetUnderground::GetEntranceProblem(Underground->Grid, SurfacePlanet->Levels, Underground->Levels, Underground->Entrances, Index);
+	if (Problem != HexPlanetUnderground::EEntranceProblem::None)
+	{
+		return Problem;
+	}
+	// an entrance is built into a mountain beside its cell and its exit into the wall along a void beside the cell below, one exit to a
+	// wall, as the developer decided on 2026-11-12
+	const int32 Cell = Underground->Entrances[Index].Cell;
+	if (!SurfacePlanet->GetEntranceSeat(Cell).bEmbedded)
+	{
+		return HexPlanetUnderground::EEntranceProblem::NoMountain;
+	}
+	const FHexEntranceSeat Exit = Underground->GetEntranceSeat(Cell);
+	if (!Exit.bEmbedded)
+	{
+		return HexPlanetUnderground::EEntranceProblem::NoWall;
+	}
+	for (int32 Other = 0; Other < Index; ++Other)
+	{
+		const FHexEntranceSeat Before = Underground->GetEntranceSeat(Underground->Entrances[Other].Cell);
+		if (Before.bEmbedded && (Before.Behind == Exit.Behind || Before.Behind == Exit.Behind2 || (Before.Behind2 != INDEX_NONE && (Before.Behind2 == Exit.Behind || Before.Behind2 == Exit.Behind2))))
+		{
+			return HexPlanetUnderground::EEntranceProblem::SharedWall;
+		}
+	}
+	return HexPlanetUnderground::EEntranceProblem::None;
 }
 
 const HexPlanetUnderground::FReport* AHexPlanet::GetUndergroundReport() const
@@ -1840,6 +1888,17 @@ void AHexPlanet::SetEntrances(const TArray<FHexEntrance>& NewEntrances, bool bBy
 	{
 		Planet->UpdateMarkers();
 		Planet->UpdateLinkMarks();
+	}
+	if (AHexPlanet* SurfacePlanet = GetLayerPlanet(EHexPlanetLayer::Surface))
+	{
+		SurfacePlanet->UpdateEntranceSides();
+	}
+	// the walls have a niche for an exit built into them
+	if (Underground->bBuilt && Underground->Settings && Underground->Settings->bWalls && !Underground->IsRebuilding() && !Underground->Walls->Lines.IsEmpty())
+	{
+		TArray<int32> WallChunksChanged;
+		Underground->UpdateWalls(WallChunksChanged);
+		Underground->Objects->RebuildChunks(WallChunksChanged);
 	}
 	UpdateClearCells();
 }
@@ -2256,9 +2315,14 @@ void AHexPlanet::StartRebuild()
 	Rebuild->bAll = bRebuildAllPending;
 	bRebuildAllPending = false;
 	Rebuild->StartTime = FPlatformTime::Seconds();
+	// the ground before the mouths of the entrances, as the levels and the entrances are now
+	Rebuild->OldLowSides = SurfaceParams.LowSides;
+	Rebuild->LowSides = FindEntranceSides();
+	HexPlanetSurface::FParams NewParams = SurfaceParams;
+	NewParams.LowSides = Rebuild->LowSides;
 
 	RebuildTask = UE::Tasks::Launch(UE_SOURCE_LOCATION,
-		[Work = Rebuild, GridPtr = &Grid, Kit = SurfaceKit.ToSharedRef(), Params = SurfaceParams, SeaParams = FSeaParams::Make(*Settings, Radius), FixedPeak = MeanPeak,
+		[Work = Rebuild, GridPtr = &Grid, Kit = SurfaceKit.ToSharedRef(), Params = MoveTemp(NewParams), SeaParams = FSeaParams::Make(*Settings, Radius), FixedPeak = MeanPeak,
 			CurveParams = Rivers->GetCurveParams(), bSea = Settings->bSea]()
 		{
 			const double SurfaceStart = FPlatformTime::Seconds();
@@ -2267,6 +2331,18 @@ void AHexPlanet::StartRebuild()
 			// a relief set by hand and a river change the cells they lie on as a level does
 			TArray<int32> ChangedCells = HexPlanetSurface::FindChangedOverrides(Work->OldOverrides, Work->Overrides);
 			ChangedCells.Append(HexPlanetRivers::FindChangedCells(Work->OldRivers, Work->Rivers));
+			// and a side that became low, or is no longer, both its cells
+			for (const TSet<uint64>* Sides : {&Work->OldLowSides, &Work->LowSides})
+			{
+				for (const uint64 Key : *Sides)
+				{
+					if (!(Sides == &Work->OldLowSides ? Work->LowSides : Work->OldLowSides).Contains(Key))
+					{
+						ChangedCells.Add(int32(Key >> 32));
+						ChangedCells.Add(int32(Key & 0xffffffffu));
+					}
+				}
+			}
 			Work->Chunks = Work->bAll ? HexPlanetSurface::GetAllChunks(*GridPtr)
 				: HexPlanetSurface::FindAffectedChunks(*GridPtr, Work->OldLevels, Work->Levels, Work->OldMassifSteps, Work->MassifSteps, ChangedCells);
 
@@ -2328,6 +2404,7 @@ void AHexPlanet::FinishRebuild()
 	ShownLevels = MoveTemp(Rebuild->Levels);
 	ShownMassifSteps = MoveTemp(Rebuild->MassifSteps);
 	ShownFrozen = MoveTemp(Rebuild->Frozen);
+	SurfaceParams.LowSides = Rebuild->LowSides;
 	ShownReliefOverrides = MoveTemp(Rebuild->Overrides);
 
 	if (!Rebuild->Chunks.IsEmpty())
@@ -2438,6 +2515,7 @@ void AHexPlanet::Tick(float DeltaTime)
 	}
 
 	Objects->SetShown(CVarHexPlanetObjects.GetValueOnGameThread(), CVarHexPlanetRims.GetValueOnGameThread());
+	UpdateReach(DeltaTime);
 
 	const APlayerController* PlayerController = GetWorld()->GetFirstPlayerController();
 
@@ -3015,6 +3093,7 @@ void AHexPlanet::UpdateDebugView()
 		HexMaterialConfig::Apply(SurfaceCutMaterial, Settings);
 		HexMaterialConfig::Apply(SurfaceCutMaterial, LoadedWaterConfig);
 		SurfaceCutMaterial->SetTextureParameterValue(TEXT("CellMarks"), CellMarks);
+		SurfaceCutMaterial->SetTextureParameterValue(TEXT("CellReach"), CellReach);
 		SetBiomeLayers(SurfaceCutMaterial);
 		SetShoreField(SurfaceCutMaterial);
 		SetCloudParameters(SurfaceCutMaterial);
@@ -3585,6 +3664,7 @@ void AHexPlanet::BuildWaterGrid()
 		WaterGridMaterial = UMaterialInstanceDynamic::Create(BaseMaterial, this);
 		HexMaterialConfig::Apply(WaterGridMaterial, Settings);
 		WaterGridMaterial->SetTextureParameterValue(TEXT("CellMarks"), CellMarks);
+		WaterGridMaterial->SetTextureParameterValue(TEXT("CellReach"), CellReach);
 		WaterGrid->SetMaterial(0, WaterGridMaterial);
 		SetGridVisible(bGridVisible);
 	}
@@ -4920,6 +5000,7 @@ void AHexPlanet::BuildSurface()
 		// the swash that runs up the beach takes the values of the shore of the water
 		HexMaterialConfig::Apply(SurfaceMaterial, LoadedWaterConfig);
 		SurfaceMaterial->SetTextureParameterValue(TEXT("CellMarks"), CellMarks);
+		SurfaceMaterial->SetTextureParameterValue(TEXT("CellReach"), CellReach);
 		SetBiomeLayers(SurfaceMaterial);
 		SetShoreField(SurfaceMaterial);
 		SetCloudParameters(SurfaceMaterial);
@@ -4935,6 +5016,7 @@ void AHexPlanet::BuildSurface()
 				HexMaterialConfig::Apply(Lod, Settings);
 				HexMaterialConfig::Apply(Lod, LoadedWaterConfig);
 				Lod->SetTextureParameterValue(TEXT("CellMarks"), CellMarks);
+				Lod->SetTextureParameterValue(TEXT("CellReach"), CellReach);
 				SetBiomeLayers(Lod);
 				SetShoreField(Lod);
 				SetCloudParameters(Lod);
@@ -5503,6 +5585,472 @@ void AHexPlanet::UpdateBoulders()
 		*FString::JoinBy(Cleared, TEXT(" "), [](int32 Cell) { return FString::FromInt(Cell); })) : TEXT(""));
 }
 
+namespace
+{
+	/** The way out of a cell at a turn, along the ground: an even turn towards the neighbor of half its number, an odd one towards the corner
+	 *  between that neighbor and the next */
+	FVector3d GetTurnOut(const TArray<FHexSphereCell>& Cells, int32 Cell, int32 Turn)
+	{
+		const FHexSphereCell& Each = Cells[Cell];
+		const int32 Num = Each.Neighbors.Num();
+		const auto GetSideOut = [&](int32 Side)
+		{
+			const FVector3d Towards = Cells[Each.Neighbors[((Side % Num) + Num) % Num]].Center - Each.Center;
+			return (Towards - Each.Center * FVector3d::DotProduct(Towards, Each.Center)).GetSafeNormal();
+		};
+		return Turn % 2 == 0 ? GetSideOut(Turn / 2) : (GetSideOut(Turn / 2) + GetSideOut(Turn / 2 + 1)).GetSafeNormal();
+	}
+}
+
+int32 AHexPlanet::FitEntrances(int32 OnlyCell, bool bMountains)
+{
+	AHexPlanet* SurfacePlanet = GetLayerPlanet(EHexPlanetLayer::Surface);
+	AHexPlanet* Underground = GetLayerPlanet(EHexPlanetLayer::Underground);
+	if (!SurfacePlanet || !Underground || !Underground->bDataLoaded || !SurfacePlanet->bBuilt)
+	{
+		return 0;
+	}
+	const TArray<FHexSphereCell>& Cells = SurfacePlanet->Grid.GetCells();
+	const UHexHeroes* Standing = SurfacePlanet->GetHeroes();
+	TSet<int32> EntranceCells;
+	for (const FHexEntrance& Entrance : GetEntrances())
+	{
+		EntranceCells.Add(Entrance.Cell);
+	}
+	// nothing stands on the cell that becomes rock, and no entrance is before it
+	const auto IsFree = [&](EHexPlanetLayer Layer, int32 Cell)
+	{
+		return !EntranceCells.Contains(Cell) && !Cells[Cell].IsPentagon() && !(Standing && (Standing->FindHeroAt(Layer, Cell)
+			|| (Standing->GetSites() && Standing->GetSites()->FindSiteAt(Layer, Cell)) || (Standing->GetCastles() && Standing->GetCastles()->FindCastleAt(Layer, Cell))));
+	};
+	// the cells around one that became rock still reach each other without it, and none of them is left one cell wide
+	const auto KeepsWays = [&](int32 Rock, TFunctionRef<bool(int32)> IsOpen, bool bNoNecks)
+	{
+		TArray<int32> Around;
+		for (const int32 Neighbor : Cells[Rock].Neighbors)
+		{
+			if (IsOpen(Neighbor))
+			{
+				Around.Add(Neighbor);
+			}
+		}
+		for (const int32 Each : Around)
+		{
+			const int32 Num = Cells[Each].Neighbors.Num();
+			for (int32 Side = 0; bNoNecks && Num == 6 && Side < 3; ++Side)
+			{
+				const int32 One = Cells[Each].Neighbors[Side];
+				const int32 Other = Cells[Each].Neighbors[Side + 3];
+				if ((One == Rock || !IsOpen(One)) && (Other == Rock || !IsOpen(Other)))
+				{
+					return false;
+				}
+			}
+		}
+		if (Around.Num() < 2)
+		{
+			return true;
+		}
+		TSet<int32> Seen = {Around[0]};
+		TArray<int32> Front = {Around[0]};
+		for (int32 Index = 0; Index < Front.Num() && Seen.Num() < 400; ++Index)
+		{
+			for (const int32 Neighbor : Cells[Front[Index]].Neighbors)
+			{
+				if (Neighbor != Rock && IsOpen(Neighbor) && !Seen.Contains(Neighbor))
+				{
+					Seen.Add(Neighbor);
+					Front.Add(Neighbor);
+				}
+			}
+		}
+		return !Around.ContainsByPredicate([&Seen](int32 Each) { return !Seen.Contains(Each); });
+	};
+	// the neighbor of a cell that becomes rock: the one behind the way the mouth was turned by hand, else the one most to the north that
+	// may, so the mouth opens to the south, towards the camera of the game
+	const auto FindRock = [&](int32 Cell, int32 Turned, int32 Preferred, TFunctionRef<bool(int32)> Fits)
+	{
+		const FHexSphereCell& Each = Cells[Cell];
+		const int32 Num = Each.Neighbors.Num();
+		if (Turned >= 0 && Turned < Num && Num % 2 == 0)
+		{
+			const int32 Behind = Each.Neighbors[(Turned + Num / 2) % Num];
+			return Fits(Behind) ? Behind : int32(INDEX_NONE);
+		}
+		if (Preferred != INDEX_NONE && Each.Neighbors.Contains(Preferred) && Fits(Preferred))
+		{
+			return Preferred;
+		}
+		const FVector3d North = (FVector3d::UpVector - Each.Center * Each.Center.Z).GetSafeNormal();
+		int32 Best = INDEX_NONE;
+		double BestScore = -2.0;
+		for (const int32 Neighbor : Each.Neighbors)
+		{
+			const double Score = FVector3d::DotProduct((Cells[Neighbor].Center - Each.Center).GetSafeNormal(), North);
+			if (Score > BestScore && Fits(Neighbor))
+			{
+				BestScore = Score;
+				Best = Neighbor;
+			}
+		}
+		return Best;
+	};
+
+	int32 NumMountains = 0;
+	int32 NumWalls = 0;
+	int32 NumLeft = 0;
+	// a copy, as the levels change what the planet says of each
+	const TArray<FHexEntrance> All = GetEntrances();
+	for (const FHexEntrance& Entrance : All)
+	{
+		const int32 Cell = Entrance.Cell;
+		if (!Cells.IsValidIndex(Cell) || (OnlyCell != INDEX_NONE && Cell != OnlyCell))
+		{
+			continue;
+		}
+		// a mountain behind it on the surface
+		const auto IsLand = [&](int32 Each) { return SurfacePlanet->Levels[Each] == 0 || SurfacePlanet->Levels[Each] == 1; };
+		if (bMountains && IsLand(Cell) && !SurfacePlanet->GetEntranceSeat(Cell).bEmbedded)
+		{
+			const int32 Rock = FindRock(Cell, Entrance.Side, INDEX_NONE, [&](int32 Each)
+			{
+				return IsLand(Each) && IsFree(EHexPlanetLayer::Surface, Each) && KeepsWays(Each, IsLand, false);
+			});
+			if (Rock != INDEX_NONE)
+			{
+				SurfacePlanet->SetCellLevels({{Rock, 2}});
+				SurfacePlanet->MarkLevelsEdited();
+				++NumMountains;
+			}
+			else
+			{
+				++NumLeft;
+			}
+		}
+		// and a void behind its exit, which the wall along it holds; under the mountain where that can be
+		const auto IsFloor = [&](int32 Each) { return HexPlanetUnderground::IsPassage(Underground->Levels[Each]); };
+		const FHexEntranceSeat Exit = Underground->GetEntranceSeat(Cell);
+		bool bShared = false;
+		for (const FHexEntrance& Other : All)
+		{
+			if (Other.Cell == Cell)
+			{
+				break;
+			}
+			const FHexEntranceSeat Before = Underground->GetEntranceSeat(Other.Cell);
+			bShared |= Exit.bEmbedded && Before.bEmbedded && Before.Behind == Exit.Behind;
+		}
+		if (IsFloor(Cell) && (!Exit.bEmbedded || bShared) && Underground->bBuilt)
+		{
+			// In the middle of a hall one cell of void would leave the passages behind it one cell wide, so the void grows away from the exit:
+			// every passage behind it that it left one cell wide becomes void too, a wedge out to the edge of the hall, while the passages
+			// around it still reach each other
+			TMap<int32, int32> Wedge;
+			const int32 Rock = FindRock(Cell, Entrance.ExitSide, SurfacePlanet->GetEntranceSeat(Cell).Behind, [&](int32 First)
+			{
+				if (!IsFloor(First) || !IsFree(EHexPlanetLayer::Underground, First))
+				{
+					return false;
+				}
+				TSet<int32> Voided = {First};
+				TArray<int32> Queue = {First};
+				const auto IsOpen = [&](int32 Each) { return IsFloor(Each) && !Voided.Contains(Each); };
+				const auto IsNeck = [&](int32 Each)
+				{
+					const int32 Num = Cells[Each].Neighbors.Num();
+					for (int32 Side = 0; Num == 6 && Side < 3; ++Side)
+					{
+						if (!IsOpen(Cells[Each].Neighbors[Side]) && !IsOpen(Cells[Each].Neighbors[Side + 3]))
+						{
+							return true;
+						}
+					}
+					return false;
+				};
+				const FVector3d Away = (Cells[First].Center - Cells[Cell].Center).GetSafeNormal();
+				for (int32 Index = 0; Index < Queue.Num(); ++Index)
+				{
+					for (const int32 Neighbor : Cells[Queue[Index]].Neighbors)
+					{
+						if (!IsOpen(Neighbor) || !IsNeck(Neighbor))
+						{
+							continue;
+						}
+						const bool bBehind = Neighbor != Cell && FVector3d::DotProduct((Cells[Neighbor].Center - Cells[Cell].Center).GetSafeNormal(), Away) > 0.45;
+						if (!bBehind || !IsFree(EHexPlanetLayer::Underground, Neighbor) || Voided.Num() >= 16)
+						{
+							return false;
+						}
+						Voided.Add(Neighbor);
+						Queue.Add(Neighbor);
+					}
+				}
+				// the passages around the wedge still reach each other
+				TArray<int32> Around;
+				for (const int32 Each : Voided)
+				{
+					for (const int32 Neighbor : Cells[Each].Neighbors)
+					{
+						if (IsOpen(Neighbor))
+						{
+							Around.AddUnique(Neighbor);
+						}
+					}
+				}
+				if (!Around.Contains(Cell))
+				{
+					return false;
+				}
+				TSet<int32> Seen = {Cell};
+				TArray<int32> Front = {Cell};
+				for (int32 Index = 0; Index < Front.Num() && Seen.Num() < 800; ++Index)
+				{
+					for (const int32 Neighbor : Cells[Front[Index]].Neighbors)
+					{
+						if (IsOpen(Neighbor) && !Seen.Contains(Neighbor))
+						{
+							Seen.Add(Neighbor);
+							Front.Add(Neighbor);
+						}
+					}
+				}
+				if (Around.ContainsByPredicate([&Seen](int32 Each) { return !Seen.Contains(Each); }))
+				{
+					return false;
+				}
+				Wedge.Reset();
+				for (const int32 Each : Voided)
+				{
+					Wedge.Add(Each, int32(HexPlanetUnderground::VoidLevel));
+				}
+				return true;
+			});
+			if (Rock != INDEX_NONE && !Wedge.IsEmpty())
+			{
+				Underground->SetCellLevels(Wedge);
+				Underground->MarkLevelsEdited();
+				++NumWalls;
+			}
+			else
+			{
+				++NumLeft;
+			}
+		}
+		else if (IsFloor(Cell) && !Exit.bEmbedded)
+		{
+			++NumLeft;
+		}
+	}
+	if (NumMountains + NumWalls + NumLeft > 0)
+	{
+		UE_LOG(LogHexHero, Log, TEXT("Planet: fitted the entrances: %d mountains raised behind them, %d walls made behind their exits, %d left as they are%s"), NumMountains, NumWalls,
+			NumLeft, Underground->bBuilt ? TEXT("") : TEXT(" (the underground is not built yet, so no wall was made: show it once and fit again)"));
+	}
+	for (AHexPlanet* Planet : GetLoadedLayers())
+	{
+		Planet->UpdateMarkers();
+	}
+	return NumMountains + NumWalls;
+}
+
+TSet<uint64> AHexPlanet::FindEntranceSides() const
+{
+	TSet<uint64> Sides;
+	// on the surface alone, as underground a passage is flat up to its sides anyway (EHexEdgeRule::HigherHolds)
+	if (PlanetLayer != EHexPlanetLayer::Surface)
+	{
+		return Sides;
+	}
+	for (const FHexEntrance& Entrance : GetEntrances())
+	{
+		const FHexEntranceSeat Seat = GetEntranceSeat(Entrance.Cell);
+		for (const int32 Behind : {Seat.Behind, Seat.Behind2})
+		{
+			if (Seat.bEmbedded && Behind != INDEX_NONE && GetCellLevel(Entrance.Cell) >= 0)
+			{
+				Sides.Add(HexPlanetKit::GetSideKey(Entrance.Cell, Behind));
+			}
+		}
+	}
+	return Sides;
+}
+
+void AHexPlanet::UpdateEntranceSides()
+{
+	if (PlanetLayer != EHexPlanetLayer::Surface || !bBuilt)
+	{
+		return;
+	}
+	const TSet<uint64> Sides = FindEntranceSides();
+	if (Sides.Num() != SurfaceParams.LowSides.Num() || !Sides.Includes(SurfaceParams.LowSides))
+	{
+		bLevelsPending = true;
+		StartRebuild();
+	}
+}
+
+FHexEntranceSeat AHexPlanet::GetEntranceSeat(int32 Cell) const
+{
+	FHexEntranceSeat Seat;
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+	if (!Cells.IsValidIndex(Cell))
+	{
+		return Seat;
+	}
+	const FHexSphereCell& Each = Cells[Cell];
+	const int32 Num = Each.Neighbors.Num();
+	const bool bSurface = PlanetLayer == EHexPlanetLayer::Surface;
+	Seat.Anchor = Each.Center;
+	const auto Wrap = [Num](int32 Side) { return ((Side % Num) + Num) % Num; };
+	// where a hero can stand by the level alone, so the rock turns only when the ground is painted, and what it can be built into
+	const auto GetLevel = [&](int32 Side) { return GetCellLevel(Each.Neighbors[Wrap(Side)]); };
+	const auto IsOpen = [&](int32 Side) { return bSurface ? GetLevel(Side) == 0 || GetLevel(Side) == 1 : HexPlanetUnderground::IsPassage(int8(GetLevel(Side))); };
+	const auto IsRock = [&](int32 Side) { return bSurface ? GetLevel(Side) >= 2 : !HexPlanetUnderground::IsPassage(int8(GetLevel(Side))); };
+	const bool bCanEmbed = Num % 2 == 0;
+	// what stands behind a mouth that opens to a turn: the neighbor opposite a side, or the two neighbors around the corner opposite a corner
+	const auto FindBehind = [&](int32 Turn)
+	{
+		const int32 Back = (Turn + Num) % (2 * Num);
+		const int32 First = Wrap(Back / 2);
+		const int32 Second = Wrap(Back / 2 + 1);
+		if (!bCanEmbed || !IsRock(First) || (Back % 2 == 1 && !IsRock(Second)))
+		{
+			return false;
+		}
+		Seat.bEmbedded = true;
+		Seat.Behind = Each.Neighbors[First];
+		Seat.Behind2 = Back % 2 == 1 ? Each.Neighbors[Second] : int32(INDEX_NONE);
+		Seat.Anchor = (Back % 2 == 0 ? Each.Center + Cells[Each.Neighbors[First]].Center
+			: Each.Center + Cells[Each.Neighbors[First]].Center + Cells[Each.Neighbors[Second]].Center).GetSafeNormal();
+		return true;
+	};
+
+	// turned by hand: to that side or corner, built into what stands behind it
+	if (const int32 Index = FindEntrance(Cell); Index != INDEX_NONE)
+	{
+		const FHexEntrance& Entrance = GetEntrances()[Index];
+		const int32 Side = bSurface ? Entrance.Side : Entrance.ExitSide;
+		if (Side >= 0 && Side < Num)
+		{
+			const int32 Turn = Side * 2 + ((bSurface ? Entrance.bCorner : Entrance.bExitCorner) ? 1 : 0);
+			Seat.Front = GetTurnOut(Cells, Cell, Turn);
+			FindBehind(Turn);
+			return Seat;
+		}
+	}
+
+	// towards the south where it can, as the camera of the game looks north unless it is turned, so it sees into the mouth
+	const FVector3d South = -(FVector3d::UpVector - Each.Center * Each.Center.Z).GetSafeNormal();
+	const auto GetHash = [Cell](int32 Side) { return 0.25f * float((uint32(Cell) * 2654435761u + uint32(Side) * 40503u) >> 8 & 1023u) / 1023.0f; };
+	bool bAnyOpen = false;
+	for (int32 Side = 0; Side < Num; ++Side)
+	{
+		bAnyOpen |= IsOpen(Side);
+	}
+	// built into the mountain or the void beside it whose far side is open, so its mouth opens away from it
+	int32 Best = INDEX_NONE;
+	float BestScore = -100.0f;
+	for (int32 Side = 0; bCanEmbed && Side < Num; ++Side)
+	{
+		if (!IsRock(Side))
+		{
+			continue;
+		}
+		const float Score = (IsOpen(Side + Num / 2) ? 4.0f : 0.0f) + (IsRock(Side - 1) ? 0.5f : 0.0f) + (IsRock(Side + 1) ? 0.5f : 0.0f)
+			- 2.5f * float(FVector3d::DotProduct(GetTurnOut(Cells, Cell, Side * 2), South)) + GetHash(Side);
+		if (Score > BestScore)
+		{
+			BestScore = Score;
+			Best = Side;
+		}
+	}
+	if (Best != INDEX_NONE)
+	{
+		const int32 Turn = Wrap(Best + Num / 2) * 2;
+		Seat.Front = GetTurnOut(Cells, Cell, Turn);
+		FindBehind(Turn);
+		return Seat;
+	}
+	// free: towards a neighbor a hero can stand on, with such neighbors beside it and, if it can be, none behind
+	for (int32 Side = 0; Side < Num; ++Side)
+	{
+		const float Score = (IsOpen(Side) ? 4.0f : 0.0f) + (IsOpen(Side - 1) ? 1.0f : 0.0f) + (IsOpen(Side + 1) ? 1.0f : 0.0f) + (IsOpen(Side + Num / 2) ? 0.0f : 1.0f)
+			+ 2.5f * float(FVector3d::DotProduct(GetTurnOut(Cells, Cell, Side * 2), South)) + GetHash(Side);
+		if (Score > BestScore)
+		{
+			BestScore = Score;
+			Best = Side;
+		}
+	}
+	Seat.Front = GetTurnOut(Cells, Cell, FMath::Max(Best, 0) * 2);
+	return Seat;
+}
+
+int32 AHexPlanet::GetEntranceTurn(int32 Cell) const
+{
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+	if (!Cells.IsValidIndex(Cell))
+	{
+		return 0;
+	}
+	const FVector3d Front = GetEntranceSeat(Cell).Front;
+	int32 Best = 0;
+	double BestDot = -2.0;
+	for (int32 Turn = 0; Turn < Cells[Cell].Neighbors.Num() * 2; ++Turn)
+	{
+		const double Dot = FVector3d::DotProduct(GetTurnOut(Cells, Cell, Turn), Front);
+		if (Dot > BestDot + 1e-6)
+		{
+			BestDot = Dot;
+			Best = Turn;
+		}
+	}
+	return Best;
+}
+
+FVector3d AHexPlanet::GetEntrancePlace(int32 Cell) const
+{
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+	if (!Cells.IsValidIndex(Cell) || !Settings)
+	{
+		return FVector3d::UpVector;
+	}
+	// the middles of two neighbors are the root of three radii of a cell apart
+	const FVector3d Center = Cells[Cell].Center;
+	const double CellRadius = FMath::Acos(FMath::Clamp(FVector3d::DotProduct(Center, Cells[Cells[Cell].Neighbors[0]].Center), -1.0, 1.0)) / FMath::Sqrt(3.0);
+	const FHexEntranceSeat Seat = GetEntranceSeat(Cell);
+	return (Center + Seat.Front * (CellRadius * (Seat.bEmbedded ? 0.0f : Settings->EntranceHeroPlace))).GetSafeNormal();
+}
+
+FVector3d AHexPlanet::GetEntranceMouth(int32 Cell) const
+{
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+	if (!Cells.IsValidIndex(Cell) || !Settings)
+	{
+		return FVector3d::ZeroVector;
+	}
+	const FVector3d Center = Cells[Cell].Center;
+	const FHexEntranceSeat Seat = GetEntranceSeat(Cell);
+	FVector3d Point = Center * FindGroundRadius(Cell, Center);
+	if (!Seat.bEmbedded)
+	{
+		return Point;
+	}
+	// as UpdateMarkers places the rock: towards the mountain from the middle of the cell, or out of the wall from the point of its niche
+	Point = PlanetLayer == EHexPlanetLayer::Surface ? Point - Seat.Front * double(Settings->HexRadius * Settings->EmbedMouthPlace)
+		: Seat.Anchor * FindGroundRadius(Cell, Seat.Anchor) + Seat.Front * double(Settings->WallNicheBulge);
+	const FVector3d Direction = Point.GetSafeNormal();
+	return Direction * FindGroundRadius(Cell, Direction);
+}
+
+FLinearColor AHexPlanet::GetEntranceColor(int32 Cell) const
+{
+	const AHexPlanet* SurfacePlanet = GetLayerPlanet(EHexPlanetLayer::Surface);
+	const UHexPlanetConfig* Colors = SurfacePlanet && SurfacePlanet->Settings ? SurfacePlanet->Settings.Get() : Settings.Get();
+	const int32 Index = FindEntrance(Cell);
+	return Colors && GetEntrances().IsValidIndex(Index) ? Colors->GetNetworkColor(GetEntrances()[Index].Network) : FLinearColor::White;
+}
+
 void AHexPlanet::UpdateMarkers()
 {
 	if (!bBuilt || !Settings)
@@ -5510,10 +6058,18 @@ void AHexPlanet::UpdateMarkers()
 		return;
 	}
 
-	// a pit on the surface, its rim and its mouth; stairs up a rock and a shaft of daylight over it underground
+	// the versions of the rock with a cave mouth of the layer, and underground the shaft of daylight before the mouth of an exit, the last
 	const bool bSurface = PlanetLayer == EHexPlanetLayer::Surface;
-	const TArray<TSoftObjectPtr<UStaticMesh>> Meshes = bSurface ? TArray<TSoftObjectPtr<UStaticMesh>>{Settings->EntranceMesh, Settings->EntranceHoleMesh}
-		: TArray<TSoftObjectPtr<UStaticMesh>>{Settings->ExitMesh, Settings->ShaftMesh};
+	TArray<TSoftObjectPtr<UStaticMesh>> Meshes = bSurface ? Settings->EntranceMeshes : Settings->ExitMeshes;
+	const int32 NumVersions = Meshes.Num();
+	// the versions for an entrance built into a mountain or a wall, which may be some of those
+	TArray<int32> Embedded;
+	for (const TSoftObjectPtr<UStaticMesh>& Each : bSurface ? Settings->EmbeddedEntranceMeshes : Settings->EmbeddedExitMeshes)
+	{
+		const int32 Found = Meshes.Find(Each);
+		Embedded.Add(Found != INDEX_NONE ? Found : Meshes.Add(Each));
+	}
+	const int32 ShaftIndex = bSurface ? int32(INDEX_NONE) : Meshes.Add(Settings->ShaftMesh);
 	if (MarkerComponents.IsEmpty())
 	{
 		for (int32 Index = 0; Index < Meshes.Num(); ++Index)
@@ -5528,19 +6084,21 @@ void AHexPlanet::UpdateMarkers()
 			UHierarchicalInstancedStaticMeshComponent* Component = NewObject<UHierarchicalInstancedStaticMeshComponent>(this, *FString::Printf(TEXT("Markers%d"), Index));
 			Component->SetupAttachment(Surface);
 			Component->SetStaticMesh(Mesh);
-			// the shaft is light alone, and the mouth of a pit draws what lies below it, so neither casts a shadow nor needs anything in ray tracing
-			const bool bShaft = !bSurface && Index == 1;
-			const bool bHole = bSurface && Index == 1;
-			// the values of the config the materials take, such as MarkerGlow, and the radius of the mouth of a pit, in which it draws the shaft
+			// the shaft is light alone, so it casts no shadow and needs nothing in ray tracing
+			const bool bShaft = Index == ShaftIndex;
+			// the values of the config the materials take, such as MarkerGlow
 			for (int32 Slot = 0; Slot < Mesh->GetStaticMaterials().Num(); ++Slot)
 			{
 				if (UMaterialInterface* Parent = Mesh->GetMaterial(Slot))
 				{
 					UMaterialInstanceDynamic* Instance = UMaterialInstanceDynamic::Create(Parent, this);
 					HexMaterialConfig::Apply(Instance, Settings);
-					if (bHole)
+					// the size and the tint of each rock layer, as the ground draws it
+					SetBiomeLayers(Instance);
+					// underground the rock is as light as that of the walls, which the developer found it did not match
+					if (!bSurface)
 					{
-						Instance->SetScalarParameterValue(TEXT("PitRadius"), float(Mesh->GetBounds().BoxExtent.X * Settings->MarkerSize));
+						Instance->SetVectorParameterValue(TEXT("MarkerRockTint"), Settings->CaveWallColor * Settings->MarkerWallTone);
 					}
 					Component->SetMaterial(Slot, Instance);
 				}
@@ -5548,8 +6106,8 @@ void AHexPlanet::UpdateMarkers()
 			// the rock layer and the color of the network
 			Component->NumCustomDataFloats = 4;
 			Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-			Component->SetCastShadow(!bShaft && !bHole);
-			Component->SetVisibleInRayTracing(!bShaft && !bHole);
+			Component->SetCastShadow(!bShaft);
+			Component->SetVisibleInRayTracing(!bShaft);
 			Component->bAffectDistanceFieldLighting = false;
 			Component->RegisterComponent();
 			MarkerComponents.Add(Component);
@@ -5570,9 +6128,7 @@ void AHexPlanet::UpdateMarkers()
 	const TArray<FHexEntrance>& All = GetEntrances();
 	int32 Placed = 0;
 	int32 Unusable = 0;
-	// the shaft of daylight falls onto the top of the stairs of an exit
-	const UStaticMesh* ExitStairs = !bSurface && MarkerComponents.IsValidIndex(0) && MarkerComponents[0] ? MarkerComponents[0]->GetStaticMesh() : nullptr;
-	const double ShaftLift = ExitStairs ? FMath::Max(ExitStairs->GetBoundingBox().Max.Z, 0.0) * Settings->MarkerSize : 0.0;
+	int32 NumEmbedded = 0;
 
 	for (int32 Index = 0; Index < All.Num(); ++Index)
 	{
@@ -5590,11 +6146,32 @@ void AHexPlanet::UpdateMarkers()
 		const bool bInVoid = !bSurface && !HexPlanetUnderground::IsPassage(int8(GetCellLevel(Cell)));
 		const double Ground = bInVoid ? Radius + (HexPlanetUnderground::PassageLevel + 1) * Settings->LevelHeight : FindGroundRadius(Cell, Up);
 
-		// turned by the cell, so neighboring markers do not all face alike
-		const FQuat Lean = FQuat::FindBetweenNormals(FVector::UpVector, FVector(Up));
-		const FQuat Spin(FVector::UpVector, (Cell * 2654435761u % 6283u) / 1000.0);
+		// its mouth, +X of the mesh, towards the open side of the cell, and one version of the rock by the cell
+		const FHexEntranceSeat Seat = GetEntranceSeat(Cell);
+		const FVector3d Front = Seat.Front;
+		const FQuat Turn = FRotationMatrix::MakeFromXZ(FVector(Front), FVector(Up)).ToQuat();
+		const uint32 Pick = uint32(Cell) * 2654435761u >> 12;
+		const int32 Behind = Seat.Behind;
+		const bool bEmbedded = Seat.bEmbedded && !Embedded.IsEmpty();
+		const int32 Version = bEmbedded ? Embedded[Pick % uint32(Embedded.Num())] : NumVersions > 0 ? int32(Pick % uint32(NumVersions)) : 0;
+		NumEmbedded += bEmbedded ? 1 : 0;
+		// built into a mountain it stands towards it from the middle of the cell, so the spur of rock behind its arch runs into the mountain;
+		// built into a wall it stands in the niche of the wall, on the middle of the side or at the corner towards the void
+		FVector SlopePlace = FVector::ZeroVector;
+		const FQuat SlopeTurn = Turn;
+		const bool bOnSlope = bEmbedded && bSurface;
+		const bool bInWall = bEmbedded && !bSurface;
+		if (bOnSlope)
+		{
+			SlopePlace = FVector(Up * Ground) - FVector(Front) * double(Settings->HexRadius * Settings->EmbedShift);
+		}
+		else if (bInWall)
+		{
+			SlopePlace = FVector(Seat.Anchor * FindGroundRadius(Cell, Seat.Anchor)) + FVector(Front) * double(Settings->WallNicheBulge);
+		}
 		const FLinearColor Color = Problem == HexPlanetUnderground::EEntranceProblem::None ? Colors->GetNetworkColor(All[Index].Network) : Colors->ProblemColor;
-		const float Rock = float(GetCellRockLayer(Cell));
+		// built into a mountain or a wall it is of the rock of that cell
+		const float Rock = float(GetCellRockLayer(bEmbedded ? Behind : Cell));
 		for (int32 Mesh = 0; Mesh < MarkerComponents.Num(); ++Mesh)
 		{
 			UHierarchicalInstancedStaticMeshComponent* Component = MarkerComponents[Mesh];
@@ -5602,9 +6179,16 @@ void AHexPlanet::UpdateMarkers()
 			{
 				continue;
 			}
-			const bool bShaft = !bSurface && Mesh == 1;
+			const bool bShaft = Mesh == ShaftIndex;
+			// no shaft of daylight before an exit in a wall, whose arch is lit itself: the developer found the shaft out of place there
+			if (bShaft ? bInWall : Mesh != Version)
+			{
+				continue;
+			}
 			const FVector Scale(Settings->MarkerSize, Settings->MarkerSize, bShaft ? Settings->ShaftHeight : Settings->MarkerSize);
-			const int32 Instance = Component->AddInstance(FTransform(Lean * Spin, FVector(Up * (Ground + (bShaft ? ShaftLift : 0.0))), Scale), false);
+			// the shaft falls before the mouth
+			const FVector Place = FVector(Up * Ground) + FVector(Front) * double(Settings->HexRadius * (!bShaft ? 0.0f : bInWall ? Settings->EmbedShaftPlace : Settings->ShaftPlace));
+			const int32 Instance = Component->AddInstance((bOnSlope || bInWall) && !bShaft ? FTransform(SlopeTurn, SlopePlace, Scale) : FTransform(Turn, Place, Scale), false);
 			Component->SetCustomDataValue(Instance, 0, Rock, false);
 			Component->SetCustomDataValue(Instance, 1, Color.R, false);
 			Component->SetCustomDataValue(Instance, 2, Color.G, false);
@@ -5621,8 +6205,8 @@ void AHexPlanet::UpdateMarkers()
 			Component->MarkRenderStateDirty();
 		}
 	}
-	UE_LOG(LogHexHero, Log, TEXT("Planet: %d %s of %d entrances marked on the %s, %d of them cannot be used"), Placed, bSurface ? TEXT("entrances") : TEXT("exits"), All.Num(),
-		GetPlanetLayerName(PlanetLayer), Unusable);
+	UE_LOG(LogHexHero, Log, TEXT("Planet: %d %s of %d entrances marked on the %s, %d of them cannot be used, %d built into %s"), Placed, bSurface ? TEXT("entrances") : TEXT("exits"), All.Num(),
+		GetPlanetLayerName(PlanetLayer), Unusable, NumEmbedded, bSurface ? TEXT("a mountain") : TEXT("a wall"));
 
 	// the shade of the surface lifts around the entrances that can be used
 	UpdateLightField();
@@ -6039,6 +6623,97 @@ void AHexPlanet::CreateCellMarks()
 	FMemory::Memcpy(Mip.BulkData.Lock(LOCK_READ_WRITE), MarkPixels.GetData(), MarkPixels.Num() * MarkPixels.GetTypeSize());
 	Mip.BulkData.Unlock();
 	CellMarks->UpdateResource();
+
+	// and what the hero chosen reaches, in the same layout
+	ReachPixels.Init(FColor(0, 0, 0, 0), HexPlanetSurface::MarkColumns * Rows);
+	ReachTouched.Reset();
+	ReachInsideCount = 0;
+	bReachOn = false;
+	ReachShown = 0.0f;
+	ReachApplied = -1.0f;
+	CellReach = UTexture2D::CreateTransient(HexPlanetSurface::MarkColumns, Rows, PF_B8G8R8A8, MakeUniqueObjectName(GetTransientPackage(), UTexture2D::StaticClass(), TEXT("PlanetCellReach")));
+	CellReach->SRGB = false;
+	CellReach->Filter = TF_Nearest;
+	CellReach->NeverStream = true;
+	FTexture2DMipMap& ReachMip = CellReach->GetPlatformData()->Mips[0];
+	FMemory::Memcpy(ReachMip.BulkData.Lock(LOCK_READ_WRITE), ReachPixels.GetData(), ReachPixels.Num() * ReachPixels.GetTypeSize());
+	ReachMip.BulkData.Unlock();
+	CellReach->UpdateResource();
+}
+
+void AHexPlanet::SetReach(TConstArrayView<int32> Cells)
+{
+	if (ReachPixels.IsEmpty())
+	{
+		return;
+	}
+	// none: what was shown stays in the texture while it fades out
+	if (Cells.IsEmpty())
+	{
+		bReachOn = false;
+		return;
+	}
+
+	for (const int32 Cell : ReachTouched)
+	{
+		ReachPixels[Cell] = FColor(0, 0, 0, 0);
+	}
+	ReachTouched.Reset();
+
+	const TArray<FHexSphereCell>& GridCells = Grid.GetCells();
+	TBitArray<> Inside(false, GridCells.Num());
+	ReachInsideCount = 0;
+	for (const int32 Cell : Cells)
+	{
+		if (GridCells.IsValidIndex(Cell) && !Inside[Cell])
+		{
+			Inside[Cell] = true;
+			ReachPixels[Cell].G = 255;
+			ReachTouched.Add(Cell);
+			++ReachInsideCount;
+		}
+	}
+	// a side of the edge is marked in both cells that share it, as each draws its half of the line (MARK_CODE)
+	for (int32 Index = 0; Index < ReachInsideCount; ++Index)
+	{
+		const int32 Cell = ReachTouched[Index];
+		for (int32 Side = 0; Side < GridCells[Cell].Neighbors.Num(); ++Side)
+		{
+			const int32 Outside = GridCells[Cell].Neighbors[Side];
+			if (!Inside[Outside])
+			{
+				ReachPixels[Cell].R |= uint8(1 << Side);
+				if (ReachPixels[Outside].R == 0)
+				{
+					ReachTouched.Add(Outside);
+				}
+				ReachPixels[Outside].R |= uint8(1 << GridCells[Outside].Neighbors.Find(Cell));
+			}
+		}
+	}
+	bReachOn = ReachInsideCount > 0;
+	UploadCellPixels(CellReach, ReachPixels);
+}
+
+void AHexPlanet::UpdateReach(float DeltaTime)
+{
+	const float Target = bReachOn ? 1.0f : 0.0f;
+	const float FadeTime = Settings ? Settings->ReachFadeTime : 0.0f;
+	ReachShown = FadeTime > 0.0f ? FMath::FInterpConstantTo(ReachShown, Target, DeltaTime, 1.0f / FadeTime) : Target;
+	if (ReachShown == ReachApplied)
+	{
+		return;
+	}
+	ReachApplied = ReachShown;
+	// eased in and out smoothly
+	const float Shown = FMath::SmoothStep(0.0f, 1.0f, ReachShown);
+	for (UMaterialInstanceDynamic* Instance : { SurfaceMaterial.Get(), SurfaceCutMaterial.Get(), LodNearMaterial.Get(), LodFarMaterial.Get(), WaterGridMaterial.Get() })
+	{
+		if (Instance)
+		{
+			Instance->SetScalarParameterValue(TEXT("ReachShown"), Shown);
+		}
+	}
 }
 
 void AHexPlanet::SetCellMarks(const TMap<int32, FColor>& Marks)
@@ -6142,17 +6817,22 @@ void AHexPlanet::SetWaterHiddenCells(TConstArrayView<int32> Cells, bool bAll)
 
 void AHexPlanet::UploadCellMarks()
 {
-	if (!CellMarks)
+	UploadCellPixels(CellMarks, MarkPixels);
+}
+
+void AHexPlanet::UploadCellPixels(UTexture2D* Texture, const TArray<FColor>& Pixels)
+{
+	if (!Texture)
 	{
 		return;
 	}
 
 	// the whole texture goes up, a few hundred kilobytes, which the render thread frees once it has it
-	const int32 Rows = MarkPixels.Num() / HexPlanetSurface::MarkColumns;
-	uint8* Data = static_cast<uint8*>(FMemory::Malloc(MarkPixels.Num() * sizeof(FColor)));
-	FMemory::Memcpy(Data, MarkPixels.GetData(), MarkPixels.Num() * sizeof(FColor));
+	const int32 Rows = Pixels.Num() / HexPlanetSurface::MarkColumns;
+	uint8* Data = static_cast<uint8*>(FMemory::Malloc(Pixels.Num() * sizeof(FColor)));
+	FMemory::Memcpy(Data, Pixels.GetData(), Pixels.Num() * sizeof(FColor));
 	FUpdateTextureRegion2D* Region = new FUpdateTextureRegion2D(0, 0, 0, 0, HexPlanetSurface::MarkColumns, Rows);
-	CellMarks->UpdateTextureRegions(0, 1, Region, HexPlanetSurface::MarkColumns * sizeof(FColor), sizeof(FColor), Data,
+	Texture->UpdateTextureRegions(0, 1, Region, HexPlanetSurface::MarkColumns * sizeof(FColor), sizeof(FColor), Data,
 		[](uint8* InData, const FUpdateTextureRegion2D* InRegion)
 		{
 			FMemory::Free(InData);
@@ -6854,7 +7534,16 @@ void AHexPlanet::UpdateWalls(TArray<int32>& Chunks)
 	// new walls, so a stream still building whole walls from the old ones keeps them and its result is dropped
 	WallParams = HexPlanetWalls::FParams::FromConfig(*Settings, Radius + Settings->LevelHeight, HexPlanetUnderground::GetSeed(GetManifest()));
 	const TSharedRef<HexPlanetWalls::FWalls> NewWalls = MakeShared<HexPlanetWalls::FWalls>();
-	HexPlanetWalls::Build(Grid, ShownLevels, [this](int32 Cell) { return ShownLevels[Cell] >= 0; }, WallParams, *NewWalls, VoidStyles, VoidHeights);
+	// an exit built into a wall has a niche in it
+	TArray<HexPlanetWalls::FNiche> Niches;
+	for (const FHexEntrance& Entrance : GetEntrances())
+	{
+		if (const FHexEntranceSeat Seat = GetEntranceSeat(Entrance.Cell); Seat.bEmbedded)
+		{
+			Niches.Add({Entrance.Cell, Seat.Anchor});
+		}
+	}
+	HexPlanetWalls::Build(Grid, ShownLevels, [this](int32 Cell) { return ShownLevels[Cell] >= 0; }, WallParams, *NewWalls, VoidStyles, VoidHeights, Niches);
 	Walls = NewWalls;
 	++WallGeneration;
 	const double LineTime = FPlatformTime::Seconds();
@@ -7223,6 +7912,7 @@ UMaterialInstanceDynamic* AHexPlanet::GetPreviewMaterial()
 	if (CellMarks)
 	{
 		PreviewMaterial->SetTextureParameterValue(TEXT("CellMarks"), CellMarks);
+		PreviewMaterial->SetTextureParameterValue(TEXT("CellReach"), CellReach);
 	}
 	PreviewMaterial->SetVectorParameterValue(TEXT("MarkPrimaryColor"), HighlightBrushSize > 0 ? Settings->BrushOutlineColor : Settings->OutlineColor);
 	return PreviewMaterial;

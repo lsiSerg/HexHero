@@ -72,6 +72,38 @@ namespace
 			Owner.Init(NoOwner, Cells.Num());
 			Cost.Init(1.0, Cells.Num());
 			OtherDistance.Init(MAX_int32, Cells.Num());
+			Kept.Init(false, Cells.Num());
+		}
+
+		/** An exit is built into the wall along a void beside its cell, as the developer decided on 2026-11-12, so one neighbor of each exit
+		 *  stays void whatever is carved: the one behind the way its mouth was turned by hand, or the two behind a corner, else one by a hash
+		 *  of its cell; never the cell of another exit */
+		void KeepWalls(TConstArrayView<FHexEntrance> Entrances)
+		{
+			TSet<int32> ExitCells;
+			for (const FHexEntrance& Entrance : Entrances)
+			{
+				ExitCells.Add(Entrance.Cell);
+			}
+			for (const FHexEntrance& Entrance : Entrances)
+			{
+				if (!Cells.IsValidIndex(Entrance.Cell))
+				{
+					continue;
+				}
+				const TArray<int32, TInlineAllocator<6>>& Neighbors = Cells[Entrance.Cell].Neighbors;
+				const int32 Num = Neighbors.Num();
+				const bool bTurned = Entrance.ExitSide >= 0 && Entrance.ExitSide < Num && Num % 2 == 0;
+				const int32 Back = bTurned ? (Entrance.ExitSide + Num / 2) % Num : int32((uint32(Entrance.Cell) * 2654435761u >> 9) % uint32(Num));
+				for (int32 Step = 0; Step < (bTurned && Entrance.bExitCorner ? 2 : 1); ++Step)
+				{
+					const int32 Wall = Neighbors[(Back + Step) % Num];
+					if (!ExitCells.Contains(Wall))
+					{
+						Kept[Wall] = true;
+					}
+				}
+			}
 		}
 
 		const TArray<FHexSphereCell>& Cells;
@@ -85,6 +117,9 @@ namespace
 
 		/** Network of each passage cell, NoOwner for the void */
 		TArray<int8> Owner;
+
+		/** The cells that stay void, the walls the exits are built into (KeepWalls) */
+		TBitArray<> Kept;
 
 		/** Cost of a way through each cell */
 		TArray<double> Cost;
@@ -126,7 +161,7 @@ namespace
 		/** Returns true if the network carved may take a void cell, which never touches another network, as that would join them */
 		bool CanCarve(int32 Cell) const
 		{
-			return Owner[Cell] == NoOwner && OtherDistance[Cell] > 1;
+			return Owner[Cell] == NoOwner && OtherDistance[Cell] > 1 && !Kept[Cell];
 		}
 
 		void FindOtherDistance()
@@ -170,6 +205,7 @@ namespace
 			TArray<int32> Seen = {Exit};
 			TArray<int32> Front = {Exit};
 			const int32 Rings = FMath::Max(Generation.HallRings, 0);
+
 			for (int32 Ring = 1; Ring <= Rings; ++Ring)
 			{
 				TArray<int32> Next;
@@ -184,7 +220,7 @@ namespace
 						Seen.Add(Neighbor);
 						Next.Add(Neighbor);
 						const bool bKept = Ring < Rings || Random.FRand() < Generation.HallEdgeShare;
-						if (bKept && Owner[Neighbor] == NoOwner && !TouchesOther(Neighbor) && CountOwnNeighbors(Neighbor) > 0)
+						if (bKept && Owner[Neighbor] == NoOwner && !Kept[Neighbor] && !TouchesOther(Neighbor) && CountOwnNeighbors(Neighbor) > 0)
 						{
 							Owner[Neighbor] = Network;
 						}
@@ -386,7 +422,7 @@ namespace
 					TArray<int32> Options;
 					for (const int32 Neighbor : Cells[Start].Neighbors)
 					{
-						if (Owner[Neighbor] == NoOwner && OtherDistance[Neighbor] > Gap && CountOwnNeighbors(Neighbor) <= 2)
+						if (Owner[Neighbor] == NoOwner && !Kept[Neighbor] && OtherDistance[Neighbor] > Gap && CountOwnNeighbors(Neighbor) <= 2)
 						{
 							Options.Add(Neighbor);
 						}
@@ -408,7 +444,7 @@ namespace
 						double BestScore = -TNumericLimits<double>::Max();
 						for (const int32 Neighbor : Cells[Cell].Neighbors)
 						{
-							if (Owner[Neighbor] != NoOwner || OtherDistance[Neighbor] <= Gap)
+							if (Owner[Neighbor] != NoOwner || Kept[Neighbor] || OtherDistance[Neighbor] <= Gap)
 							{
 								continue;
 							}
@@ -542,6 +578,37 @@ namespace
 			TArray<int32> Queue;
 			OwnCells(Queue);
 			Maze.Widen(Queue, false);
+			// a wall kept for an exit that leaves a passage one cell wide, as nothing else there can be carved, is given up: the passages
+			// come first, and that exit then has no wall, which the editor shows
+			bool bReleased = false;
+			for (const int32 Cell : Queue)
+			{
+				if (Maze.Owner[Cell] != Network)
+				{
+					continue;
+				}
+				ForEachNeckPair(Maze.Cells[Cell], [&Maze, &bReleased](int32 A, int32 B)
+				{
+					if (Maze.Owner[A] == NoOwner && Maze.Owner[B] == NoOwner && (Maze.Kept[A] || Maze.Kept[B]))
+					{
+						Maze.Kept[A] = false;
+						Maze.Kept[B] = false;
+						bReleased = true;
+					}
+				});
+			}
+			if (bReleased)
+			{
+				Maze.Widen(Queue, false);
+			}
+		}
+		for (const int32 Network : Order)
+		{
+			Maze.Network = int8(Network);
+			Maze.FindOtherDistance();
+			TArray<int32> Queue;
+			OwnCells(Queue);
+			Maze.Widen(Queue, false);
 		}
 	}
 
@@ -599,6 +666,9 @@ const TCHAR* HexPlanetUnderground::GetProblemText(EEntranceProblem Problem)
 	case EEntranceProblem::NotLand: return TEXT("not on plains or hills");
 	case EEntranceProblem::Pentagon: return TEXT("on a pentagon");
 	case EEntranceProblem::ExitInVoid: return TEXT("its exit is in the void");
+	case EEntranceProblem::NoMountain: return TEXT("no mountain behind it");
+	case EEntranceProblem::NoWall: return TEXT("no wall behind its exit");
+	case EEntranceProblem::SharedWall: return TEXT("another exit in the same wall");
 	}
 	return TEXT("");
 }
@@ -1028,6 +1098,7 @@ void HexPlanetUnderground::Generate(const FHexSphereGrid& Grid, TConstArrayView<
 	OutResult.Entrances = Entrances ? *Entrances : PlaceEntrances(Grid, SurfaceLevels, Generation, Seed);
 
 	FMaze Maze(Grid, Generation);
+	Maze.KeepWalls(OutResult.Entrances);
 	FRandomStream Random(Seed ^ 0x2545F491);
 	InitCost(Maze, Grid, Generation, Random);
 
@@ -1133,6 +1204,7 @@ void HexPlanetUnderground::RegenerateNetwork(const FHexSphereGrid& Grid, TConstA
 	// the passages kept belong to their network, or, a piece of none or of several, to a network of their own, which every network keeps clear of
 	const FReport Before = Check(Grid, SurfaceLevels, Levels, Entrances);
 	FMaze Maze(Grid, Manifest.Underground);
+	Maze.KeepWalls(Entrances);
 	for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
 	{
 		if (Piece[Cell] != INDEX_NONE && !Cleared[Piece[Cell]])

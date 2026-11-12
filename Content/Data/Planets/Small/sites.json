@@ -28,6 +28,7 @@
 		{"id": 25, "kind": "GemMine", "layer": "Underground", "cell": 1600},
 		{"id": 26, "kind": "OrePile", "layer": "Underground", "cell": 3078},
 		{"id": 27, "kind": "SulfurPile", "layer": "Underground", "cell": 3115},
-		{"id": 28, "kind": "GemPile", "layer": "Underground", "cell": 3055}
+		{"id": 28, "kind": "GemPile", "layer": "Underground", "cell": 3055},
+		{"id": 29, "kind": "GoldMine", "layer": "Surface", "cell": 1141}
 	]
 }

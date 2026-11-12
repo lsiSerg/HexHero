@@ -27,6 +27,8 @@
 #include "InputMappingContext.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "Widgets/SViewport.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Layout/WidgetPath.h"
 
 namespace
 {
@@ -823,9 +825,53 @@ FVector2D AHexCameraPawn::GetEdgeScrollInput(const APlayerController* PlayerCont
 	int32 ViewportHeight = 0;
 	PlayerController->GetViewportSize(ViewportWidth, ViewportHeight);
 
-	return FVector2D(
+	const FVector2D Input(
 		GetEdgeScrollStrength(ViewportWidth - MouseX, Curve, Margin) - GetEdgeScrollStrength(MouseX, Curve, Margin),
 		GetEdgeScrollStrength(MouseY, Curve, Margin) - GetEdgeScrollStrength(ViewportHeight - MouseY, Curve, Margin));
+
+	// what is clicked comes first: no scroll while the cursor is on a button or the like, looked up only in the zone of the edge
+	return Input.IsNearlyZero() || !IsCursorOnClickable(PlayerController) ? Input : FVector2D::ZeroVector;
+}
+
+bool AHexCameraPawn::IsCursorOnClickable(const APlayerController* PlayerController)
+{
+	UGameViewportClient* ViewportClient = PlayerController && PlayerController->GetWorld() ? PlayerController->GetWorld()->GetGameViewport() : nullptr;
+	const TSharedPtr<SViewport> ViewportWidget = ViewportClient ? ViewportClient->GetGameViewportWidget() : nullptr;
+
+	if (!ViewportWidget.IsValid() || !FSlateApplication::IsInitialized())
+	{
+		return false;
+	}
+
+	// the widgets under the cursor, from the window down to the one that is hit; those inside the viewport of the game are its UI
+	FSlateApplication& Slate = FSlateApplication::Get();
+	const FWidgetPath Path = Slate.LocateWindowUnderMouse(Slate.GetCursorPos(), Slate.GetInteractiveTopLevelWindows(), true);
+	static const TCHAR* const Clickable[] = {TEXT("SButton"), TEXT("SCheckBox"), TEXT("SSpinBox"), TEXT("SSlider"), TEXT("SEditableText"),
+		TEXT("SMultiLineEditableText"), TEXT("SScrollBar"), TEXT("SComboButton"), TEXT("SHyperlink")};
+	bool bInGame = false;
+
+	for (int32 Index = 0; Index < Path.Widgets.Num(); ++Index)
+	{
+		const TSharedRef<SWidget>& Widget = Path.Widgets[Index].Widget;
+
+		if (!bInGame)
+		{
+			bInGame = Widget == ViewportWidget;
+			continue;
+		}
+
+		const FString Type = Widget->GetTypeAsString();
+
+		for (const TCHAR* Each : Clickable)
+		{
+			if (Type.StartsWith(Each))
+			{
+				return true;
+			}
+		}
+	}
+
+	return false;
 }
 
 double AHexCameraPawn::GetEdgeScrollStrength(double EdgeDistance, const UCurveFloat* Curve, float Margin)
@@ -891,4 +937,46 @@ void AHexCameraPawn::UpdateCameraPosition()
 const UHexCameraConfig* AHexCameraPawn::Settings() const
 {
 	return CameraConfig ? CameraConfig.Get() : GetDefault<UHexCameraConfig>();
+}
+
+namespace
+{
+	/** hex.Mouse [X Y]: puts the cursor at a point of the viewport, in its pixels, or without arguments logs what lies under it and whether the
+	 *  edge of the screen scrolls there, as test runs have no mouse */
+	void MouseCommand(const TArray<FString>& Args, UWorld* World)
+	{
+		APlayerController* PlayerController = World ? World->GetFirstPlayerController() : nullptr;
+
+		if (!PlayerController)
+		{
+			return;
+		}
+
+		if (Args.Num() >= 2)
+		{
+			PlayerController->SetMouseLocation(FCString::Atoi(*Args[0]), FCString::Atoi(*Args[1]));
+			return;
+		}
+
+		float MouseX = 0.0f;
+		float MouseY = 0.0f;
+		PlayerController->GetMousePosition(MouseX, MouseY);
+		FSlateApplication& Slate = FSlateApplication::Get();
+		const FWidgetPath Path = Slate.LocateWindowUnderMouse(Slate.GetCursorPos(), Slate.GetInteractiveTopLevelWindows(), true);
+		FString Types;
+
+		for (int32 Index = 0; Index < Path.Widgets.Num(); ++Index)
+		{
+			Types += (Index > 0 ? TEXT(" > ") : TEXT("")) + Path.Widgets[Index].Widget->GetTypeAsString();
+		}
+
+		const UHexCameraConfig* Config = GetDefault<UHexCameraConfig>();
+		const FVector2D Edge = AHexCameraPawn::GetEdgeScrollInput(PlayerController, nullptr, Config->EdgeScrollMargin);
+		UE_LOG(LogHexHero, Log, TEXT("hex.Mouse: at %.0f %.0f, on something clicked: %s, the edge scrolls by %.2f %.2f, under it: %s"), MouseX, MouseY,
+			AHexCameraPawn::IsCursorOnClickable(PlayerController) ? TEXT("yes") : TEXT("no"), Edge.X, Edge.Y, *Types);
+	}
+
+	FAutoConsoleCommandWithWorldAndArgs MouseConsoleCommand(TEXT("hex.Mouse"),
+		TEXT("hex.Mouse <X> <Y> puts the cursor at a point of the viewport, in its pixels; without arguments it logs what lies under the cursor and whether the edge of the screen scrolls there"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&MouseCommand));
 }

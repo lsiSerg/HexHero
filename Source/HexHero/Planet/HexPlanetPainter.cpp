@@ -697,11 +697,20 @@ void UHexPlanetPainter::ContinueStroke(int32 Cell)
 		return;
 	}
 	// an entrance goes on the cell pressed alone, and a carved passage runs from it to the cell under the cursor
-	if (Tool == EHexPaintTool::Entrance)
+	if (Tool == EHexPaintTool::Entrance || Tool == EHexPaintTool::EntranceRemove)
 	{
 		if (LastCell == INDEX_NONE)
 		{
 			PaintEntrance(Cell);
+		}
+		LastCell = Cell;
+		return;
+	}
+	if (Tool == EHexPaintTool::EntranceTurn)
+	{
+		if (LastCell == INDEX_NONE)
+		{
+			PaintEntranceTurn(Cell);
 		}
 		LastCell = Cell;
 		return;
@@ -1034,11 +1043,51 @@ void UHexPlanetPainter::PaintEntrance(int32 Cell)
 		return;
 	}
 
+	// An entrance is put on a mountain, as the developer decided on 2026-11-12 ("переходи тепер окремо не ставимо - тільки на горі - якщо я
+	// пробую поставити перехід на пустоту - це автоматично добудує стіну чи гору під неї"): the cell clicked is the mountain its mouth is
+	// built into, raised by this step where it is plains or hills, and the entrance stands on the cell of plains or hills beside it that is
+	// nearest the cursor, its mouth opening that way
+	const TArray<FHexSphereCell>& GridCells = Planet->GetGrid().GetCells();
+	const bool bRemove = IsBackwards() || Tool == EHexPaintTool::EntranceRemove;
+	int32 Side = INDEX_NONE;
+	int32 Mountain = INDEX_NONE;
+	if (bRemove)
+	{
+		// an entrance is taken away by its cell, or by the mountain its mouth is built into
+		Cell = FindEntranceCellAt(Cell);
+	}
+	if (GridCells.IsValidIndex(Cell) && !bRemove)
+	{
+		int32 Before = INDEX_NONE;
+		FindEntrancePlace(Cell, Mountain, Before);
+		const int32 Level = Planet->GetCellLevel(Cell);
+		Mountain = Cell;
+		if (Before == INDEX_NONE)
+		{
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(INDEX_NONE, 3.0f, FColor::Yellow, TEXT("An entrance is built into a mountain with plains or hills beside it: click such a mountain, or land that may become one"));
+			}
+			return;
+		}
+		Cell = Before;
+		const int32 Back = GridCells[Cell].Neighbors.Find(Mountain);
+		Side = (Back + GridCells[Cell].Neighbors.Num() / 2) % GridCells[Cell].Neighbors.Num();
+		// the mountain, with the stroke, so Undo takes it back
+		if (Level < 2)
+		{
+			if (!Stroke.OldLevels.Contains(Mountain))
+			{
+				Stroke.OldLevels.Add(Mountain, Level);
+			}
+			Stroke.NewLevels.Add(Mountain, 2);
+		}
+	}
+
 	// a copy, as the planet keeps the list it returns and changes it
 	const TArray<FHexEntrance> Old = Planet->GetEntrances();
 	TArray<FHexEntrance> New = Old;
 	const int32 Index = New.IndexOfByPredicate([Cell](const FHexEntrance& Each) { return Each.Cell == Cell; });
-	const bool bRemove = IsBackwards();
 	if (bRemove)
 	{
 		if (Index == INDEX_NONE)
@@ -1061,15 +1110,23 @@ void UHexPlanetPainter::PaintEntrance(int32 Cell)
 		}
 		if (Index != INDEX_NONE)
 		{
-			if (New[Index].Network == Network)
+			if (New[Index].Network == Network && New[Index].Side == Side && !New[Index].bCorner)
 			{
 				return;
 			}
 			New[Index].Network = Network;
+			New[Index].Side = Side;
+			New[Index].bCorner = false;
+			New[Index].ExitSide = Side;
+			New[Index].bExitCorner = false;
 		}
 		else
 		{
-			New.Add({Cell, Network});
+			// its exit opens the same way, so its wall lies under the mountain
+			FHexEntrance Added{Cell, Network};
+			Added.Side = Side;
+			Added.ExitSide = Side;
+			New.Add(Added);
 			New.Sort([](const FHexEntrance& A, const FHexEntrance& B) { return A.Cell < B.Cell; });
 		}
 	}
@@ -1081,8 +1138,122 @@ void UHexPlanetPainter::PaintEntrance(int32 Cell)
 	}
 	Stroke.NewEntrances = New;
 	Planet->SetEntrances(New, true);
+	// and the wall its exit is built into: the cell under the mountain becomes void, outside the steps of Undo, as a step holds one layer.
+	// The mountain itself is of the stroke: raised here too, it left the tile of the stroke standing as a grey hex, as nothing was built
+	// again to take it away
+	if (!bRemove)
+	{
+		Planet->FitEntrances(Cell, false);
+	}
 	UE_LOG(LogHexHero, Log, TEXT("Painter: %s the entrance of network %c on cell %d, %d entrances"), bRemove ? TEXT("took away") : TEXT("put"),
 		HexPlanetFile::GetNetworkLetter(bRemove ? Old[Index].Network : Network), Cell, New.Num());
+}
+
+int32 UHexPlanetPainter::FindEntranceCellAt(int32 Cell) const
+{
+	if (Planet->FindEntrance(Cell) != INDEX_NONE)
+	{
+		return Cell;
+	}
+	// the entrance whose mouth is built into the cell, of several the one nearest the cursor
+	int32 Found = INDEX_NONE;
+	double Nearest = TNumericLimits<double>::Max();
+	const FVector3d Cursor = FVector3d(CursorPoint).GetSafeNormal();
+	for (const FHexEntrance& Entrance : Planet->GetEntrances())
+	{
+		const FHexEntranceSeat Seat = Planet->GetEntranceSeat(Entrance.Cell);
+		const double Distance = FVector3d::DistSquared(Seat.Anchor, Cursor);
+		if (Seat.bEmbedded && (Seat.Behind == Cell || Seat.Behind2 == Cell) && Distance < Nearest)
+		{
+			Nearest = Distance;
+			Found = Entrance.Cell;
+		}
+	}
+	const bool bNoneBuiltIn = Found == INDEX_NONE;
+	// else, on a mountain or a void, which holds no entrance itself, the entrance beside it nearest the cursor: one turned away from the cell
+	// it was put by, or one that cannot be used, is still taken by that cell
+	const TArray<FHexSphereCell>& GridCells = Planet->GetGrid().GetCells();
+	const bool bRock = GridCells.IsValidIndex(Cell)
+		&& (Target == EHexPlanetLayer::Surface ? Planet->GetCellLevel(Cell) >= 2 : !HexPlanetUnderground::IsPassage(int8(Planet->GetCellLevel(Cell))));
+	const bool bBeside = bNoneBuiltIn && bRock;
+	for (int32 Each = 0; bBeside && Each < GridCells[Cell].Neighbors.Num(); ++Each)
+	{
+		const int32 Neighbor = GridCells[Cell].Neighbors[Each];
+		const double Distance = FVector3d::DistSquared(GridCells[Neighbor].Center, Cursor);
+		if (Planet->FindEntrance(Neighbor) != INDEX_NONE && Distance < Nearest)
+		{
+			Nearest = Distance;
+			Found = Neighbor;
+		}
+	}
+	return Found != INDEX_NONE ? Found : Cell;
+}
+
+bool UHexPlanetPainter::FindEntrancePlace(int32 Clicked, int32& OutMountain, int32& OutBefore) const
+{
+	OutMountain = OutBefore = INDEX_NONE;
+	const TArray<FHexSphereCell>& GridCells = Planet->GetGrid().GetCells();
+	if (Target != EHexPlanetLayer::Surface || !GridCells.IsValidIndex(Clicked) || Planet->GetCellLevel(Clicked) < 0 || GridCells[Clicked].IsPentagon())
+	{
+		return false;
+	}
+	const FVector3d Cursor = FVector3d(CursorPoint).GetSafeNormal();
+	double BestDot = -2.0;
+	for (const int32 Neighbor : GridCells[Clicked].Neighbors)
+	{
+		const double Dot = FVector3d::DotProduct((GridCells[Neighbor].Center - GridCells[Clicked].Center).GetSafeNormal(), (Cursor - GridCells[Clicked].Center).GetSafeNormal());
+		if (HexPlanetUnderground::CanHoldEntrance(Planet->GetGrid(), Planet->GetLevels(), Neighbor) && Dot > BestDot)
+		{
+			BestDot = Dot;
+			OutBefore = Neighbor;
+		}
+	}
+	OutMountain = Clicked;
+	return OutBefore != INDEX_NONE;
+}
+
+void UHexPlanetPainter::UpdateEntranceHint(int32 Cell)
+{
+	int32 Mountain = INDEX_NONE;
+	int32 Before = INDEX_NONE;
+	if (Tool == EHexPaintTool::Entrance && !bPainting && !IsBackwards())
+	{
+		FindEntrancePlace(Cell, Mountain, Before);
+	}
+	if (Mountain != HintMountain || Before != HintBefore)
+	{
+		HintMountain = Mountain;
+		HintBefore = Before;
+		UpdatePreview(int32(Target));
+	}
+}
+
+void UHexPlanetPainter::PaintEntranceTurn(int32 Cell)
+{
+	// by its cell, or by the mountain or the void its mouth is built into
+	Cell = FindEntranceCellAt(Cell);
+	const TArray<FHexEntrance> Old = Planet->GetEntrances();
+	TArray<FHexEntrance> New = Old;
+	const int32 Index = New.IndexOfByPredicate([Cell](const FHexEntrance& Each) { return Each.Cell == Cell; });
+	if (Index == INDEX_NONE || !Planet->GetGrid().GetCells().IsValidIndex(Cell))
+	{
+		return;
+	}
+	// from the way it opens now, whoever chose that, to the next around the cell: its sides and the corners between them in turn
+	const int32 Num = Planet->GetGrid().GetCells()[Cell].Neighbors.Num() * 2;
+	const int32 Turn = (Planet->GetEntranceTurn(Cell) + (IsBackwards() ? Num - 1 : 1)) % Num;
+	const int32 Side = Turn / 2;
+	(Target == EHexPlanetLayer::Surface ? New[Index].Side : New[Index].ExitSide) = Side;
+	(Target == EHexPlanetLayer::Surface ? New[Index].bCorner : New[Index].bExitCorner) = Turn % 2 == 1;
+	if (!Stroke.bEntrances)
+	{
+		Stroke.bEntrances = true;
+		Stroke.OldEntrances = Old;
+	}
+	Stroke.NewEntrances = New;
+	Planet->SetEntrances(New, true);
+	UE_LOG(LogHexHero, Log, TEXT("Painter: turned the %s on cell %d to %s %d"), Target == EHexPlanetLayer::Surface ? TEXT("entrance") : TEXT("exit"), Cell,
+		Turn % 2 == 1 ? TEXT("the corner after side") : TEXT("side"), Side);
 }
 
 void UHexPlanetPainter::PaintCarve(int32 Cell)
@@ -1884,7 +2055,9 @@ void UHexPlanetPainter::UpdatePreview(int32 Layer)
 		}
 	}
 
-	if (Tiles.IsEmpty())
+	// the arrow of an entrance about to be put: from the mountain its mouth would be built into to the cell it would stand on
+	const bool bHint = Layer == int32(Target) && Tool == EHexPaintTool::Entrance && HintBefore != INDEX_NONE && HintMountain != INDEX_NONE;
+	if (Tiles.IsEmpty() && !bHint)
 	{
 		return;
 	}
@@ -1946,6 +2119,40 @@ void UHexPlanetPainter::UpdatePreview(int32 Layer)
 			{
 				Triangles.Append({Center, B, A});
 			}
+		}
+	}
+
+	if (bHint)
+	{
+		// As the developer asked on 2026-11-12 ("малюй стрілку підказку куди стане і напрямок куди вихід буде"): a flat arrow over the
+		// ground of the cell before the mouth, in the color of the network, from the side the mouth is built at to the middle of that cell
+		const FVector3d From = Cells[HintMountain].Center;
+		const FVector3d To = Cells[HintBefore].Center;
+		const double Radius = FMath::Max(State.Planet->GetCellTopRadius(HintBefore), State.Planet->GetCellTopRadius(HintMountain) * 0.0) + double(State.Settings->PaintLift) * 3.0 + 8.0;
+		const FVector3d Along = (To - From).GetSafeNormal();
+		const FVector3d Across = FVector3d::CrossProduct(From, Along).GetSafeNormal();
+		const double Width = FVector3d::Distance(From, To) * 0.09;
+		FLinearColor Color = GetNetworkColor(Network);
+		// its alpha is how much a tile glows
+		Color.A = 1.0f;
+		const auto Add = [&](double Share, double Side)
+		{
+			const FVector3d Point = (FMath::Lerp(From, To, Share) + Across * (Side * Width)).GetSafeNormal();
+			const int32 Index = Positions.Add(FVector(Point * Radius));
+			Normals.Add(FVector(Point));
+			UVs.Add(FVector2D::ZeroVector);
+			CellUVs.Add(HexPlanetSurface::GetCellUV(HintBefore));
+			LocalUVs.Add(FVector2D::ZeroVector);
+			Colors.Add(Color);
+			return Index;
+		};
+		const int32 Shaft[4] = {Add(0.5, -1.0), Add(0.5, 1.0), Add(0.8, 1.0), Add(0.8, -1.0)};
+		const int32 Head[3] = {Add(0.8, -2.6), Add(0.8, 2.6), Add(1.05, 0.0)};
+		// both ways round, so it shows whichever way its triangles face
+		for (const TArray<int32>& Triangle : {TArray<int32>{Shaft[0], Shaft[1], Shaft[2]}, TArray<int32>{Shaft[0], Shaft[2], Shaft[3]}, TArray<int32>{Head[0], Head[1], Head[2]}})
+		{
+			Triangles.Append({Triangle[0], Triangle[1], Triangle[2]});
+			Triangles.Append({Triangle[0], Triangle[2], Triangle[1]});
 		}
 	}
 

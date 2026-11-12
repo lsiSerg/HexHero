@@ -49,6 +49,9 @@ class AHexPlanetPlayerController : public APlayerController
 	/** Panel of the heroes of the planet, at the bottom right */
 	TSharedPtr<SHexHeroPanel> HeroPanel;
 
+	/** The marks at the edges of the screen that point to the heroes and castles of the person who plays that are out of view */
+	TSharedPtr<class SHexEdgeMarkers> EdgeMarkers;
+
 	/** Panel of the castle a person looks into, at the right; a click outside it closes it */
 	TSharedPtr<SHexCastlePanel> CastlePanel;
 
@@ -60,6 +63,9 @@ class AHexPlanetPlayerController : public APlayerController
 
 	/** Cell under the cursor in the last tick */
 	int32 MouseCell = INDEX_NONE;
+
+	/** The point of the ground under the mouse cursor, found with MouseCell */
+	FVector MouseSpot = FVector::ZeroVector;
 
 	/** Brush that paints both layers of the planet, the one shown, made when painting first turns on once both have their data */
 	UPROPERTY(Transient)
@@ -100,6 +106,20 @@ public:
 
 	/** Travels to a layer at the same place, as its tab of the palette asks */
 	void TravelToLayer(EHexPlanetLayer Layer);
+
+	/** Returns true while the cursor is on what of the UI of the planet is clicked and no widget takes input for itself: the marks at the edges
+	 *  of the screen and the panel of a castle, where the camera does not scroll (buttons: AHexCameraPawn::IsCursorOnClickable) */
+	bool IsCursorOnUi() const;
+
+	/** For the marks at the edges of the screen: gives where a point of a layer shows on the viewport when it is in view, and returns true,
+	 *  else the way to it across the screen: towards where it would show, or for one behind the planet or on the other layer the way over
+	 *  the ground from what the camera looks at */
+	bool LocateForMarker(const FVector3d& Point, EHexPlanetLayer Layer, FVector2D& OutScreen, FVector2D& OutDirection) const;
+
+	/** If the cell under the cursor is the mountain or the void an entrance that can be used is built into, gives the cell of that entrance
+	 *  on the other layer, where a hero sent through it comes out, and returns true; a mountain may hold several, of which the one whose
+	 *  mouth is nearest the cursor is taken */
+	bool FindMouthUnderCursor(EHexPlanetLayer& OutLayer, int32& OutCell) const;
 
 	/** Runs hex.PlanetPaint, which drives the brush as the palette and the mouse would */
 	void RunPaintCommand(const TArray<FString>& Args);

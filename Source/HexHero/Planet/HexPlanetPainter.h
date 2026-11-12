@@ -37,6 +37,11 @@ enum class EHexPaintTool : uint8
 	Bridge,
 	/** Puts an entrance of the chosen network on a cell of the surface, or takes it away with Ctrl */
 	Entrance,
+	/** Takes the entrance on a cell of the surface away, as Ctrl with Entrance does, for which the developer wanted a button */
+	EntranceRemove,
+	/** Turns the entrance on a cell of the surface, or the exit on one underground, to the next side of its cell, or back with Ctrl
+	 *  (FHexEntrance::Side, ExitSide), as the developer asked on 2026-11-12 */
+	EntranceTurn,
 	/** Carves a passage underground along the shortest way from the cell pressed to the cell released, as wide as the passages of the planet */
 	Carve,
 	/** Raises the walls along the voids under the brush, and along the voids beside its passages, by WallHeightStep, or lowers them with Ctrl,
@@ -353,6 +358,10 @@ public:
 	/** Returns true while the brush puts entrances of the chosen network on the surface; Ctrl takes them away */
 	bool IsPlacingEntrances() const { return Tool == EHexPaintTool::Entrance; }
 	void SetEntranceTool() { SetTool(EHexPaintTool::Entrance, EHexPaintTab::Entrances); }
+	bool IsRemovingEntrances() const { return Tool == EHexPaintTool::EntranceRemove; }
+	void SetEntranceRemoveTool() { SetTool(EHexPaintTool::EntranceRemove, EHexPaintTab::Entrances); }
+	bool IsTurningEntrances() const { return Tool == EHexPaintTool::EntranceTurn; }
+	void SetEntranceTurnTool() { SetTool(EHexPaintTool::EntranceTurn, Target == EHexPlanetLayer::Underground ? EHexPaintTab::Links : EHexPaintTab::Entrances); }
 
 	/** Returns true while a click puts a hero of the class and player chosen on a cell of the layer painted; Ctrl takes one away */
 	bool IsPlacingHeroes() const { return Tool == EHexPaintTool::Hero; }
@@ -427,6 +436,9 @@ public:
 	/** Sets the point on the planet under the cursor, by which the river brush finds the nearest corner and side */
 	void SetCursorPoint(const FVector& Point) { CursorPoint = Point; }
 
+	/** Shows, for the cell under the cursor, where an entrance would be put and which way it would open, as an arrow, or hides it */
+	void UpdateEntranceHint(int32 Cell);
+
 	/** Returns the tool of relief */
 	EHexReliefTool GetReliefTool() const { return ReliefTool; }
 
@@ -457,7 +469,7 @@ public:
 	 *  cell, a way, a side or a point, whatever its size */
 	bool UsesBrushSize() const
 	{
-		return Tool != EHexPaintTool::Entrance && Tool != EHexPaintTool::Carve && Tool != EHexPaintTool::River && Tool != EHexPaintTool::Bridge && Tool != EHexPaintTool::Placed
+		return Tool != EHexPaintTool::Entrance && Tool != EHexPaintTool::EntranceTurn && Tool != EHexPaintTool::EntranceRemove && Tool != EHexPaintTool::Carve && Tool != EHexPaintTool::River && Tool != EHexPaintTool::Bridge && Tool != EHexPaintTool::Placed
 			&& Tool != EHexPaintTool::Hero && Tool != EHexPaintTool::Site && Tool != EHexPaintTool::Castle;
 	}
 
@@ -597,6 +609,22 @@ private:
 
 	/** Puts an entrance of the network on a cell, or takes one away, at once, as part of the stroke */
 	void PaintEntrance(int32 Cell);
+
+	/** Turns the entrance or exit on a cell to the next side */
+	void PaintEntranceTurn(int32 Cell);
+
+	/** Returns the cell of the entrance a click on a cell means: the cell itself when one stands on it, else that of the entrance whose mouth
+	 *  is built into the cell, the one nearest the cursor, so Turn and Remove take an entrance by its mountain or its wall too, as the
+	 *  developer could do neither by the mountain on 2026-11-12; the cell itself when there is none */
+	int32 FindEntranceCellAt(int32 Cell) const;
+
+	/** Gives where a click on a cell of the surface would put an entrance: the cell clicked, the mountain its mouth is built into, and the
+	 *  cell of plains or hills beside it nearest the cursor, on which it stands. Returns false when it cannot be put there */
+	bool FindEntrancePlace(int32 Clicked, int32& OutMountain, int32& OutBefore) const;
+
+	/** The arrow that shows it while the tool of the entrances is chosen and nothing is painted (UpdatePreview) */
+	int32 HintMountain = INDEX_NONE;
+	int32 HintBefore = INDEX_NONE;
 
 	/** Puts a hero of the class and player chosen on a cell, or takes the one there away, at once, as part of the stroke */
 	void PaintHero(int32 Cell);

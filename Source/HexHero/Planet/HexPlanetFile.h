@@ -408,6 +408,20 @@ struct FHexEntranceLine
 
 	UPROPERTY()
 	FString Network;
+
+	/** The sides the entrance and its exit were turned to by hand, -1 when the planet turns them */
+	UPROPERTY()
+	int32 Side = -1;
+
+	UPROPERTY()
+	int32 ExitSide = -1;
+
+	/** Turned to the corner after that side rather than to the side */
+	UPROPERTY()
+	bool Corner = false;
+
+	UPROPERTY()
+	bool ExitCorner = false;
 };
 
 /** entrances.json of a planet, at the root of its folder: its entrances to the underground, a line each, which Git can merge */
@@ -435,7 +449,20 @@ struct FHexEntrance
 	/** Network, 0 to HexPlanetFile::MaxNetworks - 1 for A to H, or INDEX_NONE for a letter of the file that is none */
 	int32 Network = INDEX_NONE;
 
-	bool operator==(const FHexEntrance& Other) const { return Cell == Other.Cell && Network == Other.Network; }
+	/** The neighbor of its cell the mouth of the entrance on the surface opens to, and that of its exit underground, set with the Turn tool
+	 *  of the palette, or -1 for the side the planet chooses (AHexPlanet::GetEntranceFront) */
+	int32 Side = -1;
+	int32 ExitSide = -1;
+
+	/** Turned to the corner between that neighbor and the next rather than to the neighbor, so it stands along a wall that runs across a
+	 *  corner, as the developer asked on 2026-11-12 */
+	bool bCorner = false;
+	bool bExitCorner = false;
+
+	bool operator==(const FHexEntrance& Other) const
+	{
+		return Cell == Other.Cell && Network == Other.Network && Side == Other.Side && ExitSide == Other.ExitSide && bCorner == Other.bCorner && bExitCorner == Other.bExitCorner;
+	}
 };
 
 /**

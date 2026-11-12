@@ -1,7 +1,6 @@
 {
 	"version": 1,
 	"entrances": [
-		{"cell": 1623, "network": "A"},
 		{"cell": 3917, "network": "A"}
 	]
 }

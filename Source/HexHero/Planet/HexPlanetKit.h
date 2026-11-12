@@ -179,7 +179,17 @@ namespace HexPlanetKit
 	};
 
 	/** Returns for every corner of the grid the mean top of its three cells, or the highest of them with EHexEdgeRule::HigherHolds */
-	TArray<double> FindCornerHeights(const FHexSphereGrid& Grid, TFunctionRef<double(int32)> GetTop, EHexEdgeRule Rule = EHexEdgeRule::Shared);
+	TArray<double> FindCornerHeights(const FHexSphereGrid& Grid, TFunctionRef<double(int32)> GetTop, EHexEdgeRule Rule = EHexEdgeRule::Shared,
+		const TSet<uint64>* LowSides = nullptr);
+
+	/** The key of the side between two cells in a set of low sides: a side that lies at the top of the lower of its two cells, with both its
+	 *  corners, whatever the rule, so the lower cell stays flat up to it and the higher one carries the whole slope. The ground before the
+	 *  mouth of an entrance built into a mountain is such a side, as the developer asked on 2026-11-12 for ground that comes up to an entrance
+	 *  evenly rather than rising to the mountain (AHexPlanet::FindEntranceSides) */
+	inline uint64 GetSideKey(int32 One, int32 Other)
+	{
+		return (uint64(uint32(FMath::Min(One, Other))) << 32) | uint64(uint32(FMath::Max(One, Other)));
+	}
 
 	/** Returns the height of the middle of a side between two cells of these tops by a rule */
 	inline double GetSideMiddle(double Top, double OtherTop, EHexEdgeRule Rule)
@@ -193,7 +203,8 @@ namespace HexPlanetKit
 	 *  must come from FindCornerHeights by the same Rule
 	 */
 	FCellFrame BuildFrame(const FHexSphereGrid& Grid, int32 Cell, TFunctionRef<double(int32)> GetTop, TFunctionRef<int32(int32)> GetLevel,
-		TConstArrayView<double> CornerHeights, TConstArrayView<int32> MassifSteps, TConstArrayView<float> Relief = {}, EHexEdgeRule Rule = EHexEdgeRule::Shared);
+		TConstArrayView<double> CornerHeights, TConstArrayView<int32> MassifSteps, TConstArrayView<float> Relief = {}, EHexEdgeRule Rule = EHexEdgeRule::Shared,
+		const TSet<uint64>* LowSides = nullptr);
 
 	/** Moves a height on a slope below the plains by the wobble of the coast: a pure function of the place, so cells that share a point agree */
 	double ApplyWobble(const FPlacement& Placement, const FVector3d& Direction, double Height);
