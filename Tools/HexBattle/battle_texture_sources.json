@@ -1,0 +1,8 @@
+{
+  "comment": "Photo-scanned timber of the gate and the bridge of a siege, CC0, from Poly Haven (https://polyhaven.com/license), as the developer asked on 2026-11-13 for a gate and a bridge more real than plain boards. fetch_battle_textures.ps1 downloads them at the resolution below, which keeps them light, to Saved/TextureSources/battle/<id> as <id>_color.jpg and <id>_normal.jpg (DirectX); create_battle_assets.py textures imports them as T_Battle<Name> and T_Battle<Name>_N.",
+  "resolution": "1k",
+  "sets": [
+    { "name": "GateWood", "id": "dark_wooden_planks" },
+    { "name": "BridgeWood", "id": "weathered_planks" }
+  ]
+}

@@ -8,6 +8,7 @@
 
 class UAnimSequence;
 class UMaterialInterface;
+class UTexture2D;
 class USkeletalMesh;
 class UStaticMesh;
 
@@ -394,12 +395,14 @@ public:
 	 *  before the last, across every row, its gate in the middle row and its towers on TowerRows, as many as TowersByFort gives the level of
 	 *  its fort (index 0 none, 1 fort, 2 citadel, 3 castle: no tower in the base fort), each section, the gate and a tower as strong as the
 	 *  ...ByFort values say, so a castle built up has stronger walls; each tower holds TowerWeeksByFort weeks of the shooters of the lowest
-	 *  level of its faction that shoot, part of the castle, which only a catapult harms */
+	 *  level of its faction that shoot, part of the castle, which only a catapult harms. The towers stand symmetric, as the developer asked on
+	 *  2026-11-13: none in a fort, two at the ends of the wall in a citadel and two more beside the gate in a castle, so TowerRows lists the
+	 *  ends first */
 	UPROPERTY(EditAnywhere, Category="Siege", meta=(ClampMin=2))
 	int32 SiegeWallFromEnd = 4;
 
 	UPROPERTY(EditAnywhere, Category="Siege")
-	TArray<int32> TowerRows = {2, 8, 0};
+	TArray<int32> TowerRows = {0, 10, 4, 6};
 
 	UPROPERTY(EditAnywhere, Category="Siege")
 	TArray<int32> WallHealthByFort = {0, 100, 160, 240};
@@ -411,10 +414,10 @@ public:
 	TArray<int32> TowerHealthByFort = {0, 150, 220, 320};
 
 	UPROPERTY(EditAnywhere, Category="Siege")
-	TArray<int32> TowersByFort = {0, 0, 1, 3};
+	TArray<int32> TowersByFort = {0, 0, 2, 4};
 
 	UPROPERTY(EditAnywhere, Category="Siege")
-	TArray<float> TowerWeeksByFort = {0.0f, 0.0f, 1.0f, 1.5f};
+	TArray<float> TowerWeeksByFort = {0.0f, 0.0f, 1.0f, 0.75f};
 
 	/** A unit that strikes the wall deals this share of what it would deal a creature, without Attack or Defense */
 	UPROPERTY(EditAnywhere, Category="Siege", meta=(ClampMin=0))
@@ -438,14 +441,319 @@ public:
 	UPROPERTY(EditAnywhere, Category="Siege", meta=(ClampMin=1))
 	int32 CatapultHealth = 400;
 
+	/** A wall has a moat on the hexes before it, as the developer asked on 2026-11-13, with a bridge before the gate: a step into it costs a
+	 *  walker MoatStepCost of its speed, half its speed in the water, as they asked the same day ("штраф на мув 50%"; it stopped a walker until
+	 *  then), and a flyer flies over it */
+	UPROPERTY(EditAnywhere, Category="Siege")
+	bool bSiegeMoat = true;
+
+	UPROPERTY(EditAnywhere, Category="Siege", meta=(ClampMin=1))
+	int32 MoatStepCost = 2;
+
 	/** How the wall shows on the field: the meshes of the castle by the level of its fort (WallMeshes, GateMeshes, TowerMeshes of
-	 *  DA_HexCastles) in its material, SiegeWallHeight high, the shooters of a tower TowerFigureLift above the ground, and the catapult as
+	 *  DA_HexCastles) in its material, SiegeWallHeight high, the shooters of a tower TowerFigureScale of the size of a figure, standing
+	 *  TowerStandShare of the way up its mesh, as at their full size they hung in the air over it (until 2026-11-13), and the catapult as
 	 *  CatapultMesh, CatapultSize across */
 	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=10))
 	float SiegeWallHeight = 105.0f;
 
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0.1, ClampMax=2))
+	float TowerFigureScale = 0.6f;
+
+	/** The towers on the field are TowerWidthScale times as wide as their meshes, as high, as the developer asked on 2026-11-13 */
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0.5, ClampMax=3))
+	float TowerWidthScale = 1.8f;
+
+	/** The props of a siege that are no meshes of the castle, as the developer asked on 2026-11-13 for a gate and a bridge more real and steps
+	 *  with a texture: PropMaterial (M_HexBattleProp) with the timber of the gate and of the bridge (fetch_battle_textures.ps1) and the masonry
+	 *  of the castles by their style (StoneTextures, StoneNormals: men, the undead), WoodTileSize and StoneTileSize units a tile, the planks
+	 *  turned upright on the gate and across on the bridge by bGatePlanksTurned and bBridgePlanksTurned */
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	TSoftObjectPtr<UMaterialInterface> PropMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/HexPlanet/Battle/M_HexBattleProp.M_HexBattleProp")));
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	TSoftObjectPtr<UTexture2D> GateWoodTexture = TSoftObjectPtr<UTexture2D>(FSoftObjectPath(TEXT("/Game/HexPlanet/Battle/Textures/T_BattleGateWood.T_BattleGateWood")));
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	TSoftObjectPtr<UTexture2D> GateWoodNormal = TSoftObjectPtr<UTexture2D>(FSoftObjectPath(TEXT("/Game/HexPlanet/Battle/Textures/T_BattleGateWood_N.T_BattleGateWood_N")));
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	TSoftObjectPtr<UTexture2D> BridgeWoodTexture = TSoftObjectPtr<UTexture2D>(FSoftObjectPath(TEXT("/Game/HexPlanet/Battle/Textures/T_BattleBridgeWood.T_BattleBridgeWood")));
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	TSoftObjectPtr<UTexture2D> BridgeWoodNormal = TSoftObjectPtr<UTexture2D>(FSoftObjectPath(TEXT("/Game/HexPlanet/Battle/Textures/T_BattleBridgeWood_N.T_BattleBridgeWood_N")));
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	TArray<TSoftObjectPtr<UTexture2D>> StoneTextures = {
+		TSoftObjectPtr<UTexture2D>(FSoftObjectPath(TEXT("/Game/HexPlanet/Castles/T_CastleWall_Human.T_CastleWall_Human"))),
+		TSoftObjectPtr<UTexture2D>(FSoftObjectPath(TEXT("/Game/HexPlanet/Castles/T_CastleWall_Undead.T_CastleWall_Undead")))};
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	TArray<TSoftObjectPtr<UTexture2D>> StoneNormals = {
+		TSoftObjectPtr<UTexture2D>(FSoftObjectPath(TEXT("/Game/HexPlanet/Castles/T_CastleWall_Human_N.T_CastleWall_Human_N"))),
+		TSoftObjectPtr<UTexture2D>(FSoftObjectPath(TEXT("/Game/HexPlanet/Castles/T_CastleWall_Undead_N.T_CastleWall_Undead_N")))};
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	FLinearColor StoneTint = FLinearColor(0.9f, 0.88f, 0.85f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	FLinearColor BridgeWoodColor = FLinearColor(0.85f, 0.8f, 0.72f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=1))
+	float WoodTileSize = 90.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=1))
+	float StoneTileSize = 120.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	bool bGatePlanksTurned = true;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	bool bBridgePlanksTurned = false;
+
+	/** The arch of the gate: pointed, its sides circles GateArchRadius times half its opening, springing GateSpringShare of the wall up; its
+	 *  leaves GateLeafThickness thick, and the bridge rises BridgeRise in its middle */
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=1, ClampMax=3))
+	float GateArchRadius = 1.5f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0, ClampMax=1))
+	float GateSpringShare = 0.3f;
+
+	/** The wall over the gate is a mesh of the castle as thick as its walls themselves, ArchThickShare of the bounds of the mesh of a wall,
+	 *  which hold its buttress and plinth, and as high, ArchTopShare of them, which hold its merlons; its UV in tiles of CastleTile units of a
+	 *  mesh, TILE of generate_planet_castles.py */
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0.1, ClampMax=1))
+	float ArchThickShare = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0.1, ClampMax=1.2))
+	float ArchTopShare = 0.9f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=1))
+	float CastleTile = 36.0f;
+
+	/** The tone of the stone of the meshes of the castle (STONE of generate_planet_castles.py), which the wall over the gate takes, and how far
+	 *  above the point of its arch it rises where that stands higher than the wall, in units of a mesh */
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0, ClampMax=1))
+	float CastleStoneTone = 0.4f;
+
 	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0))
-	float TowerFigureLift = 70.0f;
+	float GateArchCrown = 9.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=1))
+	float GateLeafThickness = 5.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0))
+	float BridgeRise = 6.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0, ClampMax=1.5))
+	float TowerStandShare = 0.78f;
+
+	/** The castle is closed, as the developer asked on 2026-11-13, so it reads as a castle and not as a wall in a field one could walk around:
+	 *  from the ends of the front wall, WallEndReach of a row past its first and last row, outside the field, its walls turn back past the
+	 *  last column, BackWallReach hexes beyond its middles, where the back wall closes it, with the hall of the castle (its mesh of the level
+	 *  built, HallScale times the size of the wall) behind its middle and, from a citadel on, a keep in it, a tower KeepScale times as large */
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0.1))
+	float BackWallReach = 0.9f;
+
+	/** The yard is the front of the castle: its side walls go SideWallBeyond hexes on past the palace at its back, the hall of the castle on
+	 *  PalaceSteps steps PalaceStepRise high each in StepsColor, the dwellings built beside it, towers at the corners of the palace and a keep
+	 *  behind the hall from a citadel on, as the developer asked on 2026-11-13 */
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0))
+	float SideWallBeyond = 2.5f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0))
+	int32 PalaceSteps = 3;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0))
+	float PalaceStepRise = 5.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	FLinearColor StepsColor = FLinearColor(0.55f, 0.53f, 0.5f, 1.0f);
+
+	/** The gate: an opening GateOpening hex radii wide, 2 the longest diagonal of a hex, between two towers GateTowerScale of a tower, with two
+	 *  leaves of timber GateLeafHeight of the wall high, which swing GateSwing degrees into the yard at GateSwingSpeed a second */
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0.5))
+	float GateOpening = 2.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0.1))
+	float GateTowerScale = 0.8f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0.1, ClampMax=1.5))
+	float GateLeafHeight = 0.72f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0, ClampMax=170))
+	float GateSwing = 80.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0.1))
+	float GateSwingSpeed = 2.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	FLinearColor GateWoodColor = FLinearColor(0.42f, 0.27f, 0.15f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	FLinearColor GateIronColor = FLinearColor(0.13f, 0.13f, 0.14f, 1.0f);
+
+	/** The ground of the field is flat over the field and the castle, HillFlatMargin hexes around them, and rises over HillRamp hexes into hills
+	 *  up to HillHeight high, a noise HillScale across, as the developer asked on 2026-11-13 for hills and plains; the ground draws the terrain
+	 *  layer in relief by its normal (GroundRelief) and patches of the rock of the biome (GroundRockShare), more on the hills */
+	UPROPERTY(EditAnywhere, Category="Look|Ground", meta=(ClampMin=0))
+	float HillHeight = 110.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Ground", meta=(ClampMin=1))
+	float HillScale = 1100.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Ground", meta=(ClampMin=0.1))
+	float HillRamp = 6.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Ground", meta=(ClampMin=0))
+	float HillFlatMargin = 1.5f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Ground", meta=(ClampMin=0, ClampMax=3))
+	float GroundRelief = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Ground", meta=(ClampMin=0, ClampMax=1))
+	float GroundRockShare = 0.08f;
+
+	/** The field is small and closed, as the developer asked on 2026-11-13: a dense forest of the decor of the ground (ForestCount trees in
+	 *  clumps, ForestClumping how much) from ForestStart hexes past the field and the castle, BorderRocks RockCount of them RockSize hexes large
+	 *  on BorderReach hexes, and beyond them the fog of war (FogMaterial) at FogHeight over the field, from FogStart to FogEnd past the field,
+	 *  in FogColor with wisps of FogWispColor that drift at FogSpeed, FogUndergroundShade as light underground, its color the sky too */
+	UPROPERTY(EditAnywhere, Category="Look|Border", meta=(ClampMin=0))
+	float ForestStart = 1.3f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Border", meta=(ClampMin=0))
+	int32 ForestCount = 620;
+
+	/** How far past the rocks the forest goes on, under the fog, in hexes, and the grounds by their letters whose forest is of rocks and
+	 *  stones (RockyDecor), as a desert has no wood, as the developer asked on 2026-11-13 */
+	UPROPERTY(EditAnywhere, Category="Look|Border", meta=(ClampMin=0))
+	float ForestBeyond = 4.5f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Border")
+	FString RockyGroundLetters = TEXT("D");
+
+	UPROPERTY(EditAnywhere, Category="Look|Border")
+	TArray<TSoftObjectPtr<UStaticMesh>> RockyDecor = {
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Objects/Meshes/SM_PlanetObject_Rock_0.SM_PlanetObject_Rock_0"))),
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Objects/Meshes/SM_PlanetObject_Rock_1.SM_PlanetObject_Rock_1"))),
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Objects/Meshes/SM_PlanetObject_Rock_2.SM_PlanetObject_Rock_2"))),
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Objects/Meshes/SM_PlanetObject_Stone_0.SM_PlanetObject_Stone_0"))),
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Objects/Meshes/SM_PlanetObject_Stone_1.SM_PlanetObject_Stone_1"))),
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Kit/SM_PlanetBoulder_0.SM_PlanetBoulder_0"))),
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Kit/SM_PlanetBoulder_2.SM_PlanetBoulder_2")))};
+
+	UPROPERTY(EditAnywhere, Category="Look|Border", meta=(ClampMin=0, ClampMax=1))
+	float ForestClumping = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Border", meta=(ClampMin=1))
+	float BorderReach = 6.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Border")
+	TArray<TSoftObjectPtr<UStaticMesh>> BorderRocks = {
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Kit/SM_PlanetBoulder_0.SM_PlanetBoulder_0"))),
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Kit/SM_PlanetBoulder_1.SM_PlanetBoulder_1"))),
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Kit/SM_PlanetBoulder_2.SM_PlanetBoulder_2"))),
+		TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Kit/SM_PlanetBoulder_3.SM_PlanetBoulder_3")))};
+
+	UPROPERTY(EditAnywhere, Category="Look|Border", meta=(ClampMin=0))
+	int32 RockCount = 70;
+
+	UPROPERTY(EditAnywhere, Category="Look|Border", meta=(ClampMin=0.1))
+	float RockSize = 1.3f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Border")
+	TSoftObjectPtr<UMaterialInterface> FogMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/HexPlanet/Battle/M_HexBattleFog.M_HexBattleFog")));
+
+	UPROPERTY(EditAnywhere, Category="Look|Border")
+	float FogHeight = 95.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Border", meta=(ClampMin=0))
+	float FogStart = 170.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Border", meta=(ClampMin=1))
+	float FogEnd = 430.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Border", meta=(ClampMin=0))
+	float FogSpeed = 0.15f;
+
+	/** The fog is alive as the fog of war of the map, as the developer asked on 2026-11-13: FogLayers banks one over another, each
+	 *  FogLayerStep of FogHeight apart and FogLayerFade as dense as the one under it, churning in a noise FogScale across, with wisps that wind
+	 *  through it (FogWisp) and glows that swell and fade in it (FogPulse, FogPulseRate, FogPulseColor) */
+	UPROPERTY(EditAnywhere, Category="Look|Border", meta=(ClampMin=1, ClampMax=5))
+	int32 FogLayers = 3;
+
+	UPROPERTY(EditAnywhere, Category="Look|Border", meta=(ClampMin=0))
+	float FogLayerStep = 0.45f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Border", meta=(ClampMin=0, ClampMax=1))
+	float FogLayerFade = 0.65f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Border", meta=(ClampMin=0.0001))
+	float FogScale = 0.0016f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Border", meta=(ClampMin=0))
+	float FogWisp = 0.8f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Border", meta=(ClampMin=0))
+	float FogPulse = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Border", meta=(ClampMin=0))
+	float FogPulseRate = 0.12f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Border")
+	FLinearColor FogPulseColor = FLinearColor(0.16f, 0.22f, 0.34f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Look|Border")
+	FLinearColor FogColor = FLinearColor(0.11f, 0.13f, 0.19f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Look|Border")
+	FLinearColor FogWispColor = FLinearColor(0.2f, 0.23f, 0.31f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Look|Border", meta=(ClampMin=0, ClampMax=1))
+	float FogUndergroundShade = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0.1))
+	float HallScale = 1.5f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	float HallYaw = 0.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0.1))
+	float KeepScale = 1.5f;
+
+	/** The wall dissolves within SiegeFadeRadius of the line from the camera to the hex under the cursor where it stands in front of it, keeping
+	 *  SiegeFadeKeep of its pixels, as the walls of the underground do, as the developer asked on 2026-11-13 (SiegeFade of M_HexPlanetCastle) */
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0))
+	float SiegeFadeRadius = 75.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0, ClampMax=1))
+	float SiegeFadeKeep = 0.25f;
+
+	/** The sun over the field, its pitch and its turn, the same in a siege, and a fill light without shadows from the other side, FillShare as
+	 *  bright as the sun, FillPitch high, so what lies in a shadow, as behind the wall of a castle, is seen, as the developer asked on
+	 *  2026-11-13 when a sun turned for the siege darkened the front of the wall in its place */
+	UPROPERTY(EditAnywhere, Category="Look")
+	float SunPitch = -48.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look")
+	float SunYaw = 25.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=0, ClampMax=2))
+	float FillShare = 0.35f;
+
+	/** The camera comes to show the one that strikes or shoots and the one struck when either lies off the screen or within CameraFrameMargin
+	 *  of its width of an edge, as the developer asked on 2026-11-13, far enough that both stand CameraFrameRoom apart of the width of the view */
+	UPROPERTY(EditAnywhere, Category="Camera", meta=(ClampMin=0, ClampMax=0.45))
+	float CameraFrameMargin = 0.08f;
+
+	UPROPERTY(EditAnywhere, Category="Camera", meta=(ClampMin=0.1, ClampMax=1))
+	float CameraFrameRoom = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Look")
+	float FillPitch = -35.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look")
+	FLinearColor FillColor = FLinearColor(0.75f, 0.85f, 1.0f, 1.0f);
 
 	/** A mesh of the catapult, which an artist gives; without one it is put together of a frame, an arm and a bucket */
 	UPROPERTY(EditAnywhere, Category="Look|Siege")
@@ -453,6 +761,102 @@ public:
 
 	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=10))
 	float CatapultSize = 80.0f;
+
+	/** The wall runs straight across the field, as the developer asked on 2026-11-13, through every hex of its column, which zigzag by half a
+	 *  hex from row to row, and its corners stand WallEndReach of the step between two rows past the first and the last, where a tower at an
+	 *  end of it stands; the water of the moat, part of the ground of the biome as the developer asked the same day, lies along the hexes of
+	 *  the moat, under the front wall to its face and out to the far sides of its hexes, MoatEndReach of a row past the corners, where it
+	 *  turns into a shore that cuts the corners of the hexes by a share of up to MoatCornerCut by chance, so it shows no pattern, and winds by
+	 *  MoatShoreNoise of a hex, MoatLift above the ground and drawn with MoatMaterial over a bed the ground draws, MoatBedColor, with wet banks
+	 *  MoatBankWidth wide, darker by MoatBankColor; it waves MoatWaveHeight up and down and lets MoatOpacity of the bed through at most; the
+	 *  bridge before the gate is BridgeWidth of a hex wide */
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0))
+	float WallEndReach = 0.8f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0))
+	float MoatEndReach = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0, ClampMax=0.5))
+	float MoatShoreNoise = 0.08f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0, ClampMax=1))
+	float MoatCornerCut = 1.0f;
+
+	/** The ends of the moat round off over MoatEndRound of a hex, raggedly and each its own way, as the developer asked on 2026-11-13 */
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0.1))
+	float MoatEndRound = 1.6f;
+
+	/** The foam of the moat, as the developer asked on 2026-11-13: a line along the shore MoatFoamWidth wide that comes and goes, foam where the
+	 *  water meets the wall and the water washing up the face of the wall in MoatSplashHeight */
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	FLinearColor MoatFoamColor = FLinearColor(0.82f, 0.86f, 0.84f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0))
+	float MoatFoamWidth = 7.0f;
+
+	/** The foam where the water meets the wall, thinner than along the shore, both as wide as a noise that drifts says, from 0.35 of these up */
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0))
+	float MoatWallFoamWidth = 3.5f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0))
+	float MoatSplashHeight = 14.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0))
+	float MoatBankWidth = 26.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	FLinearColor MoatBankColor = FLinearColor(0.55f, 0.5f, 0.45f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	FLinearColor MoatBedColor = FLinearColor(0.2f, 0.17f, 0.12f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0))
+	float MoatWaveHeight = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0, ClampMax=1))
+	float MoatOpacity = 0.78f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	float MoatLift = 1.2f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	TSoftObjectPtr<UMaterialInterface> MoatMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/HexPlanet/Battle/M_HexBattleWater.M_HexBattleWater")));
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0.1))
+	float BridgeWidth = 0.8f;
+
+	/** The values of MoatMaterial: the color of the water at its banks and in its middle, its ripples, how fast they run and how rough it is */
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	FLinearColor MoatShallowColor = FLinearColor(0.08f, 0.17f, 0.17f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	FLinearColor MoatDeepColor = FLinearColor(0.025f, 0.065f, 0.075f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0))
+	float MoatRippleScale = 0.08f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0))
+	float MoatRippleSpeed = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0))
+	float MoatRippleStrength = 0.3f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0, ClampMax=1))
+	float MoatRoughness = 0.12f;
+
+	/** The water lights itself, unlit, by the sun and the sky: MoatLight times its color, a glint of the sun MoatGlint bright and the sky
+	 *  (MoatSkyColor) MoatSkyReflection of the way where it is seen edge on */
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0))
+	float MoatLight = 2.2f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0))
+	float MoatGlint = 1.5f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0))
+	float MoatSkyReflection = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Siege")
+	FLinearColor MoatSkyColor = FLinearColor(0.35f, 0.45f, 0.55f, 1.0f);
 
 	/** The hero that wins gains this much experience a point of health of the creatures it killed */
 	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=0))

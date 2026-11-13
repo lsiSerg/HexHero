@@ -25,6 +25,7 @@ namespace
 		{TEXT("Map"), TEXT("hex.Cheat enemies [on|off]"), TEXT("Marks every neutral stack and hero of another player with a line and its name, under the fog of war too")},
 		{TEXT("Map"), TEXT("hex.PlanetShroud 0"), TEXT("No fog of war while it is 0; 1 brings it back as it was")},
 		{TEXT("Map"), TEXT("hex.Neutral generate [Seed]"), TEXT("Neutral stacks scattered anew; hex.Neutral list lists them")},
+		{TEXT("Battle"), TEXT("hex.Cheat passive [on|off]"), TEXT("In the battle you fight now the enemy attacks nobody and defends on every turn, its towers too; for that battle alone, it still strikes back")},
 		{TEXT("Battle"), TEXT("hex.Battle quick"), TEXT("The rest of the battle shown at once; hex.Battle auto lets the game fight for you")},
 		{TEXT("Battle"), TEXT("hex.Battle state"), TEXT("The stacks on the field in the log, by the index the other orders take")},
 	};

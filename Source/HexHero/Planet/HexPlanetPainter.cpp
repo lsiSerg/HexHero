@@ -120,6 +120,25 @@ void UHexPlanetPainter::SetTab(EHexPaintTab Tab)
 	UpdateLinksShown();
 }
 
+EHexPlanetLayer UHexPlanetPainter::GetTabLayer(EHexPaintTab Tab)
+{
+	// by name, as the tabs added later stand after those of the underground in the enum (until 2026-11-13 the castles and the neutrals of the surface counted as
+	// tabs of the underground, so their tools were never chosen there)
+	switch (Tab)
+	{
+	case EHexPaintTab::Maze:
+	case EHexPaintTab::Links:
+	case EHexPaintTab::CaveObjects:
+	case EHexPaintTab::CaveHeroes:
+	case EHexPaintTab::CaveSites:
+	case EHexPaintTab::CaveNeutrals:
+	case EHexPaintTab::CaveCastles:
+		return EHexPlanetLayer::Underground;
+	default:
+		return EHexPlanetLayer::Surface;
+	}
+}
+
 void UHexPlanetPainter::SetTool(EHexPaintTool InTool, EHexPaintTab Tab)
 {
 	// a tool of the other layer waits until that layer is painted
@@ -145,7 +164,8 @@ FText UHexPlanetPainter::GetTabName(EHexPaintTab Tab)
 	case EHexPaintTab::CaveHeroes: return LOCTEXT("TabHeroes", "Heroes");
 	case EHexPaintTab::Sites:
 	case EHexPaintTab::CaveSites: return LOCTEXT("TabSites", "Mines");
-	case EHexPaintTab::Castles: return LOCTEXT("TabCastles", "Castles");
+	case EHexPaintTab::Castles:
+	case EHexPaintTab::CaveCastles: return LOCTEXT("TabCastles", "Castles");
 	case EHexPaintTab::Neutrals:
 	case EHexPaintTab::CaveNeutrals: return LOCTEXT("TabNeutrals", "Neutrals");
 	case EHexPaintTab::Maze: return LOCTEXT("TabMaze", "Maze");
@@ -993,9 +1013,13 @@ void UHexPlanetPainter::PaintNeutral(int32 Cell)
 	else
 	{
 		FString Problem;
-		if (Neutrals->Add(Target, Cell, FHexStack{NeutralFaction, NeutralLevel, bNeutralUpgraded, NeutralCount}, Problem) == 0 && GEngine)
+		if (Neutrals->Add(Target, Cell, FHexStack{NeutralFaction, NeutralLevel, bNeutralUpgraded, NeutralCount}, Problem) == 0)
 		{
-			GEngine->AddOnScreenDebugMessage(INDEX_NONE, 3.0f, FColor::Yellow, FString::Printf(TEXT("No stack stands there: %s"), *Problem));
+			UE_LOG(LogHexHero, Log, TEXT("Painter: no neutral stack on cell %d of the %s: %s"), Cell, GetPlanetLayerName(Target), *Problem);
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(INDEX_NONE, 3.0f, FColor::Yellow, FString::Printf(TEXT("No stack stands there: %s"), *Problem));
+			}
 		}
 	}
 	Stroke.NewNeutrals = Neutrals->MakeLines();
@@ -1058,9 +1082,13 @@ void UHexPlanetPainter::PaintCastle(int32 Cell)
 		// the cell clicked and the two around its corner nearest the cursor
 		int32 Cells[3];
 		FString Problem = TEXT("there are no three cells around a corner there");
-		if ((!Castles->FindCells(Target, Cell, FVector3d(CursorPoint), Cells) || Castles->AddCastle(Target, Cells, CastleFaction, CastleOwner, Problem) == 0) && GEngine)
+		if (!Castles->FindCells(Target, Cell, FVector3d(CursorPoint), Cells) || Castles->AddCastle(Target, Cells, CastleFaction, CastleOwner, Problem) == 0)
 		{
-			GEngine->AddOnScreenDebugMessage(INDEX_NONE, 3.0f, FColor::Yellow, FString::Printf(TEXT("No castle stands there: %s"), *Problem));
+			UE_LOG(LogHexHero, Log, TEXT("Painter: no castle on cell %d of the %s: %s"), Cell, GetPlanetLayerName(Target), *Problem);
+			if (GEngine)
+			{
+				GEngine->AddOnScreenDebugMessage(INDEX_NONE, 3.0f, FColor::Yellow, FString::Printf(TEXT("No castle stands there: %s"), *Problem));
+			}
 		}
 	}
 	Stroke.NewCastles = Castles->MakeLines();

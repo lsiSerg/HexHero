@@ -51,6 +51,9 @@ struct FHexBattleSiege
 	/** The shooters in each tower: a creature of the faction of the castle and how many */
 	FHexStack TowerStack;
 	bool bCatapult = false;
+	/** A moat on the hexes before the wall, but before the gate, where a bridge goes over it, as the developer asked on 2026-11-13: a unit
+	 *  that walks into it stops there, and a flyer flies over it */
+	bool bMoat = false;
 };
 
 /** Both sides and the seed of a battle: the attacker first */
@@ -284,6 +287,13 @@ public:
 	const TArray<FHexBattleWall>& GetWalls() const { return Walls; }
 	const FHexBattleWall* FindWall(const FHexCoord& Hex) const;
 
+	/** The hexes of the moat before the wall, and whether a hex is one: a unit that walks onto it goes no further this turn */
+	const TSet<FHexCoord>& GetMoat() const { return Moat; }
+	bool IsMoat(const FHexCoord& Hex) const { return Moat.Contains(Hex); }
+
+	/** The hex of the bridge over the moat before the gate, or the gate itself without a moat; false without walls */
+	bool GetBridge(FHexCoord& OutHex) const;
+
 	/** Whether the gate stays open whoever comes, as a unit was killed in it or it fell */
 	bool IsGateJammed() const { return bGateJammed; }
 
@@ -324,6 +334,11 @@ public:
 	/** The game gives the order for the unit whose turn it is, and its hero casts first when that is worth it */
 	void PlayAi();
 
+	/** A side the game moves that attacks nobody and defends on every turn of its stacks, its towers too, for this battle alone, the cheat
+	 *  hex.Cheat passive, as the developer asked on 2026-11-13; INDEX_NONE for none. Its stacks still strike back by the rules */
+	void SetPassiveSide(int32 Side) { PassiveSide = Side; }
+	int32 GetPassiveSide() const { return PassiveSide; }
+
 	/** Plays the battle to its end, the game giving every order */
 	void PlayToEnd();
 
@@ -354,7 +369,9 @@ private:
 	int32 Rows = 11;
 	TSet<FHexCoord> Obstacles;
 	TArray<FHexBattleWall> Walls;
+	TSet<FHexCoord> Moat;
 	bool bGateJammed = false;
+	int32 PassiveSide = INDEX_NONE;
 	TArray<FHexBattleUnit> Units;
 	TArray<FHexBattleEvent> Events;
 	int32 Mana[2] = {0, 0};

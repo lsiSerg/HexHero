@@ -41,6 +41,18 @@
 		{"id": 38, "faction": "Dawn", "creature": "Pilgrim", "upgraded": true, "count": 6, "layer": "Underground", "cell": 3315},
 		{"id": 39, "faction": "Decay", "creature": "BloodDrinker", "upgraded": false, "count": 8, "layer": "Underground", "cell": 1542},
 		{"id": 40, "faction": "Decay", "creature": "AshMage", "upgraded": false, "count": 8, "layer": "Underground", "cell": 2397},
-		{"id": 41, "faction": "Dawn", "creature": "Pilgrim", "upgraded": false, "count": 7, "layer": "Underground", "cell": 1601}
+		{"id": 41, "faction": "Dawn", "creature": "Pilgrim", "upgraded": false, "count": 7, "layer": "Underground", "cell": 1601},
+		{"id": 42, "faction": "Dawn", "creature": "Huntsman", "upgraded": false, "count": 10, "layer": "Surface", "cell": 1110},
+		{"id": 43, "faction": "Dawn", "creature": "Huntsman", "upgraded": false, "count": 10, "layer": "Surface", "cell": 1092},
+		{"id": 44, "faction": "Dawn", "creature": "Huntsman", "upgraded": false, "count": 10, "layer": "Surface", "cell": 1074},
+		{"id": 45, "faction": "Dawn", "creature": "Huntsman", "upgraded": false, "count": 10, "layer": "Surface", "cell": 1075},
+		{"id": 46, "faction": "Dawn", "creature": "Huntsman", "upgraded": false, "count": 10, "layer": "Surface", "cell": 1094},
+		{"id": 47, "faction": "Dawn", "creature": "Huntsman", "upgraded": false, "count": 10, "layer": "Surface", "cell": 3317},
+		{"id": 48, "faction": "Dawn", "creature": "Huntsman", "upgraded": false, "count": 10, "layer": "Surface", "cell": 3316},
+		{"id": 49, "faction": "Dawn", "creature": "Huntsman", "upgraded": false, "count": 10, "layer": "Surface", "cell": 1129},
+		{"id": 50, "faction": "Dawn", "creature": "Huntsman", "upgraded": false, "count": 10, "layer": "Surface", "cell": 1128},
+		{"id": 51, "faction": "Dawn", "creature": "Huntsman", "upgraded": false, "count": 10, "layer": "Surface", "cell": 1127},
+		{"id": 52, "faction": "Dawn", "creature": "Huntsman", "upgraded": false, "count": 60, "layer": "Surface", "cell": 1073},
+		{"id": 53, "faction": "Dawn", "creature": "Huntsman", "upgraded": false, "count": 120, "layer": "Surface", "cell": 1091}
 	]
 }

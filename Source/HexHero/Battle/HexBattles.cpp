@@ -144,6 +144,7 @@ bool UHexBattles::Begin(const FHexBattleRequest& InRequest, FString& OutMessage)
 	}
 	// the catapult of the attacker, at the walls of a castle
 	Setup.Siege.bCatapult = Attacker->bCatapult && Setup.Siege.bWalls;
+	Setup.Siege.bMoat = Setup.Siege.bWalls && Config->bSiegeMoat;
 	Request = InRequest;
 	Setup.Seed = HashCombine(HashCombine(GetTypeHash(Heroes->GetDay()), GetTypeHash(InRequest.Cell)), HashCombine(GetTypeHash(InRequest.Attacker), GetTypeHash(++Count)));
 	// the ground of the field is the biome where it is fought
@@ -156,6 +157,7 @@ bool UHexBattles::Begin(const FHexBattleRequest& InRequest, FString& OutMessage)
 			const FString& Letter = InRequest.Layer == EHexPlanetLayer::Underground ? Planet->GetBiomes()[Biome]->UndergroundLetter : Planet->GetBiomes()[Biome]->PlanetLetter;
 			GroundLetter = Letter.IsEmpty() ? 0 : Letter[0];
 			TerrainLayer = Planet->GetBiomes()[Biome]->TerrainLayer;
+			RockLayer = Planet->GetBiomes()[Biome]->MountainRockLayer;
 		}
 	}
 	Battle.Start(Setup, Castles->GetConfig(), Config);

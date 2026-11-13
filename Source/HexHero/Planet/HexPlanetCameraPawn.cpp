@@ -959,6 +959,12 @@ void AHexPlanetCameraPawn::Tick(float DeltaTime)
 	// not while the cursor is on the marks at the edge of the screen or the panel of a castle, which lie over it and are clicked, nor until
 	// the mouse has moved since a glide was asked for
 	const AHexPlanetPlayerController* MarksController = Cast<AHexPlanetPlayerController>(GetController());
+	// nor while the keys move it, as they take it over from the edge, which scrolls again once the mouse has moved, as the developer asked on
+	// 2026-11-13 ("інпут не стакається з іншим інпутом, скрол найнижчий приоритет")
+	if (!MoveInput.IsNearlyZero())
+	{
+		HoldEdgeScroll();
+	}
 	if (float HeldX = 0.0f, HeldY = 0.0f; bEdgeScrollHeld && (!MarksController || !MarksController->GetMousePosition(HeldX, HeldY)
 		|| FVector2D::Distance(FVector2D(HeldX, HeldY), EdgeHoldMouse) > double(Settings()->EdgeScrollHoldDistance)))
 	{
@@ -1245,10 +1251,19 @@ void AHexPlanetCameraPawn::UpdateBattleCamera(float DeltaTime)
 			Arena->DragCamera(BattleGrab, Under);
 		}
 	}
-	// the keys and the edges of the screen move it, Q and E and the right button held turn it
-	const FVector2D EdgeInput = bTurning || bBattleDragging || PlayerController->IsCursorOnUi() ? FVector2D::ZeroVector
+	// the keys and the edges of the screen move it, Q and E and the right button held turn it; the keys take it over from the edge, which
+	// scrolls again once the mouse has moved, the lowest of all inputs
+	if (!MoveInput.IsNearlyZero() || TurnKeyInput != 0.0f)
+	{
+		HoldEdgeScroll();
+	}
+	if (bEdgeScrollHeld && (!bMouse || FVector2D::Distance(FVector2D(MouseX, MouseY), EdgeHoldMouse) > double(Settings()->EdgeScrollHoldDistance)))
+	{
+		bEdgeScrollHeld = false;
+	}
+	const FVector2D EdgeInput = bTurning || bBattleDragging || bEdgeScrollHeld || PlayerController->IsCursorOnUi() ? FVector2D::ZeroVector
 		: AHexCameraPawn::GetEdgeScrollInput(PlayerController, EdgeScrollCurve, Settings()->EdgeScrollMargin);
-	const FVector2D Pan(FMath::Clamp(MoveInput.X + EdgeInput.X, -1.0, 1.0), FMath::Clamp(MoveInput.Y + EdgeInput.Y, -1.0, 1.0));
+	const FVector2D Pan = MoveInput.IsNearlyZero() ? FVector2D(FMath::Clamp(EdgeInput.X, -1.0, 1.0), FMath::Clamp(EdgeInput.Y, -1.0, 1.0)) : MoveInput.ClampAxes(-1.0, 1.0);
 	const UHexBattleConfig* BattleConfig = UHexBattleConfig::Load();
 	float Turn = TurnKeyInput * BattleConfig->CameraTurnSpeed * DeltaTime;
 	if (bTurning && bMouse)

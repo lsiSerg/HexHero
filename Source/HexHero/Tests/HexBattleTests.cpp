@@ -264,6 +264,41 @@ bool FHexBattleQuickTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHexBattlePassiveTest, "HexHero.Battle.Passive",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FHexBattlePassiveTest::RunTest(const FString& Parameters)
+{
+	// the side the cheat made passive defends on every turn of its own and deals no damage, for as long as the game plays both
+	FTestRules Rules;
+	FHexBattle Battle;
+	Battle.Start(Rules.MakeDuel(0, 10, 3, 10), Rules.Castles, Rules.Battle);
+	Battle.SetPassiveSide(1);
+	bool bDefended = false;
+	bool bHurt = false;
+	for (int32 Step = 0; Step < 40 && !Battle.IsOver(); ++Step)
+	{
+		const int32 Side = Battle.GetUnits()[Battle.GetActive()].Side;
+		if (Side == 1)
+		{
+			Battle.PlayAi();
+			for (const FHexBattleEvent& Event : Battle.TakeEvents())
+			{
+				bDefended |= Event.Type == FHexBattleEvent::EType::Defend;
+				bHurt |= (Event.Type == FHexBattleEvent::EType::Strike || Event.Type == FHexBattleEvent::EType::Shoot || Event.Type == FHexBattleEvent::EType::Spell);
+			}
+		}
+		else
+		{
+			Battle.Wait() || Battle.Defend();
+			Battle.TakeEvents();
+		}
+	}
+	TestTrue(TEXT("it defends"), bDefended);
+	TestFalse(TEXT("and attacks nobody"), bHurt);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHexBattleSiegeTest, "HexHero.Battle.Siege",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
@@ -274,6 +309,8 @@ bool FHexBattleSiegeTest::RunTest(const FString& Parameters)
 	Rules.Battle->CatapultSpeed = 99;
 	Rules.Battle->CatapultHitChance = 1.0f;
 	Rules.Battle->CatapultDamageMin = Rules.Battle->CatapultDamageMax = 200;
+	// a walker fast enough to reach past the wall in one turn
+	Rules.Stats(0, 0).Speed = 20;
 	const int32 Shooter = Rules.Castles->Factions[0].Creatures.IndexOfByPredicate([](const FHexCreature& Each) { return Each.bShoots; });
 	TestTrue(TEXT("the faction has a shooter"), Shooter != INDEX_NONE);
 	FHexBattleSetup Setup = Rules.MakeDuel(0, 10, 0, 10);
@@ -284,6 +321,7 @@ bool FHexBattleSiegeTest::RunTest(const FString& Parameters)
 	Setup.Siege.Towers = 1;
 	Setup.Siege.TowerStack = FHexStack{0, Shooter, false, 5};
 	Setup.Siege.bCatapult = true;
+	Setup.Siege.bMoat = true;
 	FHexBattle Battle;
 	Battle.Start(Setup, Rules.Castles, Rules.Battle);
 	TestEqual(TEXT("a part of the wall on every row"), Battle.GetWalls().Num(), Battle.GetRows());
@@ -304,6 +342,37 @@ bool FHexBattleSiegeTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("which falls"), Battle.FindWall(GateHex)->IsStanding());
 	TestTrue(TEXT("and stays open"), Battle.IsGateJammed());
 	TestTrue(TEXT("for the attacker too"), Battle.IsPassable(GateHex, 0));
+	// the moat before the wall, but for the bridge before the gate; a walker that steps into it goes no further, and over the bridge through
+	// the open gate it goes on
+	FHexCoord Bridge;
+	TestTrue(TEXT("a bridge"), Battle.GetBridge(Bridge));
+	TestEqual(TEXT("the moat on every row but that of the gate"), Battle.GetMoat().Num(), Battle.GetRows() - 1);
+	TestFalse(TEXT("no moat under the bridge"), Battle.IsMoat(Bridge));
+	TestEqual(TEXT("the bridge before the gate"), Bridge.GetColumn(), GateHex.GetColumn() - 1);
+	const int32 Walker = Battle.GetUnits().IndexOfByPredicate([](const FHexBattleUnit& Each) { return Each.Side == 0 && !Each.IsMachine(); });
+	TestTrue(TEXT("the attacker has a walker"), Walker != INDEX_NONE && !Battle.GetUnits()[Walker].bFlies);
+	if (Walker != INDEX_NONE)
+	{
+		TMap<FHexCoord, int32> Steps;
+		TMap<FHexCoord, FHexCoord> From;
+		Battle.FindReach(Walker, Steps, &From);
+		bool bIntoMoat = false;
+		bool bDearer = true;
+		bool bBehindWall = false;
+		for (const TPair<FHexCoord, int32>& Each : Steps)
+		{
+			bIntoMoat |= Battle.IsMoat(Each.Key);
+			// a step into the moat costs MoatStepCost
+			if (From.Contains(Each.Key) && Battle.IsMoat(Each.Key))
+			{
+				bDearer &= Each.Value == Steps[From[Each.Key]] + Rules.Battle->MoatStepCost;
+			}
+			bBehindWall |= Each.Key.GetColumn() > GateHex.GetColumn();
+		}
+		TestTrue(TEXT("it walks into the moat"), bIntoMoat);
+		TestTrue(TEXT("where a step costs more"), bDearer);
+		TestTrue(TEXT("over the bridge through the fallen gate"), bBehindWall);
+	}
 	// the machines count for nobody: the battle goes on while stacks are left
 	TestFalse(TEXT("it goes on"), Battle.IsOver());
 	return true;

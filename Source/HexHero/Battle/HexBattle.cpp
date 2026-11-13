@@ -72,6 +72,8 @@ void FHexBattle::Start(const FHexBattleSetup& InSetup, const UHexCastleConfig* I
 	Units.Reset();
 	Events.Reset();
 	Obstacles.Reset();
+	PassiveSide = INDEX_NONE;
+	Moat.Reset();
 	Walls.Reset();
 	bGateJammed = false;
 	Round = 0;
@@ -191,6 +193,15 @@ void FHexBattle::PlaceSiege()
 				Wall.Unit = Units.Num() - 1;
 			}
 		}
+		// the moat on the column before the wall, which with the rows shifted half a hex is a line no walker crosses in one turn, but for the
+		// hex before the gate, the only one the gate is reached from, where a bridge goes over it
+		for (int32 Row = 0; Siege.bMoat && Column > 0 && Row < Rows; ++Row)
+		{
+			if (Row != Rows / 2)
+			{
+				Moat.Add(FHexCoord::FromOffset(Column - 1, Row));
+			}
+		}
 	}
 	if (Siege.bCatapult)
 	{
@@ -225,6 +236,17 @@ void FHexBattle::PlaceSiege()
 const FHexBattleWall* FHexBattle::FindWall(const FHexCoord& Hex) const
 {
 	return Walls.FindByPredicate([&Hex](const FHexBattleWall& Each) { return Each.Hex == Hex; });
+}
+
+bool FHexBattle::GetBridge(FHexCoord& OutHex) const
+{
+	const FHexBattleWall* Gate = Walls.FindByPredicate([](const FHexBattleWall& Each) { return Each.Part == EHexWallPart::Gate; });
+	if (!Gate)
+	{
+		return false;
+	}
+	OutHex = Moat.IsEmpty() ? Gate->Hex : FHexCoord::FromOffset(Gate->Hex.GetColumn() - 1, Gate->Hex.GetRow());
+	return true;
 }
 
 bool FHexBattle::IsPassable(const FHexCoord& Hex, int32 Side) const
@@ -731,26 +753,36 @@ void FHexBattle::FindReach(int32 UnitIndex, TMap<FHexCoord, int32>& OutSteps, TM
 		}
 		return;
 	}
-	TArray<FHexCoord> Front = {Unit.Hex};
-	for (int32 Index = 0; Index < Front.Num(); ++Index)
+	// the cheapest ways, a step onto a hex of the moat costing MoatStepCost, as the developer asked on 2026-11-13 ("штраф на мув 50%"), by
+	// fronts of equal cost, the first found of a cost kept, so every run gives the same way
+	const int32 MoatCost = FMath::Max(Config ? Config->MoatStepCost : 2, 1);
+	TArray<TArray<FHexCoord>> Fronts;
+	Fronts.SetNum(Speed + 1);
+	Fronts[0].Add(Unit.Hex);
+	for (int32 Cost = 0; Cost < Speed; ++Cost)
 	{
-		const FHexCoord Hex = Front[Index];
-		const int32 Steps = OutSteps[Hex];
-		if (Steps >= Speed)
+		for (int32 Index = 0; Index < Fronts[Cost].Num(); ++Index)
 		{
-			continue;
-		}
-		for (int32 Direction = 0; Direction < FHexCoord::NumDirections; ++Direction)
-		{
-			const FHexCoord Next = Hex.GetNeighbor(Direction);
-			if (!OutSteps.Contains(Next) && IsFree(Next))
+			const FHexCoord Hex = Fronts[Cost][Index];
+			if (OutSteps.FindRef(Hex) != Cost)
 			{
-				OutSteps.Add(Next, Steps + 1);
+				continue;
+			}
+			for (int32 Direction = 0; Direction < FHexCoord::NumDirections; ++Direction)
+			{
+				const FHexCoord Next = Hex.GetNeighbor(Direction);
+				const int32 NextCost = Cost + (Moat.Contains(Next) ? MoatCost : 1);
+				const int32* Known = OutSteps.Find(Next);
+				if (NextCost > Speed || (Known && *Known <= NextCost) || !IsFree(Next))
+				{
+					continue;
+				}
+				OutSteps.Add(Next, NextCost);
 				if (OutFrom)
 				{
 					OutFrom->Add(Next, Hex);
 				}
-				Front.Add(Next);
+				Fronts[NextCost].Add(Next);
 			}
 		}
 	}
@@ -1465,6 +1497,12 @@ void FHexBattle::PlayAi()
 		return;
 	}
 	const int32 Side = Units[Active].Side;
+	// a side the cheat made passive casts nothing, attacks nobody and defends
+	if (Side == PassiveSide)
+	{
+		Defend();
+		return;
+	}
 	int32 Spell = INDEX_NONE;
 	FHexCoord SpellHex;
 	if (ChooseSpell(Side, Spell, SpellHex))

@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "UObject/Object.h"
 #include "HexCastleConfig.h"
+#include "HexPlanetFile.h"
 #include "HexPlanetLayers.h"
 #include "HexCastles.generated.h"
 

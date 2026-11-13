@@ -127,10 +127,12 @@ enum class EHexPaintTab : uint8
 	/** The neutral stacks of the surface and of the underground */
 	Neutrals,
 	CaveNeutrals,
+	/** The castles of the underground */
+	CaveCastles,
 };
 
 /** Number of tabs of the palette */
-constexpr int32 NumPaintTabs = 15;
+constexpr int32 NumPaintTabs = 16;
 
 /** Old and new levels, biomes, relief, objects, rivers and entrances of the cells of one step of Undo, a stroke or a button */
 struct FHexPaintStep
@@ -290,7 +292,7 @@ public:
 	void SetTab(EHexPaintTab Tab);
 
 	/** Returns the layer whose tools a tab holds, and its name */
-	static EHexPlanetLayer GetTabLayer(EHexPaintTab Tab) { return Tab >= EHexPaintTab::Maze ? EHexPlanetLayer::Underground : EHexPlanetLayer::Surface; }
+	static EHexPlanetLayer GetTabLayer(EHexPaintTab Tab);
 	static FText GetTabName(EHexPaintTab Tab);
 
 	/** Returns true while the mouse paints instead of dragging the planet */
@@ -410,7 +412,7 @@ public:
 
 	/** Returns true while the brush places castles, of the faction and for the player chosen, -1 for a castle of nobody */
 	bool IsPlacingCastles() const { return Tool == EHexPaintTool::Castle; }
-	void SetCastleTool() { SetTool(EHexPaintTool::Castle, EHexPaintTab::Castles); }
+	void SetCastleTool() { SetTool(EHexPaintTool::Castle, Target == EHexPlanetLayer::Underground ? EHexPaintTab::CaveCastles : EHexPaintTab::Castles); }
 	int32 GetCastleFaction() const { return CastleFaction; }
 	void SetCastleFaction(int32 InFaction) { CastleFaction = FMath::Max(InFaction, 0); }
 	int32 GetCastleOwner() const { return CastleOwner; }
@@ -562,7 +564,7 @@ private:
 	/** The tool each tab had last, by EHexPaintTab */
 	EHexPaintTool TabTools[NumPaintTabs] = {EHexPaintTool::Level, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None,
 		EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::Level, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None,
-		EHexPaintTool::None, EHexPaintTool::None};
+		EHexPaintTool::None, EHexPaintTool::None, EHexPaintTool::None};
 
 	bool bActive = false;
 	bool bPainting = false;

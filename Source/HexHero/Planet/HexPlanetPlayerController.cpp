@@ -687,10 +687,18 @@ void AHexPlanetPlayerController::OnHeroSent(int32 Id)
 
 void AHexPlanetPlayerController::OrderGame()
 {
-	// the right button keeps the spell chosen on the field
+	// on the field a click of the right button takes back a spell chosen, and else gives the order the left one would, as the developer asked
+	// on 2026-11-13
 	if (IsBattleShown())
 	{
-		BattleArena->Cancel();
+		if (BattleArena->IsAiming())
+		{
+			BattleArena->Cancel();
+		}
+		else if (!(BattlePanel.IsValid() && BattlePanel->IsCursorOnButtons()))
+		{
+			BattleArena->Click();
+		}
 		return;
 	}
 	const AHexPlanet* Planet = GetPlanet();
@@ -1777,6 +1785,24 @@ void AHexPlanetPlayerController::RunPaintCommand(const TArray<FString>& Args)
 			}
 		}
 	}
+	else if (Action == TEXT("castle"))
+	{
+		// the tool of the Castles tab of the layer shown: a faction by its index and the owner, -1 for nobody
+		SetPaintMode(true);
+		Brush->SetCastleFaction(GetInt(1, 0));
+		Brush->SetCastleOwner(GetInt(2, INDEX_NONE));
+		Brush->SetCastleTool();
+	}
+	else if (Action == TEXT("neutral"))
+	{
+		// the tool of the Neutrals tab of the layer shown: a faction by its index, the level 1 to 7, the count and up for upgraded
+		SetPaintMode(true);
+		Brush->SetNeutralFaction(GetInt(1, 0));
+		Brush->SetNeutralLevel(GetInt(2, 1) - 1);
+		Brush->SetNeutralCount(GetInt(3, 10));
+		Brush->SetNeutralUpgraded(Args.ContainsByPredicate([](const FString& Each) { return Each.Equals(TEXT("up"), ESearchCase::IgnoreCase); }));
+		Brush->SetNeutralTool();
+	}
 	else if (Action == TEXT("none"))
 	{
 		Brush->ClearTool();
@@ -1961,7 +1987,7 @@ namespace
 
 	FAutoConsoleCommandWithWorldAndArgs PlanetPaintConsoleCommand(TEXT("hex.PlanetPaint"),
 		TEXT("Drives the brush of the planet as the palette and the mouse would, for tests: on | off | tab <Ground|Relief|Objects|Rivers|Entrances|Maze|Links> (Objects of the layer shown) | ")
-		TEXT("key <1-5> | biome <Index> | size <1-3> | network <A-H> | entrance | carve | walls <Height|Auto> | object <Index on the palette of the layer> | eraser | river | bridge | relief <Version|Turn|Mirror|Higher|Lower|Auto> | none | ")
+		TEXT("key <1-5> | biome <Index> | size <1-3> | network <A-H> | entrance | carve | walls <Height|Auto> | object <Index on the palette of the layer> | eraser | river | bridge | relief <Version|Turn|Mirror|Higher|Lower|Auto> | castle <Faction> [Owner] | neutral <Faction> <Level 1-7> <Count> [up] | none | ")
 		TEXT("byhand <on|off> | placed <Place|Move|Turn|Size|Version|Erase> | place @Latitude:Longitude [ctrl] | drag @Latitude:Longitude @Latitude:Longitude | ")
 		TEXT("stroke <Cell or @Latitude:Longitude> [...] [ctrl] | press <Cell> | release | regenerate [all|objects|sites] | newlayout | undo | redo | save. A stroke presses on the first cell, passes the others and releases on the last; ctrl makes it take away; ")
 		TEXT("press holds a stroke, which follows the mouse as the held left button does, until release; place clicks at a point, as the tools of objects placed by hand need, and drag presses at one and releases at the other"),

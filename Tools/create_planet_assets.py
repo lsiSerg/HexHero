@@ -2796,6 +2796,27 @@ float2 pixel = Parameters.SvPosition.xy + 5.588238 * (float)View.StateFrameIndex
 float noise = frac(52.9829189 * frac(dot(pixel, float2(0.06711056, 0.00583715))));
 return lerp(solid, noise < SparkleOpacity ? 1.0 : 0.0, spark);
 """
+# In a battle the wall of a castle dissolves around the line from the camera to the hex under the cursor where it stands in front of that hex,
+# as the walls of the underground do, as the developer asked on 2026-11-13: SiegeFade is that point and its w 1 while it is on, which the
+# battle sets on its own instance of the material (0 on the planet), SiegeFadeRadius how far from the line and SiegeFadeKeep the share of the
+# pixels kept; the shadow keeps the wall whole
+CASTLE_FADE_CODE = r"""
+float3 siegeAxis = SiegeFade.xyz - CameraPos;
+float siegeLength = length(siegeAxis);
+siegeAxis /= max(siegeLength, 1.0);
+float3 siegeToPixel = WorldPos - CameraPos;
+float siegeAlong = dot(siegeToPixel, siegeAxis);
+float siegeOff = length(siegeToPixel - siegeAxis * siegeAlong);
+float siegeRadius = max(SiegeFadeRadius, 1.0);
+float siegeFade = SiegeFade.w * (1.0 - smoothstep(siegeRadius * 0.6, siegeRadius, siegeOff)) * saturate((siegeLength - siegeAlong) / 20.0);
+float siegeKeep = noise < 1.0 - siegeFade * (1.0 - SiegeFadeKeep) ? 1.0 : 0.0;
+#if SHADOW_DEPTH_SHADER
+siegeKeep = 1.0;
+#endif
+"""
+CASTLE_MASK_CODE = SITE_MASK_CODE.replace('return lerp(solid, noise < SparkleOpacity ? 1.0 : 0.0, spark);',
+    CASTLE_FADE_CODE + 'return lerp(solid, noise < SparkleOpacity ? 1.0 : 0.0, spark) * siegeKeep;')
+assert CASTLE_MASK_CODE != SITE_MASK_CODE
 # A sparkle is a small star drawn tiny in its mesh, with where each corner lies in it as its UV: it grows to SparkleSize around its middle,
 # facing the camera, as it twinkles, each at its own time (the red of its vertices and a number of its instance) and pace (their green), for
 # SparkleShare of that time, and rises SparkleRise meanwhile by their blue. From afar it grows, as the marks of a way do (SparkleFarStart, SparkleFarScale), and in the shadow
@@ -2988,8 +3009,16 @@ def build_site_graph(path, fading, castle=False):
         unreal.MaterialProperty.MP_EMISSIVE_COLOR)
     roughness = add_config_parameters(library, material, unreal.HexPlanetConfig, ['Roughness'], 1000)[0][1]
     library.connect_material_property(roughness, '', unreal.MaterialProperty.MP_ROUGHNESS)
-    library.connect_material_property(add_custom(library, material, SITE_MASK_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT1, inputs, 900), '',
-        unreal.MaterialProperty.MP_OPACITY_MASK)
+    if castle:
+        fade_inputs = inputs + [('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1000, 950), ''),
+            ('SiegeFade', add_vector4(library, material, 'SiegeFade', unreal.LinearColor(0.0, 0.0, 0.0, 0.0), 960), ''),
+            ('SiegeFadeRadius', add_scalar(library, material, 'SiegeFadeRadius', 70.0, 970), ''),
+            ('SiegeFadeKeep', add_scalar(library, material, 'SiegeFadeKeep', 0.25, 980), '')]
+        library.connect_material_property(add_custom(library, material, CASTLE_MASK_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT1, fade_inputs, 900), '',
+            unreal.MaterialProperty.MP_OPACITY_MASK)
+    else:
+        library.connect_material_property(add_custom(library, material, SITE_MASK_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT1, inputs, 900), '',
+            unreal.MaterialProperty.MP_OPACITY_MASK)
     if castle:
         library.connect_material_property(add_custom(library, material, SITE_NORMAL_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, inputs, 2400), '',
             unreal.MaterialProperty.MP_NORMAL)

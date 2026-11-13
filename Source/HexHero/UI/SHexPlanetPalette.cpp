@@ -33,7 +33,7 @@ namespace
 	/** The tabs of each layer, in the order of their buttons */
 	const EHexPaintTab SurfaceTabs[] = {EHexPaintTab::Ground, EHexPaintTab::Relief, EHexPaintTab::Objects, EHexPaintTab::Rivers, EHexPaintTab::Entrances, EHexPaintTab::Heroes, EHexPaintTab::Sites, EHexPaintTab::Castles,
 		EHexPaintTab::Neutrals};
-	const EHexPaintTab UndergroundTabs[] = {EHexPaintTab::Maze, EHexPaintTab::Links, EHexPaintTab::CaveObjects, EHexPaintTab::CaveHeroes, EHexPaintTab::CaveSites, EHexPaintTab::CaveNeutrals};
+	const EHexPaintTab UndergroundTabs[] = {EHexPaintTab::Maze, EHexPaintTab::Links, EHexPaintTab::CaveObjects, EHexPaintTab::CaveHeroes, EHexPaintTab::CaveSites, EHexPaintTab::CaveCastles, EHexPaintTab::CaveNeutrals};
 }
 
 void SHexPlanetPalette::Construct(const FArguments& InArgs)
@@ -655,10 +655,11 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 	TSharedRef<SVerticalBox> NeutralBody = MakeNeutralBody();
 	TSharedRef<SVerticalBox> CaveNeutralBody = MakeNeutralBody();
 
-	// Castles, on the surface: the faction of the castle a click places, and who has it when a game starts
+	// Castles, on either layer: the faction of the castle a click places, and who has it when a game starts
 	const UHexCastleConfig* CastleConfig = UHexCastleConfig::Load();
-	TSharedRef<SVerticalBox> CastleBody = SNew(SVerticalBox);
+	const auto MakeCastleBody = [&]()
 	{
+		TSharedRef<SVerticalBox> CastleBody = SNew(SVerticalBox);
 		CastleBody->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("CastleFactions", "Faction"), 0.0f)];
 		TSharedRef<SUniformGridPanel> Factions = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
 		for (int32 Faction = 0; Faction < CastleConfig->Factions.Num(); ++Faction)
@@ -688,7 +689,10 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 		}
 		CastleBody->AddSlot().AutoHeight()[Owners];
 		CastleBody->AddSlot().AutoHeight()[MakeHelp(LOCTEXT("CastleHelp", "Click a cell to put a castle on it and on the two cells around its corner nearest the cursor; Ctrl+click takes one away, and Undo takes either back. A castle fills its three cells: in the game a hero beside it that is sent onto it comes to its own, or takes another's if its army is the stronger. A castle of nobody is guarded."))];
-	}
+		return CastleBody;
+	};
+	TSharedRef<SVerticalBox> CastleBody = MakeCastleBody();
+	TSharedRef<SVerticalBox> CaveCastleBody = MakeCastleBody();
 
 	// Maze: the void and passages underground, carving, and the cave biomes
 	TSharedRef<SVerticalBox> Maze = SNew(SVerticalBox);
@@ -947,6 +951,7 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 			+ SWidgetSwitcher::Slot()[CastleBody]
 			+ SWidgetSwitcher::Slot()[NeutralBody]
 			+ SWidgetSwitcher::Slot()[CaveNeutralBody]
+			+ SWidgetSwitcher::Slot()[CaveCastleBody]
 		]
 
 		// Undo and Redo of the layer painted

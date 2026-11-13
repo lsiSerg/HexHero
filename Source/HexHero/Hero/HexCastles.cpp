@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "HexCastles.h"
+#include "HexBattles.h"
 #include "HexCheats.h"
 #include "HexHero.h"
 #include "HexHeroConfig.h"
@@ -9,6 +10,7 @@
 #include "HexPlanet.h"
 #include "HexPlanetFile.h"
 #include "HexPlanetLayers.h"
+#include "HexPlanetUnderground.h"
 #include "HexSiteConfig.h"
 #include "HexSites.h"
 #include "Components/InstancedStaticMeshComponent.h"
@@ -426,6 +428,19 @@ int32 UHexCastles::AddCastle(EHexPlanetLayer Layer, const int32 InCells[3], int3
 		{
 			OutProblem = TEXT("something stands on one of its cells already");
 			return 0;
+		}
+		// underground its wall, which reaches past its cells, stands on the floor of a hall and not over the void, as the developer asked for castles
+		// underground on 2026-11-13; that a whole ring of passages is needed is Claude's
+		if (Layer == EHexPlanetLayer::Underground)
+		{
+			for (const int32 Neighbor : Planet->GetGrid().GetCells()[Cell].Neighbors)
+			{
+				if (Planet->GetCellLevel(Neighbor) != HexPlanetUnderground::PassageLevel)
+				{
+					OutProblem = TEXT("underground a castle needs passages all around it, or its wall would hang over the void");
+					return 0;
+				}
+			}
 		}
 	}
 	FHexCastle Castle;
@@ -1722,6 +1737,23 @@ namespace
 				Message = FString::Printf(TEXT("Cheat: %s gets %d %s"), *Hero->Name, Stack.Count, *Stats->DisplayName);
 			}
 		}
+		else if (Action == TEXT("passive"))
+		{
+			// in the battle the person fights now, the side of the game attacks nobody and defends on every turn, for that battle alone
+			UHexBattles* Battles = Heroes->GetBattles();
+			const int32 Person = Battles && Battles->IsShown() ? Battles->GetPersonSide() : int32(INDEX_NONE);
+			if (Person == INDEX_NONE)
+			{
+				UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat passive [on|off]: only in a battle a person fights"));
+				return;
+			}
+			FHexBattle& Battle = Battles->GetBattle();
+			const int32 Enemy = 1 - Person;
+			const bool bOn = Args.IsValidIndex(1) ? Args[1].Equals(TEXT("on"), ESearchCase::IgnoreCase) : Battle.GetPassiveSide() != Enemy;
+			Battle.SetPassiveSide(bOn ? Enemy : int32(INDEX_NONE));
+			Message = bOn ? FString::Printf(TEXT("Cheat: %s attacks nobody and defends in this battle"), *Battles->GetSideName(Enemy))
+				: FString::Printf(TEXT("Cheat: %s fights again"), *Battles->GetSideName(Enemy));
+		}
 		else if (Action == TEXT("catapult"))
 		{
 			// a catapult for the hero chosen, or the one named, for nothing
@@ -1768,7 +1800,7 @@ namespace
 	}
 
 	FAutoConsoleCommandWithWorldAndArgs CheatCommand(TEXT("hex.Cheat"),
-		TEXT("Cheats for trying the game; help, or nothing after it, lists them all (also hex.Cheat.Help and Ctrl+H): reveal [Player] explores both layers for the person who plays; enemies [on|off] marks every neutral stack and hero of another player; resources [Amount] [Player] gives the person who plays, or the player named, that much of every resource, or without an amount CheatGold and CheatResources of DA_HexCastles; build [on|off] lets every castle build without the limit of one building a day, or switches that; buildall [Castle|all] builds every building to its last level for nothing, in the castle named, else in the one chosen, else in every castle of the person who plays, and with all in every castle; buildhalf <Castle|all> builds to the middle (the hall and the fort to half their levels, the four lower dwellings upgraded, the fifth built); units <Faction> <Level 1-7> <Count> [up] [Hero] gives the hero chosen, or the one named, that many creatures."),
+		TEXT("Cheats for trying the game; help, or nothing after it, lists them all (also hex.Cheat.Help and Ctrl+H): reveal [Player] explores both layers for the person who plays; enemies [on|off] marks every neutral stack and hero of another player; resources [Amount] [Player] gives the person who plays, or the player named, that much of every resource, or without an amount CheatGold and CheatResources of DA_HexCastles; build [on|off] lets every castle build without the limit of one building a day, or switches that; buildall [Castle|all] builds every building to its last level for nothing, in the castle named, else in the one chosen, else in every castle of the person who plays, and with all in every castle; buildhalf <Castle|all> builds to the middle (the hall and the fort to half their levels, the four lower dwellings upgraded, the fifth built); units <Faction> <Level 1-7> <Count> [up] [Hero] gives the hero chosen, or the one named, that many creatures; passive [on|off], in a battle the person fights, makes the side of the game attack nobody and defend on every turn, for that battle alone."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&RunCheatCommand));
 
 	FAutoConsoleCommandWithWorldAndArgs CastleCommand(TEXT("hex.Castle"),

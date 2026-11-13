@@ -84,6 +84,8 @@ public:
 	/** Where the battle is fought: the letter of the biome there and whether underground, for the ground of the field */
 	TCHAR GetGroundLetter() const { return GroundLetter; }
 	int32 GetTerrainLayer() const { return TerrainLayer; }
+	/** The rock layer of the biome fought on, for patches of rock on the field and on its hills */
+	int32 GetRockLayer() const { return RockLayer; }
 	bool IsUnderground() const { return Request.Layer == EHexPlanetLayer::Underground; }
 
 	/** A line about how the battle ended, for the person */
@@ -121,6 +123,7 @@ private:
 	bool bAuto[2] = {false, false};
 	TCHAR GroundLetter = 0;
 	int32 TerrainLayer = 0;
+	int32 RockLayer = 2;
 	int32 Count = 0;
 	int32 QuickCount = 0;
 
