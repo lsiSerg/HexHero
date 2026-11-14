@@ -1364,7 +1364,51 @@ planes /= planes.x + planes.y + planes.z;
     + HexNoise.SampleLevel(HexNoiseSampler, (P).xy * (S) + (O), M).r * planes.z)
 '''
 
-WATER_CODE = TRIPLANAR + CLOUD_SHADOW_CODE + SHORE_HASH_CODE + '''
+# the glints of the water: each cell of a plane of the world shines at a few spots of its own (GlintSpots), each at its own pace and at a new
+# place each life, with a hash of integers, as a hash of floats repeats over large coordinates; one spot a cell drew them on a grid when the
+# cells were small. Plane gives how much of the flashes of the cell of p reaches p: a spot keeps its radius off the sides of the cell, so no
+# neighbor needs to be looked at, shines only in density of the lives, and rises and falls as a sine squared over its life, brighter or dimmer
+# by its own hash
+GLINTS_CODE = r'''
+struct FGlints
+{
+    uint3 Hash(uint3 v)
+    {
+        v = v * 1664525u + 1013904223u;
+        v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+        v ^= v >> 16u;
+        v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+        return v;
+    }
+    float Plane(float2 p, float radius, float time, float density, int spots, uint plane)
+    {
+        float2 cell = floor(p);
+        uint2 key = uint2(int2(cell));
+        float shine = 0.0;
+        [loop] for (int index = 0; index < spots; ++index)
+        {
+            uint seed = plane * 977u + uint(index) * 7919u;
+            float life = time + float(Hash(uint3(key, seed)).x & 0xFFFFu) / 65535.0;
+            float slot = floor(life);
+            uint3 h = Hash(uint3(key.x + uint(int(slot)) * 2654435761u, key.y ^ 0x9E3779B9u, seed + 13u));
+            float4 r = float4(float3(h & 0xFFFFu), float(h.x >> 16u)) / 65535.0;
+            if (r.z < density)
+            {
+                // some points larger and brighter than others, which keeps a cluster from reading as a pattern of equal dots
+                float size = radius * lerp(0.6, 1.3, frac(r.w * 7.31));
+                float2 spot = lerp(size + 0.02, 0.98 - size, r.xy);
+                float shape = saturate(1.0 - length(p - cell - spot) / size);
+                float flash = sin((life - slot) * 3.14159265);
+                shine += shape * flash * flash * lerp(0.45, 1.0, r.w);
+            }
+        }
+        return min(shine, 1.0);
+    }
+};
+FGlints glints;
+'''
+
+WATER_CODE = TRIPLANAR + CLOUD_SHADOW_CODE + SHORE_HASH_CODE + GLINTS_CODE + '''
 float3 tp = WorldPos / TileSize;
 float3 tdx = PosDdx / TileSize;
 float3 tdy = PosDdy / TileSize;
@@ -1415,6 +1459,25 @@ slope *= lerp(1.0, ShallowCalm.x, shallowCalm) * iceCalm;
 // everything seen on the water sways with the swell, which is what makes it look afloat from close by
 float3 swayP = tp + slope * WaterSway * WaveScale;
 
+// the waves of the shore, as on the flat map: swells one every ShoreWavePeriod seconds, ShoreWaveLength apart, that run in to the coast along
+// the distance to it from ShoreWaveReachEnd, growing as they come, and tilt the water away from the land at their front and towards it behind,
+// so the light of the sun shows them rolling in. Their phase is bent by the noise of the swell, at its fixed mip, so they do not run in straight
+// lines nor run as the camera moves. Which way the land lies is the change of the distance over 30 units each way along the surface
+[branch] if (softDistance < ShoreWaveReachEnd && ShoreWaveSlope > 0.0)
+{
+    float3 shoreSideA = normalize(cross(planetUp, abs(planetUp.z) < 0.9 ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0)));
+    float3 shoreSideB = cross(planetUp, shoreSideA);
+    float shoreStep = 30.0 / max(length(WorldPos), 1.0);
+    float3 awayFromLand = shoreSideA * (SeaField.SampleLevel(SeaFieldSampler, planetUp + shoreSideA * shoreStep, 0).a - sea.a)
+        + shoreSideB * (SeaField.SampleLevel(SeaFieldSampler, planetUp + shoreSideB * shoreStep, 0).a - sea.a);
+    awayFromLand /= max(length(awayFromLand), 1e-6);
+    float shoreReach = 1.0 - smoothstep(ShoreWaveReachStart, max(ShoreWaveReachEnd, ShoreWaveReachStart + 1.0), softDistance);
+    shoreReach *= shoreReach;
+    float shoreWave = frac(softDistance / max(ShoreWaveLength, 1.0) + Time / max(ShoreWavePeriod, 0.1) + bendWide * 3.0 + bendMiddle * 0.8);
+    slope += awayFromLand * shoreReach * (shoreWave < 0.3 ? -1.0 : 0.35) * smoothstep(0.0, 0.05, shoreWave) * (1.0 - smoothstep(0.3, 1.0, shoreWave))
+        * ShoreWaveSlope * lerp(1.0, 0.35, shallowCalm) * iceCalm;
+}
+
 // ripples from the normal layer, each plane giving its two directions
 float rippleScaleA = RippleScaleA * waveNumber;
 float rippleScaleB = RippleScaleB * waveNumber;
@@ -1432,9 +1495,13 @@ PLUME_CODE
 
 // from the shore: clear lagoon, then turquoise, then the blue of the open sea, whose tone drifts in wide patches.
 // The water grows opaque with the depth of the seabed under it, a little unevenly by place
-// the patches and the unevenness take their noise at one blurred mip (PatchMip), as its fine detail speckles the tone
-float patchWide = TRI_NOISE_LEVEL(tp, WideNoiseScale, Time * float2(0.0011, 0.0007), PatchMip);
-float patchMiddle = TRI_NOISE_LEVEL(tp, MiddleNoiseScale, -Time * float2(0.0016, 0.0009), PatchMip);
+// the patches take their noise at the mip of the size of a pixel, as the flat map does, so from close by the open sea is mottled by its fine
+// detail, but never blurrier than PatchMip, so from far away it does not speckle
+uint noiseWidth, noiseHeight;
+HexNoise.GetDimensions(noiseWidth, noiseHeight);
+float patchTexels = aa / TileSize * float(noiseWidth);
+float patchWide = TRI_NOISE_LEVEL(tp, WideNoiseScale, Time * float2(0.0011, 0.0007), min(PatchMip, max(log2(patchTexels * WideNoiseScale), 0.0)));
+float patchMiddle = TRI_NOISE_LEVEL(tp, MiddleNoiseScale, -Time * float2(0.0016, 0.0009), min(PatchMip, max(log2(patchTexels * MiddleNoiseScale), 0.0)));
 float seabedDepth = sea.r * 100.0 + (fadeNoise - 0.5) * SeabedDepthNoise;
 float depthAmount = smoothstep(WaterClearDepth, WaterOpaqueDepth, seabedDepth);
 float opacity = lerp(Clearness, 1.0, depthAmount);
@@ -1450,24 +1517,50 @@ opacity = lerp(opacity, 1.0, iceWater * IceWaterShare);
 // the silty water of a river where it pours into the sea
 color = lerp(color, RiverPlumeColor.rgb, plumeCover * RiverPlumeTint);
 
-// the sky shows on what faces away from the camera, and the side of a wave towards the sun is lighter
+// the sky shows on what faces away from the camera, and the side of a wave or ripple towards the sun is lighter, by the whole normal of the
+// water along the surface as on the flat map, so the ripples show and the swell moves over them
 float3 toCamera = normalize(CameraDir);
 float3 sunDirection = normalize(SunDirection);
 float3 sunAlong = sunDirection - planetUp * dot(sunDirection, planetUp);
 float fresnel = pow(1.0 - saturate(dot(waterNormal, toCamera)), FresnelPower);
-color *= 1.0 + dot(slope, sunAlong) * WaveLight * lerp(1.0, FarCalm.z, farCalm);
+color *= 1.0 + dot(waterNormal - planetUp * dot(waterNormal, planetUp), sunAlong) * WaveLight * lerp(1.0, FarCalm.z, farCalm);
 color = lerp(color, SkyColor.rgb, fresnel * SkyReflection);
 
-// glints of the sun: sparkles that live on the water, drift with it and last for seconds, so they do not flicker when the camera moves.
-// The camera only decides where the path of the sun lies, from the long swell only, as finer waves would make it flicker
+// glints of the sun: points of light that flash and fade in place, each cell of GlintCellSize world units on the planes of the world shining at
+// a spot of its own for GlintLife seconds, then at another (FGlints), GlintPixels large on the screen, so the water glitters. Sparkles of a noise
+// that drifted and swayed with the water read as specks crawling over it. They gather in patches of a noise, so they come in clusters
+// that drift slowly whatever the camera, and the camera only decides where the path of the sun lies, from the long swell only, as finer waves
+// would make it flicker
 float3 reflected = reflect(-toCamera, normalize(planetUp + slope * NormalStrength.x));
 float sunPath = lerp(SunPathMin, 1.0, smoothstep(SunPathStart, SunPathEnd, dot(reflected, sunDirection)));
-float sparkleA = TRI_NOISE(swayP, GlintScaleA, Time * float2(0.02, 0.011), 2.0);
-float sparkleB = TRI_NOISE(swayP, GlintScaleB, -Time * float2(0.014, 0.022), 2.0);
 float sunUp = dot(planetUp, sunDirection);
-// from far away each would be one pixel, which only looks like noise
-color += smoothstep(GlintThresholdStart, GlintThresholdEnd, sparkleA * sparkleB) * sunPath * (1.0 - smoothstep(GlintFarStart, GlintFarEnd, aa))
-    * GlintColor.rgb * GlintAmount * lerp(1.0, ShallowCalm.z, shallowCalm) * smoothstep(0.0, GlintSunHeight, sunUp);
+// from far away a cell is a few pixels and the points only look like noise
+float glintGate = sunPath * (1.0 - smoothstep(GlintFarStart, max(GlintFarEnd, GlintFarStart + 0.01), aa)) * GlintAmount
+    * lerp(1.0, ShallowCalm.z, shallowCalm) * smoothstep(0.0, GlintSunHeight, sunUp);
+float glintDensity = 0.0;
+[branch] if (glintGate > 0.001)
+{
+    // the clusters are where the product of two noises that drift slowly against each other is high, so they come and go in patches
+    float clusterA = TRI_NOISE(tp, GlintClusterScale, Time * float2(0.004, 0.0025), 2.0);
+    float clusterB = TRI_NOISE(tp, GlintClusterScale * 1.37, -Time * float2(0.003, 0.0045), 2.0);
+    glintDensity = smoothstep(GlintClusterStart, max(GlintClusterEnd, GlintClusterStart + 1e-3), clusterA * clusterB) * GlintDensity;
+    // and in a cluster most on the sides of the ripples that face the sun, so the points follow the grain of the water
+    float rippleFacing = smoothstep(-0.05, 0.15, dot(ripple, sunAlong / max(length(sunAlong), 1e-4)));
+    glintDensity *= lerp(1.0, rippleFacing, GlintRippleShare);
+}
+[branch] if (glintGate * glintDensity > 0.001)
+{
+    float glintCell = max(GlintCellSize, 0.5);
+    float3 glintPos = (WorldPos + slope * WaterSway * WaveScale * TileSize * GlintSway) / glintCell;
+    float glintRadius = min(max(GlintPixels, 0.5) * aa / glintCell, 0.3);
+    float glintTime = Time / max(GlintLife, 0.05);
+    int glintSpots = clamp((int)round(GlintSpots), 1, 4);
+    float sparkle = 0.0;
+    [branch] if (planes.x > 0.02) { sparkle += glints.Plane(glintPos.yz, glintRadius, glintTime, glintDensity, glintSpots, 1u) * planes.x; }
+    [branch] if (planes.y > 0.02) { sparkle += glints.Plane(glintPos.xz, glintRadius, glintTime, glintDensity, glintSpots, 2u) * planes.y; }
+    [branch] if (planes.z > 0.02) { sparkle += glints.Plane(glintPos.xy, glintRadius, glintTime, glintDensity, glintSpots, 3u) * planes.z; }
+    color += sparkle * glintGate * GlintColor.rgb;
+}
 
 // between the floes of the frozen sea (instances of AHexPlanet::UpdateFloes): slush and brash ice that drift with the water, foam where the
 // water lies shallow over the ledge of a floe, and from far away, where the floes are not drawn, their color.
@@ -1750,11 +1843,12 @@ WATER_PARAMETERS = ['TileSize', 'WaveScale', 'WideNoiseScale', 'MiddleNoiseScale
     'CalmDepthStart', 'CalmDepthEnd', 'ShallowCalm', 'Clearness', 'WaterClearDepth', 'WaterOpaqueDepth', 'SeabedDepthNoise', 'FadeNoiseScale',
     'LagoonColor', 'ShallowColor', 'LagoonDistanceStart', 'LagoonDistanceEnd', 'OffshoreColor', 'OffshoreDistanceStart', 'OffshoreDistanceEnd',
     'DeepColorDark', 'DeepColorLight', 'PatchContrast', 'PatchFineContrast', 'PatchFineWeight', 'PatchMip', 'WaveLight', 'SkyColor', 'SkyReflection',
-    'FresnelPower', 'NightBrightness', 'NightStart', 'NightEnd', 'GlintAmount', 'GlintColor', 'GlintScaleA', 'GlintScaleB', 'GlintThresholdStart',
-    'GlintThresholdEnd', 'SunPathMin', 'SunPathStart', 'SunPathEnd', 'GlintFarStart', 'GlintFarEnd', 'GlintSunHeight', 'IceWaterColor', 'IceWaterShare',
+    'FresnelPower', 'NightBrightness', 'NightStart', 'NightEnd', 'GlintAmount', 'GlintColor', 'GlintCellSize', 'GlintPixels', 'GlintLife',
+    'GlintSpots', 'GlintDensity', 'GlintClusterScale', 'GlintClusterStart', 'GlintClusterEnd', 'GlintRippleShare', 'GlintSway', 'SunPathMin', 'SunPathStart', 'SunPathEnd', 'GlintFarStart', 'GlintFarEnd',
+    'GlintSunHeight', 'IceWaterColor', 'IceWaterShare',
     'IceWaveShare', 'IceSlushColor', 'IceSlush', 'IceSlushScale', 'IceFoam', 'IceFoamWidth', 'IceUnderClearness', 'IceClearDepth', 'IceFarColor', 'IceFarCover', 'IceFarStart', 'IceFarEnd',
     'IceEdgeSoftness', 'IceEdgeNoise', 'IceWaterFade', 'IceShade', 'ShoreFoamColor', 'ShoreFoam', 'ShoreFoamDepth', 'ShoreFoamPixels', 'ShoreLaceScale', 'ShoreLace',
-    'ShoreFarStart', 'ShoreFarEnd', 'ShoreFarFilm', 'Surf', 'SurfChance', 'SurfReach', 'SurfPeriod', 'SurfRunShare', 'SurfWidthStart', 'SurfWidthEnd',
+    'ShoreWaveLength', 'ShoreWavePeriod', 'ShoreWaveReachStart', 'ShoreWaveReachEnd', 'ShoreWaveSlope', 'ShoreFarStart', 'ShoreFarEnd', 'ShoreFarFilm', 'Surf', 'SurfChance', 'SurfReach', 'SurfPeriod', 'SurfRunShare', 'SurfWidthStart', 'SurfWidthEnd',
     'SurfBorderStart', 'SurfBorderEnd', 'SurfLength', 'SurfShoreDistance', 'SurfShoreSpeed', 'SurfCurl', 'SurfWobble', 'SurfCapeStart', 'SurfCapeEnd', 'RollerChance', 'RollerFoam', 'BackwashDepth', 'RunupRiseTime', 'RunupFallTime',
     'RiverPlumeLength', 'RiverPlumeWidth', 'RiverPlumeSpread', 'RiverPlumeBack', 'RiverPlumeCalm', 'RiverPlumeLanes', 'RiverPlumeLineWidth',
     'RiverPlumeDashLength', 'RiverPlumeSpeed', 'RiverPlumeFoam', 'RiverPlumeColor', 'RiverPlumeTint', 'RiverPlumeChop', 'RiverPlumeWobble', 'RiverPlumeFroth']
@@ -1816,6 +1910,10 @@ UNDERGROUND_MIGRATIONS = [('generate_objects', False, True), ('motes', False, Tr
 # and of DA_HexPlanetCamera, as (field of UndergroundLighting, old value, new value): its key light dimmed from the placeholder that lit everything
 CAMERA_CONFIG = FOLDER + '/DA_HexPlanetCamera'
 CAMERA_UNDERGROUND_MIGRATIONS = [('sun_intensity', 1.5, 0.12)]
+# values of an existing DA_HexPlanetWater set again only while it still holds the old ones, so tuning by hand stays: on 2026-11-14 the waves
+# lit as on the flat map, by their whole normal, and the glints as points that flash in place
+WATER_CONFIG = FOLDER + '/DA_HexPlanetWater'
+WATER_MIGRATIONS = [('wave_light', 0.5, 1.5), ('glint_amount', 1.0, 3.0), ('sun_path_min', 0.2, 0.15), ('ripple_scale_a', 2.3, 4.6), ('ripple_scale_b', 1.1, 2.2)]
 
 
 def holds(value, old):
@@ -1965,6 +2063,22 @@ def build_configs():
             unreal.EditorAssetLibrary.save_asset(path, only_if_is_dirty=False)
     build_underground_config()
     migrate_camera_config()
+    migrate_water_config()
+
+
+def migrate_water_config():
+    """Sets the values of DA_HexPlanetWater that still hold their old ones (WATER_MIGRATIONS)"""
+    if not unreal.EditorAssetLibrary.does_asset_exist(WATER_CONFIG):
+        return
+    config = unreal.load_asset(WATER_CONFIG)
+    changed = False
+    for name, old, new in WATER_MIGRATIONS:
+        if holds(config.get_editor_property(name), old):
+            config.set_editor_property(name, new)
+            changed = True
+            unreal.log('PLANET %s: %s from %s to %s' % (WATER_CONFIG, name, old, new))
+    if changed:
+        unreal.EditorAssetLibrary.save_asset(WATER_CONFIG, only_if_is_dirty=False)
 
 
 def migrate_camera_config():
@@ -5311,6 +5425,11 @@ def main():
     if 'flocks' in sys.argv[1:]:
         build_flock_material()
         unreal.log('PLANET flock assets created')
+        return
+    # with water only the material of the sea
+    if 'water' in sys.argv[1:]:
+        build_water()
+        unreal.log('PLANET water material created')
         return
     # with heroes only the materials of the heroes, their ring and the marks of their ways
     # with marks only the materials that draw the outlines of cells: the surfaces of both layers and the grid of the sea

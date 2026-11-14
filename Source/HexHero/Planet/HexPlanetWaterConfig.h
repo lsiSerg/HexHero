@@ -99,12 +99,15 @@ public:
 	UPROPERTY(EditAnywhere, Category="Waves", meta=(ClampMin=0))
 	float WaterSway = 0.05f;
 
-	/** Scales of the two layers of ripples, per tile */
+	/**
+	 * Scales of the two layers of ripples, per tile before WaveScale: twice those of the flat map, so with a WaveScale of 2 the ripples are as
+	 * fine as there and the sea shows their grain from close by, as the developer asked on 2026-11-14
+	 */
 	UPROPERTY(EditAnywhere, Category="Waves", meta=(ClampMin=0.01))
-	float RippleScaleA = 2.3f;
+	float RippleScaleA = 4.6f;
 
 	UPROPERTY(EditAnywhere, Category="Waves", meta=(ClampMin=0.01))
-	float RippleScaleB = 1.1f;
+	float RippleScaleB = 2.2f;
 
 	/** How much the normal tilts: by the swell far away and close by, by ripples far away and close by */
 	UPROPERTY(EditAnywhere, Category="Waves")
@@ -198,15 +201,20 @@ public:
 	float PatchFineWeight = 0.25f;
 
 	/**
-	 * Mip of the noise of the patches and of the unevenness of the depth, the same from any camera. The noise texture holds fine detail too,
-	 * which at a low mip speckles the tone; higher keeps only the wide patches
+	 * Mip of the noise of the unevenness of the depth, the same from any camera, and the blurriest the patches take: they take the mip of the
+	 * size of a pixel, as the flat map does, so from close by the fine detail of the noise mottles the open sea, and from far away no more
+	 * than this, as the detail would speckle the tone there; higher keeps only the wide patches
 	 */
 	UPROPERTY(EditAnywhere, Category="Color", meta=(ClampMin=0, ClampMax=10))
 	float PatchMip = 6.0f;
 
-	/** How much lighter the side of a wave towards the sun is, and the other side darker, which makes the open sea mottled when strong */
+	/**
+	 * How much lighter the side of a wave or ripple towards the sun is, and the other side darker, by the whole normal of the water (the swell,
+	 * the short waves and the ripples), as on the flat map, so the sea shows its ripples and the swell moving over it. FarCalm.z keeps less of it
+	 * far away, where it would mottle the open sea
+	 */
 	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=0))
-	float WaveLight = 0.5f;
+	float WaveLight = 1.5f;
 
 	/** Color of the sky that the water reflects where it faces away from the camera */
 	UPROPERTY(EditAnywhere, Category="Light")
@@ -232,31 +240,63 @@ public:
 	UPROPERTY(EditAnywhere, Category="Light")
 	float NightEnd = 0.3f;
 
-	/** Strength of the glints of the sun */
+	/**
+	 * Glints of the sun are points of light that flash and fade in place on the water: each cell of GlintCellSize world units, on the planes of
+	 * the world, has a spot of its own that shines for GlintLife seconds, then another, so the water glitters rather than carrying specks over
+	 * it. Strength of the glints at the brightest point of a flash
+	 */
 	UPROPERTY(EditAnywhere, Category="Glints", meta=(ClampMin=0))
-	float GlintAmount = 1.0f;
+	float GlintAmount = 3.0f;
 
 	/** Color of the glints */
 	UPROPERTY(EditAnywhere, Category="Glints")
 	FLinearColor GlintColor = FLinearColor(0.9f, 0.88f, 0.8f);
 
-	/** Scales of the two noises whose product makes the sparkles, per tile */
+	/** Size of a cell of points of light, in world units: smaller makes them denser. Much smaller than GlintPixels on the screen lines them up */
+	UPROPERTY(EditAnywhere, Category="Glints", meta=(ClampMin=0.5))
+	float GlintCellSize = 5.0f;
+
+	/** Points of light in a cell, each at its own pace and place, 1 to 4, so they do not stand on a grid of the cells */
+	UPROPERTY(EditAnywhere, Category="Glints", meta=(ClampMin=1, ClampMax=4))
+	int32 GlintSpots = 3;
+
+	/** Radius of a point of light in pixels, whatever the distance, so it stays a sharp point; each point is 0.6 to 1.3 times this */
+	UPROPERTY(EditAnywhere, Category="Glints", meta=(ClampMin=0.5))
+	float GlintPixels = 1.4f;
+
+	/** Seconds a point shines, from nothing to its brightest and back, before its cell shines at another spot */
+	UPROPERTY(EditAnywhere, Category="Glints", meta=(ClampMin=0.05))
+	float GlintLife = 0.8f;
+
+	/** Share of the cells that shine in the middle of a cluster */
+	UPROPERTY(EditAnywhere, Category="Glints", meta=(ClampMin=0, ClampMax=1))
+	float GlintDensity = 0.85f;
+
+	/**
+	 * The points gather in clusters where the product of two noises, which drift slowly against each other, is high: their scale per tile
+	 * (larger makes smaller clusters), and the product where a cluster begins and where it is full, closer to 1 for fewer. They do not
+	 * depend on the camera
+	 */
 	UPROPERTY(EditAnywhere, Category="Glints", meta=(ClampMin=0.01))
-	float GlintScaleA = 3.9f;
-
-	UPROPERTY(EditAnywhere, Category="Glints", meta=(ClampMin=0.01))
-	float GlintScaleB = 5.3f;
-
-	/** Product of the two noises where a sparkle starts and where it is full: closer values make fewer and sharper ones */
-	UPROPERTY(EditAnywhere, Category="Glints", meta=(ClampMin=0, ClampMax=1))
-	float GlintThresholdStart = 0.36f;
+	float GlintClusterScale = 1.5f;
 
 	UPROPERTY(EditAnywhere, Category="Glints", meta=(ClampMin=0, ClampMax=1))
-	float GlintThresholdEnd = 0.6f;
+	float GlintClusterStart = 0.26f;
 
-	/** Glints left off the path of the sun */
 	UPROPERTY(EditAnywhere, Category="Glints", meta=(ClampMin=0, ClampMax=1))
-	float SunPathMin = 0.2f;
+	float GlintClusterEnd = 0.45f;
+
+	/** How much of a cluster shines only on the sides of the ripples that face the sun, so the points follow the grain of the water */
+	UPROPERTY(EditAnywhere, Category="Glints", meta=(ClampMin=0, ClampMax=1))
+	float GlintRippleShare = 0.5f;
+
+	/** Share of the sway of the water (WaterSway) the points follow: more makes them slide over it as specks */
+	UPROPERTY(EditAnywhere, Category="Glints", meta=(ClampMin=0, ClampMax=1))
+	float GlintSway = 0.0f;
+
+	/** Glints left off the path of the sun, of GlintAmount */
+	UPROPERTY(EditAnywhere, Category="Glints", meta=(ClampMin=0, ClampMax=1))
+	float SunPathMin = 0.15f;
 
 	/** Cosine between the reflected view and the sun where the path of the sun starts and where it is full */
 	UPROPERTY(EditAnywhere, Category="Glints", meta=(ClampMin=-1, ClampMax=1))
@@ -265,7 +305,7 @@ public:
 	UPROPERTY(EditAnywhere, Category="Glints", meta=(ClampMin=-1, ClampMax=1))
 	float SunPathEnd = 0.85f;
 
-	/** Size of a pixel where the glints start to fade and where they are gone, as one-pixel sparkles only look like noise */
+	/** Size of a pixel where the glints start to fade and where they are gone, as from far away their cells are a few pixels and the points only look like noise */
 	UPROPERTY(EditAnywhere, Category="Glints", meta=(ClampMin=0))
 	float GlintFarStart = 0.9f;
 
@@ -365,6 +405,26 @@ public:
 
 	UPROPERTY(EditAnywhere, Category="Shore", meta=(ClampMin=0, ClampMax=1))
 	float ShoreLace = 0.45f;
+
+	/**
+	 * The waves of the shore, as on the flat map: swells ShoreWaveLength world units apart, one every ShoreWavePeriod seconds, that run in to the
+	 * coast along the distance to it, from ShoreWaveReachEnd, full from ShoreWaveReachStart, and tilt the water by ShoreWaveSlope, so the light of
+	 * the sun shows them rolling in (WaveLight). They bring no foam, which the breakers below do
+	 */
+	UPROPERTY(EditAnywhere, Category="Shore", meta=(ClampMin=1))
+	float ShoreWaveLength = 85.0f;
+
+	UPROPERTY(EditAnywhere, Category="Shore", meta=(ClampMin=0.1))
+	float ShoreWavePeriod = 5.5f;
+
+	UPROPERTY(EditAnywhere, Category="Shore", meta=(ClampMin=0))
+	float ShoreWaveReachStart = 20.0f;
+
+	UPROPERTY(EditAnywhere, Category="Shore", meta=(ClampMin=0))
+	float ShoreWaveReachEnd = 190.0f;
+
+	UPROPERTY(EditAnywhere, Category="Shore", meta=(ClampMin=0))
+	float ShoreWaveSlope = 0.8f;
 
 	/** The size of a pixel (as aa of WATER_CODE, in world units) from which the waves fade out, to none at ShoreFarEnd, while the film keeps
 	 *  ShoreFarFilm of itself, as from far away waves only shimmer */
