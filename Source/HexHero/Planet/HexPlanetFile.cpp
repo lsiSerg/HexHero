@@ -31,12 +31,55 @@ namespace
 
 TArray<FString> HexPlanetFile::GetRoots()
 {
-	return {FPaths::Combine(FPaths::ProjectContentDir(), RootFolder), FPaths::Combine(FPaths::ProjectSavedDir(), SavedFolder)};
+	const FString Content = FPaths::Combine(FPaths::ProjectContentDir(), RootFolder);
+	const FString Saved = FPaths::Combine(FPaths::ProjectSavedDir(), SavedFolder);
+	return WITH_EDITOR ? TArray<FString>{Content, Saved} : TArray<FString>{Saved, Content};
 }
 
 FString HexPlanetFile::GetWritableRoot()
 {
-	return GetRoots()[WITH_EDITOR ? 0 : 1];
+	return GetRoots()[0];
+}
+
+void HexPlanetFile::KeepWritableCopy(const FString& Folder)
+{
+#if !WITH_EDITOR
+	const FString Copy = FPaths::Combine(GetWritableRoot(), Folder);
+	const FString Shipped = FPaths::Combine(FPaths::ProjectContentDir(), RootFolder, Folder);
+
+	if (Folder.IsEmpty() || !IFileManager::Get().DirectoryExists(*Shipped))
+	{
+		return;
+	}
+
+	// the shipped planet lies in a pak, whose files are read like any other; file by file, as a pak lists the files of a folder in it
+	// before the folder, so a copy of the tree stopped at the first subfolder; a file the copy has already is never overwritten
+	TArray<FString> Files;
+	IFileManager::Get().FindFilesRecursive(Files, *Shipped, TEXT("*"), true, false);
+	int32 Copied = 0;
+	int32 Failed = 0;
+
+	for (const FString& File : Files)
+	{
+		FString Relative = File.Mid(Shipped.Len());
+		Relative.RemoveFromStart(TEXT("/"));
+		const FString Target = FPaths::Combine(Copy, Relative);
+
+		if (IFileManager::Get().FileExists(*Target))
+		{
+			continue;
+		}
+
+		IFileManager::Get().MakeDirectory(*FPaths::GetPath(Target), true);
+		++(IFileManager::Get().Copy(*Target, *File) == COPY_OK ? Copied : Failed);
+	}
+
+	if (Copied > 0 || Failed > 0)
+	{
+		UE_LOG(LogHexHero, Log, TEXT("Planet: copied %d files of %s to %s, where it is saved%s"), Copied, *Folder, *Copy,
+			Failed > 0 ? *FString::Printf(TEXT(", %d could not be copied"), Failed) : TEXT(""));
+	}
+#endif
 }
 
 FString HexPlanetFile::GetFilePath(const FString& Folder, const TCHAR* File)
@@ -433,7 +476,7 @@ bool HexPlanetFile::GetNewPlanet(const UWorld* World, FHexPlanetManifest& OutMan
 
 TArray<FHexPlanetEntry> HexPlanetFile::FindPlanets()
 {
-	// a folder in Content wins over one of the same name in Saved
+	// a folder in the first root wins over one of the same name in the other
 	TArray<FString> Folders;
 
 	for (const FString& Root : GetRoots())

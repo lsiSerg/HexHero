@@ -10,6 +10,7 @@
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/SkeletalMesh.h"
+#include "HAL/IConsoleManager.h"
 #include "HexCastles.h"
 #include "HexCastleConfig.h"
 #include "HexMaterialConfig.h"
@@ -36,6 +37,9 @@
 namespace
 {
 	const TCHAR* SkyMaterialPath = TEXT("/Game/HexPlanet/Battle/M_HexBattleSky.M_HexBattleSky");
+
+	TAutoConsoleVariable<float> CVarBattleAutoClose(TEXT("hex.BattleAutoClose"), 0.0f,
+		TEXT("Seconds after which the result of a battle closes by itself, as OK would, for recording the game; 0 waits for OK"));
 
 	/** A hash of a few numbers, for what stands where, the same every time */
 	/** A material of timber for the planks of the bridge and the gate, from the material of the units */
@@ -182,7 +186,8 @@ namespace
 				Description.CreateTriangle(Group, Corners);
 			}
 			UStaticMesh* Mesh = NewObject<UStaticMesh>(Outer);
-			Mesh->GetStaticMaterials().Add(FStaticMaterial(Material, TEXT("Castle"), TEXT("Castle")));
+			// the imported slot name is editor-only data, which a packaged game has not
+			Mesh->GetStaticMaterials().Add(FStaticMaterial(Material, TEXT("Castle")));
 			UStaticMesh::FBuildMeshDescriptionsParams Params;
 			Params.bBuildSimpleCollision = false;
 			Params.bFastBuild = true;
@@ -4375,6 +4380,15 @@ void AHexBattleArena::Tick(float DeltaSeconds)
 	FHexBattle* Battle = GetBattle();
 	if (!bShowing || !Battle || !Config)
 	{
+		return;
+	}
+	// for recording the game the result closes by itself a while after the field has shown it all (hex.BattleAutoClose)
+	const float AutoClose = CVarBattleAutoClose.GetValueOnGameThread();
+	ResultTime = AutoClose > 0.0f && Battle->IsOver() && !IsPlaying() ? ResultTime + DeltaSeconds : 0.0f;
+	if (AutoClose > 0.0f && ResultTime >= AutoClose)
+	{
+		ResultTime = 0.0f;
+		OrderClose();
 		return;
 	}
 	Gather();

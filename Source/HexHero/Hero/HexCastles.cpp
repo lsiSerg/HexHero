@@ -2044,7 +2044,7 @@ namespace
 		// with nothing after it, or help, it lists what there is, as the developer asked on 2026-11-12
 		if (Args.IsEmpty() || Args[0].Equals(TEXT("help"), ESearchCase::IgnoreCase) || Args[0] == TEXT("?"))
 		{
-			HexCheats::LogHelp();
+			HexCheats::LogHelp(Heroes);
 			return;
 		}
 		if (!Castles || !Castles->GetConfig() || !Sites || !Sites->GetConfig())

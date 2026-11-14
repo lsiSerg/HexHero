@@ -47,6 +47,12 @@ namespace
 	TAutoConsoleVariable<int32> CVarPlanetWallFade(TEXT("hex.PlanetWallFade"), 1,
 		TEXT("1: the walls of the underground dissolve in front of the point under the cursor (CaveWallFade values of DA_HexUnderground); 2: in front of the point in the middle of the screen, or as high as hex.PlanetWallFadeScreenY says, for screenshots; 0: they stay whole"));
 
+	TAutoConsoleVariable<bool> CVarPlanetMouse(TEXT("hex.PlanetMouse"), true,
+		TEXT("0: the planet and the battle field leave the mouse alone, no cell under it is outlined and the cursor of the game is hidden, for recording the game while the mouse is used elsewhere"));
+
+	TAutoConsoleVariable<bool> CVarPlanetOverlay(TEXT("hex.PlanetOverlay"), true,
+		TEXT("Shows the overlay at the top right of the planet: the hint and legend of the keys, the panels of the settings and the warning of what is not saved; 0 hides it, for recording the game"));
+
 	TAutoConsoleVariable<int32> CVarPlanetHoverCell(TEXT("hex.PlanetHoverCell"), -1,
 		TEXT("A cell taken to be under the cursor in place of the one the mouse is over, for screenshots of its outline and of what a click on it does; -1 for the mouse"));
 
@@ -101,6 +107,15 @@ AHexPlanetPlayerController::AHexPlanetPlayerController()
 void AHexPlanetPlayerController::BeginPlay()
 {
 	Super::BeginPlay();
+
+#if !WITH_EDITOR
+	// a packaged game shows the players no warnings of the engine, such as an oversubscribed atlas of Lumen, which the editor still shows;
+	// the messages of the game itself stay
+	if (GEngine)
+	{
+		GEngine->bSuppressMapWarnings = true;
+	}
+#endif
 
 	// a run without a map opens the planet next time
 	HexLastView::SetPlanetOpen(true);
@@ -521,6 +536,13 @@ bool AHexPlanetPlayerController::IsCursorOnUi() const
 void AHexPlanetPlayerController::UpdateGameCursor(bool bRay, const FVector& Origin, const FVector& Direction)
 {
 	if (!GameCursor.IsValid())
+	{
+		return;
+	}
+	// hex.PlanetMouse 0 hides it, for recording
+	const bool bMouse = CVarPlanetMouse.GetValueOnGameThread();
+	GameCursor->SetVisibility(bMouse ? EVisibility::HitTestInvisible : EVisibility::Collapsed);
+	if (!bMouse)
 	{
 		return;
 	}
@@ -1220,7 +1242,15 @@ void AHexPlanetPlayerController::ToggleCheatSheet()
 {
 	if (CheatSheet.IsValid())
 	{
-		CheatSheet->SetVisibility(CheatSheet->GetVisibility().IsVisible() ? EVisibility::Collapsed : EVisibility::HitTestInvisible);
+		const bool bShow = !CheatSheet->GetVisibility().IsVisible();
+		// the values of the arguments are those of the planet open, its heroes and castles as they are now
+		if (bShow)
+		{
+			const AHexPlanetCameraPawn* CameraPawn = Cast<AHexPlanetCameraPawn>(GetPawn());
+			const AHexPlanet* Planet = CameraPawn ? CameraPawn->GetPlanet() : nullptr;
+			CheatSheet->Refresh(Planet && Planet->IsBuilt() ? Planet->GetHeroes() : nullptr);
+		}
+		CheatSheet->SetVisibility(bShow ? EVisibility::HitTestInvisible : EVisibility::Collapsed);
 	}
 }
 
@@ -1252,6 +1282,7 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 
 	if (DebugOverlay.IsValid())
 	{
+		DebugOverlay->SetVisibility(CVarPlanetOverlay.GetValueOnGameThread() ? EVisibility::HitTestInvisible : EVisibility::Collapsed);
 		DebugOverlay->UpdateViewStatus(GetWorld()->GetRealTimeSeconds());
 
 		const UHexInputConfig* InputConfig = GetDefault<UHexMapSettings>()->LoadInputConfig();
@@ -1275,7 +1306,7 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 	{
 		FVector Origin;
 		FVector Direction;
-		const bool bRay = DeprojectMousePositionToWorld(Origin, Direction);
+		const bool bRay = CVarPlanetMouse.GetValueOnGameThread() && DeprojectMousePositionToWorld(Origin, Direction);
 		if (bRay)
 		{
 			BattleArena->SetHover(Origin, Direction);
@@ -1287,7 +1318,7 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 	FVector Origin;
 	FVector Direction;
 	FVector MousePoint = FVector::ZeroVector;
-	int32 Cell = DeprojectMousePositionToWorld(Origin, Direction) ? Planet->FindCellAlongRay(Origin, Direction, &MousePoint) : INDEX_NONE;
+	int32 Cell = CVarPlanetMouse.GetValueOnGameThread() && DeprojectMousePositionToWorld(Origin, Direction) ? Planet->FindCellAlongRay(Origin, Direction, &MousePoint) : INDEX_NONE;
 	MouseSpot = MousePoint;
 	// hex.PlanetHoverCell stands in for the mouse
 	if (const int32 Forced = CVarPlanetHoverCell.GetValueOnGameThread(); Planet->GetGrid().GetCells().IsValidIndex(Forced))

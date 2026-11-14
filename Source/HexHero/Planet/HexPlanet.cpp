@@ -1258,6 +1258,7 @@ void AHexPlanet::BeginPlay()
 	// or the first in Content/Data/Planets
 	const bool bNewPlanet = HexPlanetFile::GetNewPlanet(GetWorld(), Manifest);
 	PlanetFolder = bNewPlanet ? FString() : HexPlanetFile::FindPlanetToOpen(GetWorld());
+	HexPlanetFile::KeepWritableCopy(PlanetFolder);
 	FString ManifestError;
 
 	if (bNewPlanet)

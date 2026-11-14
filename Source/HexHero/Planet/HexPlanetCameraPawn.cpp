@@ -150,6 +150,33 @@ namespace
 		PendingPlanetLayer = Layer;
 	}
 
+	void PlanetFlyCommand(const TArray<FString>& Args, UWorld* World)
+	{
+		const APlayerController* PlayerController = World ? World->GetFirstPlayerController() : nullptr;
+		AHexPlanetCameraPawn* CameraPawn = PlayerController ? Cast<AHexPlanetCameraPawn>(PlayerController->GetPawn()) : nullptr;
+		FHexPlanetCameraPlacement Placement;
+		float Seconds = 0.0f;
+
+		if ((Args.Num() != 5 && Args.Num() != 6) || !LexTryParseString(Placement.Latitude, *Args[0]) || !LexTryParseString(Placement.Longitude, *Args[1])
+			|| !LexTryParseString(Placement.Heading, *Args[2]) || !LexTryParseString(Placement.Distance, *Args[3]) || !LexTryParseString(Seconds, *Args[4])
+			|| (Args.Num() == 6 && !Args[5].Equals(TEXT("linear"), ESearchCase::IgnoreCase)))
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("Usage: hex.PlanetFly <Latitude> <Longitude> <Heading> <Distance> <Seconds> [linear]"));
+			return;
+		}
+		if (!CameraPawn || !CameraPawn->GetPlanet() || !CameraPawn->GetPlanet()->IsBuilt())
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("hex.PlanetFly: no planet camera, or its planet is not built yet"));
+			return;
+		}
+		CameraPawn->FlyTo(Placement, Seconds, Args.Num() == 6);
+	}
+
+	FAutoConsoleCommandWithWorldAndArgs PlanetFlyConsoleCommand(TEXT("hex.PlanetFly"),
+		TEXT("Flies the planet camera from where it is to a place over some seconds, easing in and out unless linear, for recording the game. ")
+		TEXT("Arguments: latitude, longitude, heading in degrees clockwise from north, distance, seconds, then optionally linear. Any input ends it."),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&PlanetFlyCommand));
+
 	FAutoConsoleCommand PlanetSetCameraConsoleCommand(TEXT("hex.PlanetSetCamera"),
 		TEXT("Puts the planet camera at once over a point, as hex.CopyCamera gives it. Arguments: latitude and longitude in degrees, ")
 		TEXT("then optionally the heading in degrees clockwise from north, the distance and the layer, Surface (when left out) or Underground, ")
@@ -954,6 +981,23 @@ void AHexPlanetCameraPawn::Tick(float DeltaTime)
 		}
 	}
 
+	// a flight of hex.PlanetFly, which any input of the person ends
+	if (bFlying && (!MoveInput.IsNearlyZero() || bDragging || bTurning || bMiddleDown || TurnKeyInput != 0.0f))
+	{
+		bFlying = false;
+	}
+	if (bFlying)
+	{
+		FlyTime += DeltaTime;
+		const double Alpha = FMath::Clamp(double(FlyTime) / FMath::Max(double(FlyDuration), 0.01), 0.0, 1.0);
+		const double Eased = bFlyLinear ? Alpha : FMath::SmoothStep(0.0, 1.0, Alpha);
+		Orientation = FQuat::Slerp(FlyFromOrientation, FlyToOrientation, Eased).GetNormalized();
+		TargetDistance = CurrentDistance = FMath::Exp(FMath::Lerp(FMath::Loge(FlyFromDistance), FMath::Loge(FlyToDistance), Eased));
+		AngularVelocity = FVector::ZeroVector;
+		bFocusing = false;
+		bFlying = Alpha < 1.0;
+	}
+
 	CurrentDistance = FMath::FInterpTo(CurrentDistance, TargetDistance, DeltaTime, Settings()->ZoomInterpSpeed);
 
 	const FVector Up = Orientation.GetAxisZ();
@@ -1036,7 +1080,11 @@ void AHexPlanetCameraPawn::Tick(float DeltaTime)
 		LastTurnMouseX = MouseX;
 	}
 
-	UpdateTopDownHeading(DeltaTime);
+	// a flight keeps the heading it was given
+	if (!bFlying)
+	{
+		UpdateTopDownHeading(DeltaTime);
+	}
 
 	// the camera moves so that the ray under the mouse comes back to the grabbed point
 	FVector MouseDirection;
@@ -1793,6 +1841,20 @@ void AHexPlanetCameraPawn::SetPlacement(const FHexPlanetCameraPlacement& Placeme
 	const int32 Cell = Planet ? Planet->GetGrid().FindCell(FVector3d(Orientation.GetAxisZ())) : INDEX_NONE;
 	UE_LOG(LogHexHero, Log, TEXT("Put the planet camera over cell %d at %.4f %.4f, heading %.1f at %.0f"),
 		Cell, Placement.Latitude, Placement.Longitude, Placement.Heading, TargetDistance);
+}
+
+void AHexPlanetCameraPawn::FlyTo(const FHexPlanetCameraPlacement& Placement, float Seconds, bool bLinear)
+{
+	FlyFromOrientation = Orientation;
+	FlyFromDistance = FMath::Max(CurrentDistance, 1.0);
+	FlyToOrientation = Placement.ToOrientation();
+	FlyToDistance = FMath::Clamp(Placement.Distance > 0.0 ? Placement.Distance : TargetDistance, double(Settings()->MinDistance), GetMaxDistance());
+	FlyTime = 0.0f;
+	FlyDuration = FMath::Max(Seconds, 0.0f);
+	bFlyLinear = bLinear;
+	bFlying = true;
+	UE_LOG(LogHexHero, Log, TEXT("The planet camera flies to %.4f %.4f, heading %.1f at %.0f in %.1f s%s"), Placement.Latitude, Placement.Longitude,
+		Placement.Heading, FlyToDistance, FlyDuration, bLinear ? TEXT(", linear") : TEXT(""));
 }
 
 void AHexPlanetCameraPawn::CopyCameraToClipboard() const

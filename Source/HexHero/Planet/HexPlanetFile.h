@@ -690,11 +690,16 @@ namespace HexPlanetFile
 	/** Folder of the planets made in a packaged game, whose Content is read only, relative to the Saved folder */
 	constexpr const TCHAR* SavedFolder = TEXT("Planets");
 
-	/** Returns the folders that hold planets: the one in Content, then the one in Saved */
+	/** Returns the folders that hold planets, the writable one first: Content then Saved in builds with the editor, else Saved then
+	 *  Content, so in a packaged game what its player saved wins over the planet it shipped with */
 	TArray<FString> GetRoots();
 
 	/** Returns the folder new planets are written to: Content in builds with the editor, so they can be committed, else Saved */
 	FString GetWritableRoot();
+
+	/** In a packaged game, whose Content is read only, copies the files of a planet it shipped with that the writable root lacks when
+	 *  it opens, so edits and generated files are saved and read back; nothing in builds with the editor */
+	void KeepWritableCopy(const FString& Folder);
 
 	/** Returns the full path of a file of a planet, in the first root that has the folder of the planet, or in the writable root. Folder is
 	 *  the folder of the planet or a data folder in it (GetDataFolder), which need not exist yet: saving a file makes it */

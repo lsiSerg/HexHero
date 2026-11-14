@@ -297,6 +297,9 @@ private:
 	float TurnLead = 0.0f;
 	float AiWait = 0.0f;
 
+	/** How long the result of the battle has been shown, for hex.BattleAutoClose */
+	float ResultTime = 0.0f;
+
 	TArray<FString> Log;
 	TArray<FHexBattlePopup> Popups;
 

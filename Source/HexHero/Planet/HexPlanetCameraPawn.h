@@ -126,6 +126,10 @@ public:
 	 *  the frames before */
 	void SetPlacement(const FHexPlanetCameraPlacement& Placement);
 
+	/** Flies the camera from where it is to a place over some seconds, along the great circle and easing in and out unless linear, for
+	 *  recording the game (hex.PlanetFly); any input of the person ends the flight */
+	void FlyTo(const FHexPlanetCameraPlacement& Placement, float Seconds, bool bLinear);
+
 	/** Copies to the clipboard the console commands hex.LoadPlanet and hex.PlanetSetCamera, which open the planet and put the camera where it is now */
 	void CopyCameraToClipboard() const;
 
@@ -230,6 +234,16 @@ private:
 
 	/** True while the camera glides to a cell */
 	bool bFocusing = false;
+
+	/** A flight of hex.PlanetFly: from and to which orientation and distance, how far along and whether it eases */
+	bool bFlying = false;
+	bool bFlyLinear = false;
+	FQuat FlyFromOrientation = FQuat::Identity;
+	FQuat FlyToOrientation = FQuat::Identity;
+	double FlyFromDistance = 0.0;
+	double FlyToDistance = 0.0;
+	float FlyTime = 0.0f;
+	float FlyDuration = 0.0f;
 
 	/** While a battle is shown its field takes the camera input (UpdateBattleCamera): the point of its ground grabbed by the left or middle
 	 *  button held, and the turn of the right one */
