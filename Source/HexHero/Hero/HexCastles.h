@@ -48,10 +48,18 @@ struct FHexCastleLine
 	/** Whether the line sets the garrison, also to none */
 	bool bGarrisonSet = false;
 
+	/** Whether its garrison has a catapult when a game starts, written only when it has */
+	UPROPERTY()
+	bool Catapult = false;
+
+	/** How it is turned from where it faces by itself, in degrees, as the developer asked on 2026-11-13 to turn what is placed; written only when set */
+	UPROPERTY()
+	int32 Yaw = 0;
+
 	bool operator==(const FHexCastleLine& Other) const
 	{
 		return Id == Other.Id && Faction == Other.Faction && Layer == Other.Layer && Cells == Other.Cells && Owner == Other.Owner && Built.OrderIndependentCompareEqual(Other.Built)
-			&& Garrison == Other.Garrison;
+			&& Garrison == Other.Garrison && Catapult == Other.Catapult && Yaw == Other.Yaw;
 	}
 };
 
@@ -82,6 +90,9 @@ struct FHexCastle
 	/** Its cells: the one with the lowest number first, then the other two counterclockwise seen from outside */
 	int32 Cells[3] = {INDEX_NONE, INDEX_NONE, INDEX_NONE};
 
+	/** How it is turned around its middle, in degrees, its gates, towers and buildings with it (MakeGround), set in the editor */
+	int32 Yaw = 0;
+
 	/** The player who has it when a game starts, which castles.json keeps, and who has it in the game played; INDEX_NONE for nobody */
 	int32 StartOwner = INDEX_NONE;
 	int32 Owner = INDEX_NONE;
@@ -94,14 +105,20 @@ struct FHexCastle
 	TArray<FHexStack> StartGarrison;
 	bool bStartGarrison = false;
 
+	/** Whether its garrison has a catapult, which defends it in a siege from a hex of its own in the yard, and whether it has one when a
+	 *  game starts, as the developer asked on 2026-11-13 */
+	bool bCatapult = false;
+	bool bStartCatapult = false;
+
 	/** How many creatures of each level its dwellings offer to hire now */
 	TArray<int32> Available;
 
 	/** The creatures that guard it */
 	TArray<FHexStack> Garrison;
 
-	/** How many buildings it built or upgraded today */
+	/** How many buildings it built or upgraded today, and whether it hired a hero today */
 	int32 BuiltToday = 0;
+	bool bHeroHiredToday = false;
 
 	/** When it was last taken, in seconds of the world, by which its flag flashes, and when each of its gates last opened */
 	double EventTime = -1000.0;
@@ -192,6 +209,19 @@ public:
 	 *  attacks. Returns false and why not */
 	bool BuyCatapult(int32 CastleId, int32 HeroId, FString& OutMessage);
 
+	/** Moves the catapult of the garrison to a hero in the castle or beside it (bToHero), or that of the hero to the garrison */
+	bool MoveCatapult(int32 CastleId, int32 HeroId, bool bToHero, FString& OutMessage);
+
+	/** Hires a hero of a class (DA_HexHeroes) for the owner of a castle for HeroCost, one a day there: into the castle when nobody guards it,
+	 *  else onto a cell before its gate. Returns its Id, 0 and why not */
+	int32 HireHero(int32 CastleId, int32 Class, FString& OutMessage);
+
+	/** Upgrades a stack of the garrison (HeroId 0) or of a hero in or beside a castle whose dwelling of its level is upgraded, for
+	 *  GetUpgradeCost, as the developer asked on 2026-11-13; it joins an upgraded stack of its kind there. Returns false and why not */
+	bool UpgradeStack(int32 CastleId, int32 HeroId, int32 Slot, FString& OutMessage);
+	bool CanUpgrade(const FHexCastle& Castle, const FHexStack& Stack, FString* OutWhy = nullptr) const;
+	TMap<FName, int32> GetUpgradeCost(const FHexStack& Stack) const;
+
 	/** Returns how many creatures of a level the owner of a castle can hire now: what its dwelling offers and what it can pay for */
 	int32 GetHireMax(const FHexCastle& Castle, int32 Creature) const;
 
@@ -239,7 +269,7 @@ public:
 	/** How many of a creature its dwelling offers a week */
 	int32 GetWeeklyGrowth(const FHexCastle& Castle, int32 Creature) const { return GetGrowth(Castle, Creature); }
 
-	/** A cheat: lets every castle build as much as it can pay for in a day (hex.Cheat build) */
+	/** A cheat: lets every castle build as much as it can pay for in a day (hex.Cheat buildnolimit) */
 	void SetUnlimitedBuilds(bool bOn) { bUnlimitedBuilds = bOn; ++Revision; }
 
 	/** A cheat: builds every building of a castle to its last level at once, for nothing; gives how many levels it built */
@@ -259,8 +289,23 @@ public:
 	/** Takes a share of the creatures of an army away, the same of every stack, leaving one creature at least */
 	static void ApplyLosses(TArray<FHexStack>& Army, float Share);
 
-	/** Adds a stack to an army: to a stack of its kind, else to a free slot. Returns false when the army is full */
+	/** Adds a stack to an army: to a stack of its kind, else to the first free slot. Returns false when the army is full. An army is up to
+	 *  NumArmySlots slots, a stack of no creatures an empty slot that keeps the stacks after it in their slots, as the developer asked on
+	 *  2026-11-13 (the battles place each slot on a row of its own, ArmySlotRows of DA_HexBattle) */
 	static bool AddToArmy(TArray<FHexStack>& Army, const FHexStack& Stack);
+
+	/** Whether an army has creatures, its first free slot (INDEX_NONE when it is full), and the army without the empty slots at its end */
+	static bool HasCreatures(TConstArrayView<FHexStack> Army);
+	static int32 FindFreeSlot(TConstArrayView<FHexStack> Army);
+	static void TrimArmy(TArray<FHexStack>& Army);
+
+	/** Moves Count creatures (0 for all) of a slot of an army to a slot of the same or another (ToSlot INDEX_NONE for the stack of its kind,
+	 *  else the first free one): onto an empty slot they make a stack of their own, onto one of their kind they join it, and a whole stack onto
+	 *  another kind swaps places with it. Returns false and why not */
+	static bool MoveBetween(TArray<FHexStack>& From, int32 FromSlot, TArray<FHexStack>& To, int32 ToSlot, int32 Count, FString& OutMessage);
+
+	/** The same between the garrison (HeroId 0) and the heroes in or beside a castle, slot by slot */
+	bool ArrangeStacks(int32 CastleId, int32 FromHero, int32 FromSlot, int32 ToHero, int32 ToSlot, int32 Count, FString& OutMessage);
 
 	/** Returns the faction of a player, that of its first castle, else one by its number, and the army a hero of it starts with */
 	int32 GetPlayerFaction(int32 Player) const;
@@ -268,6 +313,10 @@ public:
 
 	/** Returns the hero of the owner of a castle that is in it, else one that stands on a cell beside it, the one chosen first, or null */
 	const FHexHero* FindVisitor(const FHexCastle& Castle) const;
+
+	/** Every hero of the owner that may take creatures from the castle: the one in it first, then those beside it, as the developer asked
+	 *  on 2026-11-13 for two heroes beside a castle */
+	TArray<const FHexHero*> FindVisitors(const FHexCastle& Castle) const;
 
 	/** A player the game moves builds what it can in each of its castles and hires into their garrisons */
 	void RunAi(int32 Player);

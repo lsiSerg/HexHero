@@ -24,6 +24,8 @@ namespace
 		case EHexFigureAction::Shoot: return Look.Shoot.Sequence.IsNull() ? &Look.Attack : &Look.Shoot;
 		case EHexFigureAction::Hit: return &Look.Hit;
 		case EHexFigureAction::Death: return &Look.Death;
+		case EHexFigureAction::Walk: return Look.Walk.Sequence.IsNull() ? &Look.Move : &Look.Walk;
+		case EHexFigureAction::Fly: return Look.Fly.Sequence.IsNull() ? &Look.Move : &Look.Fly;
 		}
 		return nullptr;
 	}
@@ -110,6 +112,13 @@ USceneComponent* HexUnitFigure::Make(UObject* Owner, USceneComponent* Parent, co
 		Instance->SetVectorParameterValue(TEXT("Tint"), Tint);
 		Instance->SetVectorParameterValue(TEXT("SideColor"), SideColor);
 		Instance->SetScalarParameterValue(TEXT("SideColorShare"), Look ? Look->SideColorShare : 0.0f);
+		if (Look)
+		{
+			Instance->SetScalarParameterValue(TEXT("DetailScale"), Look->DetailScale);
+			Instance->SetScalarParameterValue(TEXT("DetailTone"), Look->DetailTone);
+			Instance->SetScalarParameterValue(TEXT("DetailBump"), Look->DetailBump);
+			Instance->SetScalarParameterValue(TEXT("Roughness"), Look->Roughness);
+		}
 		for (int32 Slot = 0; Slot < FMath::Max(Drawn->GetNumMaterials(), 1); ++Slot)
 		{
 			Drawn->SetMaterial(Slot, Instance);
@@ -141,12 +150,27 @@ bool HexUnitFigure::Play(USceneComponent* Figure, const UHexBattleConfig* Config
 	{
 		return false;
 	}
-	const bool bLoop = Action == EHexFigureAction::Idle || Action == EHexFigureAction::Move;
+	const bool bLoop = Action == EHexFigureAction::Idle || Action == EHexFigureAction::Move || Action == EHexFigureAction::Walk || Action == EHexFigureAction::Fly;
 	UAnimSequence* Idle = Look->Idle.Sequence.LoadSynchronous();
 	// an idle of several figures each at its own place in it, so they do not breathe as one
 	const float Start = bAtEnd ? 1.0f : bLoop ? FMath::Frac(RateScale * 7.31f) : 0.0f;
 	Anim->Play(Sequence, bLoop, Each->Rate * RateScale, bAtEnd ? 0.0f : 0.15f, Start, bLoop || Action == EHexFigureAction::Death ? nullptr : Idle, Look->Idle.Rate);
 	return bOwn;
+}
+
+void HexUnitFigure::Settle(USceneComponent* Figure)
+{
+	if (USkeletalMeshComponent* Animated = Cast<USkeletalMeshComponent>(Figure))
+	{
+		Animated->TickAnimation(0.0f, false);
+		Animated->RefreshBoneTransforms();
+	}
+}
+
+bool HexUnitFigure::CanWalk(const UHexBattleConfig* Config, FName Creature)
+{
+	const FHexUnitLook* Look = Config ? Config->FindLook(Creature) : nullptr;
+	return Look && !Look->Walk.Sequence.IsNull();
 }
 
 float HexUnitFigure::GetLength(const UHexBattleConfig* Config, FName Creature, EHexFigureAction Action)

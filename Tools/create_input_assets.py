@@ -79,6 +79,8 @@ ACTIONS = [
     ("next_hero_action", "IA_HexNextHero", "Next hero", BOOLEAN, [("Tab", False, False)]),
     ("end_turn_action", "IA_HexEndTurn", "End the turn", BOOLEAN, [("Enter", False, False)]),
     ("skip_hero_action", "IA_HexSkipHero", "Skip the hero today", BOOLEAN, [("Z", False, False)]),
+    # a cheat of a battle, as the developer asked on 2026-11-13: what is under the cursor takes damage
+    ("battle_hit_action", "IA_HexBattleHit", "Cheat: hurt what is under the cursor", BOOLEAN, [("K", False, False)]),
 ]
 
 # heading of each line of a new DA_HexKeyLegend, by its action
@@ -115,13 +117,14 @@ LEGEND_CATEGORIES = {
     "IA_HexNextHero": "Heroes",
     "IA_HexEndTurn": "Heroes",
     "IA_HexSkipHero": "Heroes",
+    "IA_HexBattleHit": "Battle",
 }
 
 
 # actions added after the legend was made, whose lines an existing legend gets if it lacks them
 ADDED_LEGEND_ACTIONS = {"IA_HexPaintMode", "IA_HexPaintLevel", "IA_HexBrushSize", "IA_HexUndo", "IA_HexRedo", "IA_HexForcedLight", "IA_HexLayer",
                         "IA_HexSaveBookmark", "IA_HexJumpBookmark", "IA_HexPlayMode", "IA_HexHeroSelect", "IA_HexHeroSend", "IA_HexNextHero", "IA_HexEndTurn", "IA_HexSkipHero",
-                        "IA_HexCheatSheet"}
+                        "IA_HexCheatSheet", "IA_HexBattleHit"}
 
 # lines of the legend whose action kept its name but changed what it does: its label becomes the new description only while it still holds an
 # old one, so a label edited by hand stays

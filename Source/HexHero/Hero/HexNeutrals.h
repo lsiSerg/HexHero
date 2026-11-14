@@ -40,10 +40,14 @@ struct FHexNeutralLine
 	UPROPERTY()
 	int32 Cell = 0;
 
+	/** How it is turned from where it faces by itself, in degrees, as the developer asked on 2026-11-13 to turn what is placed; written only when set */
+	UPROPERTY()
+	int32 Yaw = 0;
+
 	bool operator==(const FHexNeutralLine& Other) const
 	{
 		return Id == Other.Id && Faction == Other.Faction && Creature == Other.Creature && Upgraded == Other.Upgraded && Count == Other.Count && Layer == Other.Layer
-			&& Cell == Other.Cell;
+			&& Cell == Other.Cell && Yaw == Other.Yaw;
 	}
 };
 
@@ -67,6 +71,9 @@ struct FHexNeutral
 	EHexPlanetLayer Layer = EHexPlanetLayer::Surface;
 	int32 Cell = INDEX_NONE;
 	FHexStack Stack;
+
+	/** How it is turned from the south it faces, in degrees, set in the editor */
+	int32 Yaw = 0;
 };
 
 /**

@@ -14,6 +14,7 @@
 #include "HexShroud.h"
 #include "HexCastles.h"
 #include "HexSites.h"
+#include "HexSiteConfig.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "HexHeroAnimInstance.h"
 #include "Animation/AnimSequence.h"
@@ -44,7 +45,7 @@ namespace
 
 	/** Returns the direction a hero faces at a point when nothing says otherwise: towards the south, where the camera mostly looks from,
 	 *  turned a little by its Id so heroes side by side do not stand as a row of copies */
-	FVector3d GetRestFacing(const FVector3d& Up, int32 Id)
+	FVector3d GetRestFacing(const FVector3d& Up, int32 Id, int32 Yaw = 0)
 	{
 		FVector3d East = FVector3d::CrossProduct(FVector3d::UnitZ(), Up);
 		if (!East.Normalize())
@@ -52,7 +53,7 @@ namespace
 			East = FVector3d::UnitX();
 		}
 		const FVector3d North = FVector3d::CrossProduct(Up, East);
-		const double Angle = FMath::DegreesToRadians(double((Id * 47) % 81) - 40.0);
+		const double Angle = FMath::DegreesToRadians(double((Id * 47) % 81) - 40.0 + double(Yaw));
 		return (-North * FMath::Cos(Angle) + East * FMath::Sin(Angle)).GetSafeNormal();
 	}
 
@@ -162,6 +163,7 @@ void UHexHeroes::ResetHero(FHexHero& Hero) const
 	Hero.Facing = FVector3d::ZeroVector;
 	// the creatures a hero of its player starts with
 	Hero.Army = !Hero.StartArmy.IsEmpty() ? Hero.StartArmy : Castles ? Castles->MakeStartArmy(Hero.Player) : TArray<FHexStack>();
+	Hero.bCatapult = Hero.bStartCatapult;
 	Hero.CastleId = 0;
 	Hero.GlideStart = -1000.0;
 	Hero.bGliding = false;
@@ -258,6 +260,7 @@ void UHexHeroes::SetLines(const TArray<FHexHeroLine>& Lines)
 		Hero.Class = Config->FindClass(Line.Class);
 		Hero.Player = FMath::Clamp(Line.Player, 0, Config->Players.Num() - 1);
 		Hero.StartCell = Line.Cell;
+		Hero.StartYaw = Line.Yaw;
 		if (Hero.Id <= 0 || Kept.ContainsByPredicate([&Line](const FHexHero& Each) { return Each.Id == Line.Id; }) || Line.Cell < 0 || Line.Cell >= NumCells
 			|| !ParsePlanetLayer(Line.Layer, Hero.StartLayer))
 		{
@@ -270,6 +273,7 @@ void UHexHeroes::SetLines(const TArray<FHexHeroLine>& Lines)
 			Hero.Class = 0;
 		}
 		Hero.StartArmy = Castles ? Castles->ParseStackLines(Line.Army) : TArray<FHexStack>();
+		Hero.bStartCatapult = Line.Catapult;
 		ResetHero(Hero);
 		Kept.Add(MoveTemp(Hero));
 	}
@@ -305,7 +309,9 @@ TArray<FHexHeroLine> UHexHeroes::MakeLines() const
 		Line.Player = Hero.Player;
 		Line.Layer = GetPlanetLayerName(Hero.StartLayer);
 		Line.Cell = Hero.StartCell;
+		Line.Yaw = Hero.StartYaw;
 		Line.Army = Castles ? Castles->MakeStackLines(Hero.StartArmy) : TArray<FHexStackLine>();
+		Line.Catapult = Hero.bStartCatapult;
 	}
 	return Lines;
 }
@@ -329,6 +335,7 @@ bool UHexHeroes::KeepArmyAsStart(int32 Id)
 		return false;
 	}
 	Hero->StartArmy = Hero->Army;
+	Hero->bStartCatapult = Hero->bCatapult;
 	UpdateEdited();
 	return true;
 }
@@ -411,9 +418,10 @@ bool UHexHeroes::Stop(int32 Id)
 	{
 		return false;
 	}
+	// it stops at the end of the step it is on and keeps the cell it was sent to, as the developer asked on 2026-11-14, so the way still shows
+	// from where it stops and the key that sends a hero, or a second click on that cell, walks it on, or another cell clicked points it there
 	Hero->Route.Reset();
 	Hero->bEnterAtEnd = false;
-	Hero->TargetCell = INDEX_NONE;
 	Hero->VisitCell = INDEX_NONE;
 	Hero->CheckCell = INDEX_NONE;
 	return true;
@@ -483,10 +491,18 @@ bool UHexHeroes::IsSeen(const FHexHero& Hero) const
 
 TArray<int32> UHexHeroes::GetActivePlayers() const
 {
+	// a player with a hero or a castle, as the developer asked on 2026-11-13 that a player whose heroes are gone plays on with its castles
 	TArray<int32> Players;
 	for (const FHexHero& Hero : Heroes)
 	{
 		Players.AddUnique(Hero.Player);
+	}
+	for (const FHexCastle& Castle : Castles ? Castles->GetCastles() : TArray<FHexCastle>())
+	{
+		if (Castle.Owner >= 0)
+		{
+			Players.AddUnique(Castle.Owner);
+		}
 	}
 	Players.Sort();
 	return Players;
@@ -547,6 +563,24 @@ void UHexHeroes::BeginTurn(int32 Player)
 			}
 		}
 		ChooseHero(Able ? Able->Id : First ? First->Id : 0);
+	}
+	// without a hero, its first castle
+	if (!GetSelected() && SelectedCastleId == 0 && Castles)
+	{
+		const FHexCastle* First = nullptr;
+		for (const FHexCastle& Castle : Castles->GetCastles())
+		{
+			First = Castle.Owner == Player && (!First || Castle.Id < First->Id) ? &Castle : First;
+		}
+		if (First)
+		{
+			// the camera shows it as it is chosen (AHexPlanetPlayerController::ShowCastle), else it is chosen here
+			OnCastleChosen.Broadcast(First->Id);
+			if (SelectedCastleId == 0)
+			{
+				SelectCastle(First->Id);
+			}
+		}
 	}
 	UE_LOG(LogHexHero, Log, TEXT("Heroes: day %d, %s plays"), Day, *Name);
 	OnMessage.Broadcast(FString::Printf(TEXT("Day %d: %s plays"), Day, *Name));
@@ -999,15 +1033,16 @@ void UHexHeroes::KeepChosen()
 	{
 		return;
 	}
-	// without a hero the game is lost
-	if (Heroes.IsEmpty())
+	// without a hero and a castle of anyone's the game is lost
+	const TArray<int32> Active = GetActivePlayers();
+	if (Active.IsEmpty())
 	{
 		bPlaying = false;
-		OnMessage.Broadcast(TEXT("No hero is left: the game is lost"));
+		OnMessage.Broadcast(TEXT("No hero and no castle is left: the game is lost"));
 		return;
 	}
-	// a player without heroes has no turn
-	if (!Heroes.ContainsByPredicate([this](const FHexHero& Each) { return Each.Player == TurnPlayer; }))
+	// a player without heroes and castles has no turn; one with castles alone plays on with them, its first castle chosen
+	if (!Active.Contains(TurnPlayer))
 	{
 		EndTurn();
 		return;
@@ -1015,6 +1050,21 @@ void UHexHeroes::KeepChosen()
 	if (IsPersonTurn())
 	{
 		SelectNext();
+		if (!GetSelected() && SelectedCastleId == 0 && Castles)
+		{
+			for (const FHexCastle& Castle : Castles->GetCastles())
+			{
+				if (Castle.Owner == TurnPlayer)
+				{
+					OnCastleChosen.Broadcast(Castle.Id);
+					if (SelectedCastleId == 0)
+					{
+						SelectCastle(Castle.Id);
+					}
+					break;
+				}
+			}
+		}
 		OnHeroChosen.Broadcast(SelectedId);
 	}
 }
@@ -1075,6 +1125,12 @@ UHexHeroes::EClick UHexHeroes::Click(EHexPlanetLayer Layer, int32 Cell, const FH
 	{
 		Under = nullptr;
 	}
+	// a hero of its own the hero chosen is pointed to: the second click walks there, to exchange the armies
+	if (const FHexHero* Chosen = GetSelected(); Under && Chosen && Under->Id != Chosen->Id && Under->Player == TurnPlayer && Chosen->TargetCell == Under->Cell
+		&& Chosen->TargetLayer == Under->Layer && !Chosen->bWalking)
+	{
+		return Go(Chosen->Id, OutMessage) ? EClick::Sent : EClick::None;
+	}
 	// also the hero chosen before a castle was chosen in its place, which a click did not choose again until 2026-11-11
 	if (Under && (Under->Id != SelectedId || !GetSelected()))
 	{
@@ -1102,6 +1158,12 @@ UHexHeroes::EClick UHexHeroes::Click(EHexPlanetLayer Layer, int32 Cell, const FH
 	{
 		OutMessage = FString::Printf(TEXT("%s is moved by the game"), *Hero->Name);
 		return EClick::None;
+	}
+	// a click on the hero chosen opens its army, as the developer asked on 2026-11-13; one that walks stops first
+	if (Under && Under->Id == Hero->Id && !Hero->bWalking && Hero->CastleId == 0)
+	{
+		OnArmyOpened.Broadcast(Hero->Id, 0);
+		return EClick::Army;
 	}
 	// a click on the body of the hero chosen is a click on its cell; the cell may be of the other layer than the hero is on, as its way may
 	// go through the entrances
@@ -1136,7 +1198,230 @@ UHexHeroes::EClick UHexHeroes::Click(EHexPlanetLayer Layer, int32 Cell, const FH
 	return EClick::Targeted;
 }
 
-UHexHeroes::EOrder UHexHeroes::GetOrderAt(EHexPlanetLayer Layer, int32 Cell, const FHexHero* Under, bool bMouth)
+bool UHexHeroes::GetMapTip(EHexPlanetLayer Layer, int32 Cell, const FHexHero* Under, FHexMapTip& OutTip) const
+{
+	OutTip = FHexMapTip();
+	const AHexPlanet* Planet = GetPlanet(Layer);
+	if (!bPlaying || !Config || !Castles || !Planet || !Planet->GetGrid().GetCells().IsValidIndex(Cell))
+	{
+		return false;
+	}
+	const int32 Player = GetShroudPlayer();
+	if (IsHidden(Player, Layer, Cell))
+	{
+		return false;
+	}
+	Under = Under ? Under : FindHeroAt(Layer, Cell);
+	if (Under && Under->Player != Player && IsHidden(Player, Under->Layer, Under->Cell))
+	{
+		Under = nullptr;
+	}
+	const UHexCastleConfig* CastleConfig = Castles->GetConfig();
+	const FHexHero* Chosen = GetSelected();
+	// how many creatures a stack of another seems to have, a range as a hero sees it from afar
+	const auto Range = [](int32 Count)
+	{
+		const int32 Steps[] = {1, 5, 10, 20, 50, 100, 250, 500, 1000};
+		for (int32 Index = UE_ARRAY_COUNT(Steps) - 1; Index >= 0; --Index)
+		{
+			if (Count >= Steps[Index])
+			{
+				return Index + 1 < int32(UE_ARRAY_COUNT(Steps)) ? FString::Printf(TEXT("%d-%d"), Steps[Index], Steps[Index + 1] - 1) : FString::Printf(TEXT("%d+"), Steps[Index]);
+			}
+		}
+		return FString(TEXT("?"));
+	};
+	const auto SetArmy = [&](TConstArrayView<FHexStack> Army, bool bExact)
+	{
+		for (const FHexStack& Stack : Army)
+		{
+			if (Stack.Count > 0)
+			{
+				OutTip.Army.Add(Stack);
+				OutTip.ArmyCounts.Add(bExact || Config->bTipExactCounts ? FString::FromInt(Stack.Count) : Range(Stack.Count));
+			}
+		}
+	};
+	// a rough forecast, by the power of the army of the hero chosen against what is there
+	const auto SetForecast = [&](float Theirs)
+	{
+		if (!Chosen || Chosen->Player != Player)
+		{
+			return;
+		}
+		const float Share = Castles->GetAttack(*Chosen) / FMath::Max(Theirs, 1.0f);
+		struct FWord { float From; const TCHAR* Text; FLinearColor Color; };
+		const FWord Words[] = {{Config->ForecastEasy, TEXT("an easy victory"), FLinearColor(0.35f, 1.0f, 0.4f, 1.0f)},
+			{Config->ForecastLikely, TEXT("a likely victory"), FLinearColor(0.65f, 0.95f, 0.35f, 1.0f)},
+			{Config->ForecastEven, TEXT("an even fight"), FLinearColor(1.0f, 0.85f, 0.3f, 1.0f)},
+			{Config->ForecastHard, TEXT("a hard fight"), FLinearColor(1.0f, 0.5f, 0.2f, 1.0f)},
+			{-1.0f, TEXT("deadly"), FLinearColor(1.0f, 0.2f, 0.15f, 1.0f)}};
+		for (const FWord& Each : Words)
+		{
+			if (Share > Each.From)
+			{
+				OutTip.Forecast = FString::Printf(TEXT("For %s: %s"), *Chosen->Name, Each.Text);
+				OutTip.ForecastColor = Each.Color;
+				return;
+			}
+		}
+	};
+	const auto PlayerName = [this](int32 Of) { return Of >= 0 ? Config->GetPlayer(Of).Name : FString(TEXT("nobody")); };
+	const auto PlayerColor = [this](int32 Of) { return Of >= 0 ? FLinearColor::LerpUsingHSV(Config->GetPlayer(Of).Color, FLinearColor::White, 0.35f) : FLinearColor(0.8f, 0.8f, 0.8f, 1.0f); };
+
+	// a castle, also by the body of the hero that guards it
+	if (const FHexCastle* Castle = Under && Under->CastleId != 0 ? Castles->FindCastle(Under->CastleId) : Castles->FindCastleAt(Layer, Cell))
+	{
+		const bool bOwn = Castle->Owner == Player;
+		const FHexHero* Guard = Castles->FindGuard(*Castle);
+		OutTip.Title = FString::Printf(TEXT("%s castle"), *CastleConfig->Factions[Castle->Faction].DisplayName);
+		OutTip.TitleColor = PlayerColor(Castle->Owner);
+		OutTip.Lines.Add(FString::Printf(TEXT("Of %s"), *PlayerName(Castle->Owner)));
+		if (Guard)
+		{
+			OutTip.Lines.Add(FString::Printf(TEXT("%s guards it"), *Guard->Name));
+		}
+		OutTip.Lines.Add(UHexCastles::HasCreatures(Castle->Garrison) ? TEXT("Garrison:") : TEXT("No garrison"));
+		SetArmy(Castle->Garrison, bOwn);
+		if (!bOwn)
+		{
+			SetForecast(Castles->GetDefense(*Castle));
+		}
+		return true;
+	}
+	if (Under)
+	{
+		const bool bOwn = Under->Player == Player;
+		OutTip.Title = FString::Printf(TEXT("%s, %s of %s"), *Under->Name, *Config->GetClass(Under->Class).DisplayName, *PlayerName(Under->Player));
+		OutTip.TitleColor = PlayerColor(Under->Player);
+		if (bOwn)
+		{
+			OutTip.Lines.Add(FString::Printf(TEXT("Level %d. Movement %.0f of %.0f. Mana %d of %d"), Under->Level, Under->MovePoints, GetMaxMovePoints(*Under), Under->Mana,
+				Under->Knowledge * 10));
+			OutTip.Lines.Add(FString::Printf(TEXT("Attack %d, defense %d, spell power %d, knowledge %d%s"), Under->Attack, Under->Defense, Under->SpellPower, Under->Knowledge,
+				Under->bCatapult ? TEXT(". Has a catapult") : TEXT("")));
+		}
+		SetArmy(Under->Army, bOwn);
+		if (!bOwn)
+		{
+			SetForecast(Castles->GetAttack(*Under));
+		}
+		return true;
+	}
+	if (const FHexNeutral* Neutral = Neutrals ? Neutrals->FindAt(Layer, Cell) : nullptr)
+	{
+		OutTip.Title = FString::Printf(TEXT("%s %s"), *UHexNeutrals::DescribeCount(Neutral->Stack.Count), *UHexNeutrals::Plural(Neutrals->GetCreatureName(Neutral->Stack)).ToLower());
+		OutTip.TitleColor = FLinearColor(0.85f, 0.85f, 0.85f, 1.0f);
+		OutTip.Lines.Add(TEXT("Neutral creatures"));
+		SetArmy({Neutral->Stack}, false);
+		SetForecast(Castles->GetPower({Neutral->Stack}));
+		return true;
+	}
+	if (const FHexSite* Site = Sites ? Sites->FindSiteAt(Layer, Cell) : nullptr)
+	{
+		const UHexSiteConfig* SiteConfig = Sites->GetConfig();
+		const FHexSiteKind& Kind = SiteConfig->Kinds[Site->Kind];
+		const int32 Resource = Sites->GetResourceOf(*Site);
+		const FString ResourceName = SiteConfig->Resources.IsValidIndex(Resource) ? SiteConfig->Resources[Resource].DisplayName : FString(TEXT("?"));
+		OutTip.Title = Kind.DisplayName;
+		if (Kind.Type == EHexSiteType::Pile)
+		{
+			OutTip.TitleColor = SiteConfig->Resources.IsValidIndex(Resource) ? FLinearColor::LerpUsingHSV(SiteConfig->Resources[Resource].Color, FLinearColor::White, 0.4f) : FLinearColor::White;
+			OutTip.Lines.Add(FString::Printf(TEXT("%d %s, for the hero whose way ends on it"), Sites->GetPileAmountOf(*Site), *ResourceName.ToLower()));
+		}
+		else
+		{
+			OutTip.TitleColor = PlayerColor(Site->Owner);
+			OutTip.Lines.Add(FString::Printf(TEXT("Of %s"), *PlayerName(Site->Owner)));
+			OutTip.Lines.Add(Kind.Type == EHexSiteType::Mill ? FString::Printf(TEXT("%s every week"), *ResourceName)
+				: FString::Printf(TEXT("%d %s a day"), Kind.PerDay, *ResourceName.ToLower()));
+			// the creatures left there to guard it
+			if (UHexCastles::HasCreatures(Site->Guard))
+			{
+				OutTip.Lines.Add(TEXT("Guarded by:"));
+				SetArmy(Site->Guard, Site->Owner == Player);
+				if (Site->Owner != Player && !FindHeroAt(Layer, Cell))
+				{
+					SetForecast(Castles->GetPower(Site->Guard));
+				}
+			}
+		}
+		return true;
+	}
+	return false;
+}
+
+void UHexHeroes::SetAltOrder(int32 Id, bool bAlt)
+{
+	if (FHexHero* Hero = FindHeroMutable(Id); Hero && Hero->bAltOrder != bAlt)
+	{
+		Hero->bAltOrder = bAlt;
+		++MapRevision;
+	}
+}
+
+const FHexHero* UHexHeroes::FindFriendAt(const FHexHero& Hero, EHexPlanetLayer Layer, int32 Cell) const
+{
+	const FHexHero* Other = FindHeroAt(Layer, Cell);
+	return Other && Other->Id != Hero.Id && Other->Player == Hero.Player && Other->CastleId == 0 ? Other : nullptr;
+}
+
+bool UHexHeroes::ArrangeArmy(int32 FromHero, int32 FromSlot, int32 ToHero, int32 ToSlot, int32 Count, FString& OutMessage)
+{
+	// the guard of a mine or a mill (a key below 0, the Id of the site) and the hero of its owner that stands on it, as the developer asked on
+	// 2026-11-13 to leave creatures to guard a mine; no war machine is left there, as only stacks have slots
+	if (FromHero < 0 || ToHero < 0)
+	{
+		FHexSite* Site = Sites ? Sites->FindSiteMutable(-FMath::Min(FromHero, ToHero)) : nullptr;
+		FHexHero* Hero = FindHeroMutable(FMath::Max(FromHero, ToHero));
+		if (!Site || !Hero || FromHero == ToHero || Hero->Layer != Site->Layer || Hero->Cell != Site->Cell || Site->Owner != Hero->Player)
+		{
+			OutMessage = TEXT("Only the hero of its owner that stands on a mine leaves creatures there");
+			return false;
+		}
+		TArray<FHexStack>& FromArmy = FromHero < 0 ? Site->Guard : Hero->Army;
+		TArray<FHexStack>& ToArmy = ToHero < 0 ? Site->Guard : Hero->Army;
+		if (!UHexCastles::MoveBetween(FromArmy, FromSlot, ToArmy, ToSlot, Count, OutMessage))
+		{
+			return false;
+		}
+		++ListRevision;
+		++MapRevision;
+		return true;
+	}
+	FHexHero* From = FindHeroMutable(FromHero);
+	FHexHero* To = FindHeroMutable(ToHero);
+	if (!From || !To || !From->Army.IsValidIndex(FromSlot) || From->Army[FromSlot].Count <= 0)
+	{
+		OutMessage = TEXT("There is no such stack");
+		return false;
+	}
+	if (From != To)
+	{
+		// the two must stand side by side, one of them on the cell beside the other
+		const AHexPlanet* Planet = GetPlanet(From->Layer);
+		if (From->Player != To->Player || From->Layer != To->Layer || !Planet || !Planet->GetGrid().GetCells().IsValidIndex(From->Cell)
+			|| !Planet->GetGrid().GetCells()[From->Cell].Neighbors.Contains(To->Cell))
+		{
+			OutMessage = FString::Printf(TEXT("%s and %s do not stand side by side"), *From->Name, *To->Name);
+			return false;
+		}
+	}
+	// slot by slot, an empty one keeping its place
+	if (!UHexCastles::MoveBetween(From->Army, FromSlot, To->Army, ToSlot, Count, OutMessage))
+	{
+		return false;
+	}
+	++ListRevision;
+	++MapRevision;
+	if (Castles)
+	{
+		Castles->NoteChanged();
+	}
+	return true;
+}
+
+UHexHeroes::EOrder UHexHeroes::GetOrderAt(EHexPlanetLayer Layer, int32 Cell, const FHexHero* Under, bool bMouth, bool bAlt)
 {
 	const AHexPlanet* Planet = GetPlanet(Layer);
 	if (!IsPersonTurn() || !Planet || !Planet->GetGrid().GetCells().IsValidIndex(Cell))
@@ -1157,13 +1442,19 @@ UHexHeroes::EOrder UHexHeroes::GetOrderAt(EHexPlanetLayer Layer, int32 Cell, con
 	const FHexCastle* Castle = Castles && !bMouth ? (Under && Under->CastleId != 0 ? Castles->FindCastle(Under->CastleId) : Castles->FindCastleAt(Layer, Cell)) : nullptr;
 	if (Castle && !bHidden && Castle->Owner == Player)
 	{
-		// a click on a castle of the person chooses it, and the hero chosen outside it is sent into it with the right button
-		return Hero && Hero->CastleId != Castle->Id && !Hero->bWalking ? EOrder::Castle : EOrder::Choose;
+		// a click on a castle of the person chooses it, and the hero chosen outside it is sent into it with the right button, or pointed into it
+		// with Ctrl and sent by a second click
+		const bool bOutside = Hero && Hero->CastleId != Castle->Id && !Hero->bWalking;
+		return bOutside ? EOrder::Castle : EOrder::Choose;
 	}
 	if (Under && Under->Player == Player && (!Hero || Under->Id != Hero->Id))
 	{
+		// with Ctrl the hero chosen swaps places with it, as the developer asked on 2026-11-13, and the way to it shown once is walked to
+		// exchange the armies
 		int32 CastleCell = INDEX_NONE;
-		return Hero && FindSallyTarget(*Hero, Layer, Cell, CastleCell) == Under ? EOrder::Swap : EOrder::Choose;
+		const bool bFree = Hero && !Hero->bWalking && Under->CastleId == 0;
+		return Hero && FindSallyTarget(*Hero, Layer, Cell, CastleCell) == Under ? EOrder::Swap : bFree && bAlt ? EOrder::Exchange
+			: bFree && Hero->TargetCell == Under->Cell && Hero->TargetLayer == Under->Layer ? EOrder::Exchange : EOrder::Choose;
 	}
 	if (!Hero || Hero->bWalking || IsPlayerAi(Hero->Player) || (Cell == Hero->Cell && Layer == Hero->Layer && !bMouth))
 	{
@@ -1210,7 +1501,7 @@ UHexHeroes::EOrder UHexHeroes::GetOrderAt(EHexPlanetLayer Layer, int32 Cell, con
 		if (Castle)
 		{
 			// a castle a garrison or a hero defends is fought for
-			return !Castle->Garrison.IsEmpty() || Castles->FindGuard(*Castle) ? EOrder::Attack : EOrder::Castle;
+			return UHexCastles::HasCreatures(Castle->Garrison) || Castles->FindGuard(*Castle) ? EOrder::Attack : EOrder::Castle;
 		}
 		if (Sites && (Sites->FindBlockerAt(Layer, Cell) || Sites->FindPileAt(Layer, Cell)))
 		{
@@ -1556,8 +1847,10 @@ bool UHexHeroes::FindWay(const FHexHero& Hero, const HexHeroPath::FField& Ways, 
 	}
 	const int32 NumCells = Planet->GetGrid().GetCells().Num();
 	// what stands on ground its player has not explored is unknown, so the cell is only one the hero cannot stand on
-	bOutVisit = ((Sites && Sites->FindBlockerAt(TargetLayer, Target)) || (Castles && Castles->FindCastleAt(TargetLayer, Target)) || IsFoeAt(Hero.Player, TargetLayer, Target))
-		&& !IsHidden(Hero.Player, TargetLayer, Target);
+	const FHexCastle* OwnCastle = Castles ? Castles->FindCastleAt(TargetLayer, Target) : nullptr;
+	OwnCastle = OwnCastle && OwnCastle->Owner == Hero.Player && Hero.bAltOrder ? OwnCastle : nullptr;
+	bOutVisit = ((Sites && Sites->FindBlockerAt(TargetLayer, Target)) || (Castles && Castles->FindCastleAt(TargetLayer, Target)) || IsFoeAt(Hero.Player, TargetLayer, Target)
+		|| FindFriendAt(Hero, TargetLayer, Target)) && !IsHidden(Hero.Player, TargetLayer, Target);
 	TArray<int32> Nodes;
 	if (!bOutVisit)
 	{
@@ -1573,6 +1866,11 @@ bool UHexHeroes::FindWay(const FHexHero& Hero, const HexHeroPath::FField& Ways, 
 		if (GetSiteWayCost(Ways, TargetLayer, Target, &Best, Hero.Player) < 0.0f || !Ways.GetPath(Best, Nodes))
 		{
 			return false;
+		}
+		// sent with Ctrl to a castle of its own it only goes before its gate
+		if (OwnCastle)
+		{
+			bOutVisit = false;
 		}
 	}
 	// the cells in the order they are entered; a cell that comes again is the step through the entrance or exit there to the other layer
@@ -1713,15 +2011,76 @@ bool UHexHeroes::VisitSite(FHexHero& Hero, FString& OutMessage)
 	const FHexCastle* Castle = Castles ? Castles->FindCastleAt(Hero.Layer, SiteCell) : nullptr;
 	// into a castle by the cell of it beside the hero, at whichever of its gates the way ended
 	SiteCell = Castle ? GetCastleEntryCell(Hero.Layer, Hero.Cell, SiteCell) : SiteCell;
+	const FHexHero* Friend = Castle ? nullptr : FindFriendAt(Hero, Hero.Layer, SiteCell);
 	if (!Planet || !Sites || !Planet->GetGrid().GetCells().IsValidIndex(Hero.Cell) || !Planet->GetGrid().GetCells()[Hero.Cell].Neighbors.Contains(SiteCell)
-		|| (!Castle && !Sites->FindBlockerAt(Hero.Layer, SiteCell) && !IsFoeAt(Hero.Player, Hero.Layer, SiteCell)))
+		|| (!Castle && !Sites->FindBlockerAt(Hero.Layer, SiteCell) && !IsFoeAt(Hero.Player, Hero.Layer, SiteCell) && !Friend))
 	{
 		Hero.VisitCell = INDEX_NONE;
 		Hero.TargetCell = INDEX_NONE;
 		return false;
 	}
-	// a visit costs what a step onto that cell would, but going into a castle of its own costs nothing, as the developer asked on 2026-11-11
-	const float Cost = Castle && Castle->Owner == Hero.Player ? 0.0f : GetVisitCost(*Planet, Hero.Cell, SiteCell);
+	// a hero of its own: beside it they exchange their armies, and sent with Ctrl they swap places, for the step onto its cell
+	if (Friend)
+	{
+		const int32 FriendId = Friend->Id;
+		Hero.VisitCell = INDEX_NONE;
+		Hero.TargetCell = INDEX_NONE;
+		const bool bSwap = Hero.bAltOrder;
+		Hero.bAltOrder = false;
+		if (bSwap)
+		{
+			const float StepCost = GetVisitCost(*Planet, Hero.Cell, SiteCell);
+			if (!HexHeroPath::CanStep(StepCost, Hero.MovePoints, GetMaxMovePoints(Hero)))
+			{
+				Hero.bOutOfPoints = true;
+				OutMessage = FString::Printf(TEXT("%s has no points of movement left to swap places today"), *Hero.Name);
+				return false;
+			}
+			Hero.MovePoints = FMath::Max(Hero.MovePoints - StepCost, 0.0f);
+			FHexHero* Other = FindHeroMutable(FriendId);
+			const int32 Was = Hero.Cell;
+			const FVector3d FromHere = Hero.Position;
+			const FVector3d FromThere = Other->Position;
+			Hero.FromCell = Hero.Cell = SiteCell;
+			Other->FromCell = Other->Cell = Was;
+			Hero.Trail.Reset();
+			Hero.bPlaced = false;
+			Other->bPlaced = false;
+			Explore(Hero);
+			// each walks to the cell of the other where the person sees it, past each other on the right, as the developer asked on 2026-11-13
+			const UWorld* World = Surface ? Surface->GetWorld() : nullptr;
+			if (World && !FromHere.IsNearlyZero() && !FromThere.IsNearlyZero() && (IsCellSeen(Hero.Layer, Was) || IsCellSeen(Hero.Layer, SiteCell)))
+			{
+				const FVector3d Up = (FromHere + FromThere).GetSafeNormal();
+				const FVector3d Aside = FVector3d::CrossProduct(FromThere - FromHere, Up).GetSafeNormal() * FVector3d::Distance(FromHere, FromThere) * 0.22;
+				for (FHexHero* Each : {&Hero, Other})
+				{
+					const bool bFirst = Each == &Hero;
+					const FVector3d From = bFirst ? FromHere : FromThere;
+					const FVector3d To = bFirst ? FromThere : FromHere;
+					Each->GlideStart = World->GetTimeSeconds();
+					Each->GlideTime = Config->SiteWalkTime * 1.6f;
+					Each->bGliding = true;
+					Each->GlidePoints[0] = From;
+					Each->GlidePoints[1] = (From + To) * 0.5 + (bFirst ? Aside : -Aside);
+					Each->GlidePoints[2] = To;
+					Each->Facing = ProjectToGround(To - From, Up);
+				}
+			}
+			OutMessage = FString::Printf(TEXT("%s and %s swap places"), *Hero.Name, *Other->Name);
+		}
+		else if (!IsPlayerAi(Hero.Player))
+		{
+			OnArmyOpened.Broadcast(Hero.Id, FriendId);
+		}
+		++ListRevision;
+		++MapRevision;
+		return true;
+	}
+	// a visit costs what a step onto that cell would, but going into a castle of its own costs nothing, as the developer asked on 2026-11-11,
+	// and taking a mine whose guard was beaten has been paid for
+	const float Cost = (Castle && Castle->Owner == Hero.Player) || bNextVisitFree ? 0.0f : GetVisitCost(*Planet, Hero.Cell, SiteCell);
+	bNextVisitFree = false;
 	if (!HexHeroPath::CanStep(Cost, Hero.MovePoints, GetMaxMovePoints(Hero)))
 	{
 		Hero.bOutOfPoints = true;
@@ -1744,10 +2103,14 @@ bool UHexHeroes::VisitSite(FHexHero& Hero, FString& OutMessage)
 	Foe = Foe && Foe->Player != Hero.Player && Foe->CastleId == 0 ? Foe : nullptr;
 	const bool bDefended = Castle && Castle->Owner != Hero.Player
 		&& (Castles->FindGuard(*Castle) || Castle->Garrison.ContainsByPredicate([](const FHexStack& Each) { return Each.Count > 0; }));
-	if (Battles && (Neutral || Foe || bDefended))
+	// a mine of another player its guard holds, with no hero on it
+	const FHexSite* Guarded = !Castle && !Foe && !Neutral ? Sites->FindBlockerAt(Hero.Layer, SiteCell) : nullptr;
+	Guarded = Guarded && Guarded->Owner != Hero.Player && UHexCastles::HasCreatures(Guarded->Guard) && !FindHeroAt(Hero.Layer, SiteCell) ? Guarded : nullptr;
+	if (Battles && (Neutral || Foe || bDefended || Guarded))
 	{
 		FHexBattleRequest Request;
-		Request.Kind = Neutral ? EHexBattleKind::Neutral : Foe ? EHexBattleKind::Hero : EHexBattleKind::Castle;
+		Request.Kind = Neutral ? EHexBattleKind::Neutral : Foe ? EHexBattleKind::Hero : Guarded ? EHexBattleKind::Site : EHexBattleKind::Castle;
+		Request.SiteId = Guarded ? Guarded->Id : 0;
 		Request.Attacker = Hero.Id;
 		Request.DefenderHero = Foe ? Foe->Id : 0;
 		Request.NeutralId = Neutral ? Neutral->Id : 0;
@@ -2029,8 +2392,11 @@ bool UHexHeroes::StartNextStep(FHexHero& Hero)
 		// and out of the mouth on the other side, growing again, once the camera is there
 		if (const AHexPlanet* After = GetPlanet(Hero.Layer); bWalkedIn && After && World)
 		{
-			const FVector3d Mouth = GetMouth(*After);
-			const FVector3d Middle = After->GetGrid().GetCells()[Hero.Cell].Center * After->FindGroundRadius(Hero.Cell, After->GetGrid().GetCells()[Hero.Cell].Center);
+			// a layer not built yet has no mouth nor ground: the points are found once it is (PlaceHero)
+			Hero.bMouthGlidePending = !After->IsBuilt();
+			const FVector3d Mouth = Hero.bMouthGlidePending ? FVector3d::ZeroVector : GetMouth(*After);
+			const FVector3d Middle = Hero.bMouthGlidePending ? FVector3d::ZeroVector
+				: After->GetGrid().GetCells()[Hero.Cell].Center * After->FindGroundRadius(Hero.Cell, After->GetGrid().GetCells()[Hero.Cell].Center);
 			Hero.GlideStart = World->GetTimeSeconds() + double(Hero.WalkWait);
 			Hero.GlideTime = Config->EntranceWalkTime;
 			Hero.bGliding = true;
@@ -2254,12 +2620,54 @@ const FHexHero* UHexHeroes::FindSallyTarget(const FHexHero& Hero, EHexPlanetLaye
 	return nullptr;
 }
 
+const FHexNeutral* UHexHeroes::FindSallyNeutral(const FHexHero& Hero, EHexPlanetLayer Layer, int32 Cell, int32& OutCastleCell) const
+{
+	const FHexCastle* Castle = Castles && Hero.CastleId != 0 && Layer == Hero.Layer ? Castles->FindCastle(Hero.CastleId) : nullptr;
+	const AHexPlanet* Planet = Castle ? GetPlanet(Layer) : nullptr;
+	const FHexNeutral* Neutral = Planet && Neutrals && Planet->GetGrid().GetCells().IsValidIndex(Cell) ? Neutrals->FindAt(Layer, Cell) : nullptr;
+	if (!Neutral)
+	{
+		return nullptr;
+	}
+	for (const int32 Neighbor : Planet->GetGrid().GetCells()[Cell].Neighbors)
+	{
+		if (Castle->HasCell(Neighbor))
+		{
+			OutCastleCell = Neighbor;
+			return Neutral;
+		}
+	}
+	return nullptr;
+}
+
 bool UHexHeroes::Sally(FHexHero& Hero, int32 Cell, FString& OutMessage)
 {
 	int32 CastleCell = INDEX_NONE;
 	const FHexHero* Found = FindSallyTarget(Hero, Hero.Layer, Cell, CastleCell);
 	FHexHero* Other = Found ? FindHeroMutable(Found->Id) : nullptr;
 	const AHexPlanet* Planet = GetPlanet(Hero.Layer);
+	// a neutral stack beside the castle: fought there, the hero behind its walls, whatever points it has left
+	if (const FHexNeutral* Neutral = !Other && Planet ? FindSallyNeutral(Hero, Hero.Layer, Cell, CastleCell) : nullptr)
+	{
+		Hero.TargetCell = INDEX_NONE;
+		Hero.MovePoints = FMath::Max(Hero.MovePoints - GetVisitCost(*Planet, CastleCell, Cell), 0.0f);
+		FHexBattleRequest Request;
+		Request.Kind = EHexBattleKind::Castle;
+		Request.Attacker = 0;
+		Request.NeutralId = Neutral->Id;
+		Request.CastleId = Hero.CastleId;
+		Request.Layer = Hero.Layer;
+		Request.Cell = CastleCell;
+		FString Problem;
+		if (!Battles || !Battles->Begin(Request, Problem))
+		{
+			OutMessage = Problem.IsEmpty() ? FString(TEXT("there is nothing to fight")) : Problem;
+			return false;
+		}
+		++ListRevision;
+		++MapRevision;
+		return true;
+	}
 	if (!Other || !Planet)
 	{
 		return false;
@@ -2277,13 +2685,8 @@ bool UHexHeroes::Sally(FHexHero& Hero, int32 Cell, FString& OutMessage)
 	{
 		// of another player: this is the attack on the castle, as the developer decided on 2026-11-11, so the hero stays in it and that one
 		// attacks it, fought as a battle since 2026-11-12 (UHexBattles); the order costs what the step out would
+		// it needs no points, as it does not go out, as the developer asked on 2026-11-13: what the step out would cost is spent, as much as is left
 		const float Cost = GetVisitCost(*Planet, CastleCell, Cell);
-		if (!HexHeroPath::CanStep(Cost, Hero.MovePoints, GetMaxMovePoints(Hero)))
-		{
-			Hero.bOutOfPoints = true;
-			OutMessage = FString::Printf(TEXT("%s has no points of movement left for that today"), *Hero.Name);
-			return false;
-		}
 		Hero.MovePoints = FMath::Max(Hero.MovePoints - Cost, 0.0f);
 		FHexBattleRequest Request;
 		Request.Kind = EHexBattleKind::Castle;
@@ -2328,8 +2731,9 @@ bool UHexHeroes::Send(int32 Id, EHexPlanetLayer TargetLayer, int32 Cell, FString
 	Hero->TargetLayer = TargetLayer;
 	Hero->bSkipped = false;
 
-	// out of the castle it guards onto a hero beside it: one of its own swaps places with it, another attacks the castle
-	if (int32 CastleCell = INDEX_NONE; !Hero->bWalking && FindSallyTarget(*Hero, TargetLayer, Cell, CastleCell))
+	// out of the castle it guards onto a hero beside it: one of its own swaps places with it, another attacks the castle; onto a neutral stack
+	// beside it the stack attacks the castle too
+	if (int32 CastleCell = INDEX_NONE; !Hero->bWalking && (FindSallyTarget(*Hero, TargetLayer, Cell, CastleCell) || FindSallyNeutral(*Hero, TargetLayer, Cell, CastleCell)))
 	{
 		return Sally(*Hero, Cell, OutMessage);
 	}
@@ -2382,6 +2786,16 @@ bool UHexHeroes::Send(int32 Id, EHexPlanetLayer TargetLayer, int32 Cell, FString
 		return false;
 	}
 	Hero->VisitCell = bVisit ? Cell : INDEX_NONE;
+	if (const FHexCastle* Own = !bVisit && Hero->bAltOrder && Castles ? Castles->FindCastleAt(TargetLayer, Cell) : nullptr; Own && Own->Owner == Hero->Player)
+	{
+		Hero->bAltOrder = false;
+		if (Path.IsEmpty())
+		{
+			Hero->TargetCell = INDEX_NONE;
+			return false;
+		}
+		Hero->TargetCell = Path.Last();
+	}
 	// a site right beside the hero needs no way
 	if (bVisit && Path.IsEmpty() && !Hero->bWalking)
 	{
@@ -2542,6 +2956,16 @@ void UHexHeroes::PlaceHero(FHexHero& Hero)
 	const FHexCastle* Inside = Castles && Hero.CastleId != 0 ? Castles->FindCastle(Hero.CastleId) : nullptr;
 	FVector3d Yard;
 	FVector3d Walked = FVector3d::ZeroVector;
+	// out of the mouth of a layer that was not built when it went through, which it is now
+	if (Hero.bMouthGlidePending && Hero.bGliding)
+	{
+		const FVector3d Mouth = Planet->GetEntranceMouth(Hero.Cell);
+		const FVector3d Middle = Cells[Hero.Cell].Center * Planet->FindGroundRadius(Hero.Cell, Cells[Hero.Cell].Center);
+		Hero.GlidePoints[0] = Mouth;
+		Hero.GlidePoints[1] = (Mouth + Middle) * 0.5;
+		Hero.GlidePoints[2] = Middle;
+	}
+	Hero.bMouthGlidePending = false;
 	// one that walked into the mouth of an entrance stays there, small, until it goes through
 	Hero.bGliding = Hero.bGliding && !bStep && (Gliding < 1.0 || Hero.bEnteringMouth);
 	if (Hero.bGliding)
@@ -2580,7 +3004,7 @@ void UHexHeroes::PlaceHero(FHexHero& Hero)
 	Hero.Facing = ProjectToGround(Hero.Facing, Up);
 	if (Hero.Facing.IsNearlyZero())
 	{
-		Hero.Facing = GetRestFacing(Up, Hero.Id);
+		Hero.Facing = GetRestFacing(Up, Hero.Id, Hero.StartYaw);
 	}
 	Hero.bPlaced = true;
 }
@@ -2921,6 +3345,10 @@ void UHexHeroes::BuildRing(const AHexPlanet& Planet, FLayerMarks& Each, const FV
 
 void UHexHeroes::ClearMarks(EHexPlanetLayer Layer)
 {
+	if (AHexPlanet* Planet = GetPlanet(Layer))
+	{
+		Planet->SetTargetCells({}, FLinearColor::Red);
+	}
 	FLayerMarks& Each = GetMarks(Layer);
 	if (Each.Dots.IsValid() && Each.Dots->GetInstanceCount() > 0)
 	{
@@ -3031,9 +3459,14 @@ void UHexHeroes::UpdatePath()
 	AHexPlanet* Planets[NumPlanetLayers] = {GetPlanet(EHexPlanetLayer::Surface), GetPlanet(EHexPlanetLayer::Underground)};
 	AHexPlanet* Planet = Hero ? Planets[int32(Hero->Layer)] : nullptr;
 	const EHexPlanetLayer Presented = Planets[1] && Planets[1]->IsPresented() ? EHexPlanetLayer::Underground : EHexPlanetLayer::Surface;
-	// a hero that walks shows the rest of its way, one that stands the way to the cell it is pointed to, which may be of the other layer
+	// a hero that walks shows the rest of its way, one that stands the way to the cell it is pointed to, which may be of the other layer; one
+	// stopped on its way keeps that cell (Stop), so while it ends the step it is on the way on from where it stops shows already, and not only
+	// once it stands, as the developer asked on 2026-11-14 when the way vanished for half a second
+	const bool bStopping = Hero && Hero->bWalking && Hero->Route.IsEmpty() && !Hero->bEnterAtEnd && Hero->VisitCell == INDEX_NONE && Hero->TargetCell != INDEX_NONE
+		&& !(Hero->TargetCell == Hero->Cell && Hero->TargetLayer == Hero->Layer);
+	const bool bOnRoute = Hero && Hero->bWalking && !bStopping;
 	EHexPlanetLayer TargetLayer = Hero ? Hero->TargetLayer : EHexPlanetLayer::Surface;
-	if (Hero && Hero->bWalking)
+	if (bOnRoute)
 	{
 		TargetLayer = Hero->Layer;
 		WalkWay(*Hero, Hero->Route, [&TargetLayer](EHexPlanetLayer Layer, int32 From, int32 To, bool bThrough)
@@ -3044,15 +3477,18 @@ void UHexHeroes::UpdatePath()
 	}
 	const AHexPlanet* TargetPlanet = Planets[int32(TargetLayer)];
 	const bool bShow = Hero && Planet && Planet->IsBuilt() && Hero->bPlaced && TargetPlanet
-		&& (Hero->bWalking ? !Hero->Route.IsEmpty() || !Hero->Trail.IsEmpty() : TargetPlanet->GetGrid().GetCells().IsValidIndex(Hero->TargetCell));
-	const int32 Target = !bShow ? INDEX_NONE : !Hero->bWalking ? Hero->TargetCell : Hero->Route.IsEmpty() ? Hero->Cell : Hero->Route.Last();
-	const int32 RouteKey = bShow && Hero->bWalking ? Hero->Route.Num() : -1;
+		&& (bOnRoute ? !Hero->Route.IsEmpty() || !Hero->Trail.IsEmpty() : TargetPlanet->GetGrid().GetCells().IsValidIndex(Hero->TargetCell));
+	const int32 Target = !bShow ? INDEX_NONE : !bOnRoute ? Hero->TargetCell : Hero->Route.IsEmpty() ? Hero->Cell : Hero->Route.Last();
+	const int32 RouteKey = !bShow ? -1 : bOnRoute ? Hero->Route.Num() : bStopping ? -2 - Hero->Cell : -1;
 	const FVector3d Start = bShow && !Hero->bWalking ? Hero->Position : FVector3d::ZeroVector;
-	if (Target == ShownTarget && (!bShow || (TargetLayer == ShownTargetLayer && Presented == ShownLayer && Hero->Id == ShownHero && MapRevision == ShownRevision
-		&& Hero->MovePoints == ShownPoints && RouteKey == ShownRoute && Start.Equals(ShownStart, 0.01))))
+	// a layer built since, as the underground is when it is first shown, gets the marks of the way on it
+	const int32 Built = (Planets[0] && Planets[0]->IsBuilt() ? 1 : 0) | (Planets[1] && Planets[1]->IsBuilt() ? 2 : 0);
+	if (Target == ShownTarget && Built == ShownBuilt && (!bShow || (TargetLayer == ShownTargetLayer && Presented == ShownLayer && Hero->Id == ShownHero
+		&& MapRevision == ShownRevision && Hero->MovePoints == ShownPoints && RouteKey == ShownRoute && Start.Equals(ShownStart, 0.01))))
 	{
 		return;
 	}
+	ShownBuilt = Built;
 	ShownTarget = Target;
 	ShownTargetLayer = TargetLayer;
 	ShownLayer = Presented;
@@ -3212,7 +3648,7 @@ void UHexHeroes::UpdatePath()
 
 	TArray<int32> Path;
 	bool bVisit = false;
-	if (Hero->bWalking)
+	if (bOnRoute)
 	{
 		Path = Hero->Route;
 		bVisit = Hero->VisitCell != INDEX_NONE;
@@ -3236,6 +3672,21 @@ void UHexHeroes::UpdatePath()
 		}
 		HoverText = Other->Player == Hero->Player ? FString::Printf(TEXT("%s: click again to swap places with %s"), *Hero->Name, *Other->Name)
 			: FString::Printf(TEXT("%s: click again, and %s attacks the castle"), *Hero->Name, *Other->Name);
+		return;
+	}
+	else if (int32 NeutralCastleCell = INDEX_NONE; !Hero->bWalking && FindSallyNeutral(*Hero, TargetLayer, Hero->TargetCell, NeutralCastleCell))
+	{
+		// a neutral stack beside its castle, fought there behind its walls
+		if (FLayerMarks* Each = FindMarks(TargetLayer))
+		{
+			AddFlatMark(TargetLayer, Each->End.Get(), Hero->TargetCell, Config->PathEndRadius, Config->PathBlockedColor);
+		}
+		if (AHexPlanet* Outlining = Planets[int32(TargetLayer)])
+		{
+			const int32 SallyCell[] = {Hero->TargetCell};
+			Outlining->SetTargetCells(SallyCell, Config->PathTargetColor, Config->PathTargetWidthScale, Config->PathTargetOpacity);
+		}
+		HoverText = FString::Printf(TEXT("%s: click again to fight them from the castle, behind its walls"), *Hero->Name);
 		return;
 	}
 	else
@@ -3283,7 +3734,7 @@ void UHexHeroes::UpdatePath()
 	{
 		// a castle by the cell of it at the gate the way ends before
 		const int32 Before = Path.IsEmpty() ? Hero->Cell : Path.Last();
-		const int32 SiteCell = GetCastleEntryCell(TargetLayer, Before, Hero->bWalking ? Hero->VisitCell : Hero->TargetCell);
+		const int32 SiteCell = GetCastleEntryCell(TargetLayer, Before, bOnRoute ? Hero->VisitCell : Hero->TargetCell);
 		Costs.Add(GetVisitCost(*TargetPlanet, Before, SiteCell));
 		Path.Add(SiteCell);
 	}
@@ -3325,7 +3776,7 @@ void UHexHeroes::UpdatePath()
 		// the cell it stands on or steps onto, but not one of a castle it is in
 		if (!(Castles && Castles->FindCastleAt(Hero->Layer, Hero->Cell)))
 		{
-			const bool bEnd = Hero->bWalking && Path.IsEmpty();
+			const bool bEnd = bOnRoute && Path.IsEmpty();
 			AddFlatMark(Hero->Layer, bEnd ? Each->End.Get() : Each->Dots.Get(), Hero->Cell, bEnd ? Config->PathEndRadius : Config->PathDotRadius, Config->PathColor);
 		}
 	}
@@ -3347,12 +3798,86 @@ void UHexHeroes::UpdatePath()
 	const bool bUnknown = IsWayUnknown(*Hero, Path, TargetLayer, Path.Last());
 	float Total = 0.0f;
 	int32 Passes = 0;
+	// a way that ends in an attack or a visit of a castle ends at the edge of what it goes for, which is outlined: the hex of a hero or a
+	// neutral stack, the three hexes of a castle, as the developer asked on 2026-11-13 (it ran to a ring in the middle of the cell before)
+	TArray<int32> Outlined;
+	bool bOutlineFoe = false;
+	if (bVisit && !Path.IsEmpty())
+	{
+		if (const FHexCastle* Castle = Castles ? Castles->FindCastleAt(TargetLayer, Path.Last()) : nullptr)
+		{
+			Outlined = {Castle->Cells[0], Castle->Cells[1], Castle->Cells[2]};
+			bOutlineFoe = Castle->Owner != Hero->Player;
+		}
+		else if (IsFoeAt(Hero->Player, TargetLayer, Path.Last()))
+		{
+			Outlined = {Path.Last()};
+			bOutlineFoe = true;
+		}
+		else if (FindFriendAt(*Hero, TargetLayer, Path.Last()))
+		{
+			// a hero of its own it goes to, to exchange armies or swap places
+			Outlined = {Path.Last()};
+		}
+	}
+	// with Ctrl to a castle of its own the way ends before its gate, and the castle is outlined, as the developer asked on 2026-11-13
+	if (const FHexCastle* Own = !bVisit && Hero->bAltOrder && !Hero->bWalking && Castles ? Castles->FindCastleAt(TargetLayer, Hero->TargetCell) : nullptr;
+		Own && Own->Owner == Hero->Player && Planets[int32(TargetLayer)])
+	{
+		const int32 OwnCells[3] = {Own->Cells[0], Own->Cells[1], Own->Cells[2]};
+		Planets[int32(TargetLayer)]->SetTargetCells(OwnCells, Config->PathColor, Config->PathTargetWidthScale, Config->PathTargetOpacity);
+	}
+	const TArray<FVector3d>& GridCorners = TargetPlanet->GetGrid().GetCorners();
+	const TArray<FHexSphereCell>& TargetCells = TargetPlanet->GetGrid().GetCells();
+	// a point of a corner on the ground of a cell
+	const auto CornerPoint = [&](EHexPlanetLayer Layer, int32 OfCell, int32 Corner)
+	{
+		return GridCorners[Corner] * (GetGroundRadius(*Planets[int32(Layer)], OfCell) + Config->PathLift);
+	};
 	// the line starts at the node under the hero, or at the cell it steps onto
 	FVector3d Previous = GetMarkPoint(Hero->Layer, Hero->Cell);
 	int32 PreviousCell = Hero->Cell;
 	for (int32 Index = 0; Index < Path.Num(); ++Index)
 	{
 		const bool bLast = Index == Path.Num() - 1;
+		if (bLast && !Outlined.IsEmpty() && TargetCells.IsValidIndex(Path[Index]) && TargetCells.IsValidIndex(PreviousCell))
+		{
+			const EHexPlanetLayer Layer = Layers[Index];
+			const FLinearColor& Color = Days[Index] <= 1 ? Config->PathColor : Config->PathFarColor;
+			const FLinearColor& Edge = bOutlineFoe ? Config->PathTargetColor : Color;
+			Total += Costs[Index];
+			if (FLayerMarks* Each = FindMarks(Layer))
+			{
+				// the line to the middle of the side the two cells share
+				const FHexSphereCell& Into = TargetCells[Path[Index]];
+				FVector3d Side = FVector3d::ZeroVector;
+				int32 Shared = 0;
+				for (const int32 Corner : TargetCells[PreviousCell].Corners)
+				{
+					if (Into.Corners.Contains(Corner))
+					{
+						Side += GridCorners[Corner];
+						++Shared;
+					}
+				}
+				const FVector3d Point = Shared == 2 ? Side.GetSafeNormal() * (GetGroundRadius(*Planets[int32(Layer)], PreviousCell) + Config->PathLift) : GetMarkPoint(Layer, Path[Index]);
+				if (FVector3d::DistSquared(Point, Previous) > 1.0)
+				{
+					AddLine(Layer, *Each, Previous, PreviousCell, Point, PreviousCell, Color);
+				}
+				// the outline of the cells, on their relief, as the cursor outlines a cell
+				if (AHexPlanet* Outlining = Planets[int32(Layer)])
+				{
+					Outlining->SetTargetCells(Outlined, Edge, Config->PathTargetWidthScale, Config->PathTargetOpacity);
+				}
+				if (Layer == Presented && Days[Index] > 1)
+				{
+					PathLabels.Add({Point, Days[Index], true, bUnknown ? FString::Printf(TEXT("%d+ days"), Days[Index]) : FString()});
+				}
+			}
+			PreviousCell = Path[Index];
+			continue;
+		}
 		const FLinearColor& Color = Days[Index] <= 1 ? Config->PathColor : Config->PathFarColor;
 		const EHexPlanetLayer Layer = Layers[Index];
 		Total += Costs[Index];
@@ -3360,6 +3885,14 @@ void UHexHeroes::UpdatePath()
 		// the way into a castle ends on the place of its hero in the yard, through the gate nearest, as the developer asked on 2026-11-11
 		// (the mark lay on the middle of the cell of the castle that was clicked before)
 		const FHexCastle* Entered = bLast && bVisit && Castles ? Castles->FindCastleAt(Layer, Path[Index]) : nullptr;
+		// through an entrance: to its mouth and a hoop in it on the layer the way leaves, and a hoop in the mouth and from it to the middle of
+		// the cell on the layer it comes to, each on its layer while that is built, so an underground never shown leaves the hoop on the
+		// surface, which it took away with it until 2026-11-14
+		if (Through[Index])
+		{
+			AddPortal(Index > 0 ? Layers[Index - 1] : Hero->Layer, Path[Index], true, Color);
+			AddPortal(Layer, Path[Index], false, Color);
+		}
 		FVector3d Gate;
 		FVector3d Yard;
 		if (FLayerMarks* Inside = Entered && Castles->FindGate(*Entered, Previous, Gate, Yard) ? FindMarks(Layer) : nullptr)
@@ -3378,15 +3911,8 @@ void UHexHeroes::UpdatePath()
 		{
 			const FVector3d Point = GetMarkPoint(Layer, Path[Index]);
 			// the line from the point before, lying on the ground between them; through an entrance or exit the way goes on from the same
-			// cell of the other layer, which gets a mark of its own
-			if (Through[Index])
-			{
-				// through an entrance: to its mouth and a hoop in it on the layer the way leaves, and a hoop in the mouth and from it to the
-				// middle of the cell on the layer it comes to
-				AddPortal(Index > 0 ? Layers[Index - 1] : Hero->Layer, Path[Index], true, Color);
-				AddPortal(Layer, Path[Index], false, Color);
-			}
-			else if (FVector3d::DistSquared(Point, Previous) > 1.0)
+			// cell of the other layer, which has its portal (above)
+			if (!Through[Index] && FVector3d::DistSquared(Point, Previous) > 1.0)
 			{
 				AddLine(Layer, *Each, Previous, PreviousCell, Point, Path[Index], Color);
 			}
@@ -3543,6 +4069,10 @@ void UHexHeroes::Update(float DeltaTime, const FVector3d* ViewPoint)
 	if (Neutrals)
 	{
 		Neutrals->Update();
+	}
+	if (Sites)
+	{
+		Sites->UpdateGuards(*this);
 	}
 	// while a battle is fought on its field the heroes and the game wait; the result of one that ended is applied here, never during the
 	// step of the hero that set it off
@@ -4167,9 +4697,19 @@ bool UHexHeroes::GetLights(EHexPlanetLayer Layer, const FVector3d& Focus, TArray
 	for (const FHexHero& Hero : Heroes)
 	{
 		// a hero under the fog of war lights nothing the person sees
-		if (Hero.Layer == Layer && Hero.bPlaced && !(IsShroudOn() && IsHidden(ViewPlayer, Hero.Layer, Hero.Cell)))
+		if (Hero.Layer != Layer || (IsShroudOn() && IsHidden(ViewPlayer, Hero.Layer, Hero.Cell)))
+		{
+			continue;
+		}
+		// one made anew, as the editor does as it drags it, lights from the middle of its cell until it is placed, as the land around it went
+		// into the shade for that frame, which flashed over the sea
+		if (Hero.bPlaced)
 		{
 			OutLights.Add({Hero.Position, double(Share) * GetMaxMovePoints(Hero)});
+		}
+		else if (const AHexPlanet* Planet = GetPlanet(Layer); Planet && Planet->IsBuilt() && Planet->GetGrid().GetCells().IsValidIndex(Hero.Cell))
+		{
+			OutLights.Add({Planet->GetGrid().GetCells()[Hero.Cell].Center * Planet->GetCellTopRadius(Hero.Cell), double(Share) * GetMaxMovePoints(Hero)});
 		}
 	}
 	OutLights.Sort([&Focus](const FHexHeroLight& A, const FHexHeroLight& B) { return FVector3d::DistSquared(A.Point, Focus) < FVector3d::DistSquared(B.Point, Focus); });
@@ -4240,7 +4780,7 @@ namespace
 		UHexHeroes* Heroes = Planet ? Planet->GetHeroes() : nullptr;
 		if (!Heroes || !Heroes->GetConfig() || Args.IsEmpty())
 		{
-			UE_LOG(LogHexHero, Warning, TEXT("hex.Hero <list|play|stop|add <Cell> [Class] [Player]|remove <Hero>|select <Hero>|next|click <Cell>|target <Cell|off>|go|send <Cell> [Hero]|ways <Cell> [Rings]|ai <Player> [on|off]|points <Amount> [Hero]|skip [Hero]|endturn|restart>, on a built planet; a hero is its Id or its name"));
+			UE_LOG(LogHexHero, Warning, TEXT("hex.Hero <list|play|stop|add <Cell> [Class] [Player]|remove <Hero>|select <Hero>|next|click <Cell>|target <Cell|off> [other]|go|send <Cell> [Hero]|ways <Cell> [Rings]|ai <Player> [on|off]|points <Amount> [Hero]|skip [Hero]|ctrl [on|off]|arrange <Hero> <Slot> <Hero> <Slot> [Count]|endturn|restart>, on a built planet; a hero is its Id or its name"));
 			return;
 		}
 		const UHexHeroConfig* Config = Heroes->GetConfig();
@@ -4327,13 +4867,17 @@ namespace
 		else if (Action.Equals(TEXT("click"), ESearchCase::IgnoreCase) && Args.Num() >= 2)
 		{
 			// what a left click on a cell of the layer shown does
-			static const TCHAR* Names[] = {TEXT("nothing"), TEXT("another hero is chosen"), TEXT("the way shows"), TEXT("the hero sets out"), TEXT("the hero stops")};
+			static const TCHAR* Names[] = {TEXT("nothing"), TEXT("another hero is chosen"), TEXT("the way shows"), TEXT("the hero sets out"), TEXT("the hero stops"), TEXT("its army opens")};
 			const UHexHeroes::EClick Result = Heroes->Click(Layer, ParseHeroCell(Args[1], *Planet, World), nullptr, Message);
 			UE_LOG(LogHexHero, Log, TEXT("hex.Hero: click, %s%s%s"), Names[int32(Result)], Message.IsEmpty() ? TEXT("") : TEXT(": "), *Message);
 		}
 		else if (Action.Equals(TEXT("target"), ESearchCase::IgnoreCase) && Args.Num() >= 2)
 		{
-			Heroes->SetTarget(Heroes->GetSelectedId(), Layer, Args[1].Equals(TEXT("off"), ESearchCase::IgnoreCase) ? INDEX_NONE : ParseHeroCell(Args[1], *Planet, World));
+			// with other, the cell of the other layer than the hero is on, as a click with Ctrl on the mouth of an entrance points it
+			const FHexHero* Chosen = Heroes->GetSelected();
+			const bool bOther = Chosen && Args.IsValidIndex(2) && Args[2].Equals(TEXT("other"), ESearchCase::IgnoreCase);
+			Heroes->SetTarget(Heroes->GetSelectedId(), bOther ? GetOtherLayer(Chosen->Layer) : Layer,
+				Args[1].Equals(TEXT("off"), ESearchCase::IgnoreCase) ? INDEX_NONE : ParseHeroCell(Args[1], *Planet, World));
 		}
 		else if (Action.Equals(TEXT("go"), ESearchCase::IgnoreCase))
 		{
@@ -4368,6 +4912,29 @@ namespace
 			}
 			UE_LOG(LogHexHero, Log, TEXT("hex.Hero: %d heroes start with the armies they have now"), Ids.Num());
 		}
+		else if (Action.Equals(TEXT("ctrl"), ESearchCase::IgnoreCase))
+		{
+			// the next order of the hero chosen as given with Ctrl: onto a hero of its own it swaps places, onto a castle of its own it stops before it
+			if (const FHexHero* Hero = Heroes->GetSelected())
+			{
+				Heroes->SetAltOrder(Hero->Id, Args.Num() < 2 || !Args[1].Equals(TEXT("off"), ESearchCase::IgnoreCase));
+			}
+		}
+		else if (Action.Equals(TEXT("arrange"), ESearchCase::IgnoreCase) && Args.Num() >= 5)
+		{
+			// a stack moved between slots of a hero, or to another beside it: all of it, or Count creatures
+			// a hero by its Id or name, or the guard of a site as minus its Id
+			const auto KeyOf = [&](const FString& Text)
+			{
+				const FHexHero* Hero = Text.StartsWith(TEXT("-")) ? nullptr : Heroes->FindHeroByText(Text);
+				return Hero ? Hero->Id : Text.StartsWith(TEXT("-")) ? FCString::Atoi(*Text) : 0;
+			};
+			const int32 From = KeyOf(Args[1]);
+			const int32 To = KeyOf(Args[3]);
+			FString Problem;
+			const bool bDone = From != 0 && To != 0 && Heroes->ArrangeArmy(From, FCString::Atoi(*Args[2]), To, FCString::Atoi(*Args[4]), Args.Num() >= 6 ? FCString::Atoi(*Args[5]) : 0, Problem);
+			UE_LOG(LogHexHero, Log, TEXT("hex.Hero arrange: %s"), bDone ? TEXT("done") : *Problem);
+		}
 		else if (Action.Equals(TEXT("skip"), ESearchCase::IgnoreCase))
 		{
 			const FHexHero* Hero = Args.Num() >= 2 ? Heroes->FindHeroByText(Args[1]) : Heroes->GetSelected();
@@ -4400,6 +4967,6 @@ namespace
 	}
 
 	FAutoConsoleCommandWithWorldAndArgs HeroCommand(TEXT("hex.Hero"),
-		TEXT("Drives the heroes of the planet: list, play and stop (the game), add <Cell> [Class] [Player] on the layer shown, remove <Hero>, select <Hero>, next, click <Cell> (as the left button), target <Cell|off> and go (as a click and Space), send <Cell> [Hero], through <Cell> [Hero] (as a click on the mouth of the entrance before that cell), ways <Cell> [Rings] (logs the way of the hero chosen to each cell around one, or why it has none), ai <Player> [on|off] (the game moves the heroes of a player by itself), points <Amount> [Hero] (more points of movement for the hero chosen or named), skip [Hero] (leaves it for today), endturn, restart. A hero is its Id or its name; a cell is its number, focus for the one the camera looks at, or focus:<Steps>[:<Side>] for one that many steps from it."),
+		TEXT("Drives the heroes of the planet: list, play and stop (the game), add <Cell> [Class] [Player] on the layer shown, remove <Hero>, select <Hero>, next, click <Cell> (as the left button), target <Cell|off> [other] (other: the cell of the other layer) and go (as a click and Space), send <Cell> [Hero], through <Cell> [Hero] (as a click on the mouth of the entrance before that cell), ways <Cell> [Rings] (logs the way of the hero chosen to each cell around one, or why it has none), ai <Player> [on|off] (the game moves the heroes of a player by itself), points <Amount> [Hero] (more points of movement for the hero chosen or named), skip [Hero] (leaves it for today), endturn, restart. A hero is its Id or its name; a cell is its number, focus for the one the camera looks at, or focus:<Steps>[:<Side>] for one that many steps from it."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&RunHeroCommand));
 }

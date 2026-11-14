@@ -63,6 +63,17 @@ enum class EHexPaintTool : uint8
 	Neutral,
 };
 
+/** What a click does in the tabs of the heroes, mines, castles and neutrals, as the developer asked on 2026-11-13 to move, turn and take away
+ *  anything placed: Place puts what is chosen (Ctrl takes away), Move drags the one pressed to the cell released, Turn turns the one clicked
+ *  by PaintPieceTurn degrees (back with Ctrl) and Remove takes it away, each a step of Undo */
+enum class EHexPieceAction : uint8
+{
+	Place,
+	Move,
+	Turn,
+	Remove,
+};
+
 /** What a click of the brush in relief mode does to the mountains and hills under it, once per cell and stroke */
 enum class EHexReliefTool : uint8
 {
@@ -386,7 +397,12 @@ public:
 
 	/** Returns true while a click puts a hero of the class and player chosen on a cell of the layer painted; Ctrl takes one away */
 	bool IsPlacingHeroes() const { return Tool == EHexPaintTool::Hero; }
-	void SetHeroTool() { SetTool(EHexPaintTool::Hero, GetHeroesTab()); }
+	void SetHeroTool() { SetTool(EHexPaintTool::Hero, GetHeroesTab()); PieceAction = EHexPieceAction::Place; }
+
+	/** What a click does to the hero, mine, castle or neutral stack of the tool chosen, and whether that tool is one of those */
+	EHexPieceAction GetPieceAction() const { return PieceAction; }
+	void SetPieceAction(EHexPieceAction InAction) { PieceAction = InAction; }
+	bool IsPieceTool() const { return Tool == EHexPaintTool::Hero || Tool == EHexPaintTool::Site || Tool == EHexPaintTool::Castle || Tool == EHexPaintTool::Neutral; }
 
 	/** Returns the tab of the heroes of the layer painted */
 	EHexPaintTab GetHeroesTab() const { return Target == EHexPlanetLayer::Underground ? EHexPaintTab::CaveHeroes : EHexPaintTab::Heroes; }
@@ -403,7 +419,7 @@ public:
 
 	/** Returns true while a click puts a mine or a pile of the kind chosen on a cell of the layer painted; Ctrl takes one away */
 	bool IsPlacingSites() const { return Tool == EHexPaintTool::Site; }
-	void SetSiteTool() { SetTool(EHexPaintTool::Site, GetSitesTab()); }
+	void SetSiteTool() { SetTool(EHexPaintTool::Site, GetSitesTab()); PieceAction = EHexPieceAction::Place; }
 	EHexPaintTab GetSitesTab() const { return Target == EHexPlanetLayer::Underground ? EHexPaintTab::CaveSites : EHexPaintTab::Sites; }
 
 	/** Scatters the sites over both layers again in place of all there are (UHexSites::Generate), each time another layout, or takes them
@@ -412,7 +428,7 @@ public:
 
 	/** Returns true while the brush places castles, of the faction and for the player chosen, -1 for a castle of nobody */
 	bool IsPlacingCastles() const { return Tool == EHexPaintTool::Castle; }
-	void SetCastleTool() { SetTool(EHexPaintTool::Castle, Target == EHexPlanetLayer::Underground ? EHexPaintTab::CaveCastles : EHexPaintTab::Castles); }
+	void SetCastleTool() { SetTool(EHexPaintTool::Castle, Target == EHexPlanetLayer::Underground ? EHexPaintTab::CaveCastles : EHexPaintTab::Castles); PieceAction = EHexPieceAction::Place; }
 	int32 GetCastleFaction() const { return CastleFaction; }
 	void SetCastleFaction(int32 InFaction) { CastleFaction = FMath::Max(InFaction, 0); }
 	int32 GetCastleOwner() const { return CastleOwner; }
@@ -421,7 +437,7 @@ public:
 	/** Returns true while the brush places neutral stacks, and what it places: a creature of a faction by its level from 0, upgraded or not,
 	 *  so many of it */
 	bool IsPlacingNeutrals() const { return Tool == EHexPaintTool::Neutral; }
-	void SetNeutralTool() { SetTool(EHexPaintTool::Neutral, Target == EHexPlanetLayer::Underground ? EHexPaintTab::CaveNeutrals : EHexPaintTab::Neutrals); }
+	void SetNeutralTool() { SetTool(EHexPaintTool::Neutral, Target == EHexPlanetLayer::Underground ? EHexPaintTab::CaveNeutrals : EHexPaintTab::Neutrals); PieceAction = EHexPieceAction::Place; }
 	int32 GetNeutralFaction() const { return NeutralFaction; }
 	void SetNeutralFaction(int32 InFaction) { NeutralFaction = FMath::Max(InFaction, 0); }
 	int32 GetNeutralLevel() const { return NeutralLevel; }
@@ -573,6 +589,10 @@ private:
 	int32 ObjectDensity = 3;
 	bool bPlacingByHand = false;
 	EHexPlacedTool PlacedTool = EHexPlacedTool::Place;
+	EHexPieceAction PieceAction = EHexPieceAction::Place;
+
+	/** The cell a stroke of Move pressed on, whose hero, mine, castle or stack goes to the cell it is released on, INDEX_NONE for none */
+	int32 MoveFrom = INDEX_NONE;
 
 	/** The object that a stroke of Move drags, taken out of its cell while it is held and shown apart (UHexPlanetObjects::SetDragPreview), and the
 	 *  cell it would be put down on, INDEX_NONE while none is held */
@@ -676,6 +696,16 @@ private:
 	void PaintSite(int32 Cell);
 	void PaintCastle(int32 Cell);
 	void PaintNeutral(int32 Cell);
+
+	/** Whether a click of the tabs of the pieces takes away what it clicks: Remove, or Place with Ctrl */
+	bool IsRemovingPiece() const { return IsBackwards() || PieceAction == EHexPieceAction::Remove; }
+
+	/** Moves the hero, mine, castle or stack of the tool chosen from a cell to another, or turns the one on a cell by PaintPieceTurn, as part of
+	 *  the stroke; returns whether it moved, and says on the screen why not unless bQuiet. A stroke of Move moves it while the button is held,
+	 *  cell by cell, as the developer asked on 2026-11-13, so it shows where it goes; a cell it may not stand on leaves it where it was */
+	bool MovePiece(int32 From, int32 To, bool bQuiet = false);
+	FString MoveProblem;
+	void TurnPiece(int32 Cell);
 
 	/** Makes the stroke of the carving brush the passage along the shortest way from where it began to a cell */
 	void PaintCarve(int32 Cell);

@@ -1066,6 +1066,14 @@ public:
 	UPROPERTY(EditAnywhere, Category="Highlight", meta=(ClampMin=0, ClampMax=1))
 	float PlayMarkOpacity = 0.45f;
 
+	/** The second layer of an outline, the neighbors the wireframe outlines or the end of a way (AHexPlanet::SetTargetCells, which gives the
+	 *  materials the values of DA_HexHeroes then): how many times as wide as the first it is and how much it covers */
+	UPROPERTY(EditAnywhere, Category="Highlight", meta=(ClampMin=0.1, ClampMax=4))
+	float SecondaryMarkScale = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Highlight", meta=(ClampMin=0, ClampMax=1))
+	float SecondaryMarkOpacity = 1.0f;
+
 	/** While the game is played the cells the hero chosen reaches today show, as the developer asked on 2026-11-12 (AHexPlanet::SetReach,
 	 *  MARK_CODE): a line along their edge, in this color, as wide as this share of a cell and at least so many pixels, covering so much
 	 *  of the ground and glowing by so much of its color */
@@ -1137,6 +1145,10 @@ public:
 
 	UPROPERTY(EditAnywhere, Category="Painting", meta=(ClampMin=1, ClampMax=180))
 	float PaintObjectTurn = 30.0f;
+
+	/** How many degrees Turn of the tabs of the heroes, mines, castles and neutrals turns what it clicks (EHexPieceAction::Turn), back with Ctrl */
+	UPROPERTY(EditAnywhere, Category="Painting", meta=(ClampMin=1, ClampMax=180))
+	int32 PaintPieceTurn = 30;
 
 	UPROPERTY(EditAnywhere, Category="Painting", meta=(ClampMin=1.01))
 	float PaintObjectScale = 1.15f;

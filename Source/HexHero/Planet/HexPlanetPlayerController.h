@@ -33,6 +33,9 @@ class AHexPlanetPlayerController : public APlayerController
 	/** Debug panel with the cell under the cursor */
 	TSharedPtr<SHexHoverInfo> HoverInfo;
 
+	/** The panel at the cursor while the game is played (UHexHeroes::GetMapTip) */
+	TSharedPtr<class SHexMapTip> MapTip;
+
 	/** Legend of the keys */
 	TSharedPtr<SHexDebugOverlay> DebugOverlay;
 
@@ -56,6 +59,9 @@ class AHexPlanetPlayerController : public APlayerController
 
 	/** Panel of the castle a person looks into, at the right; a click outside it closes it */
 	TSharedPtr<SHexCastlePanel> CastlePanel;
+
+	/** Shows the army of a hero of the person, and of another it met, in the panel of the castles (UHexHeroes::OnArmyOpened) */
+	void OnArmyOpened(int32 HeroId, int32 OtherId);
 
 	/** The buttons Edit and Play at the top left */
 	TSharedPtr<SHexModeBar> ModeBar;
@@ -177,6 +183,15 @@ public:
 
 	/** A click of the button that turns the camera, while the game is played: the hero chosen is sent to the cell under the cursor at once */
 	void OrderGame();
+
+	/** The right button on a cell, or the left with bClick, as the mouse would give them there, with Ctrl held for bCtrl (hex.Order) */
+	void OrderAt(int32 Cell, bool bClick, bool bCtrl = false);
+
+	/** Whether Ctrl is held for an order, or hex.Order gives it with ctrl */
+	bool IsOrderCtrlDown() const;
+
+	/** Set by hex.Order with ctrl for the order it gives */
+	bool bOrderCtrl = false;
 
 	/** Brings the camera to the hero chosen where it was just sent on the layer that is not shown, as a cell of the layer shown may be
 	 *  clicked for a hero on the other, whose way goes through an entrance or exit */

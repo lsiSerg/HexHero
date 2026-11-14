@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "HexBattles.h"
+#include "HexSites.h"
+#include "HexSiteConfig.h"
 #include "HexBattleConfig.h"
 #include "HexBiomeConfig.h"
 #include "HexCastles.h"
@@ -34,7 +36,9 @@ bool UHexBattles::Begin(const FHexBattleRequest& InRequest, FString& OutMessage)
 {
 	UHexCastles* Castles = Heroes ? Heroes->GetCastles() : nullptr;
 	FHexHero* Attacker = Heroes ? Heroes->FindHeroMutable(InRequest.Attacker) : nullptr;
-	if (!Attacker || !Castles || !Config)
+	// a neutral stack beside a castle the hero in it sent out onto, which attacks the castle (UHexHeroes::Sally)
+	const FHexNeutral* NeutralAttacker = !Attacker && InRequest.Kind == EHexBattleKind::Castle && Heroes && Heroes->GetNeutrals() ? Heroes->GetNeutrals()->Find(InRequest.NeutralId) : nullptr;
+	if ((!Attacker && !NeutralAttacker) || !Castles || !Config)
 	{
 		return false;
 	}
@@ -59,8 +63,21 @@ bool UHexBattles::Begin(const FHexBattleRequest& InRequest, FString& OutMessage)
 		return Side;
 	};
 	FHexBattleSetup Setup;
-	Setup.Sides[0] = MakeSide(*Attacker);
+	if (Attacker)
+	{
+		Setup.Sides[0] = MakeSide(*Attacker);
+	}
+	else
+	{
+		FHexBattleSideSetup& Side = Setup.Sides[0];
+		Side.Player = -1;
+		Side.Stacks = {NeutralAttacker->Stack};
+		Side.bBySlots = false;
+		Side.bAi = true;
+		Side.Name = FString::Printf(TEXT("%s %s"), *UHexNeutrals::DescribeCount(NeutralAttacker->Stack.Count), *UHexNeutrals::Plural(Heroes->GetNeutrals()->GetCreatureName(NeutralAttacker->Stack)).ToLower());
+	}
 	GuardSlots = 0;
+	bGuardAlone = false;
 	switch (InRequest.Kind)
 	{
 	case EHexBattleKind::Hero:
@@ -71,6 +88,8 @@ bool UHexBattles::Begin(const FHexBattleRequest& InRequest, FString& OutMessage)
 				return false;
 			}
 			Setup.Sides[1] = MakeSide(*Defender);
+			// its catapult, on an open field too, as the developer asked on 2026-11-14
+			Setup.Siege.bDefenderCatapult = Defender->bCatapult;
 		}
 		break;
 	case EHexBattleKind::Castle:
@@ -87,14 +106,28 @@ bool UHexBattles::Begin(const FHexBattleRequest& InRequest, FString& OutMessage)
 				Side = MakeSide(*Guard);
 				GuardSlots = Guard->Army.Num();
 			}
+			// the guard in its slots, and the garrison in its own behind them
+			while (Side.Stacks.Num() < NumArmySlots && Guard)
+			{
+				Side.Stacks.Add(FHexStack{0, 0, false, 0});
+			}
 			Side.Player = Castle->Owner;
 			Side.bAi = Castle->Owner < 0 || !Heroes->IsPlaying() || Heroes->IsPlayerAi(Castle->Owner);
-			Side.Stacks.Append(Castle->Garrison);
+			// the hero in the castle fights for it behind its walls with its own army, and the garrison only once no hero holds it, as the
+			// developer asked on 2026-11-13 (both fought together before); a guard without an army leaves it to the garrison
+			bGuardAlone = Guard && UHexCastles::HasCreatures(Guard->Army);
+			if (!bGuardAlone)
+			{
+				GuardSlots = Guard ? NumArmySlots : 0;
+				Side.Stacks.Append(Castle->Garrison);
+			}
 			Side.DefenseFactor = Config->bCastleDefenseFactor ? Castles->GetFortFactor(*Castle) : 1.0f;
 			// behind its wall, as strong as its fort, with towers and their shooters, as the developer asked on 2026-11-12
 			const int32 Fort = FMath::Clamp(Castles->GetLevel(*Castle, EHexBuildingType::Fort), 0, 3);
 			const auto ByFort = [Fort](const TArray<int32>& Values) { return Values.IsValidIndex(Fort) ? Values[Fort] : 0; };
 			FHexBattleSiege& Siege = Setup.Siege;
+			// the catapult of the castle, else that of the hero that holds it
+			Siege.bDefenderCatapult = Castle->bCatapult || (Guard && Guard->bCatapult);
 			Siege.bWalls = Fort >= 1;
 			Siege.WallHealth = ByFort(Config->WallHealthByFort);
 			Siege.GateHealth = ByFort(Config->GateHealthByFort);
@@ -126,8 +159,24 @@ bool UHexBattles::Begin(const FHexBattleRequest& InRequest, FString& OutMessage)
 			FHexBattleSideSetup& Side = Setup.Sides[1];
 			Side.Player = -1;
 			Side.Stacks = {Neutral->Stack};
+			Side.bBySlots = false;
 			Side.bAi = true;
 			Side.Name = FString::Printf(TEXT("%s %s"), *UHexNeutrals::DescribeCount(Neutral->Stack.Count), *UHexNeutrals::Plural(Heroes->GetNeutrals()->GetCreatureName(Neutral->Stack)).ToLower());
+		}
+		break;
+	case EHexBattleKind::Site:
+		{
+			// the guard of a mine, in its slots
+			const FHexSite* Site = Heroes->GetSites() ? Heroes->GetSites()->FindSite(InRequest.SiteId) : nullptr;
+			if (!Site)
+			{
+				return false;
+			}
+			FHexBattleSideSetup& Side = Setup.Sides[1];
+			Side.Player = Site->Owner;
+			Side.Stacks = Site->Guard;
+			Side.bAi = Site->Owner < 0 || !Heroes->IsPlaying() || Heroes->IsPlayerAi(Site->Owner);
+			Side.Name = FString::Printf(TEXT("Guards of the %s"), *Heroes->GetSites()->GetConfig()->Kinds[Site->Kind].DisplayName.ToLower());
 		}
 		break;
 	}
@@ -139,11 +188,11 @@ bool UHexBattles::Begin(const FHexBattleRequest& InRequest, FString& OutMessage)
 	}
 	if (!HasArmy(Setup.Sides[0]))
 	{
-		OutMessage = FString::Printf(TEXT("%s has no army to fight with"), *Attacker->Name);
+		OutMessage = FString::Printf(TEXT("%s has no army to fight with"), Attacker ? *Attacker->Name : TEXT("It"));
 		return false;
 	}
-	// the catapult of the attacker, at the walls of a castle
-	Setup.Siege.bCatapult = Attacker->bCatapult && Setup.Siege.bWalls;
+	// the catapult of the attacker, at the walls of a castle and on an open field alike, as the developer asked on 2026-11-14
+	Setup.Siege.bCatapult = Attacker && Attacker->bCatapult;
 	Setup.Siege.bMoat = Setup.Siege.bWalls && Config->bSiegeMoat;
 	Request = InRequest;
 	Setup.Seed = HashCombine(HashCombine(GetTypeHash(Heroes->GetDay()), GetTypeHash(InRequest.Cell)), HashCombine(GetTypeHash(InRequest.Attacker), GetTypeHash(++Count)));
@@ -287,13 +336,12 @@ void UHexBattles::Apply()
 		const TArray<FHexStack>& Stacks = Battle.GetSide(Side).Stacks;
 		for (int32 Slot = From; Slot < FMath::Min(To, Stacks.Num()); ++Slot)
 		{
+			// slot by slot, an empty or emptied one keeping its place
 			FHexStack Stack = Stacks[Slot];
-			Stack.Count = Battle.GetSlotCount(Side, Slot);
-			if (Stack.Count > 0)
-			{
-				Left.Add(Stack);
-			}
+			Stack.Count = FMath::Max(Battle.GetSlotCount(Side, Slot), 0);
+			Left.Add(Stack);
 		}
+		UHexCastles::TrimArmy(Left);
 		return Left;
 	};
 	const auto Reward = [&](FHexHero& Hero, int32 Side)
@@ -307,10 +355,17 @@ void UHexBattles::Apply()
 	{
 		Reward(*Attacker, 0);
 	}
-	// a catapult destroyed at the walls is lost
-	if (Attacker && Battle.GetUnits().ContainsByPredicate([](const FHexBattleUnit& Each) { return Each.bCatapult && !Each.IsAlive(); }))
+	// a catapult destroyed at the walls is lost, and so is that of the castle
+	if (Attacker && Battle.GetUnits().ContainsByPredicate([](const FHexBattleUnit& Each) { return Each.bCatapult && Each.Side == 0 && !Each.IsAlive(); }))
 	{
 		Attacker->bCatapult = false;
+	}
+	if (Request.Kind == EHexBattleKind::Castle && Battle.GetUnits().ContainsByPredicate([](const FHexBattleUnit& Each) { return Each.bCatapult && Each.Side == 1 && !Each.IsAlive(); }))
+	{
+		if (FHexCastle* Lost = Castles->FindCastleMutable(Request.CastleId))
+		{
+			Lost->bCatapult = false;
+		}
 	}
 	TArray<int32> Leaving;
 	switch (Request.Kind)
@@ -318,6 +373,11 @@ void UHexBattles::Apply()
 	case EHexBattleKind::Hero:
 		if (FHexHero* Defender = Heroes->FindHeroMutable(Request.DefenderHero))
 		{
+			// its catapult destroyed is lost to it
+			if (Battle.GetUnits().ContainsByPredicate([](const FHexBattleUnit& Each) { return Each.bCatapult && Each.Side == 1 && !Each.IsAlive(); }))
+			{
+				Defender->bCatapult = false;
+			}
 			if (Winner == 1)
 			{
 				Reward(*Defender, 1);
@@ -328,8 +388,38 @@ void UHexBattles::Apply()
 	case EHexBattleKind::Castle:
 		if (FHexCastle* Castle = Castles->FindCastleMutable(Request.CastleId))
 		{
+			// a neutral stack that attacked the castle, when the hero in it sent out onto it: beaten it is gone, else what is left of it stays,
+			// and a castle it took nobody holds
+			if (UHexNeutrals* Neutrals = Request.Attacker == 0 && Request.NeutralId != 0 ? Heroes->GetNeutrals() : nullptr)
+			{
+				if (Winner == 1)
+				{
+					Neutrals->Remove(Request.NeutralId);
+				}
+				else
+				{
+					Neutrals->SetCount(Request.NeutralId, Battle.GetSlotCount(0, 0));
+				}
+			}
 			const FHexHero* Guard = Castles->FindGuard(*Castle);
-			if (Winner == 0)
+			if (Winner == 0 && bGuardAlone && UHexCastles::HasCreatures(Castle->Garrison))
+			{
+				// the hero in it is beaten and leaves the map, but its garrison still holds the castle: the next attack is on that
+				if (Guard)
+				{
+					Leaving.Add(Guard->Id);
+					if (FHexHero* Beaten = Heroes->FindHeroMutable(Guard->Id))
+					{
+						Beaten->CastleId = 0;
+						Beaten->Army.Reset();
+					}
+				}
+				if (bTold)
+				{
+					Heroes->OnMessage.Broadcast(TEXT("The hero in the castle is beaten, but its garrison still holds it"));
+				}
+			}
+			else if (Winner == 0)
 			{
 				// the guard leaves the map with the army it lost, the garrison is gone, and the hero that won goes in and takes the castle
 				if (Guard)
@@ -342,6 +432,10 @@ void UHexBattles::Apply()
 					}
 				}
 				Castle->Garrison.Reset();
+				if (Request.Attacker == 0)
+				{
+					Castle->Owner = INDEX_NONE;
+				}
 				if (Attacker)
 				{
 					const FString Taken = Castles->Visit(*Attacker, Castle->Id, Request.Cell, bTold);
@@ -367,10 +461,35 @@ void UHexBattles::Apply()
 						Kept->Experience += FMath::RoundToInt32(Battle.GetKilledHealth(1) * Config->ExperiencePerHealth);
 					}
 				}
-				Castle->Garrison = Survivors(1, GuardSlots, Battle.GetSide(1).Stacks.Num());
+				if (!bGuardAlone)
+				{
+					Castle->Garrison = Survivors(1, GuardSlots, Battle.GetSide(1).Stacks.Num());
+				}
 				Leaving.Add(Request.Attacker);
 			}
 			++Castles->Revision;
+		}
+		break;
+	case EHexBattleKind::Site:
+		if (FHexSite* Site = Heroes->GetSites() ? Heroes->GetSites()->FindSiteMutable(Request.SiteId) : nullptr)
+		{
+			if (Winner == 0)
+			{
+				// its guard beaten, the hero takes the mine, for the points it paid for the battle
+				Site->Guard.Reset();
+				if (Attacker)
+				{
+					Attacker->VisitCell = Request.Cell;
+					Heroes->bNextVisitFree = true;
+					FString Taken;
+					Heroes->VisitSite(*Attacker, Taken);
+				}
+			}
+			else
+			{
+				Site->Guard = Survivors(1, 0, Battle.GetSide(1).Stacks.Num());
+				Leaving.Add(Request.Attacker);
+			}
 		}
 		break;
 	case EHexBattleKind::Neutral:

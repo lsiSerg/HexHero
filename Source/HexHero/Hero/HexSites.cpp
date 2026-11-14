@@ -11,6 +11,8 @@
 #include "HexShroud.h"
 #include "HexSiteConfig.h"
 #include "HexSiteGenerator.h"
+#include "HexBattleConfig.h"
+#include "HexUnitFigure.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
@@ -83,6 +85,7 @@ TArray<FHexSiteLine> UHexSites::MakeLines() const
 		Line.Kind = Config->Kinds[Site.Kind].Id.ToString();
 		Line.Layer = GetPlanetLayerName(Site.Layer);
 		Line.Cell = Site.Cell;
+		Line.Yaw = Site.Yaw;
 	}
 	return Lines;
 }
@@ -105,6 +108,7 @@ void UHexSites::SetLines(const TArray<FHexSiteLine>& Lines)
 		Site.Id = Line.Id;
 		Site.Kind = Config->FindKind(Line.Kind);
 		Site.Cell = Line.Cell;
+		Site.Yaw = Line.Yaw;
 		if (Site.Id <= 0 || Site.Kind == INDEX_NONE || Line.Cell < 0 || Line.Cell >= NumCells || !ParsePlanetLayer(Line.Layer, Site.Layer)
 			|| Kept.ContainsByPredicate([&Site](const FHexSite& Each) { return Each.Id == Site.Id || (Each.Layer == Site.Layer && Each.Cell == Site.Cell); }))
 		{
@@ -137,6 +141,100 @@ bool UHexSites::Save(const FString& PlanetFolder, FString& OutError)
 const FHexSite* UHexSites::FindSiteAt(EHexPlanetLayer Layer, int32 Cell) const
 {
 	return Sites.FindByPredicate([Layer, Cell](const FHexSite& Each) { return Each.Layer == Layer && Each.Cell == Cell && !Each.bTaken; });
+}
+
+const FHexSite* UHexSites::FindSite(int32 Id) const
+{
+	return Sites.FindByPredicate([Id](const FHexSite& Each) { return Each.Id == Id; });
+}
+
+FHexSite* UHexSites::FindSiteMutable(int32 Id)
+{
+	return Sites.FindByPredicate([Id](const FHexSite& Each) { return Each.Id == Id; });
+}
+
+void UHexSites::UpdateGuards(const UHexHeroes& Heroes)
+{
+	const UHexBattleConfig* BattleConfig = UHexBattleConfig::Load();
+	const UHexCastleConfig* Castles = UHexCastleConfig::Load();
+	TSet<int32> Kept;
+	for (const FHexSite& Site : Sites)
+	{
+		// the strongest stack it holds
+		const FHexStack* Strongest = nullptr;
+		for (const FHexStack& Stack : Site.Guard)
+		{
+			const FHexCreatureStats* Stats = Stack.Count > 0 ? Castles->GetStats(Stack) : nullptr;
+			const FHexCreatureStats* Best = Strongest ? Castles->GetStats(*Strongest) : nullptr;
+			if (Stats && (!Best || Stats->GetPower() * Stack.Count > Best->GetPower() * Strongest->Count))
+			{
+				Strongest = &Stack;
+			}
+		}
+		AHexPlanet* Planet = Strongest && Site.bSeated && !Site.bTaken ? GetPlanet(Site.Layer) : nullptr;
+		if (!Planet || !Planet->IsBuilt() || !Castles->Factions.IsValidIndex(Strongest->Faction))
+		{
+			continue;
+		}
+		Kept.Add(Site.Id);
+		FGuardBody& Body = GuardBodies.FindOrAdd(Site.Id);
+		if (!Body.Figure.IsValid() || Body.Faction != Strongest->Faction || Body.Creature != Strongest->Creature || Body.bUpgraded != Strongest->bUpgraded || Body.Cell != Site.Cell)
+		{
+			if (Body.Figure.IsValid())
+			{
+				Body.Figure->DestroyComponent();
+			}
+			float Scale = 1.0f;
+			float Yaw = 0.0f;
+			float Hover = 0.0f;
+			const FName Creature = Castles->Factions[Strongest->Faction].Creatures[Strongest->Creature].Id;
+			USceneComponent* Figure = HexUnitFigure::Make(Planet, Planet->GetRootComponent(), BattleConfig, Creature, Strongest->bUpgraded, Strongest->Creature,
+				GetPlayerColor(Site.Owner), BattleConfig->NeutralScale * 0.9f, Scale, Yaw, Hover);
+			if (!Figure)
+			{
+				continue;
+			}
+			// beside the place of a hero there, facing out of the mine
+			const TArray<FHexSphereCell>& Cells = Planet->GetGrid().GetCells();
+			const FVector3d Center = Cells[Site.Cell].Center;
+			const double CellRadius = FMath::Acos(FMath::Clamp(FVector3d::DotProduct(Center, Cells[Cells[Site.Cell].Neighbors[0]].Center), -1.0, 1.0)) / FMath::Sqrt(3.0);
+			const FVector2D Place = Config->Kinds[Site.Kind].HeroPlace;
+			const FVector3d Forward = FVector3d(Site.Seat.GetUnitAxis(EAxis::X));
+			const FVector3d Left = FVector3d(Site.Seat.GetUnitAxis(EAxis::Y));
+			const FVector3d Direction = (Center + (Forward * (Place.X * 0.75) + Left * 0.55) * CellRadius).GetSafeNormal();
+			const FVector3d Point = Direction * (Planet->FindGroundRadius(Site.Cell, Direction) + Hover);
+			const FVector3d Facing = (Forward - Direction * FVector3d::DotProduct(Forward, Direction)).GetSafeNormal();
+			const FQuat Turn = FRotator(0.0, Yaw, 0.0).Quaternion();
+			Figure->SetWorldTransform(FTransform(FRotationMatrix::MakeFromZX(FVector(Direction), FVector(Facing)).ToQuat() * Turn, FVector(Point), FVector(Scale)));
+			Figure->RegisterComponent();
+			HexUnitFigure::Play(Figure, BattleConfig, Creature, EHexFigureAction::Idle, 0.9f);
+			HexUnitFigure::Settle(Figure);
+			Body.Figure = Figure;
+			Body.Faction = Strongest->Faction;
+			Body.Creature = Strongest->Creature;
+			Body.bUpgraded = Strongest->bUpgraded;
+			Body.Cell = Site.Cell;
+			Body.bShown = true;
+		}
+		// nothing under the fog of war is drawn
+		const bool bShown = !Heroes.IsHidden(Heroes.GetShroudPlayer(), Site.Layer, Site.Cell);
+		if (Body.bShown != bShown && Body.Figure.IsValid())
+		{
+			Body.Figure->SetVisibility(bShown, true);
+			Body.bShown = bShown;
+		}
+	}
+	for (auto It = GuardBodies.CreateIterator(); It; ++It)
+	{
+		if (!Kept.Contains(It.Key()))
+		{
+			if (It.Value().Figure.IsValid())
+			{
+				It.Value().Figure->DestroyComponent();
+			}
+			It.RemoveCurrent();
+		}
+	}
 }
 
 const FHexSite* UHexSites::FindBlockerAt(EHexPlanetLayer Layer, int32 Cell) const
@@ -602,6 +700,7 @@ void UHexSites::Restart()
 	for (FHexSite& Site : Sites)
 	{
 		Site.Owner = INDEX_NONE;
+		Site.Guard.Reset();
 		Site.bTaken = false;
 		Site.VisitedWeek = 0;
 		Site.FormerOwners = 0;
@@ -820,7 +919,7 @@ void UHexSites::Rebuild(EHexPlanetLayer Layer)
 		if (!Site.bSeated)
 		{
 			const bool bPile = Kind.Type == EHexSiteType::Pile;
-			const double Angle = bPile ? FMath::DegreesToRadians(double((Site.Id * 73) % 360)) : 0.0;
+			const double Angle = FMath::DegreesToRadians((bPile ? double((Site.Id * 73) % 360) : 0.0) + double(Site.Yaw));
 			Site.Seat = FindSeat(*Planet, Site.Cell, Angle, bPile ? Config->PileMaxTilt : Config->BuildingMaxTilt, Scales[int32(Kind.Type)]);
 			Site.bSeated = true;
 		}

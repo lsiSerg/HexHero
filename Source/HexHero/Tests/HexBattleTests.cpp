@@ -4,6 +4,7 @@
 #include "HexBattle.h"
 #include "HexBattleConfig.h"
 #include "HexCastleConfig.h"
+#include "HexCastles.h"
 #include "Misc/AutomationTest.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -264,6 +265,96 @@ bool FHexBattleQuickTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHexBattleWallTurnsTest, "HexHero.Battle.WallTurns",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FHexBattleWallTurnsTest::RunTest(const FString& Parameters)
+{
+	// two stacks of the attacker, one strong and one of a tenth of its power: two and four turns to break a part of the wall
+	FTestRules Rules;
+	FHexBattleSetup Setup = Rules.MakeDuel(0, 100, 0, 10);
+	Setup.Sides[0].Stacks.Add(FHexStack{0, 0, false, 10});
+	Setup.Siege.bWalls = true;
+	Setup.Siege.WallHealth = 160;
+	Setup.Siege.GateHealth = 200;
+	FHexBattle Battle;
+	Battle.Start(Setup, Rules.Castles, Rules.Battle);
+	int32 Strong = INDEX_NONE;
+	int32 Weak = INDEX_NONE;
+	for (int32 Index = 0; Index < Battle.GetUnits().Num(); ++Index)
+	{
+		const FHexBattleUnit& Each = Battle.GetUnits()[Index];
+		if (Each.Side == 0 && !Each.IsMachine())
+		{
+			(Each.Count == 100 ? Strong : Weak) = Index;
+		}
+	}
+	TestTrue(TEXT("both stacks"), Strong != INDEX_NONE && Weak != INDEX_NONE);
+	if (Strong == INDEX_NONE || Weak == INDEX_NONE)
+	{
+		return false;
+	}
+	int32 Min = 0;
+	int32 Max = 0;
+	Battle.GetWallStrikeRange(Strong, 160, Min, Max);
+	TestTrue(TEXT("the strongest in three to four turns"), Min == 40 && Max == 54);
+	Battle.GetWallStrikeRange(Weak, 160, Min, Max);
+	TestTrue(TEXT("a weak one in five to six"), Min == 27 && Max == 32);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHexBattleBreachTest, "HexHero.Battle.Breach",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FHexBattleBreachTest::RunTest(const FString& Parameters)
+{
+	// the command for trying the ruins: a part falls at once, the gate stays open, and what fell does not fall again
+	FTestRules Rules;
+	FHexBattleSetup Setup = Rules.MakeDuel(0, 20, 0, 10);
+	Setup.Siege.bWalls = true;
+	Setup.Siege.WallHealth = 160;
+	Setup.Siege.GateHealth = 200;
+	FHexBattle Battle;
+	Battle.Start(Setup, Rules.Castles, Rules.Battle);
+	const int32 Gate = Battle.GetWalls().IndexOfByPredicate([](const FHexBattleWall& Each) { return Each.Part == EHexWallPart::Gate; });
+	const int32 Section = Battle.GetWalls().IndexOfByPredicate([](const FHexBattleWall& Each) { return Each.Part == EHexWallPart::Wall; });
+	TestTrue(TEXT("a gate and a section"), Gate != INDEX_NONE && Section != INDEX_NONE);
+	if (Gate == INDEX_NONE || Section == INDEX_NONE)
+	{
+		return false;
+	}
+	const FHexCoord GateHex = Battle.GetWalls()[Gate].Hex;
+	const FHexCoord SectionHex = Battle.GetWalls()[Section].Hex;
+	TestTrue(TEXT("the section falls"), Battle.BreakWall(SectionHex));
+	TestFalse(TEXT("it lies fallen"), Battle.GetWalls()[Section].IsStanding());
+	TestFalse(TEXT("and does not fall again"), Battle.BreakWall(SectionHex));
+	TestFalse(TEXT("the gate is not open yet"), Battle.IsGateJammed());
+	TestTrue(TEXT("the gate falls"), Battle.BreakWall(GateHex));
+	TestTrue(TEXT("and stays open"), Battle.IsGateJammed());
+	TestFalse(TEXT("nothing on an open hex"), Battle.BreakWall(FHexCoord::FromOffset(1, 1)));
+	// the cheat key: a quarter of a part of the wall, and of a stack, four blows killing it
+	const int32 Other = Battle.GetWalls().IndexOfByPredicate([](const FHexBattleWall& Each) { return Each.Part == EHexWallPart::Wall && Each.IsStanding(); });
+	if (Other != INDEX_NONE)
+	{
+		const int32 Before = Battle.GetWalls()[Other].Health;
+		TestTrue(TEXT("the cheat hits a part"), Battle.CheatHit(Battle.GetWalls()[Other].Hex, 0.25f));
+		TestEqual(TEXT("for a quarter of its health"), Battle.GetWalls()[Other].Health, Before - FMath::CeilToInt32(Battle.GetWalls()[Other].MaxHealth * 0.25f));
+	}
+	const int32 Enemy = Battle.GetUnits().IndexOfByPredicate([](const FHexBattleUnit& Each) { return Each.Side == 1 && !Each.IsMachine(); });
+	if (Enemy != INDEX_NONE)
+	{
+		const FHexCoord Hex = Battle.GetUnits()[Enemy].Hex;
+		for (int32 Blow = 0; Blow < 4; ++Blow)
+		{
+			Battle.CheatHit(Hex, 0.25f);
+		}
+		TestFalse(TEXT("four blows kill a stack"), Battle.GetUnits()[Enemy].IsAlive());
+		TestTrue(TEXT("and the battle is over"), Battle.IsOver());
+		TestFalse(TEXT("no blows once it is over"), Battle.CheatHit(Hex, 0.25f));
+	}
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHexBattlePassiveTest, "HexHero.Battle.Passive",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
@@ -308,7 +399,7 @@ bool FHexBattleSiegeTest::RunTest(const FString& Parameters)
 	// the catapult acts first and always hits as hard as the gate is strong
 	Rules.Battle->CatapultSpeed = 99;
 	Rules.Battle->CatapultHitChance = 1.0f;
-	Rules.Battle->CatapultDamageMin = Rules.Battle->CatapultDamageMax = 200;
+	Rules.Battle->CatapultShotsMin = Rules.Battle->CatapultShotsMax = 1.0f;
 	// a walker fast enough to reach past the wall in one turn
 	Rules.Stats(0, 0).Speed = 20;
 	const int32 Shooter = Rules.Castles->Factions[0].Creatures.IndexOfByPredicate([](const FHexCreature& Each) { return Each.bShoots; });
@@ -373,9 +464,125 @@ bool FHexBattleSiegeTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("where a step costs more"), bDearer);
 		TestTrue(TEXT("over the bridge through the fallen gate"), bBehindWall);
 	}
+	// the strongest stack of a side breaks a part of the wall in two turns, a weak one in four
+	if (Walker != INDEX_NONE)
+	{
+		const int32 Section = Battle.GetWalls().IndexOfByPredicate([](const FHexBattleWall& Each) { return Each.Part == EHexWallPart::Wall; });
+		const int32 Health = Battle.GetWalls()[Section].MaxHealth;
+		int32 Min = 0;
+		int32 Max = 0;
+		Battle.GetWallStrikeRange(Walker, Health, Min, Max);
+		TestEqual(TEXT("the strongest breaks a section in four turns at most"), Min, FMath::CeilToInt32(Health / 4.0));
+		TestEqual(TEXT("and three at least"), Max, FMath::CeilToInt32(Health / 3.0));
+	}
 	// the machines count for nobody: the battle goes on while stacks are left
 	TestFalse(TEXT("it goes on"), Battle.IsOver());
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHexBattleCatapultTest, "HexHero.Battle.Catapult",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FHexBattleCatapultTest::RunTest(const FString& Parameters)
+{
+	// on an open field both sides bring their catapults, as the developer asked on 2026-11-14, which drive and throw stones at stacks
+	FTestRules Rules;
+	Rules.Battle->CatapultSpeed = 99;
+	FHexBattleSetup Setup = Rules.MakeDuel(0, 10, 0, 10);
+	Setup.Siege.bCatapult = true;
+	Setup.Siege.bDefenderCatapult = true;
+	FHexBattle Battle;
+	Battle.Start(Setup, Rules.Castles, Rules.Battle);
+	TestEqual(TEXT("the catapult of the defender behind its last row"), Battle.GetMachineHex(1), FHexCoord::FromOffset(Battle.GetColumns(), Battle.GetRows() - 1));
+	const int32 Catapult = Battle.GetActive();
+	TestTrue(TEXT("a catapult has the first turn"), Battle.GetUnits().IsValidIndex(Catapult) && Battle.GetUnits()[Catapult].bCatapult);
+	if (!Battle.GetUnits().IsValidIndex(Catapult))
+	{
+		return false;
+	}
+	TMap<FHexCoord, int32> Steps;
+	Battle.FindReach(Catapult, Steps);
+	int32 Farthest = 0;
+	for (const TPair<FHexCoord, int32>& Each : Steps)
+	{
+		Farthest = FMath::Max(Farthest, Each.Value);
+	}
+	TestTrue(TEXT("it drives onto the field"), Steps.Num() > 1);
+	TestTrue(TEXT("no further than it may"), Farthest <= Rules.Battle->CatapultMoveHexes);
+	const int32 Enemy = Battle.GetUnits().IndexOfByPredicate([&](const FHexBattleUnit& Each) { return Each.Side != Battle.GetUnits()[Catapult].Side && !Each.IsMachine(); });
+	TestTrue(TEXT("it may throw a stone at a stack"), Enemy != INDEX_NONE && Battle.CanShoot(Catapult, Enemy));
+	FHexCoord Away = Battle.GetUnits()[Catapult].Hex;
+	for (const TPair<FHexCoord, int32>& Each : Steps)
+	{
+		if (Each.Value == Farthest)
+		{
+			Away = Each.Key;
+			break;
+		}
+	}
+	TestTrue(TEXT("and drives"), Battle.Move(Away));
+	TestEqual(TEXT("to where it was sent"), Battle.GetUnits()[Catapult].Hex, Away);
+	// its own hex off the field is part of it, which anyone may walk onto now it is empty, as the developer asked on 2026-11-14
+	TestTrue(TEXT("the hex of a catapult is part of the field"), Battle.IsOnField(Battle.GetMachineHex(0)) && !Battle.IsInGrid(Battle.GetMachineHex(0)));
+	TestTrue(TEXT("and free once it drove off"), Away == Battle.GetMachineHex(0) || Battle.IsPassable(Battle.GetMachineHex(0), 0));
+
+	// a flyer on an open field walks the way over the ground, a step a hex, and flies only over what is in the way
+	FTestRules FlyRules;
+	const int32 Flyer = FlyRules.Castles->Factions[0].Creatures.IndexOfByPredicate([](const FHexCreature& Each) { return Each.bFlies; });
+	TestTrue(TEXT("the faction has a flyer"), Flyer != INDEX_NONE);
+	if (Flyer == INDEX_NONE)
+	{
+		return false;
+	}
+	FlyRules.Stats(0, Flyer).Speed = 99;
+	FHexBattle Flight;
+	Flight.Start(FlyRules.MakeDuel(Flyer, 5, 0, 5), FlyRules.Castles, FlyRules.Battle);
+	const int32 Mover = Flight.GetActive();
+	TestTrue(TEXT("the flyer acts first"), Flight.GetUnits().IsValidIndex(Mover) && Flight.GetUnits()[Mover].bFlies);
+	if (Flight.GetUnits().IsValidIndex(Mover))
+	{
+		const FHexCoord Start = Flight.GetUnits()[Mover].Hex;
+		const FHexCoord Goal = FHexCoord::FromOffset(Start.GetColumn() + 4, Start.GetRow());
+		const TArray<FHexCoord> Path = Flight.FindPath(Mover, Goal);
+		TestEqual(TEXT("over the ground, a step a hex"), Path.Num(), Start.DistanceTo(Goal) + 1);
+	}
+	return true;
+}
+
 #endif
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHexBattleSlotsTest, "HexHero.Battle.Slots",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FHexBattleSlotsTest::RunTest(const FString& Parameters)
+{
+	// a stack keeps the slot it is put in, an empty slot keeping its place, as the developer asked on 2026-11-13
+	TArray<FHexStack> Army = {FHexStack{0, 0, false, 10}, FHexStack{0, 1, false, 6}};
+	FString Message;
+	TestTrue(TEXT("a stack moves to an empty slot further on"), UHexCastles::MoveBetween(Army, 0, Army, 5, 0, Message));
+	TestEqual(TEXT("the army reaches that slot"), Army.Num(), 6);
+	TestTrue(TEXT("its first slot is empty"), Army[0].Count == 0 && Army[1].Count == 6 && Army[5].Count == 10);
+	TestTrue(TEXT("half of it splits into an empty slot"), UHexCastles::MoveBetween(Army, 5, Army, 3, 5, Message));
+	TestTrue(TEXT("both halves stand where they were put"), Army[3].Count == 5 && Army[5].Count == 5);
+	TestTrue(TEXT("a whole stack swaps with another kind"), UHexCastles::MoveBetween(Army, 1, Army, 3, 0, Message));
+	TestTrue(TEXT("swapped"), Army[1].Creature == 0 && Army[3].Creature == 1);
+	TestFalse(TEXT("part of a stack goes onto no other kind"), UHexCastles::MoveBetween(Army, 1, Army, 3, 2, Message));
+	TestTrue(TEXT("one joins a stack of its kind"), UHexCastles::MoveBetween(Army, 1, Army, 5, 0, Message) && Army[5].Count == 10);
+	TestEqual(TEXT("the first free slot"), UHexCastles::FindFreeSlot(Army), 0);
+	TArray<FHexStack> Trailing = {FHexStack{0, 0, false, 3}, FHexStack{0, 0, false, 0}};
+	UHexCastles::TrimArmy(Trailing);
+	TestEqual(TEXT("empty slots at the end are dropped"), Trailing.Num(), 1);
+
+	// and fights on the row of its slot
+	FTestRules Rules;
+	FHexBattleSetup Setup;
+	Setup.bObstacles = false;
+	Setup.Sides[0].Stacks = {FHexStack{0, 0, false, 0}, FHexStack{0, 0, false, 0}, FHexStack{0, 0, false, 0}, FHexStack{0, 0, false, 0}, FHexStack{0, 0, false, 0},
+		FHexStack{0, 0, false, 0}, FHexStack{0, 0, false, 8}};
+	Setup.Sides[1].Stacks = {FHexStack{0, 1, false, 8}};
+	FHexBattle Battle;
+	Battle.Start(Setup, Rules.Castles, Rules.Battle);
+	const FHexBattleUnit* Last = Battle.GetUnits().FindByPredicate([](const FHexBattleUnit& Each) { return Each.Side == 0 && !Each.IsMachine(); });
+	TestTrue(TEXT("the seventh slot stands on the last row of the first column"), Last && Last->Slot == 6 && Last->Hex == FHexCoord::FromOffset(0, Rules.Battle->ArmySlotRows[6]));
+	return true;
+}

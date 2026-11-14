@@ -23,8 +23,12 @@ struct FHexBattleSideSetup
 	int32 SpellPower = 0;
 	int32 Mana = 0;
 
-	/** The stacks, as the army holds them; an empty stack is left out */
+	/** The stacks, as the army holds them, slot by slot; an empty slot places nobody */
 	TArray<FHexStack> Stacks;
+
+	/** Whether each slot stands on the row of ArmySlotRows of DA_HexBattle, the slots past the seventh in the column before, as the developer
+	 *  asked on 2026-11-13 that stacks fight in the slots they were put in; a neutral stack is spread over the rows instead */
+	bool bBySlots = true;
 
 	/** The game fights for this side */
 	bool bAi = true;
@@ -51,6 +55,10 @@ struct FHexBattleSiege
 	/** The shooters in each tower: a creature of the faction of the castle and how many */
 	FHexStack TowerStack;
 	bool bCatapult = false;
+
+	/** The castle defends itself with a catapult of its garrison, which throws stones at the stacks of the attacker from a hex of its own
+	 *  in the yard, as the developer asked on 2026-11-13 */
+	bool bDefenderCatapult = false;
 	/** A moat on the hexes before the wall, but before the gate, where a bridge goes over it, as the developer asked on 2026-11-13: a unit
 	 *  that walks into it stops there, and a flyer flies over it */
 	bool bMoat = false;
@@ -232,8 +240,19 @@ public:
 	int32 GetColumns() const { return Columns; }
 	int32 GetRows() const { return Rows; }
 
-	/** Returns true if a hex lies on the field */
+	/** Returns true if a hex lies on the field, the hexes of the catapults off it included */
 	bool IsOnField(const FHexCoord& Hex) const;
+
+	/** Returns true if a hex lies within the columns and rows of the field */
+	bool IsInGrid(const FHexCoord& Hex) const;
+
+	/** The hexes of the catapults of this battle off the field, which anyone may walk onto once a catapult drove off, as the developer asked
+	 *  on 2026-11-14 */
+	const TArray<FHexCoord>& GetHomeHexes() const { return Homes; }
+
+	/** The hex of the war machines of a side, off the field behind its first column on its right; a machine standing there can be struck */
+	FHexCoord GetMachineHex(int32 Side) const;
+	bool IsMachineHex(const FHexCoord& Hex) const;
 
 	bool IsObstacle(const FHexCoord& Hex) const { return Obstacles.Contains(Hex); }
 	const TSet<FHexCoord>& GetObstacles() const { return Obstacles; }
@@ -266,10 +285,13 @@ public:
 	int32 GetDefense(const FHexBattleUnit& Unit) const;
 
 	/** The hexes a unit can walk or fly to this turn, each with how many hexes it runs to get there, and the way there for one that walks */
-	void FindReach(int32 UnitIndex, TMap<FHexCoord, int32>& OutSteps, TMap<FHexCoord, FHexCoord>* OutFrom = nullptr) const;
+	void FindReach(int32 UnitIndex, TMap<FHexCoord, int32>& OutSteps, TMap<FHexCoord, FHexCoord>* OutFrom = nullptr, bool bOnGround = false) const;
 
 	/** Returns the hexes a unit goes through to a hex it can reach, from where it stands, or an empty list */
 	TArray<FHexCoord> FindPath(int32 UnitIndex, const FHexCoord& To) const;
+
+	/** How many steps the way to To runs from Start, by the hex each came from; -1 when it does not get there */
+	static int32 CountSteps(const TMap<FHexCoord, FHexCoord>& From, const FHexCoord& Start, const FHexCoord& To);
 
 	/** Returns true if the unit whose turn it is can shoot that unit now */
 	bool CanShoot(int32 UnitIndex, int32 Target) const;
@@ -286,6 +308,17 @@ public:
 	/** The wall of a castle on the field, empty without one, and the part of it on a hex, or null */
 	const TArray<FHexBattleWall>& GetWalls() const { return Walls; }
 	const FHexBattleWall* FindWall(const FHexCoord& Hex) const;
+
+	/** For trying the field: the part of the wall on a hex falls at once, as if struck down, and false when none stands there */
+	bool BreakWall(const FHexCoord& Hex);
+
+	/** For trying the field: the part of the wall on a hex that stands keeps Share of its health, at least 1 */
+	bool DamageWallTo(const FHexCoord& Hex, float Share);
+
+	/** A cheat: what is on a hex takes Share of its health as damage, from nobody: a unit (the catapult too) of the health of all the
+	 *  creatures it started with, else a part of the wall that stands, a tower for the shooters on it; false when nothing is there. A unit
+	 *  whose turn it is that dies ends its turn, and a side left with nobody loses */
+	bool CheatHit(const FHexCoord& Hex, float Share);
 
 	/** The hexes of the moat before the wall, and whether a hex is one: a unit that walks onto it goes no further this turn */
 	const TSet<FHexCoord>& GetMoat() const { return Moat; }
@@ -311,7 +344,14 @@ public:
 	bool FireCatapult(const FHexCoord& WallHex);
 
 	/** The least and the most damage a strike of a unit at the wall deals */
-	void PreviewWallStrike(int32 UnitIndex, int32& OutMin, int32& OutMax) const;
+	void PreviewWallStrike(int32 UnitIndex, int32& OutMin, int32& OutMax, const FHexCoord& WallHex) const;
+
+	/** Over how many turns a unit breaks a part of the wall at least and at most: a stack WallStrikeStrong* as the strongest of its side and
+	 *  WallStrikeWeak* as a weak one, the catapult CatapultShots*; a turn deals the health of the part over a number rolled between them */
+	void GetWallStrikeTurns(int32 UnitIndex, double& OutMin, double& OutMax) const;
+
+	/** What a turn of a unit deals a part of MaxHealth at least and at most */
+	void GetWallStrikeRange(int32 UnitIndex, int32 MaxHealth, int32& OutMin, int32& OutMax) const;
 
 	/** The hero of a side can cast a spell at a hex: it has one, the spell, its mana, it has not cast this round, it is the turn of a unit of
 	 *  its own, and the hex holds what the spell takes */
@@ -368,6 +408,8 @@ private:
 	int32 Columns = 15;
 	int32 Rows = 11;
 	TSet<FHexCoord> Obstacles;
+
+	TArray<FHexCoord> Homes;
 	TArray<FHexBattleWall> Walls;
 	TSet<FHexCoord> Moat;
 	bool bGateJammed = false;

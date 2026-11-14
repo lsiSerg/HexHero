@@ -430,6 +430,8 @@ void AHexPlanetCameraPawn::BeginPlay()
 		UE_LOG(LogHexHero, Warning, TEXT("Planet camera: config %s is missing, run Tools/create_planet_assets.py"), *PlanetCameraConfig.ToString());
 	}
 	Camera->PostProcessSettings.AutoExposureBias = Settings()->ExposureBias;
+	Camera->PostProcessSettings.bOverride_MotionBlurAmount = true;
+	Camera->PostProcessSettings.MotionBlurAmount = Settings()->MotionBlurAmount;
 
 	CameraConfig = GetDefault<UHexMapSettings>()->LoadCameraConfig();
 	EdgeScrollCurve = CameraConfig->EdgeScrollCurve.LoadSynchronous();
@@ -778,6 +780,10 @@ void AHexPlanetCameraPawn::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 		if (InputConfig->SkipHeroAction)
 		{
 			EnhancedInputComponent->BindAction(InputConfig->SkipHeroAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnSkipHero);
+		}
+		if (InputConfig->BattleHitAction)
+		{
+			EnhancedInputComponent->BindAction(InputConfig->BattleHitAction, ETriggerEvent::Started, this, &AHexPlanetCameraPawn::OnBattleHit);
 		}
 		if (InputConfig->PlayModeAction)
 		{
@@ -1530,6 +1536,18 @@ void AHexPlanetCameraPawn::OnSkipHero()
 	if (AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController()); PlayerController && !IsTravelling())
 	{
 		PlayerController->SkipHero();
+	}
+}
+
+void AHexPlanetCameraPawn::OnBattleHit()
+{
+	// the cheat key of a battle, only while one is shown
+	if (AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController()); PlayerController && bBattleShown)
+	{
+		if (AHexBattleArena* Arena = PlayerController->GetBattleArena(); Arena && Arena->IsShowing())
+		{
+			Arena->CheatHitUnderCursor();
+		}
 	}
 }
 

@@ -484,7 +484,12 @@ struct FHexStackLine
 	UPROPERTY()
 	int32 Count = 0;
 
-	bool operator==(const FHexStackLine& Other) const { return Faction == Other.Faction && Creature == Other.Creature && Upgraded == Other.Upgraded && Count == Other.Count; }
+	/** The slot of the army it stands in, 0 to 6, written only when an army has empty slots before its last stack, as the developer asked on
+	 *  2026-11-13 that stacks stay in the slots they are put in, which the battles keep; -1 for the next one */
+	UPROPERTY()
+	int32 Slot = -1;
+
+	bool operator==(const FHexStackLine& Other) const { return Faction == Other.Faction && Creature == Other.Creature && Upgraded == Other.Upgraded && Count == Other.Count && Slot == Other.Slot; }
 };
 
 /**
@@ -521,9 +526,18 @@ struct FHexHeroLine
 	UPROPERTY()
 	TArray<FHexStackLine> Army;
 
+	/** It starts with a catapult, as the developer asked on 2026-11-14 for heroes to try sieges with; written only when set */
+	UPROPERTY()
+	bool Catapult = false;
+
+	/** How it is turned from where it faces by itself, in degrees, as the developer asked on 2026-11-13 to turn what is placed; written only when set */
+	UPROPERTY()
+	int32 Yaw = 0;
+
 	bool operator==(const FHexHeroLine& Other) const
 	{
-		return Id == Other.Id && Name == Other.Name && Class == Other.Class && Player == Other.Player && Layer == Other.Layer && Cell == Other.Cell && Army == Other.Army;
+		return Id == Other.Id && Name == Other.Name && Class == Other.Class && Player == Other.Player && Layer == Other.Layer && Cell == Other.Cell && Army == Other.Army
+			&& Catapult == Other.Catapult && Yaw == Other.Yaw;
 	}
 };
 
@@ -563,7 +577,11 @@ struct FHexSiteLine
 	UPROPERTY()
 	int32 Cell = 0;
 
-	bool operator==(const FHexSiteLine& Other) const { return Id == Other.Id && Kind == Other.Kind && Layer == Other.Layer && Cell == Other.Cell; }
+	/** How it is turned from where it faces by itself, in degrees, as the developer asked on 2026-11-13 to turn what is placed; written only when set */
+	UPROPERTY()
+	int32 Yaw = 0;
+
+	bool operator==(const FHexSiteLine& Other) const { return Id == Other.Id && Kind == Other.Kind && Layer == Other.Layer && Cell == Other.Cell && Yaw == Other.Yaw; }
 };
 
 /** sites.json of a planet, at the root of its folder: its mines and piles, a line each, which Git can merge */

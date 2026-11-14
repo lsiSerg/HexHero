@@ -746,9 +746,31 @@ void UHexPlanetPainter::ContinueStroke(int32 Cell)
 	// a hero goes on the cell pressed alone, and so do a mine, a pile, a castle and a neutral stack
 	if (Tool == EHexPaintTool::Hero || Tool == EHexPaintTool::Site || Tool == EHexPaintTool::Castle || Tool == EHexPaintTool::Neutral)
 	{
+		if (PieceAction == EHexPieceAction::Move && LastCell != INDEX_NONE && MoveFrom != INDEX_NONE)
+		{
+			// what was pressed on follows the cursor, to each cell it may stand on
+			if (MovePiece(MoveFrom, Cell, true))
+			{
+				MoveFrom = Cell;
+				MoveProblem.Reset();
+			}
+		}
 		if (LastCell == INDEX_NONE)
 		{
-			Tool == EHexPaintTool::Hero ? PaintHero(Cell) : Tool == EHexPaintTool::Site ? PaintSite(Cell) : Tool == EHexPaintTool::Neutral ? PaintNeutral(Cell) : PaintCastle(Cell);
+			if (PieceAction == EHexPieceAction::Move)
+			{
+				// what is pressed on goes along with the cursor
+				MoveFrom = Cell;
+				MoveProblem.Reset();
+			}
+			else if (PieceAction == EHexPieceAction::Turn)
+			{
+				TurnPiece(Cell);
+			}
+			else
+			{
+				Tool == EHexPaintTool::Hero ? PaintHero(Cell) : Tool == EHexPaintTool::Site ? PaintSite(Cell) : Tool == EHexPaintTool::Neutral ? PaintNeutral(Cell) : PaintCastle(Cell);
+			}
 		}
 		LastCell = Cell;
 		return;
@@ -945,7 +967,7 @@ void UHexPlanetPainter::PaintHero(int32 Cell)
 		Stroke.bHeroes = true;
 		Stroke.OldHeroes = Heroes->MakeLines();
 	}
-	if (IsBackwards())
+	if (IsRemovingPiece())
 	{
 		if (const FHexHero* Hero = Heroes->FindHeroAt(Target, Cell))
 		{
@@ -977,7 +999,7 @@ void UHexPlanetPainter::PaintSite(int32 Cell)
 		Stroke.bSites = true;
 		Stroke.OldSites = Sites->MakeLines();
 	}
-	if (IsBackwards())
+	if (IsRemovingPiece())
 	{
 		Sites->RemoveSiteAt(Target, Cell);
 	}
@@ -1006,7 +1028,7 @@ void UHexPlanetPainter::PaintNeutral(int32 Cell)
 		Stroke.bNeutrals = true;
 		Stroke.OldNeutrals = Neutrals->MakeLines();
 	}
-	if (IsBackwards())
+	if (IsRemovingPiece())
 	{
 		Neutrals->RemoveAt(Target, Cell);
 	}
@@ -1073,7 +1095,7 @@ void UHexPlanetPainter::PaintCastle(int32 Cell)
 		Stroke.bCastles = true;
 		Stroke.OldCastles = Castles->MakeLines();
 	}
-	if (IsBackwards())
+	if (IsRemovingPiece())
 	{
 		Castles->RemoveCastleAt(Target, Cell);
 	}
@@ -1092,6 +1114,253 @@ void UHexPlanetPainter::PaintCastle(int32 Cell)
 		}
 	}
 	Stroke.NewCastles = Castles->MakeLines();
+}
+
+bool UHexPlanetPainter::MovePiece(int32 From, int32 To, bool bQuiet)
+{
+	UHexHeroes* Heroes = Planet ? Planet->GetHeroes() : nullptr;
+	if (!Heroes)
+	{
+		return false;
+	}
+	FString Problem = TEXT("nothing of this tab stands there");
+	bool bMoved = false;
+	// each is taken off, one like it tried on the cell it goes to, which says whether it may stand there, and then its own line moved there
+	if (Tool == EHexPaintTool::Hero)
+	{
+		if (const FHexHero* Hero = Heroes->FindHeroAt(Target, From))
+		{
+			if (!Stroke.bHeroes)
+			{
+				Stroke.bHeroes = true;
+				Stroke.OldHeroes = Heroes->MakeLines();
+			}
+			TArray<FHexHeroLine> Lines = Heroes->MakeLines();
+			const int32 Id = Hero->Id;
+			const int32 Class = Hero->Class;
+			const int32 Player = Hero->Player;
+			Heroes->RemoveHero(Id);
+			const int32 Tried = Heroes->AddHero(Target, To, Class, Player, Problem);
+			if (Tried != 0)
+			{
+				Heroes->RemoveHero(Tried);
+				for (FHexHeroLine& Line : Lines)
+				{
+					if (Line.Id == Id)
+					{
+						Line.Cell = To;
+						Line.Layer = GetPlanetLayerName(Target);
+					}
+				}
+				bMoved = true;
+			}
+			Heroes->SetLines(Lines);
+			Stroke.NewHeroes = Heroes->MakeLines();
+		}
+	}
+	else if (Tool == EHexPaintTool::Site)
+	{
+		UHexSites* Sites = Heroes->GetSites();
+		if (const FHexSite* Site = Sites ? Sites->FindSiteAt(Target, From) : nullptr)
+		{
+			if (!Stroke.bSites)
+			{
+				Stroke.bSites = true;
+				Stroke.OldSites = Sites->MakeLines();
+			}
+			TArray<FHexSiteLine> Lines = Sites->MakeLines();
+			const int32 Id = Site->Id;
+			const int32 Kind = Site->Kind;
+			Sites->RemoveSiteAt(Target, From);
+			if (Sites->AddSite(Target, To, Kind, Problem) != 0)
+			{
+				Sites->RemoveSiteAt(Target, To);
+				for (FHexSiteLine& Line : Lines)
+				{
+					if (Line.Id == Id)
+					{
+						Line.Cell = To;
+						Line.Layer = GetPlanetLayerName(Target);
+					}
+				}
+				bMoved = true;
+			}
+			Sites->SetLines(Lines);
+			Stroke.NewSites = Sites->MakeLines();
+		}
+	}
+	else if (Tool == EHexPaintTool::Neutral)
+	{
+		UHexNeutrals* Neutrals = Heroes->GetNeutrals();
+		if (const FHexNeutral* Neutral = Neutrals ? Neutrals->FindAt(Target, From) : nullptr)
+		{
+			if (!Stroke.bNeutrals)
+			{
+				Stroke.bNeutrals = true;
+				Stroke.OldNeutrals = Neutrals->MakeLines();
+			}
+			TArray<FHexNeutralLine> Lines = Neutrals->MakeLines();
+			const int32 Id = Neutral->Id;
+			const FHexStack Stack = Neutral->Stack;
+			Neutrals->RemoveAt(Target, From);
+			if (Neutrals->Add(Target, To, Stack, Problem) != 0)
+			{
+				Neutrals->RemoveAt(Target, To);
+				for (FHexNeutralLine& Line : Lines)
+				{
+					if (Line.Id == Id)
+					{
+						Line.Cell = To;
+						Line.Layer = GetPlanetLayerName(Target);
+					}
+				}
+				bMoved = true;
+			}
+			Neutrals->SetLines(Lines);
+			Stroke.NewNeutrals = Neutrals->MakeLines();
+		}
+	}
+	else if (Tool == EHexPaintTool::Castle)
+	{
+		UHexCastles* Castles = Heroes->GetCastles();
+		if (const FHexCastle* Castle = Castles ? Castles->FindCastleAt(Target, From) : nullptr)
+		{
+			if (!Stroke.bCastles)
+			{
+				Stroke.bCastles = true;
+				Stroke.OldCastles = Castles->MakeLines();
+			}
+			TArray<FHexCastleLine> Lines = Castles->MakeLines();
+			const int32 Id = Castle->Id;
+			const int32 Faction = Castle->Faction;
+			const int32 Owner = Castle->StartOwner;
+			// the cell released and the two around its corner nearest the cursor, as a castle is placed
+			int32 Cells[3];
+			Problem = TEXT("there are no three cells around a corner there");
+			if (Castles->FindCells(Target, To, FVector3d(CursorPoint), Cells))
+			{
+				Castles->RemoveCastleAt(Target, From);
+				const int32 Tried = Castles->AddCastle(Target, Cells, Faction, Owner, Problem);
+				if (Tried != 0)
+				{
+					Castles->RemoveCastleAt(Target, Cells[0]);
+					for (FHexCastleLine& Line : Lines)
+					{
+						if (Line.Id == Id)
+						{
+							Line.Cells = {Cells[0], Cells[1], Cells[2]};
+							Line.Layer = GetPlanetLayerName(Target);
+						}
+					}
+					bMoved = true;
+				}
+				Castles->SetLines(Lines);
+			}
+			Stroke.NewCastles = Castles->MakeLines();
+		}
+	}
+	UE_LOG(LogHexHero, Verbose, TEXT("Painter: move from cell %d to %d of the %s: %s"), From, To, GetPlanetLayerName(Target), bMoved ? TEXT("moved") : *Problem);
+	if (!bMoved)
+	{
+		MoveProblem = Problem;
+		if (!bQuiet && GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(INDEX_NONE, 3.0f, FColor::Yellow, FString::Printf(TEXT("Not moved: %s"), *Problem));
+		}
+	}
+	return bMoved;
+}
+
+void UHexPlanetPainter::TurnPiece(int32 Cell)
+{
+	UHexHeroes* Heroes = Planet ? Planet->GetHeroes() : nullptr;
+	if (!Heroes)
+	{
+		return;
+	}
+	const int32 Step = (Settings ? Settings->PaintPieceTurn : 30) * (IsBackwards() ? -1 : 1);
+	const auto Turned = [Step](int32 Yaw) { return ((Yaw + Step) % 360 + 360) % 360; };
+	bool bTurned = false;
+	if (Tool == EHexPaintTool::Hero)
+	{
+		if (const FHexHero* Hero = Heroes->FindHeroAt(Target, Cell))
+		{
+			if (!Stroke.bHeroes)
+			{
+				Stroke.bHeroes = true;
+				Stroke.OldHeroes = Heroes->MakeLines();
+			}
+			TArray<FHexHeroLine> Lines = Heroes->MakeLines();
+			for (FHexHeroLine& Line : Lines)
+			{
+				Line.Yaw = Line.Id == Hero->Id ? Turned(Line.Yaw) : Line.Yaw;
+			}
+			Heroes->SetLines(Lines);
+			Stroke.NewHeroes = Heroes->MakeLines();
+			bTurned = true;
+		}
+	}
+	else if (Tool == EHexPaintTool::Site)
+	{
+		UHexSites* Sites = Heroes->GetSites();
+		if (const FHexSite* Site = Sites ? Sites->FindSiteAt(Target, Cell) : nullptr)
+		{
+			if (!Stroke.bSites)
+			{
+				Stroke.bSites = true;
+				Stroke.OldSites = Sites->MakeLines();
+			}
+			TArray<FHexSiteLine> Lines = Sites->MakeLines();
+			for (FHexSiteLine& Line : Lines)
+			{
+				Line.Yaw = Line.Id == Site->Id ? Turned(Line.Yaw) : Line.Yaw;
+			}
+			Sites->SetLines(Lines);
+			Stroke.NewSites = Sites->MakeLines();
+			bTurned = true;
+		}
+	}
+	else if (Tool == EHexPaintTool::Neutral)
+	{
+		UHexNeutrals* Neutrals = Heroes->GetNeutrals();
+		if (const FHexNeutral* Neutral = Neutrals ? Neutrals->FindAt(Target, Cell) : nullptr)
+		{
+			if (!Stroke.bNeutrals)
+			{
+				Stroke.bNeutrals = true;
+				Stroke.OldNeutrals = Neutrals->MakeLines();
+			}
+			TArray<FHexNeutralLine> Lines = Neutrals->MakeLines();
+			for (FHexNeutralLine& Line : Lines)
+			{
+				Line.Yaw = Line.Id == Neutral->Id ? Turned(Line.Yaw) : Line.Yaw;
+			}
+			Neutrals->SetLines(Lines);
+			Stroke.NewNeutrals = Neutrals->MakeLines();
+			bTurned = true;
+		}
+	}
+	else if (Tool == EHexPaintTool::Castle)
+	{
+		UHexCastles* Castles = Heroes->GetCastles();
+		if (const FHexCastle* Castle = Castles ? Castles->FindCastleAt(Target, Cell) : nullptr)
+		{
+			if (!Stroke.bCastles)
+			{
+				Stroke.bCastles = true;
+				Stroke.OldCastles = Castles->MakeLines();
+			}
+			TArray<FHexCastleLine> Lines = Castles->MakeLines();
+			for (FHexCastleLine& Line : Lines)
+			{
+				Line.Yaw = Line.Id == Castle->Id ? Turned(Line.Yaw) : Line.Yaw;
+			}
+			Castles->SetLines(Lines);
+			Stroke.NewCastles = Castles->MakeLines();
+			bTurned = true;
+		}
+	}
+	UE_LOG(LogHexHero, Log, TEXT("Painter: turn on cell %d of the %s by %d: %s"), Cell, GetPlanetLayerName(Target), Step, bTurned ? TEXT("turned") : TEXT("nothing there"));
 }
 
 bool UHexPlanetPainter::GenerateSites(bool bClear)
@@ -1533,8 +1802,17 @@ void UHexPlanetPainter::EndStroke()
 		return;
 	}
 
-	// the object Move drags goes down where it was shown last, as part of the stroke
+	// the object Move drags goes down where it was shown last, as part of the stroke, and so does a hero, mine, castle or stack
 	DropHeld();
+	if (MoveFrom != INDEX_NONE)
+	{
+		// it moved while the button was held; released where it may not stand, it stays at the last cell it could
+		if (LastCell != INDEX_NONE && LastCell != MoveFrom && !MoveProblem.IsEmpty() && GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(INDEX_NONE, 3.0f, FColor::Yellow, FString::Printf(TEXT("Not moved further: %s"), *MoveProblem));
+		}
+		MoveFrom = INDEX_NONE;
+	}
 	bPainting = false;
 	LastCell = INDEX_NONE;
 	CarveFrom = INDEX_NONE;

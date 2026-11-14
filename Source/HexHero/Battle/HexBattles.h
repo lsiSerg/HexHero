@@ -21,6 +21,8 @@ enum class EHexBattleKind : uint8
 	Castle,
 	/** A neutral stack of the map */
 	Neutral,
+	/** The guard a player left at a mine or a mill */
+	Site,
 };
 
 /** What a battle is about: the hero that attacks and what it attacks, where */
@@ -31,6 +33,7 @@ struct FHexBattleRequest
 	int32 DefenderHero = 0;
 	int32 CastleId = 0;
 	int32 NeutralId = 0;
+	int32 SiteId = 0;
 	EHexPlanetLayer Layer = EHexPlanetLayer::Surface;
 	/** The cell attacked, and the cell of the castle it was attacked by */
 	int32 Cell = INDEX_NONE;
@@ -129,6 +132,9 @@ private:
 
 	/** How many stacks of the defender of a castle were its guard's, the rest its garrison's */
 	int32 GuardSlots = 0;
+
+	/** The hero in a castle fights for it alone, its garrison holding the castle after it, as the developer asked on 2026-11-13 */
+	bool bGuardAlone = false;
 
 	/** Gives the armies what is left of them, the experience, and the map what the battle changed */
 	void Apply();

@@ -18,6 +18,10 @@ enum class EHexFigureAction : uint8
 	Shoot,
 	Hit,
 	Death,
+	/** On foot, for a flyer that walks; Move without a walk of its own */
+	Walk,
+	/** In the air, for a flyer; Move without a flight of its own */
+	Fly,
 };
 
 /**
@@ -36,8 +40,14 @@ namespace HexUnitFigure
 
 	/** Plays an action on a figure, looped for Idle and Move, else once and back to Idle; Death holds its last pose, at once with bAtEnd, so a
 	 *  corpse lies on the field. Returns false when the figure has no animation of its own for the action */
+	/** Poses a figure made this frame at once, as it ticks its pose only once it was drawn and would be drawn in its pose at rest first */
+	void Settle(USceneComponent* Figure);
+
 	bool Play(USceneComponent* Figure, const UHexBattleConfig* Config, FName Creature, EHexFigureAction Action, float RateScale = 1.0f, bool bAtEnd = false);
 
 	/** Returns how long an action lasts on a figure, in seconds, 0 without its animation */
+	/** Whether the look of a creature has a walk of its own, so a flyer walks where it can */
+	bool CanWalk(const UHexBattleConfig* Config, FName Creature);
+
 	float GetLength(const UHexBattleConfig* Config, FName Creature, EHexFigureAction Action);
 }

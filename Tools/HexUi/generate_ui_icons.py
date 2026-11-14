@@ -319,10 +319,23 @@ def draw_fly(c):
 
 
 def bow_arrow(c, broken=False):
-    shaft_parts = [capsule(c, 10, 54, 30, 34, 2.2), capsule(c, 36, 28, 50, 14, 2.2)] if broken else [capsule(c, 10, 54, 50, 14, 2.2)]
-    head = polygon(c, [(57, 7), (45, 12), (52, 19)])
     fletch = union(polygon(c, [(10, 54), (6, 46), (14, 50)]), polygon(c, [(10, 54), (18, 58), (14, 50)]))
-    return union(*shaft_parts), head, fletch
+    if not broken:
+        return capsule(c, 10, 54, 50, 14, 2.2), polygon(c, [(57, 7), (45, 12), (52, 19)]), fletch
+    # broken in the middle, its front half bent down at an angle at the break, with splinters there, as the developer asked on 2026-11-14
+    # (the two halves lay in one line before)
+    bend = np.radians(-5.0)
+    dx, dy = np.cos(bend), np.sin(bend)
+    start = (34.0, 33.5)
+    end = (start[0] + dx * 21.0, start[1] + dy * 21.0)
+    px, py = -dy, dx
+    rear = capsule(c, 10, 54, 29.5, 34.5, 2.2)
+    front = capsule(c, start[0], start[1], end[0], end[1], 2.2)
+    tip = (end[0] + dx * 9.0, end[1] + dy * 9.0)
+    head = polygon(c, [tip, (end[0] - dx + px * 4.8, end[1] - dy + py * 4.8), (end[0] - dx - px * 4.8, end[1] - dy - py * 4.8)])
+    # jagged ends of the wood at the break, on the rear half and on the front one
+    splinters = union(polygon(c, [(27.5, 34.0), (33.0, 29.5), (31.0, 36.5)]), polygon(c, [(33.0, 31.0), (37.5, 31.5), (34.0, 37.0)]))
+    return union(rear, front, splinters), head, fletch
 
 
 def draw_shoot(c, broken=False, color=(0.85, 0.6, 0.3)):
@@ -473,6 +486,39 @@ def draw_icon_flies(c):
     draw_fly(c)
 
 
+def straight_arrow(c, ax, ay, bx, by):
+    # a shaft from a to b with its head at b
+    dx, dy = bx - ax, by - ay
+    length = max(np.hypot(dx, dy), 1e-3)
+    ux, uy = dx / length, dy / length
+    head = polygon(c, [(bx + ux * 3, by + uy * 3), (bx - ux * 8 - uy * 7, by - uy * 8 + ux * 7), (bx - ux * 8 + uy * 7, by - uy * 8 - ux * 7)])
+    return union(capsule(c, ax, ay, bx - ux * 5, by - uy * 5, 3.0), head)
+
+
+def draw_exchange(c):
+    # two banners that hand stacks to each other, as heroes of one player exchange their armies, the arrows swinging to and fro
+    swing = 3.0 * np.sin(2.0 * np.pi * c.t)
+    left = polygon(c, [(8, 12), (22, 12), (22, 30), (15, 25), (8, 30)])
+    right = polygon(c, [(42, 34), (56, 34), (56, 52), (49, 47), (42, 52)])
+    top = straight_arrow(c, 24 + swing, 18, 48 + swing, 18)
+    bottom = straight_arrow(c, 40 - swing, 46, 16 - swing, 46)
+    c.outline(union(left, right, top, bottom))
+    c.fill(left, (0.95, 0.3, 0.2))
+    c.fill(right, (0.3, 0.55, 1.0))
+    c.fill(top, (1.0, 0.85, 0.4))
+    c.fill(bottom, (1.0, 0.85, 0.4))
+
+
+def draw_icon_level_up(c):
+    # an arrow up that rises and falls a little, on a gold disc, for the button that upgrades a stack
+    lift = 2.0 * np.sin(2.0 * np.pi * c.t)
+    disc = circle(c, 32, 32, 26)
+    shaft = capsule(c, 32, 46 - lift, 32, 26 - lift, 5.0)
+    head = polygon(c, [(32, 10 - lift), (48, 28 - lift), (16, 28 - lift)])
+    c.outline(disc)
+    c.fill(disc, (0.55, 0.38, 0.08))
+    c.fill(union(shaft, head), (1.0, 0.9, 0.45))
+
 # name, drawing, pixels, hot spot (0 to 1 of the picture), whether it is a cursor, frames a second
 ICONS = [
     ('Default', draw_default, 64, (5 / 64, 4 / 64), True),
@@ -485,6 +531,7 @@ ICONS = [
     ('Visit', draw_visit, 64, (0.5, 0.5), True),
     ('Portal', draw_portal, 64, (0.5, 0.5), True),
     ('Swap', draw_swap, 64, (0.5, 0.5), True),
+    ('Exchange', draw_exchange, 64, (0.5, 0.5), True),
     ('Fly', draw_fly, 64, (0.5, 0.5), True),
     ('Shoot', draw_shoot, 64, (0.5, 0.5), True),
     ('ShootFar', draw_shoot_far, 64, (0.5, 0.5), True),
@@ -502,6 +549,7 @@ ICONS = [
     ('IconKills', draw_icon_kills, 40, (0.5, 0.5), False),
     ('IconCount', draw_icon_count, 40, (0.5, 0.5), False),
     ('IconFlies', draw_icon_flies, 40, (0.5, 0.5), False),
+    ('IconLevelUp', draw_icon_level_up, 40, (0.5, 0.5), False),
 ]
 
 # how fast each plays, frames a second; the rest at DEFAULT_RATE

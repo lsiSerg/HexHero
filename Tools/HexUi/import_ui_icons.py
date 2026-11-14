@@ -20,13 +20,13 @@ CONFIG = FOLDER + '/DA_HexUi'
 # each cursor of EHexCursor, the picture it shows and its size in pixels of Slate; the pictures are drawn at twice that
 CURSORS = [
     ('DEFAULT', 'Default', 32), ('CHOOSE', 'Choose', 32), ('MOVE', 'Move', 42), ('MOVE_LATER', 'MoveLater', 42), ('BLOCKED', 'Blocked', 30),
-    ('ATTACK', 'Attack', 36), ('CASTLE', 'Castle', 36), ('VISIT', 'Visit', 34), ('PORTAL', 'Portal', 36), ('SWAP', 'Swap', 34),
+    ('ATTACK', 'Attack', 36), ('CASTLE', 'Castle', 36), ('VISIT', 'Visit', 34), ('PORTAL', 'Portal', 36), ('SWAP', 'Swap', 34), ('EXCHANGE', 'Exchange', 36),
     ('BATTLE_WALK', 'Move', 42), ('BATTLE_FLY', 'Fly', 38), ('BATTLE_SHOOT', 'Shoot', 36), ('BATTLE_SHOOT_FAR', 'ShootFar', 36),
     ('BATTLE_STRIKE', 'Strike', 40), ('BATTLE_CAST', 'Cast', 36), ('BATTLE_BLOCKED', 'Blocked', 30),
 ]
 
 ICONS = [('FLIES', 'IconFlies'), ('ATTACK', 'IconAttack'), ('DEFENSE', 'IconDefense'), ('DAMAGE', 'IconDamage'), ('HEALTH', 'IconHealth'), ('SPEED', 'IconSpeed'),
-         ('SHOTS', 'IconShots'), ('MORALE', 'IconMorale'), ('LUCK', 'IconLuck'), ('MANA', 'IconMana'), ('KILLS', 'IconKills'), ('COUNT', 'IconCount')]
+         ('SHOTS', 'IconShots'), ('MORALE', 'IconMorale'), ('LUCK', 'IconLuck'), ('MANA', 'IconMana'), ('KILLS', 'IconKills'), ('COUNT', 'IconCount'), ('LEVEL_UP', 'IconLevelUp')]
 
 assets = unreal.EditorAssetLibrary
 

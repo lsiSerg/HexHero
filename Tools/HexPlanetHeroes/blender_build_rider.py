@@ -111,12 +111,17 @@ def import_model(name):
     return added
 
 
-def paint(obj, owner_materials=()):
-    """Puts the colors of the materials of a mesh into the colors of its corners, and the alpha 1 on those of the owner"""
+def paint(obj, owner_materials=(), same_as=None):
+    """Puts the colors of the materials of a mesh into the colors of its corners, and the alpha 1 on those of the owner; a material of
+    same_as takes the color of the one it names"""
     mesh = obj.data
     colors = mesh.color_attributes.new('Col', 'FLOAT_COLOR', 'CORNER')
+    by_name = {material.name.split('.')[0]: material for material in mesh.materials if material}
     for polygon in mesh.polygons:
         material = mesh.materials[polygon.material_index] if mesh.materials else None
+        named = material.name.split('.')[0] if material else ''
+        if same_as and named in same_as and same_as[named] in by_name:
+            material = by_name[same_as[named]]
         color = tuple(material.diffuse_color[:3]) if material else (0.5, 0.5, 0.5)
         owned = material is not None and material.name.split('.')[0] in owner_materials
         value = (OWNER_COLOR + (1.0,)) if owned else (color + (0.0,))
@@ -271,7 +276,31 @@ def animate(armature, rider_bones, left):
     scene.frame_set(0)
 
 
-def make_extras(armature, horse, seat, half_width, back, left):
+# the rider of the battles holds a lance in place of the banner, which only a hero carries, as the developer asked on 2026-11-13 (the argument
+# lance writes SK_UnitRider.glb): a shaft couched forward along the horse, a little up, with a steel point
+LANCE_BACK = 1.4
+LANCE_FRONT = 4.6
+LANCE_RISE = 0.5
+STEEL = (0.62, 0.64, 0.68)
+# round, as the developer found the lance of blocks too low poly on 2026-11-14: LANCE_SIDES around, a shaft that thickens at the hand and thins
+# to the point (LANCE_BUTT, LANCE_GRIP, LANCE_END radii), a cone of steel before the hand that opens towards it (LANCE_GUARD wide,
+# LANCE_GUARD_LENGTH long) and a leaf of steel at the point (LANCE_HEAD long, LANCE_HEAD_WIDTH wide)
+LANCE_SIDES = 12
+LANCE_BUTT = 0.05
+LANCE_GRIP = 0.07
+LANCE_END = 0.035
+LANCE_GUARD = 0.26
+LANCE_GUARD_LENGTH = 0.5
+LANCE_HEAD = 0.7
+LANCE_HEAD_WIDTH = 0.07
+LEATHER_GRIP = (0.16, 0.1, 0.06)
+LANCE_DROPPED = {'Gold'}
+CLOTH_GAP = 0.12
+LANCE_SEAT_SINK = 0.05
+HORSE_PLAIN = {'Main_Light': 'Main'}
+
+
+def make_extras(armature, horse, seat, half_width, back, left, lance=False):
     """The saddle cloth on the seat bone, the banner in the right hand of the knight and the reins from the mouth of the horse to his left:
     made where they are while he sits, and each vertex taken back to where its bone rests, so the bone carries it from there"""
     world = armature.matrix_world
@@ -304,6 +333,30 @@ def make_extras(armature, horse, seat, half_width, back, left):
             loop[color] = value
             # the exporter writes 1 - V
             loop[uv].uv = (marks[index], 1.0 - FLAG_V) if marks else (0.0, 0.0)
+        return made
+
+    def lathe(start, end, profile, bone):
+        """A body turned around the line from start to end: profile is (how far along it, radius, color) at each ring, smooth, its ends closed
+        in a point where the radius is 0"""
+        axis = (end - start).normalized()
+        side = axis.cross(Vector((1.0, 0.0, 0.0)))
+        side = (side if side.length > 1.0e-4 else axis.orthogonal()).normalized()
+        other = axis.cross(side)
+        rings = []
+        for along, radius, value in profile:
+            centre = start + axis * along
+            rings.append(([centre + (side * math.cos(2.0 * math.pi * step / LANCE_SIDES) + other * math.sin(2.0 * math.pi * step / LANCE_SIDES)) * radius
+                for step in range(LANCE_SIDES)], radius, value))
+        for (lower, low_radius, value), (upper, high_radius, _) in zip(rings, rings[1:]):
+            for step in range(LANCE_SIDES):
+                following = (step + 1) % LANCE_SIDES
+                corners = [lower[step], lower[following], upper[following], upper[step]]
+                if low_radius <= 0.0:
+                    corners = [lower[step], upper[following], upper[step]]
+                elif high_radius <= 0.0:
+                    corners = [lower[step], lower[following], upper[step]]
+                made = face([(corner, bone) for corner in corners], value)
+                made.smooth = True
 
     def glove(start, end, value, bone):
         """A closed hand: a rounded lump around the line from a wrist to where its knuckles were"""
@@ -330,25 +383,45 @@ def make_extras(armature, horse, seat, half_width, back, left):
         for indices in ((0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)):
             face([(corners[index], bone) for index in indices], value)
 
-    # the cloth: a strip over the back, hanging down both flanks
+    # the cloth: a strip over the back, hanging down both flanks, CLOTH_GAP off them, as the back of the horse came through it in its
+    # animations in patches the developer saw close on the field on 2026-11-14 (0.05 and 0.04 before)
     steps = 8
     centre = back - half_width * 0.9
     rows = []
     for step in range(steps + 1):
         angle = math.radians(-78.0 + 156.0 * step / steps)
-        rows.append((math.sin(angle) * (half_width + 0.05), centre + math.cos(angle) * (back - centre + 0.04)))
+        rows.append((math.sin(angle) * (half_width + CLOTH_GAP), centre + math.cos(angle) * (back - centre + CLOTH_GAP)))
     for (x0, z0), (x1, z1) in zip(rows, rows[1:]):
         face([((x0, seat - 0.75, z0), SEAT_BONE), ((x1, seat - 0.75, z1), SEAT_BONE), ((x1, seat + 0.75, z1), SEAT_BONE), ((x0, seat + 0.75, z0), SEAT_BONE)],
             OWNER_COLOR + (1.0,))
     # his gloves: a closed hand of leather on each wrist, bound to the wrist (blocks of steel until the developer asked them away)
     for name in (POLE_HAND, REIN_HAND):
         glove(wrist(name), hand(name), GLOVE_COLOR + (0.0,), PREFIX + name)
-    # the banner: its pole stands in his right hand, its foot by his stirrup, and its cloth flies back
     grip = hand(POLE_HAND)
     holder = PREFIX + POLE_HAND
-    box((grip.x - 0.05, grip.y - 0.05, grip.z - 2.1), (grip.x + 0.05, grip.y + 0.05, grip.z + 4.6), WOOD + (0.0,), holder)
+    if lance:
+        # the lance, one round body that rises a little towards its point, the horse facing -Y, the hand LANCE_BACK from its butt
+        start = Vector((grip.x, grip.y + LANCE_BACK, grip.z - LANCE_RISE * LANCE_BACK / (LANCE_FRONT + LANCE_BACK)))
+        end = Vector((grip.x, grip.y - LANCE_FRONT, grip.z + LANCE_RISE * LANCE_FRONT / (LANCE_FRONT + LANCE_BACK)))
+        length = (end - start).length
+        wood = WOOD + (0.0,)
+        steel = STEEL + (0.0,)
+        leather = LEATHER_GRIP + (0.0,)
+        hold = LANCE_BACK
+        lathe(start, end, [
+            (0.0, 0.0, steel), (0.03, LANCE_BUTT * 0.8, steel), (0.12, LANCE_BUTT, wood),
+            (hold - 0.25, LANCE_GRIP * 0.85, leather), (hold - 0.15, LANCE_GRIP, leather), (hold + 0.15, LANCE_GRIP, wood),
+            # the guard: a cone of steel that opens towards the hand
+            (hold + 0.2, LANCE_GRIP, steel), (hold + 0.22, LANCE_GUARD, steel), (hold + 0.26, LANCE_GUARD * 0.96, steel),
+            (hold + 0.2 + LANCE_GUARD_LENGTH, LANCE_GRIP * 0.95, wood),
+            (length - 0.08, LANCE_END, steel), (length, LANCE_END * 1.1, steel),
+            # the head: a leaf of steel
+            (length + LANCE_HEAD * 0.25, LANCE_HEAD_WIDTH, steel), (length + LANCE_HEAD, 0.0, steel)], holder)
+    # the banner: its pole stands in his right hand, its foot by his stirrup, and its cloth flies back
+    if not lance:
+        box((grip.x - 0.05, grip.y - 0.05, grip.z - 2.1), (grip.x + 0.05, grip.y + 0.05, grip.z + 4.6), WOOD + (0.0,), holder)
     # in strips along it, so the material can wave it
-    for strip in range(FLAG_STRIPS):
+    for strip in range(0 if lance else FLAG_STRIPS):
         near, far = strip / FLAG_STRIPS, (strip + 1) / FLAG_STRIPS
         face([((grip.x, grip.y + 0.05 + 1.7 * near, grip.z + 4.5 - 0.15 * near), holder), ((grip.x, grip.y + 0.05 + 1.7 * near, grip.z + 3.4 + 0.15 * near), holder),
             ((grip.x, grip.y + 0.05 + 1.7 * far, grip.z + 3.4 + 0.15 * far), holder), ((grip.x, grip.y + 0.05 + 1.7 * far, grip.z + 4.5 - 0.15 * far), holder)],
@@ -419,6 +492,7 @@ def render_preview(armature):
 
 def main():
     arguments = sys.argv[sys.argv.index('--') + 1:] if '--' in sys.argv else []
+    lance = 'lance' in arguments
     bpy.ops.wm.read_factory_settings(use_empty=True)
     horse_objects = import_model('horse')
     armature = next(obj for obj in horse_objects if obj.type == 'ARMATURE')
@@ -434,7 +508,19 @@ def main():
             bpy.data.actions.remove(action)
     make_look(armature)
     horse_actions = set(bpy.data.actions)
-    paint(horse)
+    # the dapples of the coat, small faces lighter than the rest, read as pixels on the horse of the battles, close to the camera, as the
+    # developer saw on 2026-11-14, so that horse is of one tone (HORSE_PLAIN)
+    paint(horse, same_as=HORSE_PLAIN if lance else None)
+    # and smooth: its small flat faces lit each its own way drew a checker on its back on the field (2026-11-14); the vertices the glTF split
+    # for the flat faces are joined first, so the normals blend across them
+    if lance:
+        build = bmesh.new()
+        build.from_mesh(horse.data)
+        bmesh.ops.remove_doubles(build, verts=build.verts, dist=1.0e-4)
+        build.to_mesh(horse.data)
+        build.free()
+        for polygon in horse.data.polygons:
+            polygon.use_smooth = True
 
     # where the knight sits: over the seat bone, on the back of the horse there; the horse faces -Y
     use_action(armature, None)
@@ -473,12 +559,19 @@ def main():
             weights = [(weight, names[group]) for group, weight in vertex[layer].items() if group < len(names)]
             return bool(weights) and max(weights)[1].startswith(HAND_BONES)
         bmesh.ops.delete(build, geom=[face for face in build.faces if all(is_hand(vertex) for vertex in face.verts)], context='FACES')
+        # the rider of the battles is no king: the crown of the model, which the reduction of the hero tore away, goes (LANCE_DROPPED)
+        if lance:
+            dropped = {index for index, material in enumerate(part.data.materials) if material and material.name.split('.')[0] in LANCE_DROPPED}
+            bmesh.ops.delete(build, geom=[face for face in build.faces if face.material_index in dropped], context='FACES')
         build.to_mesh(part.data)
         build.free()
-        modifier = part.modifiers.new('Decimate', 'DECIMATE')
-        modifier.ratio = KNIGHT_RATIO.get(part.name.split('.')[0], 0.4)
-        bpy.ops.object.modifier_move_to_index(modifier='Decimate', index=0)
-        bpy.ops.object.modifier_apply(modifier='Decimate')
+        # reduced for the hero, which is seen from afar on the planet; the rider of the battles keeps every triangle, as reduced the faces of
+        # his materials ran into each other in ragged patches, which the developer saw close on the field on 2026-11-14
+        if not lance:
+            modifier = part.modifiers.new('Decimate', 'DECIMATE')
+            modifier.ratio = KNIGHT_RATIO.get(part.name.split('.')[0], 0.4)
+            bpy.ops.object.modifier_move_to_index(modifier='Decimate', index=0)
+            bpy.ops.object.modifier_apply(modifier='Decimate')
         paint(part, OWNER_MATERIALS)
     for bone in knight_armature.data.bones:
         bone.name = PREFIX + bone.name
@@ -487,7 +580,10 @@ def main():
     # his hips onto the back of the horse, facing where it does
     bpy.context.view_layer.update()
     hips = (knight_armature.matrix_world @ knight_armature.data.bones[PREFIX + 'Hips'].head_local).z
-    place = Matrix.Translation((0.0, seat, back - SEAT_SINK)) @ Matrix.Scale(RIDER_SCALE, 4) @ Matrix.Translation((0.0, 0.0, -hips))
+    # the rider of the battles sits higher, LANCE_SEAT_SINK, as the skirt of the armor, whole there, went through the back of the horse
+    # and drew a ragged patchwork the developer saw on the field on 2026-11-14
+    sink = LANCE_SEAT_SINK if lance else SEAT_SINK
+    place = Matrix.Translation((0.0, seat, back - sink)) @ Matrix.Scale(RIDER_SCALE, 4) @ Matrix.Translation((0.0, 0.0, -hips))
     knight_armature.matrix_world = place @ knight_armature.matrix_world
     bpy.context.view_layer.update()
     worlds = {part.name: part.matrix_world.copy() for part in parts}
@@ -522,7 +618,8 @@ def main():
 
     # the cloth, the banner and the reins, made around him as he sits on the horse at rest
     sit(armature, left)
-    extras = make_extras(armature, horse, seat, half_width, back, left)
+    name = 'SK_UnitRider' if lance else 'SK_PlanetRider'
+    extras = make_extras(armature, horse, seat, half_width, back, left, lance)
     for pose_bone in rider_bones:
         pose_bone.matrix_basis = Matrix.Identity(4)
     bpy.context.view_layer.update()
@@ -537,8 +634,8 @@ def main():
     horse.select_set(True)
     bpy.context.view_layer.objects.active = horse
     bpy.ops.object.join()
-    horse.name = 'SK_PlanetRider'
-    horse.data.name = 'SK_PlanetRider'
+    horse.name = name
+    horse.data.name = name
     material = bpy.data.materials.new('Rider')
     horse.data.materials.clear()
     horse.data.materials.append(material)
@@ -560,7 +657,7 @@ def main():
     bpy.ops.object.select_all(action='DESELECT')
     horse.select_set(True)
     armature.select_set(True)
-    bpy.ops.export_scene.gltf(filepath=os.path.join(OUTPUT, 'SK_PlanetRider.glb'), export_format='GLB', use_selection=True, export_animations=True,
+    bpy.ops.export_scene.gltf(filepath=os.path.join(OUTPUT, name + '.glb'), export_format='GLB', use_selection=True, export_animations=True,
         export_animation_mode='ACTIONS', export_vertex_color='ACTIVE', export_all_vertex_colors=False, export_materials='EXPORT', export_yup=True,
         export_skins=True, export_def_bones=False, export_force_sampling=True)
     print('RIDER DONE')

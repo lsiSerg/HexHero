@@ -349,7 +349,7 @@ void SHexBattlePanel::RebuildTooltip(const FGeometry& Geometry)
 	}
 	else if (Wall)
 	{
-		Key = FString::Printf(TEXT("wall %d %d %d"), Wall->Hex.Q, Wall->Hex.R, Wall->Health * 2 + (Battle.IsGateJammed() ? 1 : 0));
+		Key = FString::Printf(TEXT("wall %d %d %d"), Wall->Hex.Q, Wall->Hex.R, Arena->GetShownWallHealth(int32(Wall - Battle.GetWalls().GetData())) * 2 + (Battle.IsGateJammed() ? 1 : 0));
 	}
 	// it stands beside the cursor, on the other side of it where it would leave the screen
 	const UHexUiConfig* Ui = UHexUiConfig::Load();
@@ -378,13 +378,15 @@ void SHexBattlePanel::RebuildTooltip(const FGeometry& Geometry)
 	}
 	if (Wall)
 	{
+		// its health as the field shows it, which a blow takes down when it lands
+		const int32 Shown = Arena->GetShownWallHealth(int32(Wall - Battle.GetWalls().GetData()));
 		const FString Part = Wall->Part == EHexWallPart::Gate ? TEXT("The gate") : Wall->Part == EHexWallPart::Tower ? TEXT("A tower") : TEXT("The wall");
-		const FString What = !Wall->IsStanding() ? TEXT("fallen: anyone walks over the rubble")
+		const FString What = Shown <= 0 ? TEXT("fallen: anyone walks over the rubble")
 			: Wall->Part == EHexWallPart::Gate ? (Battle.IsGateJammed() ? TEXT("jammed open: anyone goes through") : TEXT("opens for the defenders, shuts behind them"))
 			: Wall->Part == EHexWallPart::Tower ? TEXT("its shooters only a catapult harms") : TEXT("a catapult or a stack beside it breaks it");
 		TooltipBox->SetContent(SNew(SVerticalBox)
 			+ SVerticalBox::Slot().AutoHeight()[SNew(STextBlock).Font(Font(12, true)).ColorAndOpacity(FLinearColor(1.0f, 0.88f, 0.6f, 1.0f))
-				.Text(FText::FromString(Wall->IsStanding() ? FString::Printf(TEXT("%s: %d of %d"), *Part, Wall->Health, Wall->MaxHealth) : Part))]
+				.Text(FText::FromString(Shown > 0 ? FString::Printf(TEXT("%s: %d of %d"), *Part, Shown, Wall->MaxHealth) : Part))]
 			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 3.0f, 0.0f, 0.0f)[SNew(STextBlock).Font(Font(9)).ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.0f)).Text(FText::FromString(What))]);
 		return;
 	}
@@ -397,13 +399,18 @@ void SHexBattlePanel::RebuildTooltip(const FGeometry& Geometry)
 	const int32 Count = Arena->GetShownCount(Unit);
 	FHexUnitTooltipData Data = HexUnitTooltip::FromStats(Each.Stats);
 	Data.Title = FString::Printf(TEXT("%d %s"), Count, *Each.Stats.DisplayName);
+	if (!Each.IsMachine() || Each.bTower)
+	{
+		HexUnitTooltip::SetRank(Data, Each.Kind.Creature, Each.Kind.bUpgraded);
+	}
 	Data.Subtitle = Battles->GetSideName(Each.Side);
 	Data.TitleColor = FLinearColor::LerpUsingHSV(Battles->GetSideColor(Each.Side), FLinearColor::White, 0.35f);
-	// as it is now, with its hero and its spells
-	Data.Attack = Battle.GetAttack(Each);
-	Data.Defense = Battle.GetDefense(Each);
-	Data.Speed = Battle.GetSpeed(Each);
-	Data.TopHealth = Each.TopHealth;
+	// its own stats, and what its hero, its spells and defending change of them as it is now
+	Data.AttackBonus = Battle.GetAttack(Each) - Each.Stats.Attack;
+	Data.DefenseBonus = Battle.GetDefense(Each) - Each.Stats.Defense;
+	Data.SpeedBonus = Battle.GetSpeed(Each) - Each.Stats.Speed;
+	// the health of its top creature once the field has shown the blows that took it down
+	Data.TopHealth = Count == Each.Count ? Each.TopHealth : -1;
 	Data.Shots = Each.bShoots ? Each.ShotsLeft : -1;
 	Data.Morale = Each.Morale;
 	Data.Luck = Each.Luck;
@@ -475,16 +482,17 @@ int32 SHexBattlePanel::OnPaint(const FPaintArgs& Args, const FGeometry& Allotted
 			FVector World;
 			FVector2D Screen;
 			const FHexBattleWall& Wall = Battle.GetWalls()[Index];
-			// the gate, the towers and what was struck; a whole section of the wall says nothing
-			if ((Wall.Part == EHexWallPart::Wall && Wall.Health >= Wall.MaxHealth) || !Arena->GetWallPoint(Index, World) || !OnProject(World, Screen))
+			// the gate, the towers and what was struck, by the health the field shows; a whole section of the wall says nothing
+			const int32 Health = Arena->GetShownWallHealth(Index);
+			if ((Wall.Part == EHexWallPart::Wall && Health >= Wall.MaxHealth) || !Arena->GetWallPoint(Index, World) || !OnProject(World, Screen))
 			{
 				continue;
 			}
-			const FString Text = FString::Printf(TEXT("%d"), Wall.Health);
+			const FString Text = FString::Printf(TEXT("%d"), Health);
 			const FVector2D TextSize = Measure->Measure(Text, WallFont);
 			const FVector2D Box = TextSize + FVector2D(8.0, 3.0);
 			const FVector2D Local = Screen / Scale - Box * 0.5;
-			const float Share = float(Wall.Health) / float(FMath::Max(Wall.MaxHealth, 1));
+			const float Share = float(Health) / float(FMath::Max(Wall.MaxHealth, 1));
 			FSlateDrawElement::MakeBox(OutDrawElements, Layer, AllottedGeometry.ToPaintGeometry(Box, FSlateLayoutTransform(Local)), WhiteBrush(), ESlateDrawEffect::None,
 				FLinearColor(0.05f, 0.05f, 0.06f, 0.75f));
 			FSlateDrawElement::MakeBox(OutDrawElements, Layer + 1, AllottedGeometry.ToPaintGeometry(FVector2D(Box.X * Share, 2.0), FSlateLayoutTransform(Local + FVector2D(0.0, Box.Y - 2.0))),

@@ -147,6 +147,12 @@ public:
 	UPROPERTY(EditAnywhere, Category="Light")
 	float ExposureBias = -1.0f;
 
+	/** How much the camera blurs what moves on the screen, 0 for none: a hero, a site or a castle placed anew, which the editor does as it
+	 *  drags one, is drawn in its first frame from where its components were made, which the blur smeared over the whole screen for that
+	 *  frame, as the developer saw on 2026-11-13 (the default of the engine, 0.5, before); the field of a battle takes it too */
+	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=0, ClampMax=1))
+	float MotionBlurAmount = 0.0f;
+
 	/** Direction the sun shines from over the point the camera looks at, in degrees from north towards the right of the screen of a camera
 	 *  facing north, so turning the camera turns no shadow; 120 is from behind and to the right of the usual view */
 	UPROPERTY(EditAnywhere, Category="Light", meta=(ClampMin=-360, ClampMax=360))

@@ -272,6 +272,10 @@ bool FHexHeroFileTest::RunTest(const FString& Parameters)
 	Second.Player = 2;
 	Second.Layer = TEXT("Underground");
 	Second.Cell = 4242;
+	// turned in the editor, which only its line says
+	Second.Yaw = 210;
+	// it starts with a catapult, which only its line says
+	Second.Catapult = true;
 	FHexHeroLine& First = Heroes.AddDefaulted_GetRef();
 	First.Id = 1;
 	First.Name = TEXT("Bohdan");
@@ -286,6 +290,8 @@ bool FHexHeroFileTest::RunTest(const FString& Parameters)
 	Text.ParseIntoArrayLines(Lines);
 	TestEqual(TEXT("A line per hero between the brackets"), Lines.Num(), 7);
 	TestTrue(TEXT("The lowest Id comes first"), Lines.IsValidIndex(4) && Lines[3].Contains(TEXT("\"id\": 1,")) && Lines[4].Contains(TEXT("\"id\": 7,")));
+	TestTrue(TEXT("Only a hero that is turned says how"), Lines.IsValidIndex(4) && !Lines[3].Contains(TEXT("yaw")) && Lines[4].Contains(TEXT("\"yaw\": 210")));
+	TestTrue(TEXT("Only a hero with a catapult says so"), Lines.IsValidIndex(4) && !Lines[3].Contains(TEXT("catapult")) && Lines[4].Contains(TEXT("\"catapult\": true")));
 
 	TArray<FHexHeroLine> Read;
 	FString Error;

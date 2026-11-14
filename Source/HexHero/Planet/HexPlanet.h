@@ -690,6 +690,11 @@ public:
 	 *  the game is played the outline is thinner and lets the ground through (PlayMarkWidth and the rest of the config) */
 	void SetHoveredCell(int32 Cell, int32 BrushSize = 0, TConstArrayView<int32> Group = TConstArrayView<int32>(), bool bPlay = false);
 
+	/** Outlines the cells a way ends at, a hero, a neutral stack or the three of a castle, as one in a color, in the second layer of CellMarks,
+	 *  which lies on the relief as the outline of the cursor does (UHexHeroes::UpdatePath; a line of marks laid over the corners of the cells
+	 *  zigzagged over uneven ground, as the developer found on 2026-11-13); none to take it away */
+	void SetTargetCells(TConstArrayView<int32> InCells, const FLinearColor& Color, float WidthScale = 1.0f, float Opacity = 1.0f);
+
 	/** Returns the text of the debug panel for a cell */
 	FString GetCellDebugText(int32 Cell) const;
 
@@ -1160,6 +1165,13 @@ private:
 
 	/** Marks cells, cell -> mark, and clears the marks of the other cells; the blue of the marks is left to SetWaterHiddenCells */
 	void SetCellMarks(const TMap<int32, FColor>& Marks);
+
+	/** The cells SetTargetCells outlines and in what color, and whether the marks must be made again though the cursor did not move */
+	TArray<int32> TargetGroup;
+	FLinearColor TargetColor = FLinearColor::Red;
+	float TargetWidthScale = 1.0f;
+	float TargetOpacity = 1.0f;
+	bool bMarksStale = false;
 
 	/** Sets blue of CellMarks in the cells whose water the debug view hides, every cell when bAll, so the surface draws the grid lines and
 	 *  outlines on their seabed, as the strip of the water grid that draws them on the water is hidden with it */

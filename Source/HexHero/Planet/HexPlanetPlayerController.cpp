@@ -30,6 +30,7 @@
 #include "HexBattles.h"
 #include "SHexModeBar.h"
 #include "SHexHoverInfo.h"
+#include "SHexMapTip.h"
 #include "HexHeroes.h"
 #include "HexSites.h"
 #include "SHexPlanetPalette.h"
@@ -69,6 +70,22 @@ namespace
 		}
 	}
 
+	// a right click on a cell, or a left one with click, as the mouse gives them, for test runs that have no mouse
+	void RunOrderCommand(const TArray<FString>& Args, UWorld* World)
+	{
+		AHexPlanetPlayerController* Controller = World ? Cast<AHexPlanetPlayerController>(World->GetFirstPlayerController()) : nullptr;
+		if (!Controller || Args.IsEmpty())
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("hex.Order <Cell> [click] [ctrl]: a right click on a cell, or a left one, with Ctrl held, while the game is played"));
+			return;
+		}
+		const auto Has = [&Args](const TCHAR* Word) { return Args.ContainsByPredicate([Word](const FString& Arg) { return Arg.Equals(Word, ESearchCase::IgnoreCase); }); };
+		Controller->OrderAt(FCString::Atoi(*Args[0]), Has(TEXT("click")), Has(TEXT("ctrl")));
+	}
+
+	FAutoConsoleCommandWithWorldAndArgs OrderCommand(TEXT("hex.Order"), TEXT("hex.Order <Cell> [click] [ctrl]: a right click on a cell, or a left one, with Ctrl held, as the mouse gives them"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&RunOrderCommand));
+
 	FAutoConsoleCommandWithWorldAndArgs CheatSheetCommand(TEXT("hex.CheatSheet"), TEXT("Shows or hides the sheet of the cheats over the screen, as Ctrl+H does"),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&RunCheatSheetCommand));
 
@@ -94,6 +111,8 @@ void AHexPlanetPlayerController::BeginPlay()
 	{
 		SAssignNew(HoverInfo, SHexHoverInfo);
 		ViewportClient->AddViewportWidgetContent(HoverInfo.ToSharedRef());
+		SAssignNew(MapTip, SHexMapTip);
+		ViewportClient->AddViewportWidgetContent(MapTip.ToSharedRef(), 95);
 
 		SAssignNew(DebugOverlay, SHexDebugOverlay);
 		ViewportClient->AddViewportWidgetContent(DebugOverlay.ToSharedRef());
@@ -320,7 +339,7 @@ void AHexPlanetPlayerController::OnBattleShown()
 	}
 	// the widgets of the planet leave the screen meanwhile
 	HiddenForBattle.Reset();
-	const TPair<TSharedPtr<SWidget>, int32> Widgets[] = {{HeroPanel, 0}, {EdgeMarkers, 100}, {ModeBar, 0}, {HoverInfo, 0}, {CastlePanel, 0}};
+	const TPair<TSharedPtr<SWidget>, int32> Widgets[] = {{HeroPanel, 0}, {EdgeMarkers, 100}, {ModeBar, 0}, {HoverInfo, 0}, {CastlePanel, 0}, {MapTip, 95}};
 	for (const TPair<TSharedPtr<SWidget>, int32>& Each : Widgets)
 	{
 		if (Each.Key.IsValid())
@@ -428,7 +447,13 @@ void AHexPlanetPlayerController::ClickGame(bool bDouble)
 	const UHexCastles* Castles = Heroes->GetCastles();
 	const FHexCastle* Castle = !Castles ? nullptr : Under && Under->CastleId != 0 ? Castles->FindCastle(Under->CastleId)
 		: !Under && MouseCell != INDEX_NONE ? Castles->FindCastleAt(Planet->GetLayer(), MouseCell) : nullptr;
-	if (Castle && Castle->Owner == Heroes->GetShroudPlayer() && !Heroes->IsHidden(Castle->Owner, Castle->Layer, MouseCell))
+	// with Ctrl a hero chosen outside it is pointed into it, the way shown with the castle outlined, as the developer asked on 2026-11-13, and
+	// a second click on it or the key that sends the hero goes in, swapping places with a hero that guards it
+	const bool bAlt = IsOrderCtrlDown();
+	const FHexHero* Chosen = Heroes->GetSelected();
+	const bool bPointedIn = Castle && Chosen && Chosen->TargetLayer == Castle->Layer && Castle->HasCell(Chosen->TargetCell);
+	const bool bWayToCastle = (bAlt || bPointedIn) && Castle && Chosen && Chosen->CastleId != Castle->Id && !Under && !Chosen->bWalking;
+	if (Castle && !bWayToCastle && Castle->Owner == Heroes->GetShroudPlayer() && !Heroes->IsHidden(Castle->Owner, Castle->Layer, MouseCell))
 	{
 		Heroes->SelectCastle(Castle->Id);
 		if (bDouble)
@@ -446,6 +471,14 @@ void AHexPlanetPlayerController::ClickGame(bool bDouble)
 	{
 		Under = nullptr;
 	}
+	// with Ctrl a hero of its own is not chosen: the hero chosen is pointed to it, and the way shows, which a second click walks to exchange
+	// the armies, as the developer asked on 2026-11-13
+	if (bAlt && Under && Chosen && Under->Id != Chosen->Id && Under->Player == Chosen->Player && Under->CastleId == 0 && !Chosen->bWalking && Chosen->CastleId == 0)
+	{
+		Heroes->SetAltOrder(Chosen->Id, false);
+		Heroes->SetTarget(Chosen->Id, Under->Layer, Under->Cell);
+		return;
+	}
 	if (bDouble && Under && Heroes->CanChoose(Under->Id))
 	{
 		ShowHero(Under->Id);
@@ -462,6 +495,15 @@ void AHexPlanetPlayerController::ClickGame(bool bDouble)
 	if (!Under)
 	{
 		FindMouthUnderCursor(Layer, Cell);
+	}
+	// the castle by the cell it is pointed to already, so a click on another of its cells walks there too
+	if (bWayToCastle && bPointedIn)
+	{
+		Cell = Chosen->TargetCell;
+	}
+	if (const FHexHero* Pointed = Heroes->GetSelected(); Pointed && !(Pointed->TargetCell == Cell && Pointed->TargetLayer == Layer))
+	{
+		Heroes->SetAltOrder(Pointed->Id, bAlt && !bWayToCastle);
 	}
 	Heroes->Click(Layer, Cell, Under, Message);
 	if (!Message.IsEmpty())
@@ -518,7 +560,7 @@ void AHexPlanetPlayerController::UpdateGameCursor(bool bRay, const FVector& Orig
 			EHexPlanetLayer Layer = Planet->GetLayer();
 			int32 Cell = MouseCell;
 			const bool bMouth = !Under && FindMouthUnderCursor(Layer, Cell);
-			switch (Heroes->GetOrderAt(Layer, Cell, Under, bMouth))
+			switch (Heroes->GetOrderAt(Layer, Cell, Under, bMouth, FSlateApplication::Get().GetModifierKeys().IsControlDown()))
 			{
 			case UHexHeroes::EOrder::Choose: Cursor = EHexCursor::Choose; break;
 			case UHexHeroes::EOrder::Move: Cursor = EHexCursor::Move; break;
@@ -529,11 +571,24 @@ void AHexPlanetPlayerController::UpdateGameCursor(bool bRay, const FVector& Orig
 			case UHexHeroes::EOrder::Visit: Cursor = EHexCursor::Visit; break;
 			case UHexHeroes::EOrder::Portal: Cursor = EHexCursor::Portal; break;
 			case UHexHeroes::EOrder::Swap: Cursor = EHexCursor::Swap; break;
+			case UHexHeroes::EOrder::Exchange: Cursor = EHexCursor::Exchange; break;
 			default: break;
 			}
 		}
 	}
 	GameCursor->SetCursor(Cursor, Angle);
+	if (MapTip.IsValid())
+	{
+		FHexMapTip Tip;
+		const AHexPlanet* TipPlanet = GetPlanet();
+		UHexHeroes* TipHeroes = GetHeroes();
+		if (!bBlocked && !IsBattleShown() && TipPlanet && TipHeroes && IsPlayMode() && !IsBrushArmed() && MouseCell != INDEX_NONE)
+		{
+			const FHexHero* Under = bRay ? TipHeroes->FindHeroAlongRay(TipPlanet->GetLayer(), Origin, Direction) : nullptr;
+			TipHeroes->GetMapTip(TipPlanet->GetLayer(), MouseCell, Under, Tip);
+		}
+		MapTip->SetTip(Tip);
+	}
 	// the cursor of the system hides while the game draws its own
 	const EMouseCursor::Type System = GameCursor->UsesSystemCursor() ? EMouseCursor::Default : EMouseCursor::None;
 	if (CurrentMouseCursor != System)
@@ -625,6 +680,15 @@ bool AHexPlanetPlayerController::FindMouthUnderCursor(EHexPlanetLayer& OutLayer,
 	return bFound;
 }
 
+void AHexPlanetPlayerController::OnArmyOpened(int32 HeroId, int32 OtherId)
+{
+	const UHexHeroes* Heroes = GetHeroes();
+	if (CastlePanel.IsValid() && Heroes && Heroes->IsPersonTurn())
+	{
+		CastlePanel->OpenArmy(HeroId, OtherId);
+	}
+}
+
 void AHexPlanetPlayerController::OnCastleOpened(int32 Id)
 {
 	const UHexHeroes* Heroes = GetHeroes();
@@ -685,6 +749,26 @@ void AHexPlanetPlayerController::OnHeroSent(int32 Id)
 	}
 }
 
+void AHexPlanetPlayerController::OrderAt(int32 Cell, bool bClick, bool bCtrl)
+{
+	MouseCell = Cell;
+	bOrderCtrl = bCtrl;
+	if (bClick)
+	{
+		ClickGame(false);
+	}
+	else
+	{
+		OrderGame();
+	}
+	bOrderCtrl = false;
+}
+
+bool AHexPlanetPlayerController::IsOrderCtrlDown() const
+{
+	return bOrderCtrl || (FSlateApplication::IsInitialized() && FSlateApplication::Get().GetModifierKeys().IsControlDown());
+}
+
 void AHexPlanetPlayerController::OrderGame()
 {
 	// on the field a click of the right button takes back a spell chosen, and else gives the order the left one would, as the developer asked
@@ -736,6 +820,20 @@ void AHexPlanetPlayerController::OrderGame()
 	EHexPlanetLayer Layer = Planet->GetLayer();
 	int32 Cell = MouseCell;
 	FindMouthUnderCursor(Layer, Cell);
+	// with Ctrl it only points the hero there, whatever lies there (a hero, a castle, a neutral stack, a site or bare ground), the way shown
+	// with its end outlined, as the developer asked on 2026-11-14, and the key that sends a hero or a second click there carries it out;
+	// without Ctrl it goes at once. Ctrl with the right button swapped places with a hero of its own from 2026-11-13 until then
+	Heroes->SetAltOrder(Hero->Id, false);
+	if (IsOrderCtrlDown())
+	{
+		const UHexCastles* Castles = Heroes->GetCastles();
+		const FHexCastle* Guarded = Castles && Hero->CastleId != 0 ? Castles->FindCastle(Hero->CastleId) : nullptr;
+		if (!(Cell == Hero->Cell && Layer == Hero->Layer) && !(Guarded && Guarded->Layer == Layer && Guarded->HasCell(Cell)))
+		{
+			Heroes->SetTarget(Hero->Id, Layer, Cell);
+		}
+		return;
+	}
 	if (!Heroes->Send(Hero->Id, Layer, Cell, Message) && !Message.IsEmpty())
 	{
 		OnHeroMessage(Message);
@@ -871,6 +969,10 @@ void AHexPlanetPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReaso
 {
 	if (UGameViewportClient* ViewportClient = GetWorld()->GetGameViewport())
 	{
+		if (MapTip.IsValid())
+		{
+			ViewportClient->RemoveViewportWidgetContent(MapTip.ToSharedRef());
+		}
 		if (HoverInfo.IsValid())
 		{
 			ViewportClient->RemoveViewportWidgetContent(HoverInfo.ToSharedRef());
@@ -941,6 +1043,7 @@ void AHexPlanetPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReaso
 	ModeBar.Reset();
 	Dialog.Reset();
 	HoverInfo.Reset();
+	MapTip.Reset();
 	Palette.Reset();
 	DebugOverlay.Reset();
 	MapMenu.Reset();
@@ -1262,6 +1365,8 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 			Heroes->OnHeroTravelled.AddUObject(this, &AHexPlanetPlayerController::OnHeroTravelled);
 			Heroes->OnHeroChosen.AddUObject(this, &AHexPlanetPlayerController::OnHeroChosen);
 			Heroes->OnHeroSent.AddUObject(this, &AHexPlanetPlayerController::OnHeroSent);
+			Heroes->OnArmyOpened.AddUObject(this, &AHexPlanetPlayerController::OnArmyOpened);
+			Heroes->OnCastleChosen.AddUObject(this, &AHexPlanetPlayerController::ShowCastle);
 			if (UHexBattles* Battles = Heroes->GetBattles())
 			{
 				Battles->OnShown.AddUObject(this, &AHexPlanetPlayerController::OnBattleShown);
@@ -1319,7 +1424,7 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 		{
 			Info += TEXT("\n") + CastleText;
 		}
-		HoverInfo->SetInfo(Info);
+		HoverInfo->SetInfo(Heroes && Heroes->IsPlaying() && !IsBrushArmed() ? FString() : Info);
 	}
 }
 
@@ -1802,6 +1907,26 @@ void AHexPlanetPlayerController::RunPaintCommand(const TArray<FString>& Args)
 		Brush->SetNeutralCount(GetInt(3, 10));
 		Brush->SetNeutralUpgraded(Args.ContainsByPredicate([](const FString& Each) { return Each.Equals(TEXT("up"), ESearchCase::IgnoreCase); }));
 		Brush->SetNeutralTool();
+	}
+	else if (Action == TEXT("piece") && Args.IsValidIndex(1))
+	{
+		// what a click of the tabs of the heroes, mines, castles and neutrals does: Place, Move, Turn or Remove
+		const TCHAR* Names[] = {TEXT("Place"), TEXT("Move"), TEXT("Turn"), TEXT("Remove")};
+		for (int32 Index = 0; Index < UE_ARRAY_COUNT(Names); ++Index)
+		{
+			if (Args[1].Equals(Names[Index], ESearchCase::IgnoreCase))
+			{
+				Brush->SetPieceAction(EHexPieceAction(Index));
+			}
+		}
+	}
+	else if (Action == TEXT("hero"))
+	{
+		// the tool of the Heroes tab of the layer shown: a class and a player by their index
+		SetPaintMode(true);
+		Brush->SetHeroClass(GetInt(1, 0));
+		Brush->SetHeroPlayer(GetInt(2, 0));
+		Brush->SetHeroTool();
 	}
 	else if (Action == TEXT("none"))
 	{

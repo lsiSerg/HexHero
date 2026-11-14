@@ -17,6 +17,7 @@ class UHexSites;
 class UHexShroud;
 class UHexBattles;
 class UHexNeutrals;
+struct FHexNeutral;
 class UInstancedStaticMeshComponent;
 class UProceduralMeshComponent;
 class UMaterialInstanceDynamic;
@@ -42,6 +43,9 @@ struct FHexHero
 	/** Where it stands when a game starts, which heroes.json keeps */
 	EHexPlanetLayer StartLayer = EHexPlanetLayer::Surface;
 	int32 StartCell = INDEX_NONE;
+
+	/** How it is turned at rest when a game starts, in degrees from where it faces by itself, set in the editor (heroes.json) */
+	int32 StartYaw = 0;
 
 	/** Where it stands now; while it walks, the cell it steps onto */
 	EHexPlanetLayer Layer = EHexPlanetLayer::Surface;
@@ -75,6 +79,13 @@ struct FHexHero
 	/** It has a catapult, bought in a castle (UHexCastles::BuyCatapult), which shoots at the walls of a castle it attacks; lost when it is
 	 *  destroyed there */
 	bool bCatapult = false;
+
+	/** It starts with a catapult, as its line of heroes.json says */
+	bool bStartCatapult = false;
+
+	/** It was sent with Ctrl, as the developer asked on 2026-11-13: onto a hero of its own it swaps places with it, and onto a castle of its own
+	 *  it goes before its gate without going in; without Ctrl onto a hero of its own it comes beside it and they exchange their armies */
+	bool bAltOrder = false;
 
 	/** The army it starts with, as heroes.json has it, empty for the default of its player (UHexCastles::MakeStartArmy) */
 	TArray<FHexStack> StartArmy;
@@ -110,6 +121,10 @@ struct FHexHero
 	 *  it stay on the way shown until it stops, as the developer found on 2026-11-12 that they went as soon as it had come through */
 	int32 CameOutCell = INDEX_NONE;
 	FVector3d GlidePoints[3] = {FVector3d::ZeroVector, FVector3d::ZeroVector, FVector3d::ZeroVector};
+	/** The glide out of the mouth on a layer that was not built when the hero went through, as an underground never shown is built only
+	 *  when the camera comes to it: its points are found once it is (PlaceHero), as before 2026-11-14 they were found on nothing and the camera
+	 *  followed the hero to a place far away on its first way down */
+	bool bMouthGlidePending = false;
 	int32 GateStepFrom = INDEX_NONE;
 
 	/** For a hero of a player the game moves: seconds until it looks for where to go again, and whether it found nothing more to do today */
@@ -189,6 +204,35 @@ constexpr int32 MaxHeroLights = 8;
  *  Each hero is a mesh component of the planet of its layer, so it is hidden with it; the ring under the hero chosen and the marks of its way
  *  are components of that planet too, drawn with M_HexPlanetHeroMark.
  */
+/** What the panel at the cursor says while the game is played (UHexHeroes::GetMapTip, SHexMapTip): a title, lines, an army as portraits with
+ *  their numbers or ranges (ArmyCounts, one a stack, empty for the numbers), and a rough forecast of a battle there */
+struct FHexMapTip
+{
+	FString Title;
+	FLinearColor TitleColor = FLinearColor::White;
+	TArray<FString> Lines;
+	TArray<FHexStack> Army;
+	TArray<FString> ArmyCounts;
+	FString Forecast;
+	FLinearColor ForecastColor = FLinearColor::White;
+
+	bool operator==(const FHexMapTip& Other) const
+	{
+		if (!(Title == Other.Title && Lines == Other.Lines && ArmyCounts == Other.ArmyCounts && Forecast == Other.Forecast && Army.Num() == Other.Army.Num()))
+		{
+			return false;
+		}
+		for (int32 Index = 0; Index < Army.Num(); ++Index)
+		{
+			if (!Army[Index].IsSameKind(Other.Army[Index]) || Army[Index].Count != Other.Army[Index].Count)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+};
+
 UCLASS()
 class UHexHeroes : public UObject
 {
@@ -336,7 +380,38 @@ public:
 		Sent,
 		/** It stops at the end of the step it is on */
 		Stopped,
+		/** The hero chosen was clicked again: its army opens (OnArmyOpened) */
+		Army,
 	};
+
+	/** What the panel at the cursor says of a cell of a layer while the game is played, with the hero whose body is under the cursor: a hero of
+	 *  the person, what it leads and has left; a pile or a mine; a neutral stack, a hero of another player or a castle with how many it seems
+	 *  to have and a rough forecast of a battle against it, as the developer asked on 2026-11-13. False for nothing to say */
+	bool GetMapTip(EHexPlanetLayer Layer, int32 Cell, const FHexHero* Under, FHexMapTip& OutTip) const;
+
+	/** A neutral stack beside the castle a hero guards, which that hero sent onto it fights there as a siege, the hero behind its walls, as the
+	 *  developer asked on 2026-11-13; null for none, and the cell of the castle beside it */
+	const FHexNeutral* FindSallyNeutral(const FHexHero& Hero, EHexPlanetLayer Layer, int32 Cell, int32& OutCastleCell) const;
+
+	/** Says whether the next order of a hero was given with Ctrl (FHexHero::bAltOrder) */
+	void SetAltOrder(int32 Id, bool bAlt);
+
+	/** Returns whether a hero of the player of a hero, not that one and not in a castle, stands on a cell, which it may meet there */
+	const FHexHero* FindFriendAt(const FHexHero& Hero, EHexPlanetLayer Layer, int32 Cell) const;
+
+	/** Moves Count creatures (0 for all) of a stack of the army of a hero to a slot of the army of the same hero or of another of its player
+	 *  beside it: onto an empty slot (one past the last) they make a stack of their own, onto one of their kind they join it, and the whole
+	 *  stack onto another kind swaps places with it, as the developer asked on 2026-11-13 for an army panel that swaps, splits and joins.
+	 *  Returns false and why not */
+	bool ArrangeArmy(int32 FromHero, int32 FromSlot, int32 ToHero, int32 ToSlot, int32 Count, FString& OutMessage);
+
+	/** Broadcast when a person opens the army of a hero, with the other hero of its player it met, 0 for none, for the panel of the army */
+	DECLARE_MULTICAST_DELEGATE_TwoParams(FOnArmyOpened, int32, int32);
+	FOnArmyOpened OnArmyOpened;
+
+	/** Broadcast when the turn of a person without a hero chose its first castle, for the camera to show it */
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnCastleChosenByTurn, int32);
+	FOnCastleChosenByTurn OnCastleChosen;
 
 	/** A left click of the player on a cell of the layer shown, with the hero whose body is under the cursor, if any: a click on another hero
 	 *  chooses it; on a cell it points the hero chosen there, so its way shows; a second click on that cell sets it walking; and while it
@@ -360,8 +435,10 @@ public:
 		Visit,
 		Portal,
 		Swap,
+		/** Walk to a hero of its own it is pointed to and exchange the armies */
+		Exchange,
 	};
-	EOrder GetOrderAt(EHexPlanetLayer Layer, int32 Cell, const FHexHero* Under, bool bMouth);
+	EOrder GetOrderAt(EHexPlanetLayer Layer, int32 Cell, const FHexHero* Under, bool bMouth, bool bAlt = false);
 
 	/** Points a hero to a cell of a layer, INDEX_NONE for nowhere; its way shows while it is the one chosen */
 	bool SetTarget(int32 Id, EHexPlanetLayer Layer, int32 Cell);
@@ -610,6 +687,8 @@ private:
 	float ShownPoints = -1.0f;
 	int32 ShownRoute = -1;
 	FVector3d ShownStart = FVector3d::ZeroVector;
+	/** Which layers were built when the way was shown, a bit each, so a layer built since gets its marks */
+	int32 ShownBuilt = 0;
 	FString HoverText;
 	TArray<FPathLabel> PathLabels;
 	EHexPlanetLayer PathLayer = EHexPlanetLayer::Surface;
@@ -670,6 +749,9 @@ private:
 
 	/** A hero that stands beside the site it was sent to visits it, paying as for a step. Returns false and why not */
 	bool VisitSite(FHexHero& Hero, FString& OutMessage);
+
+	/** The next visit costs nothing, as when the guard of a mine was beaten and the hero goes onto it (UHexBattles) */
+	bool bNextVisitFree = false;
 
 	/** A hero takes the pile that lies on the cell its way ended on, if any; one it only runs over on its way further stays, as the
 	 *  developer decided on 2026-11-11 */

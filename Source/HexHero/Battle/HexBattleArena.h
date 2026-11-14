@@ -115,6 +115,10 @@ public:
 	const TArray<FString>& GetLog() const { return Log; }
 	const TArray<FHexBattlePopup>& GetPopups() const { return Popups; }
 	int32 GetShownCount(int32 Unit) const { return ShownCounts.IsValidIndex(Unit) ? ShownCounts[Unit] : 0; }
+
+	/** The health of a part of the wall as the field shows it, which a hit takes down when its stone or blow lands, as the developer asked on
+	 *  2026-11-14 that damage shows at the moment of the blow and not when the order is given */
+	int32 GetShownWallHealth(int32 Wall) const;
 	bool GetUnitPoint(int32 Unit, FVector& OutWorld) const;
 
 	/** Where a part of the wall stands, over its top, for its health to show */
@@ -122,8 +126,19 @@ public:
 
 	UHexBattles* GetBattles() const { return Battles.Get(); }
 
-	/** The hex of the field at a point of the world, and its middle */
-	FVector GetHexPoint(const FHexCoord& Hex) const;
+	/** The middle of a hex of the field in the world, on the ground there, or with bGround false at the height of the field without its
+	 *  hills, which the marks take, as they are laid on the ground afterwards (DrapeOnGround) */
+	FVector GetHexPoint(const FHexCoord& Hex, bool bGround = true) const;
+
+	/** The height of the ground of the field at a point of the world as its mesh has it, from the heights its build kept */
+	double GetShownGroundHeight(const FVector2D& World) const;
+
+	/** Where a ray meets the ground of the field, its hills included */
+	bool TraceGround(const FVector& Origin, const FVector& Direction, FVector& OutPoint) const;
+
+	/** How high above the ground the marks of a hex lie: on the water of the moat, and the bridge, whose deck GetHexPoint gives, as the
+	 *  developer asked on 2026-11-13 to see the outline of a unit on the bridge and on the water and not under them */
+	double GetMarkFloor(const FHexCoord& Hex) const;
 
 	/** The point of the straight line of the wall at the row of a hex of its column: the line runs through the middle of what the hexes of the
 	 *  column share, as they shift half a hex from row to row */
@@ -157,7 +172,24 @@ public:
 	};
 	FSiegeShape GetSiegeShape() const;
 
-	/** The height of the ground of the field at a point of the world: flat over the field and the castle, hills beyond (HillHeight) */
+	/** The deck of the bridge over the moat, relative to the field: where it starts at the face of the wall, the way out over the water and
+	 *  across it, how long and wide it is; it rises BridgeRise in its middle (BuildSiege) */
+	struct FBridgeDeck
+	{
+		bool bValid = false;
+		FVector Start = FVector::ZeroVector;
+		FVector Out = FVector::XAxisVector;
+		FVector Across = FVector::YAxisVector;
+		double Span = 0.0;
+		double Wide = 0.0;
+	};
+	FBridgeDeck GetBridgeDeck() const;
+
+	/** How high the top of the deck lies at a point relative to the field, false off it */
+	bool GetDeckHeight(const FBridgeDeck& Deck, const FVector& Local, double& OutHeight) const;
+
+	/** The height of the ground of the field at a point of the world: gentle hills over the field (FieldHillHeight) but a castle, hills
+	 *  beyond (HillHeight), sinking at the edge of the ground (EdgeSinkDepth) */
 	double GetGroundHeight(const FVector2D& World) const;
 
 	/** The box of the field, and of the castle with its moat and palace, in the world, around which the forest, the rocks and the fog stand */
@@ -165,6 +197,9 @@ public:
 
 	/** Whether a spell is chosen and waits for its hex */
 	bool IsAiming() const { return Aimed != INDEX_NONE; }
+
+	/** The cheat key: what is under the cursor takes CheatHitShare of its health as damage; false when nothing is there */
+	bool CheatHitUnderCursor();
 
 	/** Gives an order from the console, by hexes as column and row (hex.Battle) */
 	bool OrderAt(const FString& Order, const FHexCoord& Hex, int32 Unit, int32 Spell, FString& OutMessage);
@@ -185,6 +220,15 @@ private:
 
 	UPROPERTY(VisibleAnywhere)
 	TObjectPtr<UProceduralMeshComponent> Marks;
+
+	/** The marks under the units, which follow their figures as they walk, apart from the rest, so a walk rebuilds them alone, as the field
+	 *  stuttered while anything walked when all were one mesh laid on its hills (2026-11-14) */
+	UPROPERTY()
+	TObjectPtr<UProceduralMeshComponent> UnitMarks;
+
+	/** The hex under the cursor and the way there, apart too, so the cursor or the camera crossing a hex rebuilds them alone */
+	UPROPERTY()
+	TObjectPtr<UProceduralMeshComponent> HoverMarks;
 
 	UPROPERTY(VisibleAnywhere)
 	TObjectPtr<UStaticMeshComponent> Sky;
@@ -228,8 +272,18 @@ private:
 		float Yaw = 0.0f;
 		float Hover = 0.0f;
 		FVector Position = FVector::ZeroVector;
+		/** Where it should face, and where it faces now, which turns towards it at FigureTurnSpeed */
 		FVector Facing = FVector::ForwardVector;
+		FVector Shown = FVector::ForwardVector;
 		bool bDead = false;
+		/** The arm of the catapult, which swings when it fires */
+		TWeakObjectPtr<USceneComponent> Arm;
+		/** Where the last blow came from, flat, and how long ago, below 0 when it is over: the figure reels away from it */
+		FVector HitFrom = FVector::ZeroVector;
+		float HitTime = -1.0f;
+		/** A shooter of a tower that falls with it: from how high and how long ago, below 0 when it is not falling */
+		float FallFrom = 0.0f;
+		float FallTime = -1.0f;
 	};
 	TArray<FFigure> Figures;
 	TArray<int32> ShownCounts;
@@ -239,6 +293,8 @@ private:
 	TOptional<FHexBattleEvent> Current;
 	float CurrentTime = 0.0f;
 	float CurrentLength = 0.0f;
+	/** How long a walk waits at its start while the figure turns to its first step */
+	float TurnLead = 0.0f;
 	float AiWait = 0.0f;
 
 	TArray<FString> Log;
@@ -251,6 +307,10 @@ private:
 
 	/** What the marks were drawn for, so they are drawn again only when it changed */
 	FString MarksKey;
+	FString UnitMarksKey;
+	FString HoverMarksKey;
+	/** The hexes of what the stack that takes orders can strike or shoot, as the marks found them */
+	TSet<FHexCoord> MarkTargets;
 
 	/** The wall of a castle on the field, as the developer asked on 2026-11-12: its pieces, made again when a part of it falls, the material
 	 *  of the castle, and the gate, whose leaves open while a defender goes through or stands in it and stay open once it is jammed */
@@ -261,6 +321,10 @@ private:
 	TObjectPtr<UMaterialInstanceDynamic> CastleMaterial;
 
 	FString SiegeKey;
+
+	/** The health of each part of the wall as the field shows it, which a hit takes down when it plays, so a part shows its damage and falls
+	 *  when the stone or the blow lands, not when the rules decide it */
+	TArray<int32> ShownWallHealth;
 	/** How high the shooters of a tower stand, over the ground, and the water of the moat, made once for a field */
 	double TowerTop = 0.0;
 	TWeakObjectPtr<UProceduralMeshComponent> MoatWater;
@@ -279,6 +343,35 @@ private:
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UStaticMesh>> ArchMeshes;
 
+	/** What falls of the wall as it is struck, played and then gone: blocks that fall and tumble, and a part that fell sinking into its
+	 *  rubble, as the developer asked on 2026-11-13 for the damage to a castle animated and not one mesh swapped for another */
+	struct FCrumble
+	{
+		TWeakObjectPtr<UInstancedStaticMeshComponent> Component;
+		TArray<FVector> Start;
+		TArray<FVector> Velocity;
+		TArray<FQuat> Turn;
+		TArray<FVector> Spin;
+		TArray<FVector> Scale;
+		double Ground = 0.0;
+		double Sink = 0.0;
+		bool bSinks = false;
+		float Time = 0.0f;
+	};
+	TArray<FCrumble> Crumbles;
+
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UInstancedStaticMeshComponent>> CrumbleComponents;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UStaticMesh> DebrisMesh;
+
+	/** The fog of war of the field, a post process of its camera */
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> ShroudInstance;
+
+	void UpdateCrumbles(float DeltaSeconds);
+
 	/** The materials of the props of a siege that dissolve with the wall in front of the hex under the cursor (the leaves of the gate too) */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UMaterialInstanceDynamic>> FadeMaterials;
@@ -292,6 +385,13 @@ private:
 	FVector2D FieldMin = FVector2D::ZeroVector;
 	FVector2D FieldMax = FVector2D::ZeroVector;
 	int32 GroundSeed = 0;
+	/** The boxes the ground is built from, found once for a field: the field and the castle, the castle alone, and the ground in all */
+	FBox2D FlatBox = FBox2D(ForceInit);
+	FBox2D CastleBox = FBox2D(ForceInit);
+	FBox2D GroundBox = FBox2D(ForceInit);
+	/** The heights of the vertices of the ground mesh, GroundSteps + 1 a side over GroundBox, which the field stands on */
+	TArray<float> GroundHeights;
+	int32 GroundSteps = 0;
 
 	UProceduralMeshComponent* MakeMoatWater(const FSiegeShape& Shape);
 	void SetMoatParameters(UMaterialInstanceDynamic* Instance, const FSiegeShape& Shape) const;
@@ -343,6 +443,27 @@ private:
 
 	void BuildGround();
 	void BuildGrid();
+
+	/** Whether a move is played as a flight: a flyer flies over what is in the way, and walks a way over the ground when its look has a walk */
+	bool IsFlight(const FHexBattleEvent& Event) const;
+
+	/** A heap of the wood of a catapult destroyed where it stood */
+	void AddWreck(int32 Unit);
+
+	/** A walk through the gate holds on the hex before it until its leaves are open (GateWaitOpen) */
+	bool bWaitingAtGate = false;
+
+
+	/** Lays the grid on the water of the moat where it runs over its hexes, each point by whether it lies in or on a hex of the moat, so the
+	 *  lines join between a hex of the moat and one of the ground without a step */
+	void LiftOverMoat(TArray<FVector>& Vertices) const;
+
+	/** Copies the triangles of the grid under the deck of the bridge onto its top, as a projection, as the developer asked on 2026-11-14,
+	 *  the lines on the water under it kept */
+	void ProjectOnBridge(TArray<FVector>& Vertices, TArray<int32>& Triangles, TArray<FVector>& Normals, TArray<FLinearColor>& Colors) const;
+
+	/** Lays marks built at the height of the field on its hills, subdividing their triangles so they follow the ground */
+	void DrapeOnGround(TArray<FVector>& Vertices, TArray<int32>& Triangles, TArray<FVector>& Normals, TArray<FLinearColor>& Colors) const;
 	void BuildProps();
 	void PlaceFigures();
 	void ClearField();

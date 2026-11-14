@@ -1070,8 +1070,9 @@ FString HexPlanetFile::EncodeStackLines(TConstArrayView<FHexStackLine> Stacks)
 	for (int32 Index = 0; Index < Stacks.Num(); ++Index)
 	{
 		const FHexStackLine& Stack = Stacks[Index];
-		Text += FString::Printf(TEXT("%s{\"faction\": \"%s\", \"creature\": \"%s\", \"upgraded\": %s, \"count\": %d}"), Index == 0 ? TEXT("") : TEXT(", "),
-			*EscapeJsonText(Stack.Faction), *EscapeJsonText(Stack.Creature), Stack.Upgraded ? TEXT("true") : TEXT("false"), Stack.Count);
+		Text += FString::Printf(TEXT("%s{\"faction\": \"%s\", \"creature\": \"%s\", \"upgraded\": %s, \"count\": %d%s}"), Index == 0 ? TEXT("") : TEXT(", "),
+			*EscapeJsonText(Stack.Faction), *EscapeJsonText(Stack.Creature), Stack.Upgraded ? TEXT("true") : TEXT("false"), Stack.Count,
+			Stack.Slot >= 0 ? *FString::Printf(TEXT(", \"slot\": %d"), Stack.Slot) : TEXT(""));
 	}
 	return Text + TEXT("]");
 }
@@ -1099,9 +1100,11 @@ FString HexPlanetFile::EncodeHeroes(TConstArrayView<FHexHeroLine> Heroes, TConst
 	for (int32 Index = 0; Index < Sorted.Num(); ++Index)
 	{
 		const FHexHeroLine& Hero = Sorted[Index];
-		Text += FString::Printf(TEXT("%s\n\t\t{\"id\": %d, \"name\": \"%s\", \"class\": \"%s\", \"player\": %d, \"layer\": \"%s\", \"cell\": %d%s}"), Index == 0 ? TEXT("") : TEXT(","),
+		Text += FString::Printf(TEXT("%s\n\t\t{\"id\": %d, \"name\": \"%s\", \"class\": \"%s\", \"player\": %d, \"layer\": \"%s\", \"cell\": %d%s%s%s}"), Index == 0 ? TEXT("") : TEXT(","),
 			Hero.Id, *EscapeJsonText(Hero.Name), *EscapeJsonText(Hero.Class), Hero.Player, *EscapeJsonText(Hero.Layer), Hero.Cell,
-			Hero.Army.IsEmpty() ? TEXT("") : *(TEXT(", \"army\": ") + EncodeStackLines(Hero.Army)));
+			Hero.Yaw != 0 ? *FString::Printf(TEXT(", \"yaw\": %d"), Hero.Yaw) : TEXT(""),
+			Hero.Army.IsEmpty() ? TEXT("") : *(TEXT(", \"army\": ") + EncodeStackLines(Hero.Army)),
+			Hero.Catapult ? TEXT(", \"catapult\": true") : TEXT(""));
 	}
 	Text += Sorted.IsEmpty() ? TEXT("]\n}\n") : TEXT("\n\t]\n}\n");
 	return Text;
@@ -1180,8 +1183,8 @@ FString HexPlanetFile::EncodeSites(TConstArrayView<FHexSiteLine> Sites)
 	for (int32 Index = 0; Index < Sorted.Num(); ++Index)
 	{
 		const FHexSiteLine& Site = Sorted[Index];
-		Text += FString::Printf(TEXT("%s\n\t\t{\"id\": %d, \"kind\": \"%s\", \"layer\": \"%s\", \"cell\": %d}"), Index == 0 ? TEXT("") : TEXT(","),
-			Site.Id, *EscapeJsonText(Site.Kind), *EscapeJsonText(Site.Layer), Site.Cell);
+		Text += FString::Printf(TEXT("%s\n\t\t{\"id\": %d, \"kind\": \"%s\", \"layer\": \"%s\", \"cell\": %d%s}"), Index == 0 ? TEXT("") : TEXT(","),
+			Site.Id, *EscapeJsonText(Site.Kind), *EscapeJsonText(Site.Layer), Site.Cell, Site.Yaw != 0 ? *FString::Printf(TEXT(", \"yaw\": %d"), Site.Yaw) : TEXT(""));
 	}
 	Text += Sorted.IsEmpty() ? TEXT("]\n}\n") : TEXT("\n\t]\n}\n");
 	return Text;

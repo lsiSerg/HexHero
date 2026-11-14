@@ -6,6 +6,8 @@
 #include "Engine/DataAsset.h"
 #include "HexCastleConfig.generated.h"
 
+class UTexture2D;
+
 class UMaterialInterface;
 class UStaticMesh;
 
@@ -176,6 +178,11 @@ struct FHexBuildingLevel
 	/** Its mesh seen from outside the castle, standing on its origin; none to keep that of the level before */
 	UPROPERTY(EditAnywhere, Category="Building")
 	TSoftObjectPtr<UStaticMesh> Mesh;
+
+	/** Its picture in the tree of the buildings of the panel of a castle (Tools/HexUi/render_portraits.py), as the developer asked on
+	 *  2026-11-13; none to keep that of the level before */
+	UPROPERTY(EditAnywhere, Category="Building")
+	TSoftObjectPtr<UTexture2D> Picture;
 };
 
 /**
@@ -300,6 +307,16 @@ public:
 	 *  shoots at the walls of the castles that hero attacks (Siege of DA_HexBattle) */
 	UPROPERTY(EditAnywhere, Category="Rules")
 	TMap<FName, int32> CatapultCost = {{TEXT("Gold"), 1000}, {TEXT("Wood"), 5}};
+
+	/** What a hero hired in a castle costs, one a day in each castle, as the developer asked on 2026-11-13 (Claude's number); it comes with the
+	 *  army a new hero starts with and goes into the castle when nobody guards it, else onto a cell before its gate */
+	UPROPERTY(EditAnywhere, Category="Rules")
+	TMap<FName, int32> HeroCost = {{TEXT("Gold"), 2500}};
+
+	/** What upgrading creatures in a castle whose dwelling of their level is upgraded costs: this share of the difference of their prices, a
+	 *  creature (Claude's) */
+	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=0))
+	float UpgradeCostShare = 1.0f;
 
 	/** What hex.Cheat resources gives the person who plays when it names no amount: this much gold and this much of every other resource */
 	UPROPERTY(EditAnywhere, Category="Rules|Cheats", meta=(ClampMin=0))

@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "HexBattleArena.h"
+#include "Async/ParallelFor.h"
 #include "HexBattleConfig.h"
 #include "HexBattles.h"
 #include "HexHero.h"
@@ -129,6 +130,24 @@ namespace
 			Face(P(1, -1, -1), P(1, 1, -1), P(1, 1, 1), P(1, -1, 1), FVector::XAxisVector, 1, 2);
 		}
 
+		/** A block turned its own way around its middle, five faces (not the one it lies on), its UV in tiles of Tile units along its own faces
+		 *  moved by Shift, so blocks side by side keep their courses */
+		void Block(const FVector& Middle, const FQuat& Turn, const FVector& Half, double Tile, const FVector2D& Shift)
+		{
+			const auto P = [&](double X, double Y, double Z) { return FVector(X * Half.X, Y * Half.Y, Z * Half.Z); };
+			const auto Face = [&](const FVector& A, const FVector& B, const FVector& C, const FVector& D, const FVector& Normal, int32 U, int32 V)
+			{
+				const auto Uv = [&](const FVector& Point) { return FVector2D(Point[U] / Tile, Point[V] / Tile) + Shift; };
+				Quad(Middle + Turn.RotateVector(A), Middle + Turn.RotateVector(B), Middle + Turn.RotateVector(C), Middle + Turn.RotateVector(D),
+					Turn.RotateVector(Normal), Uv(A), Uv(B), Uv(C), Uv(D));
+			};
+			Face(P(-1, -1, 1), P(1, -1, 1), P(1, 1, 1), P(-1, 1, 1), FVector::UpVector, 0, 1);
+			Face(P(-1, -1, -1), P(1, -1, -1), P(1, -1, 1), P(-1, -1, 1), -FVector::YAxisVector, 0, 2);
+			Face(P(-1, 1, -1), P(1, 1, -1), P(1, 1, 1), P(-1, 1, 1), FVector::YAxisVector, 0, 2);
+			Face(P(-1, -1, -1), P(-1, 1, -1), P(-1, 1, 1), P(-1, -1, 1), -FVector::XAxisVector, 1, 2);
+			Face(P(1, -1, -1), P(1, 1, -1), P(1, 1, 1), P(1, -1, 1), FVector::XAxisVector, 1, 2);
+		}
+
 		/** A static mesh of these triangles, as a mesh of the castle is, so it draws as its instances with their custom values */
 		UStaticMesh* Build(UObject* Outer, UMaterialInterface* Material) const
 		{
@@ -232,6 +251,17 @@ AHexBattleArena::AHexBattleArena()
 	Marks->SetupAttachment(Root);
 	Marks->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	Marks->SetCastShadow(false);
+	UnitMarks = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("UnitMarks"));
+	UnitMarks->SetupAttachment(Root);
+	UnitMarks->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	UnitMarks->SetCastShadow(false);
+	// over the dark of the field and the reach, as they were drawn after them in one mesh
+	UnitMarks->TranslucencySortPriority = 1;
+	HoverMarks = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("HoverMarks"));
+	HoverMarks->SetupAttachment(Root);
+	HoverMarks->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	HoverMarks->SetCastShadow(false);
+	HoverMarks->TranslucencySortPriority = 2;
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> SphereMesh(TEXT("/Engine/BasicShapes/Sphere.Sphere"));
 	Sky = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Sky"));
 	Sky->SetupAttachment(Root);
@@ -275,10 +305,347 @@ const FHexBattleGround* AHexBattleArena::GetGround() const
 	return Config && Battles.IsValid() ? Config->FindGround(Battles->GetGroundLetter(), Battles->IsUnderground()) : nullptr;
 }
 
-FVector AHexBattleArena::GetHexPoint(const FHexCoord& Hex) const
+FVector AHexBattleArena::GetHexPoint(const FHexCoord& Hex, bool bGround) const
 {
 	const FVector2D Flat = FHexLayout(Config ? Config->HexRadius : 48.0f).HexToWorld(Hex) - FieldCenter;
-	return GetActorLocation() + FVector(Flat.X, Flat.Y, 0.0);
+	// on the bridge on its deck, which rises over the water in its middle (BuildSiege), so a unit stands and walks on it; else on the hills
+	// of the field
+	double Deck = 0.0;
+	FHexCoord BridgeHex;
+	const FHexBattle* Battle = GetBattle();
+	if (!bGround)
+	{
+		// the marks lie at the height of the field, and are laid on the ground, the water and the deck afterwards
+	}
+	else if (Config && Battle && Battle->GetBridge(BridgeHex) && BridgeHex == Hex)
+	{
+		Deck = Config->MoatLift + Config->MoatWaveHeight + 2.0 + Config->BridgeRise * 0.9;
+	}
+	else
+	{
+		Deck = GetShownGroundHeight(FVector2D(GetActorLocation().X + Flat.X, GetActorLocation().Y + Flat.Y));
+	}
+	return GetActorLocation() + FVector(Flat.X, Flat.Y, Deck);
+}
+
+double AHexBattleArena::GetShownGroundHeight(const FVector2D& World) const
+{
+	if (GroundSteps <= 0 || GroundHeights.Num() != (GroundSteps + 1) * (GroundSteps + 1) || !GroundBox.bIsValid)
+	{
+		return 0.0;
+	}
+	// on the triangles of the mesh: a cell of vertices A (I, J), B (I, J + 1), C (I + 1, J) and D, split into A B C and B D C
+	const FVector2D Size = GroundBox.GetSize();
+	const double U = FMath::Clamp((World.X - GroundBox.Min.X) / FMath::Max(Size.X, 1.0), 0.0, 1.0) * GroundSteps;
+	const double V = FMath::Clamp((World.Y - GroundBox.Min.Y) / FMath::Max(Size.Y, 1.0), 0.0, 1.0) * GroundSteps;
+	const int32 I = FMath::Min(FMath::FloorToInt32(U), GroundSteps - 1);
+	const int32 J = FMath::Min(FMath::FloorToInt32(V), GroundSteps - 1);
+	const double FU = U - I;
+	const double FV = V - J;
+	const auto At = [this](int32 Row, int32 Column) { return double(GroundHeights[Row * (GroundSteps + 1) + Column]); };
+	const double A = At(I, J);
+	const double B = At(I, J + 1);
+	const double C = At(I + 1, J);
+	const double D = At(I + 1, J + 1);
+	return FU + FV <= 1.0 ? A + (C - A) * FU + (B - A) * FV : D + (B - D) * (1.0 - FU) + (C - D) * (1.0 - FV);
+}
+
+bool AHexBattleArena::TraceGround(const FVector& Origin, const FVector& Direction, FVector& OutPoint) const
+{
+	if (!Config || Direction.Z >= -1.0e-4)
+	{
+		return false;
+	}
+	// down the ray from above the highest hill to the field, in steps of a quarter of a hex, then halving the step where it goes under
+	const double Base = GetActorLocation().Z;
+	const double Top = Base + Config->FieldHillHeight + Config->HillHeight + 5.0;
+	const double Bottom = Base - 5.0;
+	const double From = FMath::Max((Top - Origin.Z) / Direction.Z, 0.0);
+	const double To = (Bottom - Origin.Z) / Direction.Z;
+	if (To <= 0.0)
+	{
+		return false;
+	}
+	const auto Above = [&](double T)
+	{
+		const FVector Point = Origin + Direction * T;
+		return Point.Z - Base - GetShownGroundHeight(FVector2D(Point.X, Point.Y));
+	};
+	const double Flat = FMath::Max(FVector2D(Direction.X, Direction.Y).Size(), 1.0e-3);
+	const int32 Steps = FMath::Clamp(FMath::CeilToInt32((To - From) * Flat / (Config->HexRadius * 0.25)), 4, 600);
+	double Last = From;
+	for (int32 Step = 1; Step <= Steps; ++Step)
+	{
+		const double T = FMath::Lerp(From, To, double(Step) / Steps);
+		if (Above(T) <= 0.0)
+		{
+			double Low = Last;
+			double High = T;
+			for (int32 Half = 0; Half < 14; ++Half)
+			{
+				const double Middle = (Low + High) * 0.5;
+				if (Above(Middle) > 0.0)
+				{
+					Low = Middle;
+				}
+				else
+				{
+					High = Middle;
+				}
+			}
+			OutPoint = Origin + Direction * High;
+			return true;
+		}
+		Last = T;
+	}
+	OutPoint = Origin + Direction * To;
+	return true;
+}
+
+AHexBattleArena::FBridgeDeck AHexBattleArena::GetBridgeDeck() const
+{
+	FBridgeDeck Deck;
+	const FHexBattle* Battle = GetBattle();
+	const FSiegeShape Shape = GetSiegeShape();
+	FHexCoord BridgeHex;
+	if (!Config || !Battle || !Shape.bValid || !Shape.bMoat || !Battle->GetBridge(BridgeHex))
+	{
+		return Deck;
+	}
+	// from the face of the wall out over the far shore
+	Deck.Out = -Shape.In;
+	Deck.Across = FVector::CrossProduct(FVector::UpVector, Deck.Out).GetSafeNormal();
+	const FVector Gate = GetWallLinePoint(FHexCoord::FromOffset(BridgeHex.GetColumn() + 1, BridgeHex.GetRow()));
+	const double Far = FMath::Min(Shape.MoatRows.Z, Shape.MoatRows.W);
+	const double HalfThick = FVector::DotProduct(Shape.FrontStart, Shape.In) - Shape.WallFace;
+	Deck.Span = FVector::DotProduct(Gate, Shape.In) - HalfThick - Far + Config->HexRadius * 0.35;
+	Deck.Wide = Shape.GateHalf * 2.0 * Config->BridgeWidth;
+	Deck.Start = Gate - GetActorLocation() + Deck.Out * HalfThick + FVector(0.0, 0.0, Config->MoatLift + Config->MoatWaveHeight + 2.0);
+	Deck.bValid = Deck.Span > 0.0;
+	return Deck;
+}
+
+bool AHexBattleArena::GetDeckHeight(const FBridgeDeck& Deck, const FVector& Local, double& OutHeight) const
+{
+	if (!Deck.bValid || !Config)
+	{
+		return false;
+	}
+	const FVector Offset = Local - Deck.Start;
+	const double S = FVector::DotProduct(FVector(Offset.X, Offset.Y, 0.0), Deck.Out);
+	const double T = FVector::DotProduct(FVector(Offset.X, Offset.Y, 0.0), Deck.Across);
+	if (S < 0.0 || S > Deck.Span || FMath::Abs(T) > Deck.Wide * 0.5)
+	{
+		return false;
+	}
+	OutHeight = Deck.Start.Z + Config->BridgeRise * FMath::Sin(UE_PI * FMath::Clamp(S / Deck.Span, 0.0, 1.0));
+	return true;
+}
+
+void AHexBattleArena::DrapeOnGround(TArray<FVector>& Vertices, TArray<int32>& Triangles, TArray<FVector>& Normals, TArray<FLinearColor>& Colors) const
+{
+	if (!Config || GroundSteps <= 0)
+	{
+		return;
+	}
+	if (Config->FieldHillHeight <= 0.0f && Config->EdgeSinkDepth <= 0.0f)
+	{
+		return;
+	}
+	// halve the longest side of each triangle longer than DrapeMaxEdge of a hex, until none is, so a mark bends with the hills between its
+	// corners; a thin line is cut along its length alone, which halving every side cut across its width too, 64 triangles of each, and the
+	// field stuttered as the camera moved, as the developer found on 2026-11-14
+	const double MaxEdge = FMath::Max(Config->HexRadius * Config->DrapeMaxEdge, 2.0);
+	const double MaxSquared = MaxEdge * MaxEdge;
+	TArray<int32> Work = MoveTemp(Triangles);
+	Triangles.Reset();
+	Triangles.Reserve(Work.Num() * 3);
+	while (!Work.IsEmpty())
+	{
+		TArray<int32> Next;
+		for (int32 Index = 0; Index + 2 < Work.Num(); Index += 3)
+		{
+			int32 Corner[3] = {Work[Index], Work[Index + 1], Work[Index + 2]};
+			// the longest side, from corner K to corner K + 1
+			int32 Longest = 0;
+			double Most = -1.0;
+			for (int32 K = 0; K < 3; ++K)
+			{
+				const double Size = FVector::DistSquared2D(Vertices[Corner[K]], Vertices[Corner[(K + 1) % 3]]);
+				if (Size > Most)
+				{
+					Most = Size;
+					Longest = K;
+				}
+			}
+			if (Most <= MaxSquared)
+			{
+				Triangles.Append({Corner[0], Corner[1], Corner[2]});
+				continue;
+			}
+			const int32 A = Corner[Longest];
+			const int32 B = Corner[(Longest + 1) % 3];
+			const int32 C = Corner[(Longest + 2) % 3];
+			// copies first, as an array takes no element of its own
+			const FVector Point = (Vertices[A] + Vertices[B]) * 0.5;
+			const FVector Normal = Normals[A];
+			const FLinearColor Color = (Colors[A] + Colors[B]) * 0.5f;
+			const int32 Middle = Vertices.Add(Point);
+			Normals.Add(Normal);
+			Colors.Add(Color);
+			Next.Append({A, Middle, C, Middle, B, C});
+		}
+		Work = MoveTemp(Next);
+	}
+	const FVector Base = GetActorLocation();
+	for (FVector& Point : Vertices)
+	{
+		Point.Z += GetShownGroundHeight(FVector2D(Base.X + Point.X, Base.Y + Point.Y));
+	}
+}
+
+void AHexBattleArena::LiftOverMoat(TArray<FVector>& Vertices) const
+{
+	if (!Config)
+	{
+		return;
+	}
+	// a point over the water lies on it: everything from the face of the wall out past the furthest the shore of the moat winds out
+	// (MOAT_SHORE_CODE: its flat edges MoatRows Z and W less MoatShoreNoise), along it a hex past its ends, so no line of the ground runs
+	// under the water where its shore winds over the hexes of the ground, which showed through it as a second, lighter line and joined
+	// the lines on the water with a step, as the developer found on 2026-11-14; the lines step down to the ground on the bank beyond
+	const FSiegeShape Shape = GetSiegeShape();
+	if (!Shape.bValid || !Shape.bMoat)
+	{
+		return;
+	}
+	const double Water = Config->MoatLift + Config->MoatWaveHeight + 1.0;
+	const double Far = FMath::Min(Shape.MoatRows.Z, Shape.MoatRows.W) - Config->HexRadius * (Config->MoatShoreNoise * 2.0 + 0.35);
+	const FVector Base = GetActorLocation();
+	for (FVector& Point : Vertices)
+	{
+		const double X = Base.X + Point.X;
+		const double Y = Base.Y + Point.Y;
+		if (Y >= Far && Y <= Shape.WallFace + 2.0 && X >= Shape.MoatXMin - Config->HexRadius && X <= Shape.MoatXMax + Config->HexRadius)
+		{
+			Point.Z = FMath::Max(Point.Z, Water);
+		}
+	}
+}
+
+void AHexBattleArena::ProjectOnBridge(TArray<FVector>& Vertices, TArray<int32>& Triangles, TArray<FVector>& Normals, TArray<FLinearColor>& Colors) const
+{
+	const FBridgeDeck Deck = GetBridgeDeck();
+	if (!Config || !Deck.bValid)
+	{
+		return;
+	}
+	double Height = 0.0;
+	// the triangles that reach onto the deck, copied
+	TArray<int32> Work;
+	const int32 Count = Triangles.Num();
+	for (int32 Index = 0; Index + 2 < Count; Index += 3)
+	{
+		bool bNear = false;
+		bool bOnTop = true;
+		for (int32 K = 0; K < 3; ++K)
+		{
+			const FVector& Point = Vertices[Triangles[Index + K]];
+			const bool bOver = GetDeckHeight(Deck, Point, Height);
+			bNear |= bOver;
+			// a mark on the deck already is not copied again
+			bOnTop &= bOver && Point.Z >= Height - 0.5;
+		}
+		if (!bNear || bOnTop)
+		{
+			continue;
+		}
+		for (int32 K = 0; K < 3; ++K)
+		{
+			const FVector Point = Vertices[Triangles[Index + K]];
+			const FVector Normal = Normals[Triangles[Index + K]];
+			const FLinearColor Color = Colors[Triangles[Index + K]];
+			Work.Add(Vertices.Add(Point));
+			Normals.Add(Normal);
+			Colors.Add(Color);
+		}
+	}
+	// cut fine, so they bend with the deck and end close to its edge, and laid on its top; what lies off it is left out
+	const double MaxSquared = FMath::Square(FMath::Max(Config->HexRadius * 0.12, 1.0));
+	while (!Work.IsEmpty())
+	{
+		TArray<int32> Next;
+		for (int32 Index = 0; Index + 2 < Work.Num(); Index += 3)
+		{
+			const int32 Corner[3] = {Work[Index], Work[Index + 1], Work[Index + 2]};
+			int32 Longest = 0;
+			double Most = -1.0;
+			for (int32 K = 0; K < 3; ++K)
+			{
+				const double Size = FVector::DistSquared2D(Vertices[Corner[K]], Vertices[Corner[(K + 1) % 3]]);
+				if (Size > Most)
+				{
+					Most = Size;
+					Longest = K;
+				}
+			}
+			if (Most <= MaxSquared)
+			{
+				// kept when any corner lies on the deck; the corners off it go onto its edge below, so the edge runs straight and not in
+				// teeth, which the developer saw along both sides on 2026-11-14, when only the pieces wholly on it were kept
+				bool bOn = false;
+				for (int32 K = 0; K < 3 && !bOn; ++K)
+				{
+					bOn = GetDeckHeight(Deck, Vertices[Corner[K]], Height);
+				}
+				if (bOn)
+				{
+					Triangles.Append({Corner[0], Corner[1], Corner[2]});
+				}
+				continue;
+			}
+			const int32 A = Corner[Longest];
+			const int32 B = Corner[(Longest + 1) % 3];
+			const int32 C = Corner[(Longest + 2) % 3];
+			const FVector Point = (Vertices[A] + Vertices[B]) * 0.5;
+			const FVector Normal = Normals[A];
+			const FLinearColor Color = Colors[A];
+			const int32 Middle = Vertices.Add(Point);
+			Normals.Add(Normal);
+			Colors.Add(Color);
+			Next.Append({A, Middle, C, Middle, B, C});
+		}
+		Work = MoveTemp(Next);
+	}
+	TSet<int32> Laid;
+	for (int32 Index = Count; Index < Triangles.Num(); ++Index)
+	{
+		const int32 Vertex = Triangles[Index];
+		if (Laid.Contains(Vertex))
+		{
+			continue;
+		}
+		Laid.Add(Vertex);
+		// onto the deck, a point off it onto its nearest edge
+		FVector& Point = Vertices[Vertex];
+		const FVector Offset = Point - Deck.Start;
+		const double S = FMath::Clamp(FVector::DotProduct(FVector(Offset.X, Offset.Y, 0.0), Deck.Out), 0.0, Deck.Span);
+		const double T = FMath::Clamp(FVector::DotProduct(FVector(Offset.X, Offset.Y, 0.0), Deck.Across), -Deck.Wide * 0.5, Deck.Wide * 0.5);
+		const FVector OnDeck = Deck.Start + Deck.Out * S + Deck.Across * T;
+		Point.X = OnDeck.X;
+		Point.Y = OnDeck.Y;
+		// the height of the deck there at once, as a point put on its very edge may fall off it by rounding in GetDeckHeight, which left it
+		// on the water and hung the piece down the side of the deck in teeth
+		Point.Z = Deck.Start.Z + Config->BridgeRise * FMath::Sin(UE_PI * S / FMath::Max(Deck.Span, 1.0)) + 0.8;
+	}
+}
+
+double AHexBattleArena::GetMarkFloor(const FHexCoord& Hex) const
+{
+	FHexCoord BridgeHex;
+	const FHexBattle* Battle = GetBattle();
+	const bool bBridge = Battle && Battle->GetBridge(BridgeHex) && BridgeHex == Hex;
+	return Config && Battle && Battle->IsMoat(Hex) && !bBridge ? Config->MoatLift + Config->MoatWaveHeight + 0.5 : 0.0;
 }
 
 FVector AHexBattleArena::GetWallLinePoint(const FHexCoord& Hex) const
@@ -355,31 +722,46 @@ AHexBattleArena::FSiegeShape AHexBattleArena::GetSiegeShape() const
 
 double AHexBattleArena::GetGroundHeight(const FVector2D& World) const
 {
-	if (!Config || Config->HillHeight <= 0.0f)
+	if (!Config)
 	{
 		return 0.0;
 	}
-	// flat over the field and the castle with its moat, as everything on them stands at the height of the field, hills beyond
-	FBox2D Flat(FieldMin, FieldMax);
-	const FSiegeShape Shape = GetSiegeShape();
-	if (Shape.bValid)
+	const auto AwayFrom = [&World](const FBox2D& Box)
 	{
-		for (const FVector& Corner : {Shape.FrontStart, Shape.FrontEnd, Shape.SideStart, Shape.SideEnd})
+		const FVector2D Nearest(FMath::Clamp(World.X, Box.Min.X, Box.Max.X), FMath::Clamp(World.Y, Box.Min.Y, Box.Max.Y));
+		return FVector2D::Distance(World, Nearest);
+	};
+	const FVector2D Local = World - FVector2D(GetActorLocation().X, GetActorLocation().Y);
+	double Height = 0.0;
+	// the gentle hills of the field, as the developer asked on 2026-11-14, a hill over several hexes; flat over a castle and its moat
+	if (Config->FieldHillHeight > 0.0f)
+	{
+		const double Mask = CastleBox.bIsValid ? FMath::SmoothStep(0.0, double(Config->HexRadius * Config->FieldHillRamp), AwayFrom(CastleBox)) : 1.0;
+		if (Mask > 0.0)
 		{
-			Flat += FVector2D(Corner.X, Corner.Y);
+			const FVector2D Place = Local / FMath::Max(double(Config->FieldHillScale), 1.0) + FVector2D(GroundSeed * 0.53, GroundSeed * 0.29);
+			const double Noise = 0.5 + 0.55 * FMath::PerlinNoise2D(Place) + 0.2 * FMath::PerlinNoise2D(Place * 2.17 + FVector2D(3.1, 7.4));
+			Height += double(Config->FieldHillHeight) * Mask * FMath::Clamp(Noise, 0.0, 1.0);
 		}
 	}
-	Flat = Flat.ExpandBy(Config->HexRadius * Config->HillFlatMargin);
-	const FVector2D Nearest(FMath::Clamp(World.X, Flat.Min.X, Flat.Max.X), FMath::Clamp(World.Y, Flat.Min.Y, Flat.Max.Y));
-	const double Away = FVector2D::Distance(World, Nearest);
-	const double Ramp = FMath::SmoothStep(0.0, double(Config->HexRadius * Config->HillRamp), Away);
-	if (Ramp <= 0.0)
+	// the higher hills beyond the field and the castle, as the developer asked on 2026-11-13
+	if (Config->HillHeight > 0.0f && FlatBox.bIsValid)
 	{
-		return 0.0;
+		const double Ramp = FMath::SmoothStep(0.0, double(Config->HexRadius * Config->HillRamp), AwayFrom(FlatBox));
+		if (Ramp > 0.0)
+		{
+			const FVector2D Place = Local / FMath::Max(double(Config->HillScale), 1.0) + FVector2D(GroundSeed * 0.37, GroundSeed * 0.91);
+			const double Noise = 0.5 + 0.35 * FMath::PerlinNoise2D(Place) + 0.15 * FMath::PerlinNoise2D(Place * 2.3 + FVector2D(5.2, 1.3));
+			Height += double(Config->HillHeight) * Ramp * FMath::Clamp(Noise, 0.0, 1.0);
+		}
 	}
-	const FVector2D Local = (World - FVector2D(GetActorLocation().X, GetActorLocation().Y)) / FMath::Max(double(Config->HillScale), 1.0) + FVector2D(GroundSeed * 0.37, GroundSeed * 0.91);
-	const double Noise = 0.5 + 0.35 * FMath::PerlinNoise2D(Local) + 0.15 * FMath::PerlinNoise2D(Local * 2.3 + FVector2D(5.2, 1.3));
-	return double(Config->HillHeight) * Ramp * FMath::Clamp(Noise, 0.0, 1.0);
+	// the ground sinks at its edge, so its end does not show against the sky, as the developer asked on 2026-11-14
+	if (Config->EdgeSinkDepth > 0.0f && GroundBox.bIsValid)
+	{
+		const double Inside = FMath::Min(FMath::Min(World.X - GroundBox.Min.X, GroundBox.Max.X - World.X), FMath::Min(World.Y - GroundBox.Min.Y, GroundBox.Max.Y - World.Y));
+		Height -= double(Config->EdgeSinkDepth) * (1.0 - FMath::SmoothStep(0.0, double(Config->HexRadius * Config->EdgeSinkWidth), Inside));
+	}
+	return Height;
 }
 
 void AHexBattleArena::Show(UHexBattles* InBattles, const FPostProcessSettings& PostProcess)
@@ -468,17 +850,33 @@ void AHexBattleArena::Show(UHexBattles* InBattles, const FPostProcessSettings& P
 	SkyLight->SetIntensity(Each ? Each->SkyIntensity : 1.0f);
 	SkyLight->SetLightColor(Each ? Each->SkyColor : FLinearColor::White);
 
+	// what each step of the field takes, as a battle that opens with a stutter shows here first
+	double Clock = FPlatformTime::Seconds();
+	const auto Lap = [&Clock]()
+	{
+		const double Now = FPlatformTime::Seconds();
+		const double Took = (Now - Clock) * 1000.0;
+		Clock = Now;
+		return Took;
+	};
 	BuildGround();
+	const double GroundMs = Lap();
 	BuildGrid();
+	const double GridMs = Lap();
 	BuildProps();
+	const double PropsMs = Lap();
 	BuildSiege();
+	const double SiegeMs = Lap();
 	PlaceFigures();
+	UE_LOG(LogHexHero, Log, TEXT("Battle field: ground %.1f ms, grid %.1f ms, props %.1f ms, siege %.1f ms, figures %.1f ms"), GroundMs, GridMs, PropsMs, SiegeMs, Lap());
 	Log.Reset();
 	Popups.Reset();
 	Pending.Reset();
 	Current.Reset();
 	Aimed = INDEX_NONE;
 	MarksKey.Empty();
+	UnitMarksKey.Empty();
+	HoverMarksKey.Empty();
 	ReachUnit = INDEX_NONE;
 	AiWait = Config->TurnPause * 2.0f;
 	AddLog(FString::Printf(TEXT("%s attacks %s"), *Battles->GetSideName(0), *Battles->GetSideName(1)));
@@ -679,39 +1077,85 @@ void AHexBattleArena::ClearField()
 	Ground->ClearAllMeshSections();
 	Grid->ClearAllMeshSections();
 	Marks->ClearAllMeshSections();
+	UnitMarks->ClearAllMeshSections();
+	HoverMarks->ClearAllMeshSections();
 }
 
 void AHexBattleArena::BuildGround()
 {
 	FHexBattle* Battle = GetBattle();
 	const FHexLayout Layout(Config->HexRadius);
+	// the boxes the heights are found by, once for the field
+	GroundHeights.Reset();
+	GroundSteps = 0;
+	GroundBox = FBox2D(ForceInit);
+	FlatBox = FBox2D(FieldMin, FieldMax);
+	CastleBox = FBox2D(ForceInit);
+	const FSiegeShape Castle = GetSiegeShape();
+	if (Castle.bValid)
+	{
+		for (const FVector& Corner : {Castle.FrontStart, Castle.FrontEnd, Castle.SideStart, Castle.SideEnd})
+		{
+			FlatBox += FVector2D(Corner.X, Corner.Y);
+			CastleBox += FVector2D(Corner.X, Corner.Y);
+		}
+		// the moat before the wall
+		const FVector2D Out(-Castle.In.X, -Castle.In.Y);
+		CastleBox += FVector2D(Castle.FrontStart.X, Castle.FrontStart.Y) + Out * Config->HexRadius * 2.0;
+		CastleBox += FVector2D(Castle.FrontEnd.X, Castle.FrontEnd.Y) + Out * Config->HexRadius * 2.0;
+		CastleBox = CastleBox.ExpandBy(Config->HexRadius * Config->FieldHillFlat);
+	}
+	FlatBox = FlatBox.ExpandBy(Config->HexRadius * Config->HillFlatMargin);
 	// out under the fog, which hides where it ends
 	const FBox2D Covered = GetFieldBox().ExpandBy(double(Config->FogEnd) + Config->HexRadius * 2.0);
 	const double HalfX = FMath::Max(FMath::Abs(Covered.Min.X - GetActorLocation().X), FMath::Abs(Covered.Max.X - GetActorLocation().X));
 	const double HalfY = FMath::Max(FMath::Abs(Covered.Min.Y - GetActorLocation().Y), FMath::Abs(Covered.Max.Y - GetActorLocation().Y));
-	// fine enough for the hills around the field, which the field and the castle leave flat (GetGroundHeight)
-	const int32 Steps = Config->HillHeight > 0.0f ? 120 : 24;
+	const FVector2D Origin(GetActorLocation().X, GetActorLocation().Y);
+	GroundBox = FBox2D(Origin - FVector2D(HalfX, HalfY), Origin + FVector2D(HalfX, HalfY));
+	// fine enough for the hills of the field, which take several hexes (GetGroundHeight)
+	const int32 Steps = 180;
 	TArray<FVector> Vertices;
 	TArray<int32> Triangles;
 	TArray<FVector> Normals;
 	TArray<FVector2D> UVs;
 	TArray<FProcMeshTangent> Tangents;
-	const FVector2D Origin(GetActorLocation().X, GetActorLocation().Y);
-	const double Probe = FMath::Max(HalfX, HalfY) * 2.0 / Steps;
+	TArray<FLinearColor> Colors;
+	TArray<float> Heights;
+	Heights.SetNumUninitialized((Steps + 1) * (Steps + 1));
+	ParallelFor(Steps + 1, [&](int32 I)
+	{
+		for (int32 J = 0; J <= Steps; ++J)
+		{
+			const FVector2D Flat(FMath::Lerp(-HalfX, HalfX, I / double(Steps)), FMath::Lerp(-HalfY, HalfY, J / double(Steps)));
+			Heights[I * (Steps + 1) + J] = float(GetGroundHeight(Origin + Flat));
+		}
+	});
+	const double StepX = HalfX * 2.0 / Steps;
+	const double StepY = HalfY * 2.0 / Steps;
+	const auto HeightAt = [&](int32 I, int32 J) { return double(Heights[FMath::Clamp(I, 0, Steps) * (Steps + 1) + FMath::Clamp(J, 0, Steps)]); };
+	// the tone of the ground by its relief: above or below the ground around it, and how steep it is
+	const int32 ReliefReach = FMath::Max(FMath::RoundToInt32(Config->HexRadius * 1.73 * Config->GroundReliefReach / FMath::Max(StepX, 1.0)), 1);
 	for (int32 I = 0; I <= Steps; ++I)
 	{
 		for (int32 J = 0; J <= Steps; ++J)
 		{
 			const FVector2D Flat(FMath::Lerp(-HalfX, HalfX, I / double(Steps)), FMath::Lerp(-HalfY, HalfY, J / double(Steps)));
-			const auto Height = [&](const FVector2D& Offset) { return GetGroundHeight(Origin + Flat + Offset); };
-			Vertices.Add(FVector(Flat.X, Flat.Y, Height(FVector2D::ZeroVector)));
-			const FVector AlongX(Probe * 2.0, 0.0, Height(FVector2D(Probe, 0.0)) - Height(FVector2D(-Probe, 0.0)));
-			const FVector AlongY(0.0, Probe * 2.0, Height(FVector2D(0.0, Probe)) - Height(FVector2D(0.0, -Probe)));
-			Normals.Add(FVector::CrossProduct(AlongX, AlongY).GetSafeNormal());
+			const double Here = HeightAt(I, J);
+			Vertices.Add(FVector(Flat.X, Flat.Y, Here));
+			const FVector AlongX(StepX * 2.0, 0.0, HeightAt(I + 1, J) - HeightAt(I - 1, J));
+			const FVector AlongY(0.0, StepY * 2.0, HeightAt(I, J + 1) - HeightAt(I, J - 1));
+			const FVector Normal = FVector::CrossProduct(AlongX, AlongY).GetSafeNormal();
+			Normals.Add(Normal);
 			Tangents.Add(FProcMeshTangent(AlongX.GetSafeNormal(), false));
 			UVs.Add(Flat / 300.0);
+			const double Around = (HeightAt(I + ReliefReach, J) + HeightAt(I - ReliefReach, J) + HeightAt(I, J + ReliefReach) + HeightAt(I, J - ReliefReach)) * 0.25;
+			const double Convex = FMath::Clamp((Here - Around) / FMath::Max(double(Config->GroundReliefScale), 0.1), -1.0, 1.0);
+			const double Slope = FMath::Clamp((1.0 - Normal.Z) * 8.0, 0.0, 1.0);
+			Colors.Add(FLinearColor(float(Convex * 0.5 + 0.5), float(Slope), 0.0f, 1.0f));
 		}
 	}
+	GroundHeights = MoveTemp(Heights);
+	GroundSteps = Steps;
 	for (int32 I = 0; I < Steps; ++I)
 	{
 		for (int32 J = 0; J < Steps; ++J)
@@ -723,7 +1167,7 @@ void AHexBattleArena::BuildGround()
 			Triangles.Append({A, B, C, B, D, C});
 		}
 	}
-	Ground->CreateMeshSection_LinearColor(0, Vertices, Triangles, Normals, UVs, {}, Tangents, false);
+	Ground->CreateMeshSection_LinearColor(0, Vertices, Triangles, Normals, UVs, Colors, Tangents, false);
 	if (UMaterialInterface* Material = Config->GroundMaterial.LoadSynchronous())
 	{
 		UMaterialInstanceDynamic* Instance = UMaterialInstanceDynamic::Create(Material, this);
@@ -749,43 +1193,99 @@ void AHexBattleArena::BuildGrid()
 	TArray<int32> Triangles;
 	TArray<FVector> Normals;
 	TArray<FLinearColor> Colors;
-	const double Width = FMath::Max(Config->HexRadius * 0.035, 1.0);
-	const double Inset = Config->HexRadius * 0.97;
+	// one line along each side of a hex, centered on it and drawn once, GridLineWidth wide in GridColor, as the grid of the planet is, as the
+	// developer asked on 2026-11-14 (each hex drew a line of its own inside it before, two lines with a gap between them along every side);
+	// the outer edge of the field FieldBorderWidth wide in FieldBorderColor; on the hills (DrapeOnGround), on the water of the moat over its
+	// hexes (LiftOverMoat) and copied onto the deck of the bridge (ProjectOnBridge)
+	const double Radius = Config->HexRadius;
+	const FHexLayout Layout(Config->HexRadius);
+	TSet<FHexCoord> Field;
 	for (int32 Column = 0; Column < Battle->GetColumns(); ++Column)
 	{
 		for (int32 Row = 0; Row < Battle->GetRows(); ++Row)
 		{
-			const FVector Middle = GetHexPoint(FHexCoord::FromOffset(Column, Row)) - GetActorLocation() + FVector(0.0, 0.0, 0.6);
-			for (int32 Corner = 0; Corner < 6; ++Corner)
-			{
-				const FVector2D A2 = FHexLayout::GetCornerDirection(Corner);
-				const FVector2D B2 = FHexLayout::GetCornerDirection(Corner + 1);
-				const FVector A = Middle + FVector(A2.X, A2.Y, 0.0) * Inset;
-				const FVector B = Middle + FVector(B2.X, B2.Y, 0.0) * Inset;
-				const FVector In = (Middle - (A + B) * 0.5).GetSafeNormal2D() * Width;
-				const int32 Base = Vertices.Num();
-				Vertices.Append({A, B, B + In, A + In});
-				for (int32 Index = 0; Index < 4; ++Index)
-				{
-					Normals.Add(FVector::UpVector);
-					Colors.Add(Config->GridColor);
-				}
-				Triangles.Append({Base, Base + 2, Base + 1, Base, Base + 3, Base + 2});
-			}
+			Field.Add(FHexCoord::FromOffset(Column, Row));
 		}
 	}
+	const auto AddSide = [&](const FVector& A, const FVector& B, bool bBorder = false)
+	{
+		const double Width = FMath::Max(double(bBorder ? Config->FieldBorderWidth : Config->GridLineWidth), 0.2);
+		const FVector Along = (B - A).GetSafeNormal2D();
+		const FVector Side = FVector(-Along.Y, Along.X, 0.0) * (Width * 0.5);
+		const int32 Base = Vertices.Num();
+		Vertices.Append({A - Side, B - Side, B + Side, A + Side});
+		for (int32 Index = 0; Index < 4; ++Index)
+		{
+			Normals.Add(FVector::UpVector);
+			Colors.Add(bBorder ? Config->FieldBorderColor : Config->GridColor);
+		}
+		Triangles.Append({Base, Base + 1, Base + 2, Base, Base + 2, Base + 3, Base, Base + 2, Base + 1, Base, Base + 3, Base + 2});
+	};
+	const TArray<FHexCoord>& Homes = Battle->GetHomeHexes();
+	for (const FHexCoord& Hex : Field)
+	{
+		const FVector2D Flat = Layout.HexToWorld(Hex) - FieldCenter;
+		for (int32 Corner = 0; Corner < 6; ++Corner)
+		{
+			const FVector2D A2 = FHexLayout::GetCornerDirection(Corner);
+			const FVector2D B2 = FHexLayout::GetCornerDirection(Corner + 1);
+			const FHexCoord Across = Layout.WorldToHex(Layout.HexToWorld(Hex) + (A2 + B2) * Radius);
+			// a side between two hexes of the field once, by the order of the two
+			if (Field.Contains(Across) && (Across.Q < Hex.Q || (Across.Q == Hex.Q && Across.R < Hex.R)))
+			{
+				continue;
+			}
+			// the outer edge of the field, but towards the hex of a catapult
+			const bool bBorder = !Field.Contains(Across) && !Homes.Contains(Across);
+			AddSide(FVector(Flat.X + A2.X * Radius, Flat.Y + A2.Y * Radius, 0.6), FVector(Flat.X + B2.X * Radius, Flat.Y + B2.Y * Radius, 0.6), bBorder);
+		}
+	}
+	// the hexes of the catapults off the field, whole, whether a catapult stands there now or drove off onto the field, their outer sides
+	// the edge of the field
+	for (const FHexCoord& Home : Homes)
+	{
+		const FVector Middle = GetHexPoint(Home, false) - GetActorLocation() + FVector(0.0, 0.0, 0.6);
+		for (int32 Corner = 0; Corner < 6; ++Corner)
+		{
+			const FVector2D A2 = FHexLayout::GetCornerDirection(Corner);
+			const FVector2D B2 = FHexLayout::GetCornerDirection(Corner + 1);
+			const FHexCoord Across = Layout.WorldToHex(Layout.HexToWorld(Home) + (A2 + B2) * Radius);
+			if (Field.Contains(Across))
+			{
+				continue;
+			}
+			AddSide(Middle + FVector(A2.X, A2.Y, 0.0) * Radius, Middle + FVector(B2.X, B2.Y, 0.0) * Radius, true);
+		}
+	}
+	DrapeOnGround(Vertices, Triangles, Normals, Colors);
+	LiftOverMoat(Vertices);
+	ProjectOnBridge(Vertices, Triangles, Normals, Colors);
+	UE_LOG(LogHexHero, Log, TEXT("Battle grid: %d triangles"), Triangles.Num() / 3);
 	Grid->CreateMeshSection_LinearColor(0, Vertices, Triangles, Normals, {}, Colors, {}, false);
 	if (UMaterialInterface* Material = Config->MarkMaterial.LoadSynchronous())
 	{
 		Grid->SetMaterial(0, Material);
 		Marks->SetMaterial(0, Material);
+		UnitMarks->SetMaterial(0, Material);
+		HoverMarks->SetMaterial(0, Material);
 	}
 }
 
 FBox2D AHexBattleArena::GetFieldBox() const
 {
-	// the field, and the castle with its moat and its palace
+	// the field, the hexes of its catapults off it, and the castle with its moat and its palace
 	FBox2D Box(FieldMin, FieldMax);
+	if (const FHexBattle* Battle = GetBattle(); Battle && Config)
+	{
+		for (const FHexBattleUnit& Each : Battle->GetUnits())
+		{
+			if (Each.bCatapult)
+			{
+				const FVector Home = GetHexPoint(Battle->GetMachineHex(Each.Side));
+				Box += FBox2D(FVector2D(Home.X, Home.Y) - FVector2D(Config->HexRadius * 1.5), FVector2D(Home.X, Home.Y) + FVector2D(Config->HexRadius * 1.5));
+			}
+		}
+	}
 	const FSiegeShape Shape = GetSiegeShape();
 	if (Shape.bValid && Config)
 	{
@@ -812,7 +1312,12 @@ void AHexBattleArena::BuildProps()
 	const FHexBattleGround* Fought = Each;
 	const float RockLayer = float(Fought && Fought->TerrainLayer >= 0 ? Fought->TerrainLayer : Battles->GetRockLayer());
 	TMap<UStaticMesh*, UInstancedStaticMeshComponent*> Instances;
-	const auto MakeProp = [&](UStaticMesh* Mesh, const FVector& At, double Size, int32 Hash, double Sink = 0.0)
+	// the rocks a desert has for a forest, their middles and radii
+	TArray<FVector> Rocky;
+	// the third to fifth custom values the tint of the photo-scanned obstacles (M_HexBattleScan), which the meshes of the planet do not read
+	const FLinearColor Tint = Each ? Each->ObstacleTint : FLinearColor::White;
+	// with bWhole the largest extent of the mesh, up too, is Size, as for a rock; else across, as for a tree
+	const auto MakeProp = [&](UStaticMesh* Mesh, const FVector& At, double Size, int32 Hash, double Sink = 0.0, bool bWhole = false)
 	{
 		if (!Mesh)
 		{
@@ -826,24 +1331,36 @@ void AHexBattleArena::BuildProps()
 			Component->SetupAttachment(Root);
 			Component->SetMobility(EComponentMobility::Movable);
 			Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-			Component->SetNumCustomDataFloats(2);
+			Component->SetNumCustomDataFloats(5);
 			Component->RegisterComponent();
 			Props.Add(Component);
 		}
 		const FBoxSphereBounds Bounds = Mesh->GetBounds();
-		const double Extent = FMath::Max3(Bounds.BoxExtent.X, Bounds.BoxExtent.Y, 1.0);
+		const double Extent = FMath::Max3(Bounds.BoxExtent.X, Bounds.BoxExtent.Y, bWhole ? Bounds.BoxExtent.Z * 2.0 : 1.0);
 		const double Scale = Size / Extent;
 		const FVector Place = At - FVector(0.0, 0.0, (Bounds.Origin.Z - Bounds.BoxExtent.Z) * Scale + Sink * Size) - GetActorLocation();
 		const int32 Index = Component->AddInstance(FTransform(FRotator(0.0, double(Hash % 360), 0.0), Place, FVector(Scale)), false);
-		const float Data[2] = {RockLayer, 0.0f};
+		const float Data[5] = {RockLayer, 0.0f, Tint.R, Tint.G, Tint.B};
 		Component->SetCustomData(Index, MakeArrayView(Data), true);
 	};
 	UStaticMesh* Fallback = Config->FallbackMesh.LoadSynchronous();
+	const TCHAR Letter = Battles->GetGroundLetter();
+	const bool bRocky = Letter != 0 && Config->RockyGroundLetters.Contains(FString::Chr(Letter));
+	const TArray<TSoftObjectPtr<UStaticMesh>>* Obstacles = bRocky && !Config->RockyObstacles.IsEmpty() ? &Config->RockyObstacles : (Each ? &Each->Obstacles : nullptr);
 	for (const FHexCoord& Hex : Battle->GetObstacles())
 	{
 		const uint32 Hash = Mix(Hex.Q, Hex.R, int32(Seed));
-		UStaticMesh* Mesh = Each && !Each->Obstacles.IsEmpty() ? Each->Obstacles[Hash % Each->Obstacles.Num()].LoadSynchronous() : Fallback;
-		MakeProp(Mesh, GetHexPoint(Hex), Config->HexRadius * 0.8, int32(Hash));
+		UStaticMesh* Mesh = Obstacles && !Obstacles->IsEmpty() ? (*Obstacles)[Hash % Obstacles->Num()].LoadSynchronous() : Fallback;
+		MakeProp(Mesh, GetHexPoint(Hex), Config->HexRadius * Config->ObstacleSize, int32(Hash), 0.04, true);
+		// now and then the bones of something that died there lie on top of it, as the developer suggested on 2026-11-13
+		if (Mesh && !Config->FieldDecor.IsEmpty() && (Hash >> 8) % 100 < uint32(Config->ObstacleBonesShare * 100.0f))
+		{
+			const FBoxSphereBounds Bounds = Mesh->GetBounds();
+			const double Extent = FMath::Max3(Bounds.BoxExtent.X, Bounds.BoxExtent.Y, Bounds.BoxExtent.Z * 2.0);
+			const double Top = (Bounds.Origin.Z + Bounds.BoxExtent.Z) * Config->HexRadius * Config->ObstacleSize / FMath::Max(Extent, 1.0);
+			MakeProp(Config->FieldDecor[(Hash >> 4) % Config->FieldDecor.Num()].LoadSynchronous(), GetHexPoint(Hex) + FVector(0.0, 0.0, Top * 0.8),
+				Config->HexRadius * Config->FieldDecorSize * 0.8, int32(Hash >> 3), 0.0, false);
+		}
 	}
 
 	// the field is small and closed, as the developer asked on 2026-11-13: a dense forest around it and the castle, from ForestStart hexes out,
@@ -861,8 +1378,6 @@ void AHexBattleArena::BuildProps()
 	const FVector2D NoiseOrigin(GroundSeed * 1.37, GroundSeed * 0.61);
 	// a desert has rocks and stones in place of a wood
 	TArray<TSoftObjectPtr<UStaticMesh>> Wood = Each ? Each->Decor : TArray<TSoftObjectPtr<UStaticMesh>>();
-	const TCHAR Letter = Battles->GetGroundLetter();
-	const bool bRocky = Letter != 0 && Config->RockyGroundLetters.Contains(FString::Chr(Letter));
 	if (bRocky && !Config->RockyDecor.IsEmpty())
 	{
 		Wood = Config->RockyDecor;
@@ -887,8 +1402,94 @@ void AHexBattleArena::BuildProps()
 				continue;
 			}
 			const FVector At(Point.X, Point.Y, GetActorLocation().Z + GetGroundHeight(Point) - 2.0);
-			MakeProp(Wood[Random.RandRange(0, Wood.Num() - 1)].LoadSynchronous(), At, R * Random.FRandRange(0.7, 1.7) * (bRocky ? 0.8 : 1.0), Random.RandRange(0, 359), bRocky ? 0.15 : 0.0);
+			const double Size = R * Random.FRandRange(0.7, 1.7) * (bRocky ? 0.8 : 1.0);
+			MakeProp(Wood[Random.RandRange(0, Wood.Num() - 1)].LoadSynchronous(), At, Size, Random.RandRange(0, 359), bRocky ? 0.15 : 0.0);
+			if (bRocky)
+			{
+				Rocky.Add(FVector(Point.X, Point.Y, Size));
+			}
 			++Placed;
+		}
+	}
+	// what stands among the rocks keeps off them, as the developer found cacti standing in boulders on 2026-11-13: each is kept with its
+	// middle and its radius, and a cactus or a skeleton is not put where it would reach into one, nor a border rock onto them
+	const auto Clear = [](const TArray<FVector>& Taken, const FVector2D& Point, double Radius)
+	{
+		for (const FVector& Each : Taken)
+		{
+			if (FVector2D::Distance(FVector2D(Each.X, Each.Y), Point) < (Each.Z + Radius) * 0.85)
+			{
+				return false;
+			}
+		}
+		return true;
+	};
+	TArray<FVector> Standing;
+	// in a desert cacti and the bones of beasts among the rocks, as the developer asked on 2026-11-13
+	if (bRocky && !Config->DesertProps.IsEmpty())
+	{
+		for (int32 Try = 0, Placed = 0; Try < Config->DesertPropCount * 10 && Placed < Config->DesertPropCount; ++Try)
+		{
+			const FVector2D Point = Spot();
+			const double Gap = Away(Point);
+			if (Gap < R * Config->ForestStart * 0.8 || Gap > R * (Config->BorderReach + Config->ForestBeyond))
+			{
+				continue;
+			}
+			const double Size = R * Random.FRandRange(Config->DesertPropSizeMin, Config->DesertPropSizeMax);
+			if (!Clear(Rocky, Point, Size * 0.5) || !Clear(Standing, Point, Size * 0.5))
+			{
+				continue;
+			}
+			const FVector At(Point.X, Point.Y, GetActorLocation().Z + GetGroundHeight(Point));
+			MakeProp(Config->DesertProps[Random.RandRange(0, Config->DesertProps.Num() - 1)].LoadSynchronous(), At, Size, Random.RandRange(0, 359), 0.02, true);
+			Standing.Add(FVector(Point.X, Point.Y, Size * 0.5));
+			++Placed;
+		}
+	}
+	if (bRocky && !Config->DesertLandmarks.IsEmpty())
+	{
+		for (int32 Try = 0, Placed = 0; Try < Config->DesertLandmarkCount * 20 && Placed < Config->DesertLandmarkCount; ++Try)
+		{
+			const FVector2D Point = Spot();
+			const double Gap = Away(Point);
+			if (Gap < R * (Config->ForestStart + 1.0) || Gap > R * (Config->BorderReach + Config->ForestBeyond))
+			{
+				continue;
+			}
+			const double Size = R * Random.FRandRange(Config->DesertLandmarkSizeMin, Config->DesertLandmarkSizeMax) * 0.5;
+			if (!Clear(Rocky, Point, Size * 0.6) || !Clear(Standing, Point, Size * 0.6))
+			{
+				continue;
+			}
+			const FVector At(Point.X, Point.Y, GetActorLocation().Z + GetGroundHeight(Point));
+			MakeProp(Config->DesertLandmarks[Random.RandRange(0, Config->DesertLandmarks.Num() - 1)].LoadSynchronous(), At, Size, Random.RandRange(0, 359), 0.05, true);
+			Standing.Add(FVector(Point.X, Point.Y, Size * 0.6));
+			++Placed;
+		}
+	}
+	// a few bones lying on the field, on hexes nobody stands on and no obstacle holds; they block nothing
+	if (!Config->FieldDecor.IsEmpty())
+	{
+		TArray<FHexCoord> Free;
+		for (int32 Column = 1; Column + 1 < Battle->GetColumns(); ++Column)
+		{
+			for (int32 Row = 0; Row < Battle->GetRows(); ++Row)
+			{
+				const FHexCoord Hex = FHexCoord::FromOffset(Column, Row);
+				if (!Battle->IsObstacle(Hex) && Battle->FindUnitAt(Hex) == INDEX_NONE && !Battle->FindWall(Hex) && !Battle->IsMoat(Hex))
+				{
+					Free.Add(Hex);
+				}
+			}
+		}
+		for (int32 Index = 0; Index < Config->FieldDecorCount && !Free.IsEmpty(); ++Index)
+		{
+			const FHexCoord Hex = Free[Random.RandRange(0, Free.Num() - 1)];
+			Free.Remove(Hex);
+			const FVector Offset(Random.FRandRange(-0.35, 0.35) * R, Random.FRandRange(-0.35, 0.35) * R, 0.0);
+			MakeProp(Config->FieldDecor[Random.RandRange(0, Config->FieldDecor.Num() - 1)].LoadSynchronous(), GetHexPoint(Hex) + Offset,
+				R * Config->FieldDecorSize * Random.FRandRange(0.8, 1.2), Random.RandRange(0, 359), 0.03, false);
 		}
 	}
 	// the rocks, big and sunk into the ground, along the edge of the forest
@@ -908,8 +1509,13 @@ void AHexBattleArena::BuildProps()
 		{
 			continue;
 		}
+		const double Size = R * Config->RockSize * Random.FRandRange(0.6, 1.5);
+		if (!Clear(Standing, Point, Size * 0.8))
+		{
+			continue;
+		}
 		const FVector At(Point.X, Point.Y, GetActorLocation().Z + GetGroundHeight(Point));
-		MakeProp(Rocks[Random.RandRange(0, Rocks.Num() - 1)], At, R * Config->RockSize * Random.FRandRange(0.6, 1.5), Random.RandRange(0, 359), 0.25);
+		MakeProp(Rocks[Random.RandRange(0, Rocks.Num() - 1)], At, Size, Random.RandRange(0, 359), 0.25);
 		++Placed;
 	}
 
@@ -939,6 +1545,64 @@ void AHexBattleArena::BuildProps()
 		UProceduralMeshComponent* Bank = Plane.Make(this, Root, Fog, Props);
 		Bank->SetCastShadow(false);
 		Bank->TranslucencySortPriority = 2 + Layer;
+	}
+	// the fog of war as on the planet, over the view of the camera of the field
+	Camera->PostProcessSettings.WeightedBlendables.Array.RemoveAll([this](const FWeightedBlendable& Each) { return Each.Object == ShroudInstance; });
+	ShroudInstance = nullptr;
+	if (UMaterialInterface* ShroudMaterial = Config->ShroudMaterial.LoadSynchronous())
+	{
+		ShroudInstance = UMaterialInstanceDynamic::Create(ShroudMaterial, this);
+		HexMaterialConfig::Apply(ShroudInstance, Config);
+		ShroudInstance->SetVectorParameterValue(TEXT("FogBox"), FLinearColor(float(Box.Min.X), float(Box.Min.Y), float(Box.Max.X), float(Box.Max.Y)));
+		ShroudInstance->SetScalarParameterValue(TEXT("GroundZ"), float(GetActorLocation().Z));
+		ShroudInstance->SetScalarParameterValue(TEXT("Shade"), Battles->IsUnderground() ? Config->FogUndergroundShade : 1.0f);
+		Camera->PostProcessSettings.WeightedBlendables.Array.Add(FWeightedBlendable(1.0f, ShroudInstance));
+	}
+	// a skirt of the fog that rises from FogStart past the box over the forest to FogSkirtHeight at FogEnd and lies on there, so the trees
+	// that stand higher than its banks and the end of the ground sink into it, as the developer found the field end abruptly against the sky
+	// on 2026-11-13
+	if (UMaterialInterface* FogMaterial = Config->FogMaterial.LoadSynchronous(); FogMaterial && Config->FogSkirtHeight > 0.0f)
+	{
+		const FVector2D Local(GetActorLocation().X, GetActorLocation().Y);
+		const FVector2D Middle = Box.GetCenter() - Local;
+		const FVector2D Half = Box.GetExtent();
+		// a ring around the box at a distance from it, a rounded rectangle
+		const auto Around = [&](double Angle, double Out, double Z)
+		{
+			const FVector2D Direction(FMath::Cos(Angle), FMath::Sin(Angle));
+			const double Reach = 1.0 / FMath::Max(FMath::Max(FMath::Abs(Direction.X) / FMath::Max(Half.X, 1.0), FMath::Abs(Direction.Y) / FMath::Max(Half.Y, 1.0)), 1e-6);
+			const FVector2D Point = Middle + Direction * (Reach + Out);
+			return FVector(Point.X, Point.Y, Z);
+		};
+		FPropMesh Skirt;
+		const int32 Steps = 64;
+		const double Rings[4][2] = {{Config->FogStart, Config->FogHeight * 0.2}, {(Config->FogStart + Config->FogEnd) * 0.5, Config->FogSkirtHeight * 0.55},
+			{Config->FogEnd, Config->FogSkirtHeight}, {Config->FogEnd * 6.0, Config->FogSkirtHeight}};
+		for (int32 Ring = 0; Ring < 3; ++Ring)
+		{
+			for (int32 Step = 0; Step < Steps; ++Step)
+			{
+				const double A0 = UE_TWO_PI * Step / Steps;
+				const double A1 = UE_TWO_PI * (Step + 1) / Steps;
+				const FVector P0 = Around(A0, Rings[Ring][0], Rings[Ring][1]);
+				const FVector P1 = Around(A1, Rings[Ring][0], Rings[Ring][1]);
+				const FVector P2 = Around(A1, Rings[Ring + 1][0], Rings[Ring + 1][1]);
+				const FVector P3 = Around(A0, Rings[Ring + 1][0], Rings[Ring + 1][1]);
+				Skirt.Quad(P0, P1, P2, P3, FVector::UpVector, FVector2D(0.0, 0.0), FVector2D(1.0, 0.0), FVector2D(1.0, 1.0), FVector2D(0.0, 1.0));
+			}
+		}
+		UMaterialInstanceDynamic* Fog = UMaterialInstanceDynamic::Create(FogMaterial, this);
+		HexMaterialConfig::Apply(Fog, Config);
+		const float Shade = Battles->IsUnderground() ? Config->FogUndergroundShade : 1.0f;
+		Fog->SetVectorParameterValue(TEXT("FogColor"), Config->FogColor * Shade);
+		Fog->SetVectorParameterValue(TEXT("FogWispColor"), Config->FogWispColor * Shade);
+		Fog->SetVectorParameterValue(TEXT("FogBox"), FLinearColor(float(Box.Min.X), float(Box.Min.Y), float(Box.Max.X), float(Box.Max.Y)));
+		Fog->SetVectorParameterValue(TEXT("FogPulseColor"), Config->FogPulseColor * Shade);
+		Fog->SetScalarParameterValue(TEXT("FogLayer"), 7.0f);
+		Fog->SetScalarParameterValue(TEXT("FogLayerOpacity"), Config->FogSkirtOpacity);
+		UProceduralMeshComponent* Bank = Skirt.Make(this, Root, Fog, Props);
+		Bank->SetCastShadow(false);
+		Bank->TranslucencySortPriority = 1;
 	}
 }
 
@@ -988,7 +1652,7 @@ void AHexBattleArena::PlaceFigures()
 				Part->SetupAttachment(Component);
 				Part->SetMobility(EComponentMobility::Movable);
 				Part->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-				Part->SetRelativeTransform(FTransform(Turn, Offset, Size / 100.0));
+				Part->SetRelativeTransform(FTransform(Turn, Offset + FVector(-Config->HexRadius * Config->CatapultBackShift, 0.0, 0.0), Size / 100.0));
 				if (Wood)
 				{
 					Part->SetMaterial(0, Wood);
@@ -997,8 +1661,23 @@ void AHexBattleArena::PlaceFigures()
 				SiegeProps.Add(Part);
 			};
 			const double Size = Config->CatapultSize;
+			// behind the middle of its hex, away from where it throws (its X), so it does not reach over the stacks beside it
+			const FVector Behind(-Config->HexRadius * Config->CatapultBackShift, 0.0, 0.0);
 			if (UStaticMesh* Given = Config->CatapultMesh.LoadSynchronous())
 			{
+				// its wood, iron and rope in the planks of the props, by the names of its slots
+				UMaterialInstanceDynamic* Planks = MakeProp(this, Config, Config->BridgeWoodTexture, Config->BridgeWoodNormal, Config->CatapultWoodColor, Config->WoodTileSize, true, false);
+				UMaterialInstanceDynamic* Iron = MakeProp(this, Config, Config->GateWoodTexture, Config->GateWoodNormal, Config->CatapultIronColor, Config->WoodTileSize * 0.5f, true, false);
+				UMaterialInstanceDynamic* Rope = MakeProp(this, Config, Config->GateWoodTexture, Config->GateWoodNormal, Config->CatapultRopeColor, Config->WoodTileSize * 0.2f, true, true);
+				const auto Dress = [&](UStaticMeshComponent* Mesh)
+				{
+					const TArray<FStaticMaterial>& Slots = Mesh->GetStaticMesh()->GetStaticMaterials();
+					for (int32 Slot = 0; Slot < Slots.Num(); ++Slot)
+					{
+						const FString Name = Slots[Slot].MaterialSlotName.ToString();
+						Mesh->SetMaterial(Slot, Name.Contains(TEXT("Iron")) ? Iron : Name.Contains(TEXT("Rope")) ? Rope : Planks);
+					}
+				};
 				UStaticMeshComponent* Part = NewObject<UStaticMeshComponent>(this);
 				Part->SetStaticMesh(Given);
 				Part->SetupAttachment(Component);
@@ -1006,8 +1685,23 @@ void AHexBattleArena::PlaceFigures()
 				Part->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 				const double Extent = FMath::Max(Given->GetBounds().BoxExtent.GetMax(), 1.0);
 				Part->SetRelativeScale3D(FVector(Size * 0.5 / Extent));
+				Part->SetRelativeLocation(Behind);
+				Dress(Part);
 				Part->RegisterComponent();
 				SiegeProps.Add(Part);
+				if (UStaticMesh* ArmMesh = Config->CatapultArmMesh.LoadSynchronous())
+				{
+					UStaticMeshComponent* Arm = NewObject<UStaticMeshComponent>(this);
+					Arm->SetStaticMesh(ArmMesh);
+					Arm->SetupAttachment(Part);
+					Arm->SetMobility(EComponentMobility::Movable);
+					Arm->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+					Arm->SetRelativeLocation(Config->CatapultArmPivot);
+					Dress(Arm);
+					Arm->RegisterComponent();
+					SiegeProps.Add(Arm);
+					Figure.Arm = Arm;
+				}
 			}
 			else
 			{
@@ -1040,6 +1734,7 @@ void AHexBattleArena::PlaceFigures()
 			Figure.Position = Wall != INDEX_NONE ? GetWallPartPoint(Wall) : Figure.Position;
 		}
 		Figure.Facing = Unit.Side == 0 ? FVector(0.0, 1.0, 0.0) : FVector(0.0, -1.0, 0.0);
+		Figure.Shown = Figure.Facing;
 		Figure.bDead = !Unit.IsAlive();
 		if (const FHexUnitLook* Look = Figure.bDead ? Config->FindLook(Unit.CreatureId) : nullptr)
 		{
@@ -1069,15 +1764,35 @@ void AHexBattleArena::PlaceFigure(int32 Unit)
 		return;
 	}
 	const FFigure& Figure = Figures[Unit];
-	const FRotator Turn = FRotationMatrix::MakeFromX(Figure.Facing.GetSafeNormal2D().IsNearlyZero() ? FVector::ForwardVector : Figure.Facing.GetSafeNormal2D()).Rotator()
+	const FRotator Turn = FRotationMatrix::MakeFromX(Figure.Shown.GetSafeNormal2D().IsNearlyZero() ? FVector::ForwardVector : Figure.Shown.GetSafeNormal2D()).Rotator()
 		+ FRotator(0.0, Figure.Yaw, 0.0);
-	Figure.Component->SetWorldTransform(FTransform(Turn, Figure.Position + FVector(0.0, 0.0, Figure.Hover), FVector(Figure.Scale)));
+	// reeling from a blow: leaning away from where it came from and pushed back, in and out again
+	FQuat Reel = FQuat::Identity;
+	FVector Push = FVector::ZeroVector;
+	if (Figure.HitTime >= 0.0f && !Figure.HitFrom.IsNearlyZero())
+	{
+		const float Share = FMath::Sin(FMath::Clamp(Figure.HitTime / FMath::Max(Config->HitReelTime, 0.05f), 0.0f, 1.0f) * PI);
+		const FVector Axis = FVector::CrossProduct(FVector::UpVector, Figure.HitFrom).GetSafeNormal();
+		Reel = FQuat(Axis, FMath::DegreesToRadians(Config->HitLean) * Share);
+		Push = Figure.HitFrom * (Config->HitPush * Share);
+	}
+	Figure.Component->SetWorldTransform(FTransform(Reel * Turn.Quaternion(), Figure.Position + Push + FVector(0.0, 0.0, Figure.Hover), FVector(Figure.Scale)));
+}
+
+int32 AHexBattleArena::GetShownWallHealth(int32 Wall) const
+{
+	const FHexBattle* Battle = GetBattle();
+	if (!Battle || !Battle->GetWalls().IsValidIndex(Wall))
+	{
+		return 0;
+	}
+	return ShownWallHealth.IsValidIndex(Wall) && ShownWallHealth.Num() == Battle->GetWalls().Num() ? ShownWallHealth[Wall] : Battle->GetWalls()[Wall].Health;
 }
 
 bool AHexBattleArena::GetWallPoint(int32 Wall, FVector& OutWorld) const
 {
 	const FHexBattle* Battle = GetBattle();
-	if (!Battle || !Battle->GetWalls().IsValidIndex(Wall) || !Battle->GetWalls()[Wall].IsStanding())
+	if (!Battle || !Battle->GetWalls().IsValidIndex(Wall) || GetShownWallHealth(Wall) <= 0)
 	{
 		return false;
 	}
@@ -1093,16 +1808,40 @@ void AHexBattleArena::BuildSiege()
 	{
 		return;
 	}
-	// made again only when a part fell
-	FString Key;
-	for (const FHexBattleWall& Wall : Battle->GetWalls())
+	// the health shown follows the rules while nothing plays, and a hit takes it down when it plays; what the rules did this frame waits
+	// to be played first
+	Gather();
+	const TArray<FHexBattleWall>& WallParts = Battle->GetWalls();
+	if (ShownWallHealth.Num() != WallParts.Num() || !IsPlaying())
 	{
-		Key += Wall.IsStanding() ? TEXT("1") : TEXT("0");
+		ShownWallHealth.SetNum(WallParts.Num());
+		for (int32 Index = 0; Index < WallParts.Num(); ++Index)
+		{
+			ShownWallHealth[Index] = WallParts[Index].Health;
+		}
+	}
+	// 0 whole, 1 and 2 damaged, 3 fallen, as it shows
+	const auto GetStage = [&](int32 Index)
+	{
+		const int32 Health = ShownWallHealth.IsValidIndex(Index) ? ShownWallHealth[Index] : WallParts[Index].Health;
+		if (Health <= 0)
+		{
+			return 3;
+		}
+		const float Share = float(Health) / float(FMath::Max(WallParts[Index].MaxHealth, 1));
+		return Share < Config->DamageHeavyShare ? 2 : Share < Config->DamageLightShare ? 1 : 0;
+	};
+	// made again only when a part shows another stage
+	FString Key;
+	for (int32 Index = 0; Index < WallParts.Num(); ++Index)
+	{
+		Key += FString::FromInt(GetStage(Index));
 	}
 	if (Key == SiegeKey)
 	{
 		return;
 	}
+	const FString OldKey = SiegeKey;
 	SiegeKey = Key;
 	for (const TObjectPtr<USceneComponent>& Prop : SiegeProps)
 	{
@@ -1162,14 +1901,14 @@ void AHexBattleArena::BuildSiege()
 		SiegeProps.Add(Component);
 		return Component;
 	};
-	const auto AddInstance = [&](UInstancedStaticMeshComponent* Component, const FVector& At, double Turn, double Size = 1.0, double Wide = 1.0) -> int32
+	const auto AddInstance = [&](UInstancedStaticMeshComponent* Component, const FVector& At, double Turn, double Size = 1.0, double Wide = 1.0, double Long = 1.0) -> int32
 	{
 		if (!Component)
 		{
 			return INDEX_NONE;
 		}
 		const float Data[11] = {OwnerColor.R, OwnerColor.G, OwnerColor.B, OwnerColor.R, OwnerColor.G, OwnerColor.B, -1000.0f, Style, -1000.0f, 0.0f, 0.0f};
-		const int32 Index = Component->AddInstance(FTransform(FRotator(0.0, Turn, 0.0), At - GetActorLocation(), FVector(Scale * Size * Wide, Scale * Size * Wide, Scale * Size)), false);
+		const int32 Index = Component->AddInstance(FTransform(FRotator(0.0, Turn, 0.0), At - GetActorLocation(), FVector(Scale * Size * Wide, Scale * Size * Wide * Long, Scale * Size)), false);
 		Component->SetCustomData(Index, MakeArrayView(Data), true);
 		return Index;
 	};
@@ -1182,7 +1921,8 @@ void AHexBattleArena::BuildSiege()
 	const double TowerRadius = (TowerMesh ? FMath::Max(TowerMesh->GetBounds().BoxExtent.X, TowerMesh->GetBounds().BoxExtent.Y) * Scale : Config->HexRadius * 0.3) * Config->TowerWidthScale;
 	// the stretches between two points, as many as fill the way, turned along it; the mesh of the castle lies along its Y
 	const double StretchLength = WallMesh ? FMath::Max(WallMesh->GetBounds().BoxExtent.Y * 2.0 * Scale, 1.0) : 1.0;
-	const auto AddStretch = [&](const FVector& A, const FVector& B)
+	// with bFit the pieces end at the points and no further, a little shorter, as one that meets a ruin must not reach on into it
+	const auto AddStretch = [&](const FVector& A, const FVector& B, bool bFit = false)
 	{
 		if (FVector::Dist2D(A, B) < 1.0)
 		{
@@ -1191,9 +1931,10 @@ void AHexBattleArena::BuildSiege()
 		const FVector Along = (B - A).GetSafeNormal2D();
 		const double Turn = FMath::RadiansToDegrees(FMath::Atan2(Along.Y, Along.X)) - 90.0;
 		const int32 Count = FMath::Max(FMath::CeilToInt32(FVector::Dist2D(A, B) / StretchLength), 1);
+		const double Long = bFit ? FVector::Dist2D(A, B) / (Count * StretchLength) : 1.0;
 		for (int32 Piece = 0; Piece < Count; ++Piece)
 		{
-			AddInstance(Walls, FMath::Lerp(A, B, (Piece + 0.5) / Count), Turn);
+			AddInstance(Walls, FMath::Lerp(A, B, (Piece + 0.5) / Count), Turn, 1.0, 1.0, Long);
 		}
 	};
 	const auto IsCorner = [&Parts](int32 Index) { return Parts[Index].Part == EHexWallPart::Tower && (Index == 0 || Index == Parts.Num() - 1); };
@@ -1205,21 +1946,223 @@ void AHexBattleArena::BuildSiege()
 		return Parts[Index].Part == EHexWallPart::Gate ? At + (Towards - At).GetSafeNormal2D() * GateFlank : At;
 	};
 
-	// the front wall between the parts that stand, from corner to corner, where a tower at an end of it stands
+	// the ruins of what fell, as the developer asked on 2026-11-13 when a part that fell left nothing but a gap whose walls ended as if cut by a
+	// laser: one mesh of the castle for all of them, in its material and masonry, in units of a mesh from the actor: a stub of the wall whose
+	// broken top steps down by courses from a wall that stands to a breach, a tower broken off low, hollow and uneven, and heaps of blocks of
+	// its stone spilled to both sides of it, more outwards (Ruin* and Rubble* of DA_HexBattle)
+	FPropMesh Ruins;
+	const double Unit = 1.0 / FMath::Max(Scale, 0.0001);
+	const double Tile = FMath::Max(double(Config->CastleTile), 1.0);
+	const FBoxSphereBounds WallBounds = WallMesh ? WallMesh->GetBounds() : FBoxSphereBounds(FVector::ZeroVector, FVector(6.0, 10.0, 40.0), 40.0);
+	const double RuinTop = (WallBounds.Origin.Z + WallBounds.BoxExtent.Z) * Config->ArchTopShare;
+	const double RuinBody = WallBounds.BoxExtent.X * Config->RuinThickShare;
+	const double TowerTall = TowerMesh ? (TowerMesh->GetBounds().Origin.Z + TowerMesh->GetBounds().BoxExtent.Z) : RuinTop * 1.4;
+	const double Course = FMath::Max(double(Config->RuinCourse), 1.0);
+	const FVector Origin = GetActorLocation();
+	const auto ToMesh = [&](const FVector& World) { return (World - Origin) * Unit; };
+	const auto StoneTone = [&](FRandomStream& Random, float Light = 1.0f)
+	{
+		const float Tone = Config->CastleStoneTone * Light * Random.FRandRange(0.8f, 1.08f);
+		return FLinearColor(Tone, Tone, Tone, 0.1f);
+	};
+	// a block of rubble lying near a point, turned at random, at most Heap high above the ground
+	const auto AddRubbleBlock = [&](FRandomStream& Random, const FVector& Ground, double Heap)
+	{
+		const double Size = Random.FRandRange(Config->RubbleSizeMin, Config->RubbleSizeMax);
+		const FVector Half(Size * Random.FRandRange(0.85, 1.35), Size * Random.FRandRange(0.55, 0.85), Size * Random.FRandRange(0.4, 0.65));
+		const FQuat Turn = FRotator(Random.FRandRange(-30.0, 30.0), Random.FRandRange(0.0, 360.0), Random.FRandRange(-30.0, 30.0)).Quaternion();
+		Ruins.Color = StoneTone(Random);
+		Ruins.Block(Ground + FVector(0.0, 0.0, Random.FRand() * Heap + Half.Z * 0.5), Turn, Half, Tile, FVector2D(Random.FRand(), Random.FRand()));
+	};
+	// a heap along a line from A to B, deepest by the wall and towards the breach, spilled across it to both sides
+	const auto AddHeap = [&](FRandomStream& Random, const FVector& A, const FVector& B, int32 Count, double Heap)
+	{
+		const double Spread = Config->HexRadius * Config->RubbleSpread * Unit;
+		for (int32 Index = 0; Index < Count; ++Index)
+		{
+			const double T = FMath::Sqrt(Random.FRand());
+			const bool bIn = Random.FRand() < Config->RubbleInShare;
+			const double Off = FMath::Pow(Random.FRand(), 1.7) * Spread;
+			const double Across = (bIn ? 1.0 : -1.0) * (Off + RuinBody * 0.6);
+			const double Near = 1.0 - Off / FMath::Max(Spread, 1.0);
+			AddRubbleBlock(Random, FMath::Lerp(A, B, T) + Shape.In * Across, Heap * Near * Near * (0.4 + 0.6 * T));
+		}
+	};
+	// a stub of the wall from From, at a wall that stands when bShoulder, to To, where it is broken down to its breach: from High of its height
+	// to Low, merlons on Merlons of its columns that stand high, and a heap of Blocks; a ruin by default
+	const auto AddRuin = [&](const FVector& FromWorld, const FVector& ToWorld, bool bShoulder, int32 Seed, double ShoulderShare = -1.0, double BreachShare = -1.0,
+		double Merlons = 0.0, int32 Blocks = -1)
+	{
+		const double HighShare = ShoulderShare >= 0.0 ? ShoulderShare : double(Config->RuinShoulderShare);
+		const double LowShare = BreachShare >= 0.0 ? BreachShare : double(Config->RuinBreachShare);
+		FRandomStream Random(Seed);
+		const FVector From = ToMesh(FromWorld);
+		const FVector To = ToMesh(ToWorld);
+		const double Length = FVector::Dist2D(From, To);
+		if (Length < 1.0)
+		{
+			return;
+		}
+		const FVector Along = (To - From).GetSafeNormal2D();
+		const FQuat Facing = FRotationMatrix::MakeFromXZ(Along, FVector::UpVector).ToQuat();
+		const int32 Columns = FMath::Max(FMath::RoundToInt32(Length / FMath::Max(double(Config->RuinColumnWidth), 1.0)), 2);
+		const double Width = Length / Columns;
+		for (int32 Column = 0; Column < Columns; ++Column)
+		{
+			const double T = (Column + 0.5) / Columns;
+			const double High = bShoulder ? 1.0 - FMath::SmoothStep(0.05, 0.9, T + Random.FRandRange(-0.14, 0.14)) : 0.0;
+			const double Share = FMath::Min(FMath::Lerp(LowShare, HighShare, High) + Random.FRandRange(-0.06, 0.06) * (1.0 - LowShare * 0.6), 1.0);
+			const double Height = FMath::Max(FMath::RoundToDouble(RuinTop * Share / Course), 1.0) * Course;
+			// the first reaches back into the wall that stands, so its end shows nowhere
+			const double U0 = Column * Width - (Column == 0 && bShoulder ? Course * 0.5 : 0.0);
+			const double U1 = (Column + 1) * Width;
+			const double Body = RuinBody * Random.FRandRange(0.86, 1.0);
+			const FVector Foot = FMath::Lerp(From, To, (U0 + U1) * 0.5 / Length);
+			Ruins.Color = StoneTone(Random);
+			Ruins.Block(Foot + Along * 0.0 + FVector(0.0, 0.0, Height * 0.5), Facing, FVector((U1 - U0) * 0.5, Body, Height * 0.5), Tile,
+				FVector2D((U0 + U1) * 0.5 / Tile, Height * 0.5 / Tile));
+			// what is left of its merlons along its outer edge, where it stands nearly whole
+			if (Merlons > 0.0 && Height >= RuinTop * 0.9 && Random.FRand() < Merlons)
+			{
+				Ruins.Color = StoneTone(Random, 1.12f);
+				Ruins.Block(Foot - Shape.In * (Body - 1.8) + FVector(0.0, 0.0, Height + 3.5), Facing, FVector(FMath::Min(Width * 0.32, 3.8), 1.8, 3.5), Tile,
+					FVector2D(Random.FRand(), Random.FRand()));
+				continue;
+			}
+			// loose blocks on its broken top
+			for (int32 Loose = 0; Loose < 2; ++Loose)
+			{
+				if (Random.FRand() > Config->RuinLooseShare)
+				{
+					continue;
+				}
+				const FVector Half(Width * Random.FRandRange(0.22, 0.42), Body * Random.FRandRange(0.35, 0.8), Course * Random.FRandRange(0.4, 0.55));
+				const FQuat Turn = Facing * FRotator(Random.FRandRange(-12.0, 12.0), Random.FRandRange(-18.0, 18.0), Random.FRandRange(-12.0, 12.0)).Quaternion();
+				const FVector Shift = Along * Random.FRandRange(-Width * 0.3, Width * 0.3) + Shape.In * Random.FRandRange(-Body * 0.4, Body * 0.4);
+				Ruins.Color = StoneTone(Random, 1.05f);
+				Ruins.Block(Foot + Shift + FVector(0.0, 0.0, Height + Half.Z * 0.8), Turn, Half, Tile, FVector2D(Random.FRand(), Random.FRand()));
+			}
+		}
+		AddHeap(Random, From, To, Blocks >= 0 ? Blocks : Config->RubbleBlocks, RuinTop * Config->RubbleHeapShare * (1.0 - HighShare * 0.5 + LowShare * 0.0));
+	};
+	// a heap of rubble around a point, of a part that stands but is damaged
+	const auto AddFallen = [&](const FVector& CenterWorld, double RadiusWorld, int32 Count, int32 Seed)
+	{
+		FRandomStream Random(Seed);
+		const FVector Center = ToMesh(CenterWorld);
+		const double Radius = RadiusWorld * Unit;
+		const double Spread = Config->HexRadius * Config->RubbleSpread * Unit;
+		for (int32 Index = 0; Index < Count; ++Index)
+		{
+			const double Angle = Random.FRandRange(0.0, UE_TWO_PI);
+			const double Away = Radius + FMath::Pow(Random.FRand(), 1.5) * Spread * 0.7;
+			AddRubbleBlock(Random, Center + FVector(FMath::Cos(Angle), FMath::Sin(Angle), 0.0) * Away, RuinTop * Config->RubbleHeapShare * 0.3);
+		}
+	};
+	// a tower broken off: a ring of blocks of uneven heights, from MinShare to MaxShare of it, rubble inside it and around it
+	const auto AddStump = [&](const FVector& CenterWorld, double RadiusWorld, double Tall, double MinShare, double MaxShare, int32 Seed, int32 Blocks = -1, double HeapShare = -1.0)
+	{
+		const int32 Heap = Blocks >= 0 ? Blocks : Config->RubbleBlocks;
+		const double HeapTall = HeapShare >= 0.0 ? HeapShare : MinShare * Config->RubbleHeapShare * 2.0;
+		FRandomStream Random(Seed);
+		const FVector Center = ToMesh(CenterWorld);
+		const double Radius = RadiusWorld * Unit;
+		const int32 Segments = FMath::Max(Config->RuinTowerSegments, 6);
+		const double Phase = Random.FRandRange(0.0, UE_TWO_PI);
+		for (int32 Segment = 0; Segment < Segments; ++Segment)
+		{
+			const double Angle = UE_TWO_PI * Segment / Segments;
+			const FVector Out(FMath::Cos(Angle), FMath::Sin(Angle), 0.0);
+			const double Share = FMath::Lerp(MinShare, MaxShare, 0.5 + 0.5 * FMath::Sin(Angle + Phase)) + Random.FRandRange(-0.08, 0.08);
+			const double Height = FMath::Max(FMath::RoundToDouble(Tall * FMath::Max(Share, 0.05) / Course), 1.0) * Course;
+			const FQuat Facing = FRotationMatrix::MakeFromXZ(FVector(-Out.Y, Out.X, 0.0), FVector::UpVector).ToQuat();
+			const double Thick = Radius * 0.26;
+			Ruins.Color = StoneTone(Random);
+			Ruins.Block(Center + Out * (Radius - Thick) + FVector(0.0, 0.0, Height * 0.5), Facing,
+				FVector(UE_PI * Radius / Segments * 1.12, Thick, Height * 0.5), Tile, FVector2D(Angle * Radius / Tile, Height * 0.5 / Tile));
+		}
+		for (int32 Index = 0; Index < Heap; ++Index)
+		{
+			const double Angle = Random.FRandRange(0.0, UE_TWO_PI);
+			const bool bInside = Index < Heap / 4;
+			const double Away = bInside ? Radius * 0.6 * FMath::Sqrt(Random.FRand())
+				: Radius + FMath::Pow(Random.FRand(), 1.7) * Config->HexRadius * Config->RubbleSpread * Unit;
+			const double Near = bInside ? 1.0 : 1.0 - (Away - Radius) / FMath::Max(Config->HexRadius * Config->RubbleSpread * Unit, 1.0);
+			AddRubbleBlock(Random, Center + FVector(FMath::Cos(Angle), FMath::Sin(Angle), 0.0) * Away, Tall * HeapTall * Near * Near);
+		}
+	};
+
+	// the front wall from corner to corner, where a tower at an end of it stands: between two parts that stand a wall, and of a part that fell
+	// its half of the way to each neighbor a ruin, high where it meets the wall of a neighbor that stands
 	for (int32 Index = 0; Index + 1 < Parts.Num(); ++Index)
 	{
-		if (Parts[Index].IsStanding() && Parts[Index + 1].IsStanding())
+		const FVector A = EndAt(Index, GetWallPartPoint(Index + 1));
+		const FVector B = EndAt(Index + 1, GetWallPartPoint(Index));
+		const int32 StageA = GetStage(Index);
+		const int32 StageB = GetStage(Index + 1);
+		// a half of the way is whole wall but of a section that is damaged or fell
+		const bool bWholeA = StageA == 0 || (StageA < 3 && Parts[Index].Part != EHexWallPart::Wall);
+		const bool bWholeB = StageB == 0 || (StageB < 3 && Parts[Index + 1].Part != EHexWallPart::Wall);
+		if (bWholeA && bWholeB)
 		{
-			AddStretch(EndAt(Index, GetWallPartPoint(Index + 1)), EndAt(Index + 1, GetWallPartPoint(Index)));
+			AddStretch(A, B);
+			continue;
 		}
+		const FVector Middle = (A + B) * 0.5;
+		const auto AddHalf = [&](const FVector& End, int32 Stage, bool bWhole, bool bOtherStands, int32 Seed)
+		{
+			if (bWhole)
+			{
+				AddStretch(End == A ? A : Middle, End == A ? Middle : B, true);
+			}
+			else if (Stage == 3)
+			{
+				AddRuin(Middle, End, bOtherStands, Seed);
+			}
+			else
+			{
+				// a section that stands but is damaged: whole where it meets its neighbors, chipped or broken down in its middle
+				const bool bHeavy = Stage == 2;
+				AddRuin(Middle, End, true, Seed, 0.98, bHeavy ? Config->DamageHeavyBreach : Config->DamageLightBreach,
+					bHeavy ? Config->DamageHeavyMerlons : Config->DamageLightMerlons, bHeavy ? Config->DamageHeavyBlocks : Config->DamageLightBlocks);
+			}
+		};
+		AddHalf(A, StageA, bWholeA, StageB < 3, int32(Mix(Index, 1, 7 + StageA)));
+		AddHalf(B, StageB, bWholeB, StageA < 3, int32(Mix(Index + 1, 2, 7 + StageB)));
 	}
-	if (Parts[0].IsStanding() && !IsCorner(0))
+	// the ends of the front wall meet the side walls, which stand
+	const auto AddEnd = [&](int32 Index, const FVector& Corner, int32 Salt)
 	{
-		AddStretch(Shape.FrontStart, GetWallPartPoint(0));
+		const int32 Stage = GetStage(Index);
+		if (Stage == 0 || (Stage < 3 && Parts[Index].Part != EHexWallPart::Wall))
+		{
+			if (Salt == 3)
+			{
+				AddStretch(Corner, GetWallPartPoint(Index));
+			}
+			else
+			{
+				AddStretch(GetWallPartPoint(Index), Corner);
+			}
+		}
+		else if (Stage == 3)
+		{
+			AddRuin(Corner, GetWallPartPoint(Index), true, int32(Mix(Index, Salt, 7)));
+		}
+		else
+		{
+			const bool bHeavy = Stage == 2;
+			AddRuin(Corner, GetWallPartPoint(Index), true, int32(Mix(Index, Salt, 7 + Stage)), 0.98, bHeavy ? Config->DamageHeavyBreach : Config->DamageLightBreach,
+				bHeavy ? Config->DamageHeavyMerlons : Config->DamageLightMerlons, bHeavy ? Config->DamageHeavyBlocks : Config->DamageLightBlocks);
+		}
+	};
+	if (!IsCorner(0))
+	{
+		AddEnd(0, Shape.FrontStart, 3);
 	}
-	if (Parts.Last().IsStanding() && !IsCorner(Parts.Num() - 1))
+	if (!IsCorner(Parts.Num() - 1))
 	{
-		AddStretch(GetWallPartPoint(Parts.Num() - 1), Shape.FrontEnd);
+		AddEnd(Parts.Num() - 1, Shape.FrontEnd, 4);
 	}
 
 	// the walls that close the yard outside the field, which nothing harms: the side walls go on past the palace, as the yard is only the
@@ -1230,7 +2173,9 @@ void AHexBattleArena::BuildSiege()
 	if (Fort >= 2 && Towers)
 	{
 		AddInstance(Towers, Shape.BackStart, -90.0, 1.0, Config->TowerWidthScale);
-		AddInstance(Towers, Shape.BackEnd, -90.0, 1.0, Config->TowerWidthScale);
+		// at the outer corner of the bay of the catapult of the castle, where there is one
+		const bool bCatapultBay = Battle->GetUnits().ContainsByPredicate([](const FHexBattleUnit& Each) { return Each.bCatapult && Each.Side == 1; });
+		AddInstance(Towers, Shape.BackEnd + (bCatapultBay ? Shape.In * (Config->HexRadius * UE_DOUBLE_SQRT_3 * Config->CatapultBayDepth) : FVector::ZeroVector), -90.0, 1.0, Config->TowerWidthScale);
 	}
 
 	// the palace at the back of the yard: the hall of the castle in its middle on a flight of steps, the dwellings built beside it behind the
@@ -1273,9 +2218,35 @@ void AHexBattleArena::BuildSiege()
 		}
 		const auto Width = [&](UStaticMesh* Mesh) { return Mesh ? FMath::Max(Mesh->GetBounds().BoxExtent.X, Mesh->GetBounds().BoxExtent.Y) * 2.0 * Scale * Config->HallScale : 0.0; };
 		const double HallWidth = Width(HallMesh);
-		// the back wall with an opening for the steps up to the hall
+		// the back wall with an opening for the steps up to the hall, and a bay around the catapult of the castle, which the wall goes out
+		// around, as the developer asked on 2026-11-14 ("стіна її обходе"): from where it stands along the wall CatapultBayHalfWidth hexes each
+		// way, CatapultBayDepth hexes out; at a corner the side wall, which goes on past the back wall, closes it
 		const double StepsHalf = FMath::Max(HallWidth * 0.32, Config->HexRadius * 0.8);
-		AddStretch(Shape.BackEnd, BackMiddle - BackAlong * StepsHalf);
+		const double HexWidth = Config->HexRadius * UE_DOUBLE_SQRT_3;
+		const bool bBay = Battle->GetUnits().ContainsByPredicate([](const FHexBattleUnit& Each) { return Each.bCatapult && Each.Side == 1; });
+		const double BackLength = FVector::Dist2D(Shape.BackStart, Shape.BackEnd);
+		const FVector Home = GetHexPoint(Battle->GetMachineHex(1));
+		const double BayAt = FVector::DotProduct(Home - Shape.BackEnd, BackAlong);
+		const double BayFrom = FMath::Max(BayAt - HexWidth * Config->CatapultBayHalfWidth, 0.0);
+		const double BayTo = FMath::Min(BayAt + HexWidth * Config->CatapultBayHalfWidth, BackLength * 0.5 - StepsHalf);
+		const FVector BayOut = Shape.In * (HexWidth * Config->CatapultBayDepth);
+		if (bBay && BayTo > BayFrom)
+		{
+			const FVector A = Shape.BackEnd + BackAlong * BayFrom;
+			const FVector B = Shape.BackEnd + BackAlong * BayTo;
+			if (BayFrom > Config->HexRadius * 0.2)
+			{
+				AddStretch(Shape.BackEnd, A);
+				AddStretch(A, A + BayOut);
+			}
+			AddStretch(A + BayOut, B + BayOut);
+			AddStretch(B + BayOut, B);
+			AddStretch(B, BackMiddle - BackAlong * StepsHalf);
+		}
+		else
+		{
+			AddStretch(Shape.BackEnd, BackMiddle - BackAlong * StepsHalf);
+		}
 		AddStretch(BackMiddle + BackAlong * StepsHalf, Shape.BackStart);
 		if (HallMesh)
 		{
@@ -1285,14 +2256,14 @@ void AHexBattleArena::BuildSiege()
 		{
 			AddInstance(Towers, BackMiddle + Shape.In * (HallWidth + TowerRadius * Config->KeepScale), -90.0, Config->KeepScale, Config->TowerWidthScale);
 		}
-		// the dwellings behind the wall, outwards from the hall by turns on either side
-		const double BackLength = FVector::Dist2D(Shape.BackStart, Shape.BackEnd);
+		// the dwellings behind the wall, outwards from the hall by turns on either side, none over the bay of the catapult
 		double Taken[2] = {HallWidth * 0.5 + Config->HexRadius * 0.4, HallWidth * 0.5 + Config->HexRadius * 0.4};
+		const double BayNear = bBay ? BackLength * 0.5 - BayTo - Config->HexRadius * 0.3 : BackLength * 0.5;
 		for (int32 Index = 0; Index < Dwellings.Num(); ++Index)
 		{
 			const int32 Side = Index % 2;
 			const double DwellingWidth = Width(Dwellings[Index]);
-			if (Taken[Side] + DwellingWidth > BackLength * 0.5)
+			if (Taken[Side] + DwellingWidth > (Side == 1 ? BayNear : BackLength * 0.5))
 			{
 				continue;
 			}
@@ -1343,17 +2314,19 @@ void AHexBattleArena::BuildSiege()
 		if (Battle->GetBridge(BridgeHex))
 		{
 			// a deck of planks from the face of the wall out over the far shore, rising a little in its middle, with posts and rails along its sides
-			const FVector Out = -Shape.In;
-			const FVector Across = FVector::CrossProduct(FVector::UpVector, Out).GetSafeNormal();
-			const FVector Gate = GetWallLinePoint(FHexCoord::FromOffset(BridgeHex.GetColumn() + 1, BridgeHex.GetRow()));
-			const double Far = FMath::Min(Shape.MoatRows.Z, Shape.MoatRows.W);
-			const double HalfThick = FVector::DotProduct(Shape.FrontStart, Shape.In) - Shape.WallFace;
-			const double Span = FVector::DotProduct(Gate, Shape.In) - HalfThick - Far + Config->HexRadius * 0.35;
-			const double Wide = Shape.GateHalf * 2.0 * Config->BridgeWidth;
-			const FVector Start = Gate - GetActorLocation() + Out * HalfThick + FVector(0.0, 0.0, Config->MoatLift + Config->MoatWaveHeight + 2.0);
+			const FBridgeDeck Frame = GetBridgeDeck();
+			const FVector Out = Frame.Out;
+			const FVector Across = Frame.Across;
+			const double Span = Frame.Span;
+			const double Wide = Frame.Wide;
+			const FVector Start = Frame.Start;
 			const double Deck = 5.0;
 			const auto Height = [&](double S) { return Config->BridgeRise * FMath::Sin(UE_PI * FMath::Clamp(S / Span, 0.0, 1.0)); };
 			const auto At = [&](double S, double T, double Z) { return Start + Out * S + Across * T + FVector(0.0, 0.0, Height(S) + Z); };
+			// its underside never under the waves, whose crests cut its sides in teeth where it was Deck thick all along, as the developer saw
+			// on 2026-11-14: thinner towards its ends, which lie low over the water
+			const double WaterTop = Config->MoatLift + Config->MoatWaveHeight + 1.3;
+			const auto Bottom = [&](double S) { return FMath::Min(FMath::Max(-Deck, WaterTop - (Start.Z + Height(S))), -0.8); };
 			FPropMesh Planks;
 			const int32 Steps = 10;
 			for (int32 Step = 0; Step < Steps; ++Step)
@@ -1362,15 +2335,20 @@ void AHexBattleArena::BuildSiege()
 				const double S1 = Span * (Step + 1) / Steps;
 				const FVector Slope = (At(S1, 0.0, 0.0) - At(S0, 0.0, 0.0)).GetSafeNormal();
 				const FVector Up = FVector::CrossProduct(Slope, Across).GetSafeNormal() * (FVector::CrossProduct(Slope, Across).Z >= 0.0 ? 1.0 : -1.0);
-				for (const double Z : {0.0, -Deck})
+				for (const bool bTop : {true, false})
 				{
-					Planks.Quad(At(S0, -Wide * 0.5, Z), At(S0, Wide * 0.5, Z), At(S1, Wide * 0.5, Z), At(S1, -Wide * 0.5, Z), Z == 0.0 ? Up : -Up,
+					const double Z0 = bTop ? 0.0 : Bottom(S0);
+					const double Z1 = bTop ? 0.0 : Bottom(S1);
+					Planks.Quad(At(S0, -Wide * 0.5, Z0), At(S0, Wide * 0.5, Z0), At(S1, Wide * 0.5, Z1), At(S1, -Wide * 0.5, Z1), bTop ? Up : -Up,
 						FVector2D(-Wide * 0.5, S0), FVector2D(Wide * 0.5, S0), FVector2D(Wide * 0.5, S1), FVector2D(-Wide * 0.5, S1));
 				}
 				for (const double T : {-Wide * 0.5, Wide * 0.5})
 				{
-					Planks.Quad(At(S0, T, -Deck), At(S1, T, -Deck), At(S1, T, 0.0), At(S0, T, 0.0), Across * (T > 0.0 ? 1.0 : -1.0),
-						FVector2D(S0, 0.0), FVector2D(S1, 0.0), FVector2D(S1, Deck), FVector2D(S0, Deck));
+					// its texture away from the edge of a tile, where the ragged ends of the boards of the scan drew teeth along the side, as the
+					// developer saw on 2026-11-14
+					const double Shift = Config->WoodTileSize * 0.43;
+					Planks.Quad(At(S0, T, Bottom(S0)), At(S1, T, Bottom(S1)), At(S1, T, 0.0), At(S0, T, 0.0), Across * (T > 0.0 ? 1.0 : -1.0),
+						FVector2D(S0, Shift + Bottom(S0)), FVector2D(S1, Shift + Bottom(S1)), FVector2D(S1, Shift), FVector2D(S0, Shift));
 				}
 			}
 			Planks.Make(this, Root, MakeProp(this, Config, Config->BridgeWoodTexture, Config->BridgeWoodNormal, Config->BridgeWoodColor, Config->WoodTileSize, true, Config->bBridgePlanksTurned), SiegeProps);
@@ -1407,28 +2385,58 @@ void AHexBattleArena::BuildSiege()
 	}
 	GateParts.Reset();
 	GateHinges[0] = GateHinges[1] = nullptr;
-	FRandomStream Random(int32(Battle->GetRound() * 31 + 7));
 	WallPicks.Reset();
 	for (int32 Index = 0; Index < Parts.Num(); ++Index)
 	{
 		const FHexBattleWall& Part = Parts[Index];
 		const FVector At = GetWallPartPoint(Index);
-		if (!Part.IsStanding())
+		const int32 Stage = GetStage(Index);
+		if (Stage == 3)
 		{
-			// rubble where it fell
-			const FHexBattleGround* Each = GetGround();
-			UStaticMesh* Rubble = Each && !Each->Obstacles.IsEmpty() ? Each->Obstacles[0].LoadSynchronous() : Config->FallbackMesh.LoadSynchronous();
-			if (Rubble)
+			// a tower broken off low; of the gate its towers broken off higher, the arch gone, and the planks of its leaves lying in the way,
+			// which stays open; a section is its two halves of ruin
+			if (Part.Part == EHexWallPart::Tower)
 			{
-				const double Extent = FMath::Max(Rubble->GetBounds().BoxExtent.GetMax(), 1.0);
-				AddBox(this, Root, Rubble, nullptr, FTransform(FRotator(0.0, Random.FRandRange(0.0, 360.0), 0.0), At,
-					FVector(Config->HexRadius * 0.45 / Extent, Config->HexRadius * 0.45 / Extent, Config->HexRadius * 0.2 / Extent)), SiegeProps);
+				AddStump(At, TowerRadius, TowerTall, Config->RuinTowerMinShare, Config->RuinTowerMaxShare, int32(Mix(Index, 5, 7)));
+			}
+			else if (Part.Part == EHexWallPart::Gate)
+			{
+				const FVector Along = (Shape.FrontEnd - Shape.FrontStart).GetSafeNormal2D();
+				for (const double Side : {-1.0, 1.0})
+				{
+					AddStump(At + Along * (Side * GateFlank), TowerRadius * Config->GateTowerScale, TowerTall * Config->GateTowerScale,
+						Config->RuinGateMinShare, Config->RuinGateMaxShare, int32(Mix(Index, Side > 0.0 ? 6 : 8, 7)));
+				}
+				FRandomStream Splinters(int32(Mix(Index, 9, 7)));
+				AddHeap(Splinters, ToMesh(At - Along * Shape.GateHalf), ToMesh(At + Along * Shape.GateHalf), Config->RubbleBlocks / 2, RuinTop * Config->RubbleHeapShare * 0.5);
+				UMaterialInstanceDynamic* Wood = MakeProp(this, Config, Config->GateWoodTexture, Config->GateWoodNormal, Config->GateWoodColor, Config->WoodTileSize, true, Config->bGatePlanksTurned);
+				FPropMesh Planks;
+				for (int32 Plank = 0; Plank < Config->RuinGatePlanks; ++Plank)
+				{
+					const FVector Half(Shape.GateHalf * Splinters.FRandRange(0.25, 0.5), Splinters.FRandRange(3.0, 5.0), Config->GateLeafThickness * 0.4);
+					const FQuat Turn = FRotator(Splinters.FRandRange(-14.0, 14.0), Splinters.FRandRange(0.0, 360.0), Splinters.FRandRange(-10.0, 10.0)).Quaternion();
+					const FVector Place = At - Origin + Along * Splinters.FRandRange(-Shape.GateHalf, Shape.GateHalf) + Shape.In * Splinters.FRandRange(-Config->HexRadius * 0.5, Config->HexRadius * 0.4);
+					Planks.Block(Place + FVector(0.0, 0.0, Half.Z + Splinters.FRandRange(0.0, 4.0)), Turn, Half, 1.0, FVector2D(Splinters.FRandRange(0.0, 200.0), 0.0));
+				}
+				Planks.Make(this, Root, Wood, SiegeProps);
 			}
 			continue;
 		}
 		if (Part.Part == EHexWallPart::Tower)
 		{
-			AddInstance(Towers, At, -90.0, 1.0, Config->TowerWidthScale);
+			// damaged: rubble at its foot, and heavily its top broken off
+			if (Stage == 2)
+			{
+				AddStump(At, TowerRadius, TowerTall, Config->DamageTowerMinShare, Config->DamageTowerMaxShare, int32(Mix(Index, 10, 7)), Config->DamageHeavyBlocks, 0.08);
+			}
+			else
+			{
+				AddInstance(Towers, At, -90.0, 1.0, Config->TowerWidthScale);
+			}
+			if (Stage == 1)
+			{
+				AddFallen(At, TowerRadius, Config->DamageLightBlocks, int32(Mix(Index, 11, 7)));
+			}
 			WallPicks.Add({At, TowerRadius, TowerTop / FMath::Max(double(Config->TowerStandShare), 0.1), Part.Hex});
 		}
 		else if (Part.Part == EHexWallPart::Wall)
@@ -1443,9 +2451,27 @@ void AHexBattleArena::BuildSiege()
 			const double Flank = GateFlank;
 			for (const double Side : {-1.0, 1.0})
 			{
-				AddInstance(Towers, At + Along * (Side * Flank), -90.0, Config->GateTowerScale, Config->TowerWidthScale);
+				// damaged: rubble at the foot of its towers, and heavily their tops broken off
+				if (Stage == 2)
+				{
+					AddStump(At + Along * (Side * Flank), TowerRadius * Config->GateTowerScale, TowerTall * Config->GateTowerScale, Config->DamageTowerMinShare,
+						Config->DamageTowerMaxShare, int32(Mix(Index, Side > 0.0 ? 12 : 13, 7)), Config->DamageHeavyBlocks / 2, 0.08);
+				}
+				else
+				{
+					// without the flags of its mesh, which crossed the way in under the arch (an EventTime below -1500 hides the cloth)
+					const int32 Flankless = AddInstance(Towers, At + Along * (Side * Flank), -90.0, Config->GateTowerScale, Config->TowerWidthScale);
+					if (Towers && Flankless != INDEX_NONE)
+					{
+						Towers->SetCustomDataValue(Flankless, 6, -2000.0f, true);
+					}
+				}
+				if (Stage == 1)
+				{
+					AddFallen(At + Along * (Side * Flank), TowerRadius * Config->GateTowerScale, Config->DamageLightBlocks / 2, int32(Mix(Index, Side > 0.0 ? 14 : 15, 7)));
+				}
 				const int32 Beside = Index + (Side > 0.0 ? 1 : -1);
-				if (Parts.IsValidIndex(Beside) && Parts[Beside].IsStanding())
+				if (Parts.IsValidIndex(Beside) && GetStage(Beside) < 3)
 				{
 					WallPicks.Add({At + Along * (Side * Flank), TowerRadius * Config->GateTowerScale, TowerTop / FMath::Max(double(Config->TowerStandShare), 0.1) * Config->GateTowerScale, Parts[Beside].Hex});
 				}
@@ -1465,8 +2491,6 @@ void AHexBattleArena::BuildSiege()
 				// meshes of the castle mark it (the alpha of a vertex 0.1, its tone as its color), its UV in tiles of CastleTile units of a mesh, as
 				// thick as the wall itself (ArchThickShare of the bounds of the mesh of the wall, which hold its buttress and plinth) and as high
 				// (ArchTopShare of them, which hold its merlons), from the middle of one tower to that of the other, with merlons on top
-				const double Unit = 1.0 / FMath::Max(Scale, 0.0001);
-				const FBoxSphereBounds WallBounds = WallMesh ? WallMesh->GetBounds() : FBoxSphereBounds(FVector::ZeroVector, FVector(6.0, 10.0, 40.0), 40.0);
 				const double Body = WallBounds.BoxExtent.X * Config->ArchThickShare;
 				// as high as the wall, or above the point of the arch where that rises higher, as a gatehouse does
 				const double WallTopZ = (WallBounds.Origin.Z + WallBounds.BoxExtent.Z) * Config->ArchTopShare;
@@ -1476,7 +2500,6 @@ void AHexBattleArena::BuildSiege()
 				const double Sm = Spring * Unit;
 				const auto ArchTopM = [&](double X) { return Sm + FMath::Sqrt(FMath::Max(Rm * Rm - FMath::Square(X - Rm), 0.0)); };
 				const double TopZ = FMath::Max(WallTopZ, ArchTopM(Wm) + Config->GateArchCrown);
-				const double Tile = FMath::Max(double(Config->CastleTile), 1.0);
 				FPropMesh Arch;
 				// the stone of the meshes of the castle (STONE of generate_planet_castles.py), which was twice as light here until 2026-11-13
 				Arch.Color = FLinearColor(Config->CastleStoneTone, Config->CastleStoneTone, Config->CastleStoneTone, 0.1f);
@@ -1589,6 +2612,104 @@ void AHexBattleArena::BuildSiege()
 						}
 						Strap->RegisterComponent();
 						GateParts.Add(Strap);
+					}
+				}
+			}
+		}
+	}
+	if (!Ruins.Vertices.IsEmpty())
+	{
+		if (UStaticMesh* RuinMesh = Ruins.Build(this, CastleMaterial))
+		{
+			ArchMeshes.Add(RuinMesh);
+			AddInstance(MakeInstances(RuinMesh), Origin, 0.0);
+		}
+	}
+
+	// the parts that show a worse stage than before play it: blocks fall from their top, and one that fell sinks into its rubble
+	if (!DebrisMesh && CastleMaterial)
+	{
+		FPropMesh Block;
+		Block.Color = FLinearColor(Config->CastleStoneTone, Config->CastleStoneTone, Config->CastleStoneTone, 0.1f);
+		Block.Block(FVector::ZeroVector, FQuat::Identity, FVector(1.0), Tile, FVector2D::ZeroVector);
+		DebrisMesh = Block.Build(this, CastleMaterial);
+	}
+	for (int32 Index = 0; Index < Parts.Num() && OldKey.Len() == Parts.Num(); ++Index)
+	{
+		const int32 Was = OldKey[Index] - TEXT('0');
+		const int32 Now = GetStage(Index);
+		if (Now <= Was || !DebrisMesh)
+		{
+			continue;
+		}
+		const FHexBattleWall& Part = Parts[Index];
+		const FVector At = GetWallPartPoint(Index);
+		const bool bTower = Part.Part == EHexWallPart::Tower;
+		const double Tall = bTower ? TowerTall * Scale : Config->SiegeWallHeight;
+		FRandomStream Random(int32(Mix(Index, Now, 17)));
+		const FVector Along = (Shape.FrontEnd - Shape.FrontStart).GetSafeNormal2D();
+		// the blocks, from about its top, thrown a little out and falling
+		{
+			UInstancedStaticMeshComponent* Debris = MakeInstances(DebrisMesh);
+			SiegeProps.Remove(Debris);
+			CrumbleComponents.Add(Debris);
+			FCrumble& Crumble = Crumbles.AddDefaulted_GetRef();
+			Crumble.Component = Debris;
+			Crumble.Ground = At.Z;
+			const int32 Count = Config->CrumbleBlocks * (Now - Was);
+			for (int32 Block = 0; Block < Count; ++Block)
+			{
+				const double Width = bTower ? TowerRadius : Config->HexRadius * 0.6;
+				const FVector From = At + Along * Random.FRandRange(-Width, Width) + Shape.In * Random.FRandRange(-Width * 0.4, Width * 0.4)
+					+ FVector(0.0, 0.0, Tall * Random.FRandRange(0.6, 1.0));
+				const double Size = Random.FRandRange(Config->RubbleSizeMin, Config->RubbleSizeMax) * Scale;
+				Crumble.Start.Add(From);
+				Crumble.Velocity.Add(FVector(-Shape.In * Random.FRandRange(40.0, 160.0) + Along * Random.FRandRange(-60.0, 60.0) + FVector(0.0, 0.0, Random.FRandRange(0.0, 180.0))));
+				Crumble.Turn.Add(FRotator(Random.FRandRange(0.0, 360.0), Random.FRandRange(0.0, 360.0), 0.0).Quaternion());
+				Crumble.Spin.Add(FVector(Random.FRandRange(-400.0, 400.0), Random.FRandRange(-400.0, 400.0), Random.FRandRange(-200.0, 200.0)));
+				Crumble.Scale.Add(FVector(Size * Random.FRandRange(0.8, 1.3), Size * Random.FRandRange(0.6, 0.9), Size * Random.FRandRange(0.45, 0.7)));
+				AddInstance(Debris, From, 0.0);
+			}
+		}
+		// a part that fell sinks into its rubble, its tower or its stretch of wall, leaning as it goes
+		if (Now == 3)
+		{
+			UInstancedStaticMeshComponent* Falling = MakeInstances(bTower || Part.Part == EHexWallPart::Gate ? TowerMesh : WallMesh);
+			if (Falling)
+			{
+				SiegeProps.Remove(Falling);
+				CrumbleComponents.Add(Falling);
+				FCrumble& Crumble = Crumbles.AddDefaulted_GetRef();
+				Crumble.Component = Falling;
+				Crumble.bSinks = true;
+				Crumble.Ground = At.Z;
+				Crumble.Sink = Tall * Config->CrumbleSink;
+				const auto AddSinking = [&](const FVector& Where, double Yaw, double Size, double Wide)
+				{
+					Crumble.Start.Add(Where);
+					Crumble.Velocity.Add(FVector::ZeroVector);
+					Crumble.Turn.Add(FRotator(0.0, Yaw, 0.0).Quaternion());
+					Crumble.Spin.Add(FVector(Random.FRandRange(-10.0, 10.0), 0.0, Random.FRandRange(-10.0, 10.0)));
+					Crumble.Scale.Add(FVector(Scale * Size * Wide, Scale * Size * Wide, Scale * Size));
+					AddInstance(Falling, Where, Yaw, Size, Wide);
+				};
+				if (bTower)
+				{
+					AddSinking(At, -90.0, 1.0, Config->TowerWidthScale);
+				}
+				else if (Part.Part == EHexWallPart::Gate)
+				{
+					for (const double Side : {-1.0, 1.0})
+					{
+						AddSinking(At + Along * (Side * GateFlank), -90.0, Config->GateTowerScale, Config->TowerWidthScale);
+					}
+				}
+				else
+				{
+					const double Turn = FMath::RadiansToDegrees(FMath::Atan2(Along.Y, Along.X)) - 90.0;
+					for (const double Offset : {-0.5, 0.5})
+					{
+						AddSinking(At + Along * (Offset * StretchLength), Turn, 1.0, 1.0);
 					}
 				}
 			}
@@ -1839,6 +2960,12 @@ bool AHexBattleArena::GetUnitPoint(int32 Unit, FVector& OutWorld) const
 		return false;
 	}
 	OutWorld = Figures[Unit].Position;
+	// the shooters of a tower stand on top of it, where their count is, as the developer found it at the foot of the tower on 2026-11-14
+	const FHexBattle* Battle = GetBattle();
+	if (Battle && Battle->GetUnits().IsValidIndex(Unit) && Battle->GetUnits()[Unit].bTower)
+	{
+		OutWorld.Z += Figures[Unit].Hover;
+	}
 	return true;
 }
 
@@ -1849,15 +2976,21 @@ void AHexBattleArena::SetHover(const FVector& Origin, const FVector& Direction)
 	{
 		return;
 	}
-	const double Along = (GetActorLocation().Z - Origin.Z) / Direction.Z;
+	// where the ray meets the ground of the field, over its hills
+	FVector OnGround;
+	if (!TraceGround(Origin, Direction, OnGround))
+	{
+		return;
+	}
+	const double Along = FVector::DotProduct(OnGround - Origin, Direction);
 	if (Along <= 0.0)
 	{
 		return;
 	}
-	HoverPoint = Origin + Direction * Along;
+	HoverPoint = OnGround;
 	const FVector Local = HoverPoint - GetActorLocation();
 	const FHexCoord Hex = FHexLayout(Config->HexRadius).WorldToHex(FVector2D(Local.X, Local.Y) + FieldCenter);
-	if (GetBattle() && GetBattle()->IsOnField(Hex))
+	if (GetBattle() && (GetBattle()->IsOnField(Hex) || GetBattle()->IsMachineHex(Hex)))
 	{
 		bHover = true;
 		HoverHex = Hex;
@@ -2215,14 +3348,17 @@ FString AHexBattleArena::GetActionText() const
 		FHexCoord From;
 		if (Battle->CanFireCatapult(HoverHex))
 		{
-			return FString::Printf(TEXT("Catapult: fire at the %s (%d of %d), %d-%d damage, %.0f%% to hit"), *Part, Wall->Health, Wall->MaxHealth, Config->CatapultDamageMin, Config->CatapultDamageMax,
-				Config->CatapultHitChance * 100.0f);
+			int32 Min = 0;
+			int32 Max = 0;
+			Battle->GetWallStrikeRange(ActiveIndex, Wall->MaxHealth, Min, Max);
+			return FString::Printf(TEXT("Catapult: fire at the %s (%d of %d), %s damage%s%s"), *Part, Wall->Health, Wall->MaxHealth, *Range(Min, Max),
+				Min >= Wall->Health ? TEXT(". It falls") : TEXT(""), Config->CatapultHitChance < 1.0f ? *FString::Printf(TEXT(", %.0f%% to hit"), Config->CatapultHitChance * 100.0f) : TEXT(""));
 		}
 		if (FindWallStrikeFrom(HoverHex, From))
 		{
 			int32 Min = 0;
 			int32 Max = 0;
-			Battle->PreviewWallStrike(ActiveIndex, Min, Max);
+			Battle->PreviewWallStrike(ActiveIndex, Min, Max, HoverHex);
 			return FString::Printf(TEXT("Strike the %s (%d of %d): %s damage%s"), *Part, Wall->Health, Wall->MaxHealth, *Range(Min, Max), Min >= Wall->Health ? TEXT(". It falls") : TEXT(""));
 		}
 		if (Wall->Part == EHexWallPart::Gate && Reach.Contains(HoverHex))
@@ -2413,9 +3549,19 @@ void AHexBattleArena::BeginEvent(const FHexBattleEvent& Event)
 	case FHexBattleEvent::EType::Move:
 		if (Figures.IsValidIndex(Event.Unit) && Event.Path.Num() >= 2)
 		{
-			const bool bFlies = Battle->GetUnits()[Event.Unit].bFlies;
+			const bool bFlies = IsFlight(Event);
+			bWaitingAtGate = false;
 			CurrentLength = bFlies ? Event.Path[0].DistanceTo(Event.Path.Last()) / Config->FlySpeed : (Event.Path.Num() - 1) / Config->WalkSpeed;
-			HexUnitFigure::Play(Figure(Event.Unit), Config, Figures[Event.Unit].Creature, EHexFigureAction::Move);
+			// it first turns in place to where it goes, as the developer asked on 2026-11-14, until it faces within TurnLeadAngle of it
+			const FVector First = (bFlies ? GetHexPoint(Event.Path.Last()) : GetHexPoint(Event.Path[1])) - GetHexPoint(Event.Path[0]);
+			const FVector Now = Figures[Event.Unit].Shown.GetSafeNormal2D();
+			const double Angle = First.IsNearlyZero() || Now.IsNearlyZero() ? 0.0
+				: FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct(Now, First.GetSafeNormal2D()), -1.0, 1.0)));
+			TurnLead = float(FMath::Max(Angle - Config->TurnLeadAngle, 0.0)) / FMath::Max(Config->FigureTurnSpeed, 30.0f);
+			CurrentLength += TurnLead;
+			Figures[Event.Unit].Facing = First;
+			HexUnitFigure::Play(Figure(Event.Unit), Config, Figures[Event.Unit].Creature, bFlies ? EHexFigureAction::Fly
+				: Battle->GetUnits()[Event.Unit].bFlies ? EHexFigureAction::Walk : EHexFigureAction::Move);
 		}
 		break;
 	case FHexBattleEvent::EType::Strike:
@@ -2425,14 +3571,16 @@ void AHexBattleArena::BeginEvent(const FHexBattleEvent& Event)
 			// at the wall
 			Face(Event.Unit, GetHexPoint(Event.Hex));
 			HexUnitFigure::Play(Figure(Event.Unit), Config, Figures[Event.Unit].Creature, EHexFigureAction::Attack);
-			CurrentLength = Config->StrikeTime;
+			// the hit on the wall follows when the blow lands, while the swing plays on
+			CurrentLength = Config->StrikeTime * Config->StrikeHitShare;
 			AddLog(FString::Printf(TEXT("%s strikes the %s"), *Who, Battle->FindWall(Event.Hex)->Part == EHexWallPart::Gate ? TEXT("gate") : TEXT("wall")));
 		}
 		else if (Figures.IsValidIndex(Event.Target))
 		{
 			Face(Event.Unit, Figures[Event.Target].Position);
 			HexUnitFigure::Play(Figure(Event.Unit), Config, Figures[Event.Unit].Creature, EHexFigureAction::Attack);
-			CurrentLength = Config->StrikeTime;
+			// the damage follows when the blow lands, while the swing plays on
+			CurrentLength = Config->StrikeTime * Config->StrikeHitShare;
 			AddLog(FString::Printf(TEXT("%s %s %s"), *Who, Event.Type == FHexBattleEvent::EType::Retaliate ? TEXT("strikes back at") : TEXT("strikes"), *GetUnitName(Event.Target)));
 		}
 		break;
@@ -2459,6 +3607,11 @@ void AHexBattleArena::BeginEvent(const FHexBattleEvent& Event)
 			if (ShownCounts[Event.Target] > 0)
 			{
 				HexUnitFigure::Play(Figure(Event.Target), Config, Figures[Event.Target].Creature, EHexFigureAction::Hit);
+				// it reels away from the one that struck, or back from where it faces for a spell
+				FFigure& Struck = Figures[Event.Target];
+				const FVector Away = Figures.IsValidIndex(Event.Unit) && Event.Unit != Event.Target ? Struck.Position - Figures[Event.Unit].Position : -Struck.Facing;
+				Struck.HitFrom = Away.GetSafeNormal2D();
+				Struck.HitTime = 0.0f;
 			}
 			CurrentLength = 0.25f;
 		}
@@ -2469,6 +3622,12 @@ void AHexBattleArena::BeginEvent(const FHexBattleEvent& Event)
 			HexUnitFigure::Play(Figure(Event.Unit), Config, Figures[Event.Unit].Creature, EHexFigureAction::Death);
 			CurrentLength = FMath::Max(Config->DeathTime, HexUnitFigure::GetLength(Config, Figures[Event.Unit].Creature, EHexFigureAction::Death) * 0.9f);
 			AddLog(FString::Printf(TEXT("%s are all dead"), *Battle->GetUnits()[Event.Unit].Stats.DisplayName));
+			// the shooters of a tower that falls fall with it onto its rubble, as the developer found them hanging in the air on 2026-11-13
+			if (Battle->GetUnits()[Event.Unit].bTower && Figures[Event.Unit].Hover > 1.0f)
+			{
+				Figures[Event.Unit].FallFrom = Figures[Event.Unit].Hover;
+				Figures[Event.Unit].FallTime = 0.0f;
+			}
 		}
 		break;
 	case FHexBattleEvent::EType::Wait:
@@ -2544,11 +3703,15 @@ void AHexBattleArena::BeginEvent(const FHexBattleEvent& Event)
 		{
 			const TCHAR* Part = Wall->Part == EHexWallPart::Gate ? TEXT("gate") : Wall->Part == EHexWallPart::Tower ? TEXT("tower") : TEXT("wall");
 			AddPopup(GetHexPoint(Event.Hex) + FVector(0.0, 0.0, Config->SiegeWallHeight * 0.6), FString::Printf(TEXT("-%d"), Event.Amount), FLinearColor(1.0f, 0.75f, 0.3f, 1.0f));
+			// the part shows the hit now: more damaged, or fallen
+			const int32 WallIndex = Battle->GetWalls().IndexOfByPredicate([&Event](const FHexBattleWall& Each) { return Each.Hex == Event.Hex; });
+			if (ShownWallHealth.IsValidIndex(WallIndex))
+			{
+				ShownWallHealth[WallIndex] = Event.Killed > 0 ? 0 : FMath::Max(ShownWallHealth[WallIndex] - Event.Amount, 1);
+			}
 			if (Event.Killed > 0)
 			{
 				AddLog(FString::Printf(TEXT("The %s falls"), Part));
-				// what fell shows as rubble now, while the rules have it fallen already
-				SiegeKey.Empty();
 			}
 			CurrentLength = Event.Killed > 0 ? 0.6f : 0.25f;
 		}
@@ -2562,6 +3725,45 @@ void AHexBattleArena::BeginEvent(const FHexBattleEvent& Event)
 	}
 }
 
+void AHexBattleArena::AddWreck(int32 Unit)
+{
+	if (!Config || !Figures.IsValidIndex(Unit))
+	{
+		return;
+	}
+	// beams and boards thrown over each other where it stood, each its own way, by a seed of the unit and its hex
+	FRandomStream Random(int32(Mix(Unit, FMath::RoundToInt32(Figures[Unit].Position.X), FMath::RoundToInt32(Figures[Unit].Position.Y)) & 0x7fffffff));
+	const double Size = Config->CatapultSize * Config->WreckSize;
+	const FVector Middle = Figures[Unit].Position - GetActorLocation();
+	FPropMesh Pile;
+	for (int32 Beam = 0; Beam < Config->WreckBeams; ++Beam)
+	{
+		const bool bBoard = Beam % 3 == 2;
+		const double Length = Size * Random.FRandRange(0.35, 0.75);
+		const FVector Half(Length * 0.5, bBoard ? Size * 0.07 : Size * 0.035, bBoard ? Size * 0.012 : Size * 0.03);
+		const FVector2D Spot = FVector2D(Random.FRandRange(-1.0, 1.0), Random.FRandRange(-1.0, 1.0)) * Size * 0.32;
+		// the lower ones flat on the ground, the later ones leaning on them
+		const double Layer = double(Beam) / FMath::Max(Config->WreckBeams, 1);
+		const FQuat Turn = FRotator(Random.FRandRange(-6.0, 6.0) + Layer * Random.FRandRange(-22.0, 22.0), Random.FRandRange(0.0, 360.0), Random.FRandRange(-8.0, 8.0)).Quaternion();
+		Pile.Block(Middle + FVector(Spot.X, Spot.Y, Half.Z + Layer * Size * 0.12), Turn, Half, 1.0, FVector2D(Random.FRandRange(0.0, 200.0), 0.0));
+	}
+	UMaterialInstanceDynamic* Wood = MakeProp(this, Config, Config->BridgeWoodTexture, Config->BridgeWoodNormal, Config->CatapultWoodColor * Config->WreckTone,
+		Config->WoodTileSize, true, false);
+	Pile.Make(this, Root, Wood, SiegeProps);
+}
+
+bool AHexBattleArena::IsFlight(const FHexBattleEvent& Event) const
+{
+	// a flyer flies over what is in the way, and where its way runs over the ground walks when it has legs to, else flies along it all the same
+	const FHexBattle* Battle = GetBattle();
+	if (!Battle || !Battle->GetUnits().IsValidIndex(Event.Unit) || !Battle->GetUnits()[Event.Unit].bFlies || Event.Path.Num() < 2)
+	{
+		return false;
+	}
+	const bool bOverGround = Event.Path.Num() > 2 || Event.Path[0].DistanceTo(Event.Path[1]) <= 1;
+	return !(bOverGround && HexUnitFigure::CanWalk(Config, Battle->GetUnits()[Event.Unit].CreatureId));
+}
+
 void AHexBattleArena::PlayEvent(float DeltaSeconds)
 {
 	if (!Current.IsSet())
@@ -2570,11 +3772,37 @@ void AHexBattleArena::PlayEvent(float DeltaSeconds)
 	}
 	const FHexBattleEvent& Event = Current.GetValue();
 	CurrentTime += DeltaSeconds;
-	const float Alpha = CurrentLength > 0.0f ? FMath::Clamp(CurrentTime / CurrentLength, 0.0f, 1.0f) : 1.0f;
+	// a stack that walks through the gate waits on the hex before it until its leaves are open, as the developer asked on 2026-11-14
+	if (Event.Type == FHexBattleEvent::EType::Move && Figures.IsValidIndex(Event.Unit) && Event.Path.Num() >= 2 && !IsFlight(Event) && CurrentLength > 0.0f)
+	{
+		const FHexBattleWall* Gate = GetBattle()->GetWalls().FindByPredicate([](const FHexBattleWall& Each) { return Each.Part == EHexWallPart::Gate; });
+		const int32 Into = Gate && Gate->IsStanding() && !GetBattle()->IsGateJammed() ? Event.Path.IndexOfByKey(Gate->Hex) : INDEX_NONE;
+		if (Into > 0)
+		{
+			const float Before = TurnLead + (CurrentLength - TurnLead) * float(Into - 1) / float(Event.Path.Num() - 1);
+			const bool bWait = GateOpenShown < Config->GateWaitOpen && CurrentTime > Before;
+			if (bWait)
+			{
+				CurrentTime = Before;
+			}
+			if (bWait != bWaitingAtGate)
+			{
+				bWaitingAtGate = bWait;
+				HexUnitFigure::Play(Figures[Event.Unit].Component.Get(), Config, Figures[Event.Unit].Creature, bWait ? EHexFigureAction::Idle
+					: GetBattle()->GetUnits()[Event.Unit].bFlies ? EHexFigureAction::Walk : EHexFigureAction::Move);
+			}
+		}
+	}
+	float Alpha = CurrentLength > 0.0f ? FMath::Clamp(CurrentTime / CurrentLength, 0.0f, 1.0f) : 1.0f;
+	if (Event.Type == FHexBattleEvent::EType::Move)
+	{
+		// the turn in place before the walk
+		Alpha = CurrentLength - TurnLead > 0.0f ? FMath::Clamp((CurrentTime - TurnLead) / (CurrentLength - TurnLead), 0.0f, 1.0f) : 1.0f;
+	}
 	if (Event.Type == FHexBattleEvent::EType::Move && Figures.IsValidIndex(Event.Unit) && Event.Path.Num() >= 2)
 	{
 		FFigure& Figure = Figures[Event.Unit];
-		const bool bFlies = GetBattle()->GetUnits()[Event.Unit].bFlies;
+		const bool bFlies = IsFlight(Event);
 		if (bFlies)
 		{
 			const FVector From = GetHexPoint(Event.Path[0]);
@@ -2589,7 +3817,11 @@ void AHexBattleArena::PlayEvent(float DeltaSeconds)
 			const int32 Segment = FMath::Min(FMath::FloorToInt32(Along), Event.Path.Num() - 2);
 			const FVector From = GetHexPoint(Event.Path[Segment]);
 			const FVector To = GetHexPoint(Event.Path[Segment + 1]);
-			Figure.Position = FMath::Lerp(From, To, double(Along - Segment));
+			const double Share = double(Along - Segment);
+			Figure.Position = FMath::Lerp(From, To, Share);
+			// over the hills of the field between the middles of the hexes, the deck of the bridge kept
+			const auto GroundAt = [this](const FVector& At) { return GetShownGroundHeight(FVector2D(At.X, At.Y)); };
+			Figure.Position.Z += GroundAt(Figure.Position) - FMath::Lerp(GroundAt(From), GroundAt(To), Share);
 			Figure.Facing = To - From;
 		}
 		PlaceFigure(Event.Unit);
@@ -2599,7 +3831,17 @@ void AHexBattleArena::PlayEvent(float DeltaSeconds)
 		const float Flight = FMath::Clamp((CurrentTime - 0.3f) / FMath::Max(CurrentLength - 0.3f, 0.01f), 0.0f, 1.0f);
 		Shot->SetVisibility(CurrentTime >= 0.3f && Flight < 1.0f);
 		const FVector Lift(0.0, 0.0, Config->HexRadius * 0.9);
-		Shot->SetWorldLocation(FMath::Lerp(Figures[Event.Unit].Position, Figures[Event.Target].Position, double(Flight)) + Lift + FVector(0.0, 0.0, FMath::Sin(Flight * PI) * Config->HexRadius));
+		// a catapult of a castle throws its stone high and swings its arm
+		const bool bStone = Figures[Event.Unit].Arm.IsValid();
+		Shot->SetWorldLocation(FMath::Lerp(Figures[Event.Unit].Position, Figures[Event.Target].Position, double(Flight)) + Lift
+			+ FVector(0.0, 0.0, FMath::Sin(Flight * PI) * Config->HexRadius * (bStone ? 4.0 : 1.0)));
+		if (USceneComponent* Arm = Figures[Event.Unit].Arm.Get())
+		{
+			const float Fire = Config->CatapultArmFireTime;
+			const float Share = CurrentTime < Fire ? FMath::InterpEaseIn(0.0f, 1.0f, CurrentTime / Fire, 2.0f)
+				: 1.0f - FMath::InterpEaseInOut(0.0f, 1.0f, FMath::Clamp((CurrentTime - Fire) / FMath::Max(CurrentLength - Fire, 0.01f), 0.0f, 1.0f), 2.0f);
+			Arm->SetRelativeRotation(FRotator(Config->CatapultArmSwing * Share, 0.0f, 0.0f));
+		}
 	}
 	else if (Event.Type == FHexBattleEvent::EType::CatapultShot && Figures.IsValidIndex(Event.Unit))
 	{
@@ -2609,6 +3851,14 @@ void AHexBattleArena::PlayEvent(float DeltaSeconds)
 		const FVector From = Figures[Event.Unit].Position + FVector(0.0, 0.0, Config->CatapultSize);
 		const FVector To = GetHexPoint(Event.Hex) + FVector(0.0, 0.0, Config->SiegeWallHeight * 0.6);
 		Shot->SetWorldLocation(FMath::Lerp(From, To, double(Flight)) + FVector(0.0, 0.0, FMath::Sin(Flight * PI) * Config->HexRadius * 5.0));
+		// the arm swings up against its stop, which throws the stone, and comes slowly back down
+		if (USceneComponent* Arm = Figures[Event.Unit].Arm.Get())
+		{
+			const float Fire = Config->CatapultArmFireTime;
+			const float Share = CurrentTime < Fire ? FMath::InterpEaseIn(0.0f, 1.0f, CurrentTime / Fire, 2.0f)
+				: 1.0f - FMath::InterpEaseInOut(0.0f, 1.0f, FMath::Clamp((CurrentTime - Fire) / FMath::Max(CurrentLength - Fire, 0.01f), 0.0f, 1.0f), 2.0f);
+			Arm->SetRelativeRotation(FRotator(Config->CatapultArmSwing * Share, 0.0f, 0.0f));
+		}
 	}
 	else if (Event.Type == FHexBattleEvent::EType::Spell)
 	{
@@ -2654,6 +3904,11 @@ void AHexBattleArena::EndEvent()
 			{
 				Figures[Event.Unit].Component->SetVisibility(false, true);
 			}
+			// a catapult leaves the wood it was built of
+			if (GetBattle() && GetBattle()->GetUnits().IsValidIndex(Event.Unit) && GetBattle()->GetUnits()[Event.Unit].bCatapult)
+			{
+				AddWreck(Event.Unit);
+			}
 			// a flyer falls to the ground
 			if (Look && Look->Hover > 0.0f)
 			{
@@ -2687,22 +3942,41 @@ void AHexBattleArena::UpdateMarks()
 	FHexCoord From;
 	const bool bStrike = bOrder && Aimed == INDEX_NONE && HoverUnit != INDEX_NONE && Battle->GetUnits()[HoverUnit].Side != Battle->GetUnits()[Active].Side
 		&& !Battle->CanShoot(Active, HoverUnit) && FindStrikeFrom(HoverUnit, From);
-	const FString Key = FString::Printf(TEXT("%d %d %d %d %d %d %d %d %d %d"), bOrder ? 1 : 0, Active, Battle->GetRound(), bHover ? HoverHex.Q : -99, bHover ? HoverHex.R : -99, Aimed,
-		bStrike ? From.Q : -99, bStrike ? From.R : -99, IsPlaying() ? 1 : 0, Battle->IsOver() ? 1 : 0);
-	if (Key == MarksKey)
+	FString Key = FString::Printf(TEXT("%d %d %d %d %d %d"), bOrder ? 1 : 0, Active, Battle->GetRound(), Aimed, IsPlaying() ? 1 : 0, Battle->IsOver() ? 1 : 0);
+	// the rest by where the units stand by the rules, as what can be struck follows them
+	for (const FHexBattleUnit& Each : Battle->GetUnits())
+	{
+		Key += Each.IsAlive() ? *FString::Printf(TEXT(" %d,%d"), Each.Hex.Q, Each.Hex.R) : TEXT(" x");
+	}
+	// the marks under the units follow their figures as they walk, and go with those that died
+	FString UnitKey = Key + FString::Printf(TEXT(" p%d"), GetPersonSide());
+	for (int32 Index = 0; Index < Battle->GetUnits().Num() && Index < Figures.Num(); ++Index)
+	{
+		const FFigure& Figure = Figures[Index];
+		UnitKey += Figure.bDead || !Battle->GetUnits()[Index].IsAlive() ? TEXT(" x") : *FString::Printf(TEXT(" %d,%d"), FMath::RoundToInt32(Figure.Position.X / 2.0), FMath::RoundToInt32(Figure.Position.Y / 2.0));
+	}
+	// the hex under the cursor and the way there by where the cursor is
+	const FString HoverKey = Key + FString::Printf(TEXT(" h%d %d %d %d"), bHover ? HoverHex.Q : -99, bHover ? HoverHex.R : -99, bStrike ? From.Q : -99, bStrike ? From.R : -99);
+	const bool bStaticChanged = Key != MarksKey;
+	const bool bHoverChanged = HoverKey != HoverMarksKey;
+	const bool bUnitChanged = UnitKey != UnitMarksKey;
+	if (!bStaticChanged && !bHoverChanged && !bUnitChanged)
 	{
 		return;
 	}
 	MarksKey = Key;
+	UnitMarksKey = UnitKey;
+	HoverMarksKey = HoverKey;
+	UMaterialInterface* MarkMaterial = Config->MarkMaterial.LoadSynchronous();
+	const double MarksStart = FPlatformTime::Seconds();
 	TArray<FVector> Vertices;
 	TArray<int32> Triangles;
 	TArray<FVector> Normals;
 	TArray<FLinearColor> Colors;
 	// what is drawn later lies over what came before, as the marks are one translucent section drawn in the order of its triangles
-	const auto Local = [this](const FHexCoord& Hex, double Lift) { return GetHexPoint(Hex) - GetActorLocation() + FVector(0.0, 0.0, Lift); };
-	const auto Fill = [&](const FHexCoord& Hex, const FLinearColor& Color, double Inset, double Lift)
+	const auto Local = [this](const FHexCoord& Hex, double Lift) { return GetHexPoint(Hex, false) - GetActorLocation() + FVector(0.0, 0.0, Lift + GetMarkFloor(Hex)); };
+	const auto FillAt = [&](const FVector& Middle, const FLinearColor& Color, double Inset)
 	{
-		const FVector Middle = Local(Hex, Lift);
 		const int32 Base = Vertices.Num();
 		Vertices.Add(Middle);
 		Normals.Add(FVector::UpVector);
@@ -2719,6 +3993,7 @@ void AHexBattleArena::UpdateMarks()
 			Triangles.Append({Base, Base + 1 + (Corner + 1) % 6, Base + 1 + Corner});
 		}
 	};
+	const auto Fill = [&](const FHexCoord& Hex, const FLinearColor& Color, double Inset, double Lift) { FillAt(Local(Hex, Lift), Color, Inset); };
 	// a quad from A to B and Across from them, its color Near at A and B and Far across
 	const auto Quad = [&](const FVector& A, const FVector& B, const FVector& Across, const FLinearColor& Near, const FLinearColor& Far)
 	{
@@ -2754,13 +4029,15 @@ void AHexBattleArena::UpdateMarks()
 			Triangles.Append({A, B + 1, A + 1, A, B, B + 1, A, A + 1, B + 1, A, B + 1, B});
 		}
 	};
-	if (Battle->GetUnits().IsValidIndex(Active) && !Battle->IsOver())
+	if (bStaticChanged && Battle->GetUnits().IsValidIndex(Active) && !Battle->IsOver())
 	{
 		const FHexBattleUnit& Unit = Battle->GetUnits()[Active];
+		// the field lies in the dark but where the stack of the person whose turn it is can go this turn, as the developer asked on
+		// 2026-11-13: on a turn of the game, while what happened plays and while a spell is aimed all of it is dark
+		TSet<FHexCoord> Reached;
+		TSet<FHexCoord> Targets;
 		if (bOrder && Aimed == INDEX_NONE)
 		{
-			TSet<FHexCoord> Reached;
-			TSet<FHexCoord> Targets;
 			Reached.Add(Unit.Hex);
 			for (const TPair<FHexCoord, int32>& Each : Reach)
 			{
@@ -2784,18 +4061,26 @@ void AHexBattleArena::UpdateMarks()
 					Targets.Add(Other.Hex);
 				}
 			}
-			// the field it does not reach lies in the dark, as the ground outside the reach of a hero does on the planet
-			for (int32 Column = 0; Column < Battle->GetColumns(); ++Column)
+		}
+		// the field it does not reach lies in the dark, as the ground outside the reach of a hero does on the planet, the hexes of the
+		// catapults off it too, which are part of it
+		TArray<FHexCoord> All = Battle->GetHomeHexes();
+		for (int32 Column = 0; Column < Battle->GetColumns(); ++Column)
+		{
+			for (int32 Row = 0; Row < Battle->GetRows(); ++Row)
 			{
-				for (int32 Row = 0; Row < Battle->GetRows(); ++Row)
-				{
-					const FHexCoord Hex = FHexCoord::FromOffset(Column, Row);
-					if (!Reached.Contains(Hex) && !Targets.Contains(Hex))
-					{
-						Fill(Hex, Config->ReachOutsideColor, 1.0, 0.7);
-					}
-				}
+				All.Add(FHexCoord::FromOffset(Column, Row));
 			}
+		}
+		for (const FHexCoord& Hex : All)
+		{
+			if (!Reached.Contains(Hex) && !Targets.Contains(Hex))
+			{
+				Fill(Hex, Config->ReachOutsideColor, 1.0, 0.7);
+			}
+		}
+		if (bOrder && Aimed == INDEX_NONE)
+		{
 			for (const FHexCoord& Hex : Reached)
 			{
 				if (Hex != Unit.Hex)
@@ -2829,11 +4114,44 @@ void AHexBattleArena::UpdateMarks()
 			for (const FHexCoord& Hex : Targets)
 			{
 				Fill(Hex, Config->TargetColor * FLinearColor(1.0f, 1.0f, 1.0f, 0.6f), 0.9, 0.9);
+				// a part of the wall to strike has the outline of an enemy, as the developer asked on 2026-11-14, as its hex shows only in part
+				if (Battle->FindUnitAt(Hex) == INDEX_NONE)
+				{
+					const FVector Middle = Local(Hex, 0.95);
+					const double Inset = Config->HexRadius * Config->UnitLineInset;
+					for (int32 Corner = 0; Corner < 6; ++Corner)
+					{
+						const FVector2D A2 = FHexLayout::GetCornerDirection(Corner);
+						const FVector2D B2 = FHexLayout::GetCornerDirection(Corner + 1);
+						Segment(Middle + FVector(A2.X, A2.Y, 0.0) * Inset, Middle + FVector(B2.X, B2.Y, 0.0) * Inset, Config->UnitLineWidth, Config->UnitEnemyColor);
+					}
+				}
 			}
 		}
-		Fill(Unit.Hex, Config->ActiveColor, 0.92, 0.95);
+		MarkTargets = Targets;
 	}
-	if (bHover && bOrder)
+	if (bStaticChanged)
+	{
+		if (!Battle->GetUnits().IsValidIndex(Active) || Battle->IsOver() || !bOrder || Aimed != INDEX_NONE)
+		{
+			MarkTargets.Reset();
+		}
+		DrapeOnGround(Vertices, Triangles, Normals, Colors);
+		LiftOverMoat(Vertices);
+		ProjectOnBridge(Vertices, Triangles, Normals, Colors);
+		UE_LOG(LogHexHero, Verbose, TEXT("Battle marks: %d triangles in %.2f ms"), Triangles.Num() / 3, (FPlatformTime::Seconds() - MarksStart) * 1000.0);
+		Marks->ClearAllMeshSections();
+		if (!Vertices.IsEmpty())
+		{
+			Marks->CreateMeshSection_LinearColor(0, Vertices, Triangles, Normals, {}, Colors, {}, false);
+			Marks->SetMaterial(0, MarkMaterial);
+		}
+	}
+	Vertices.Reset();
+	Triangles.Reset();
+	Normals.Reset();
+	Colors.Reset();
+	if (bHoverChanged && bHover && bOrder)
 	{
 		const FHexBattleUnit& Unit = Battle->GetUnits()[Active];
 		if (Aimed != INDEX_NONE && Config->Spells.IsValidIndex(Aimed))
@@ -2855,15 +4173,26 @@ void AHexBattleArena::UpdateMarks()
 		}
 		else
 		{
-			const bool bEnemy = HoverUnit != INDEX_NONE && Battle->GetUnits()[HoverUnit].Side != Unit.Side;
-			Fill(HoverHex, bEnemy ? Config->TargetColor : Config->HoverColor * FLinearColor(1.0f, 1.0f, 1.0f, 0.5f), 0.95, 1.0);
+			// an enemy, or a part of the wall it can strike or hit, in the red of a target, as the developer asked on 2026-11-14 (a part of the wall
+			// took the pale hover before)
+			const FHexBattleWall* HoverWall = Battle->FindWall(HoverHex);
+			FHexCoord WallFrom;
+			const bool bWallTarget = HoverUnit == INDEX_NONE && HoverWall && HoverWall->IsStanding()
+				&& (Battle->CanFireCatapult(HoverHex) || FindWallStrikeFrom(HoverHex, WallFrom));
+			const bool bEnemy = (HoverUnit != INDEX_NONE && Battle->GetUnits()[HoverUnit].Side != Unit.Side) || bWallTarget;
+			// a hex it cannot go to is dark under the cursor, as the developer asked on 2026-11-14 (green as any before)
+			const bool bReached = HoverHex == Unit.Hex || Reach.Contains(HoverHex);
+			Fill(HoverHex, bEnemy ? Config->TargetColor : bReached ? Config->HoverColor : Config->HoverBlockedColor, 0.95, 1.0);
 			// the way there, as a way shows on the planet: a line through a dot on each hex to a ring on the last, straight for a flyer
 			const bool bWalkTo = HoverUnit == INDEX_NONE && Reach.Contains(HoverHex) && HoverHex != Unit.Hex;
 			const FHexCoord End = bStrike ? From : HoverHex;
 			if ((bWalkTo || bStrike) && End != Unit.Hex)
 			{
 				const double Lift = 1.2;
-				if (Unit.bFlies)
+				FHexBattleEvent Way;
+				Way.Unit = Active;
+				Way.Path = Battle->FindPath(Active, End);
+				if (Unit.bFlies && IsFlight(Way))
 				{
 					// a flyer's way is the arc it flies, as dots in the air, as the developer asked on 2026-11-12, and the ring where it lands
 					const FVector A = Local(Unit.Hex, Lift);
@@ -2902,14 +4231,141 @@ void AHexBattleArena::UpdateMarks()
 			}
 		}
 	}
-	Marks->ClearAllMeshSections();
+	if (bHoverChanged)
+	{
+		DrapeOnGround(Vertices, Triangles, Normals, Colors);
+		LiftOverMoat(Vertices);
+		ProjectOnBridge(Vertices, Triangles, Normals, Colors);
+		UE_LOG(LogHexHero, Verbose, TEXT("Battle hover marks: %d triangles, hover %d at %d %d, orders %d"), Triangles.Num() / 3, bHover ? 1 : 0, HoverHex.GetColumn(), HoverHex.GetRow(), bOrder ? 1 : 0);
+		HoverMarks->ClearAllMeshSections();
+		if (!Vertices.IsEmpty())
+		{
+			HoverMarks->CreateMeshSection_LinearColor(0, Vertices, Triangles, Normals, {}, Colors, {}, false);
+			HoverMarks->SetMaterial(0, MarkMaterial);
+		}
+	}
+	if (!bUnitChanged)
+	{
+		return;
+	}
+	// the hex under each unit, as the developer asked on 2026-11-13: an outline in the color of its side, UnitFriendColor for those of the
+	// person and UnitEnemyColor for the others, over a hex in the shade (UnitShadeColor, darker than the dark of the field), but green
+	// (ActiveColor) under the stack of the person that takes orders now and red (TargetColor, in the rest of the marks) under an enemy it
+	// can strike or shoot; the one that acts on a turn of the game has its outline wider. They follow the figures as they walk, in a mesh of
+	// their own, which a walk rebuilds alone
+	const double UnitStart = FPlatformTime::Seconds();
+	Vertices.Reset();
+	Triangles.Reset();
+	Normals.Reset();
+	Colors.Reset();
+	if (Battle->GetUnits().IsValidIndex(Active) && !Battle->IsOver())
+	{
+		const int32 Person = GetPersonSide();
+		for (int32 Index = 0; Index < Battle->GetUnits().Num() && Index < Figures.Num(); ++Index)
+		{
+			const FHexBattleUnit& Each = Battle->GetUnits()[Index];
+			const FFigure& Figure = Figures[Index];
+			if (!Each.IsAlive() || Each.bTower || Figure.bDead)
+			{
+				continue;
+			}
+			const bool bMine = Each.Side == Person;
+			const bool bCommanded = bMine && Index == Active && bOrder;
+			const bool bTarget = !bMine && MarkTargets.Contains(Each.Hex);
+			const FVector Floor = GetHexPoint(Each.Hex, false) - GetActorLocation() + FVector(0.0, 0.0, GetMarkFloor(Each.Hex));
+			const FVector Middle(Figure.Position.X - GetActorLocation().X, Figure.Position.Y - GetActorLocation().Y, Floor.Z + 0.92);
+			if (bCommanded)
+			{
+				FillAt(Middle, Config->ActiveColor, 0.92);
+			}
+			else if (!bTarget)
+			{
+				FillAt(Middle, Config->UnitShadeColor, 0.96);
+			}
+			const FLinearColor Line = bMine ? Config->UnitFriendColor : Config->UnitEnemyColor;
+			const double Width = Config->UnitLineWidth * (Index == Active && !bOrder ? Config->UnitActingWidth : 1.0);
+			for (int32 Corner = 0; Corner < 6; ++Corner)
+			{
+				const FVector2D A2 = FHexLayout::GetCornerDirection(Corner);
+				const FVector2D B2 = FHexLayout::GetCornerDirection(Corner + 1);
+				const double Inset = Config->HexRadius * Config->UnitLineInset;
+				Segment(Middle + FVector(A2.X, A2.Y, 0.08) * Inset, Middle + FVector(B2.X, B2.Y, 0.08) * Inset, Width, Line);
+			}
+		}
+	}
+	DrapeOnGround(Vertices, Triangles, Normals, Colors);
+	LiftOverMoat(Vertices);
+	ProjectOnBridge(Vertices, Triangles, Normals, Colors);
+	UE_LOG(LogHexHero, Verbose, TEXT("Battle unit marks: %d triangles in %.2f ms"), Triangles.Num() / 3, (FPlatformTime::Seconds() - UnitStart) * 1000.0);
+	UnitMarks->ClearAllMeshSections();
 	if (!Vertices.IsEmpty())
 	{
-		Marks->CreateMeshSection_LinearColor(0, Vertices, Triangles, Normals, {}, Colors, {}, false);
-		if (UMaterialInterface* Material = Config->MarkMaterial.LoadSynchronous())
+		UnitMarks->CreateMeshSection_LinearColor(0, Vertices, Triangles, Normals, {}, Colors, {}, false);
+		UnitMarks->SetMaterial(0, MarkMaterial);
+	}
+}
+
+bool AHexBattleArena::CheatHitUnderCursor()
+{
+	FHexBattle* Battle = GetBattle();
+	if (!bShowing || !Battle || !bHover || Battle->IsOver())
+	{
+		return false;
+	}
+	if (!Battle->CheatHit(HoverHex, Config->CheatHitShare))
+	{
+		return false;
+	}
+	UE_LOG(LogHexHero, Log, TEXT("Battle: cheat, %d,%d takes %.0f%% of its health"), HoverHex.GetColumn(), HoverHex.GetRow(), Config->CheatHitShare * 100.0f);
+	AddLog(TEXT("Cheat: a blow from nowhere"));
+	return true;
+}
+
+void AHexBattleArena::UpdateCrumbles(float DeltaSeconds)
+{
+	const double Life = FMath::Max(double(Config->CrumbleTime), 0.1);
+	for (int32 Index = Crumbles.Num() - 1; Index >= 0; --Index)
+	{
+		FCrumble& Crumble = Crumbles[Index];
+		UInstancedStaticMeshComponent* Component = Crumble.Component.Get();
+		Crumble.Time += DeltaSeconds;
+		if (!Component || Crumble.Time >= Life)
 		{
-			Marks->SetMaterial(0, Material);
+			if (Component)
+			{
+				CrumbleComponents.Remove(Component);
+				Component->DestroyComponent();
+			}
+			Crumbles.RemoveAt(Index);
+			continue;
 		}
+		const double T = Crumble.Time;
+		// the last part of its time it goes down into the ground, where its rubble is
+		const double Gone = FMath::Clamp((T / Life - 0.75) / 0.25, 0.0, 1.0);
+		TArray<FTransform> Transforms;
+		for (int32 Each = 0; Each < Crumble.Start.Num(); ++Each)
+		{
+			FVector Where;
+			FQuat Turn = Crumble.Turn[Each];
+			if (Crumble.bSinks)
+			{
+				const double Share = FMath::InterpEaseIn(0.0, 1.0, FMath::Clamp(T / Life, 0.0, 1.0), 2.0);
+				Where = Crumble.Start[Each] - FVector(0.0, 0.0, Crumble.Sink * Share);
+				Turn = FRotator(Crumble.Spin[Each].X * Share, 0.0, Crumble.Spin[Each].Z * Share).Quaternion() * Turn;
+			}
+			else
+			{
+				Where = Crumble.Start[Each] + Crumble.Velocity[Each] * T - FVector(0.0, 0.0, 0.5 * Config->CrumbleGravity * T * T);
+				// on the ground it lies still
+				const double Floor = Crumble.Ground + Crumble.Scale[Each].Z * 0.5 - Gone * Crumble.Scale[Each].Z * 1.5;
+				const double Landed = Where.Z <= Floor ? 1.0 : 0.0;
+				Where.Z = FMath::Max(Where.Z, Floor);
+				const double Spun = FMath::Min(T, 0.6) * (1.0 - Landed * 0.0);
+				Turn = FRotator(Crumble.Spin[Each].X * Spun, Crumble.Spin[Each].Z * Spun, Crumble.Spin[Each].Y * Spun).Quaternion() * Turn;
+			}
+			Transforms.Add(FTransform(Turn, Where - GetActorLocation(), Crumble.Scale[Each]));
+		}
+		Component->BatchUpdateInstancesTransforms(0, Transforms, false, true);
 	}
 }
 
@@ -2975,7 +4431,45 @@ void AHexBattleArena::Tick(float DeltaSeconds)
 			AiWait = Config->TurnPause;
 		}
 	}
+	// the figures that turn, that reel from a blow, and those that fall with their tower
+	for (int32 Index = 0; Index < Figures.Num(); ++Index)
+	{
+		FFigure& Each = Figures[Index];
+		const FVector Goal = Each.Facing.GetSafeNormal2D();
+		const FVector Now = Each.Shown.GetSafeNormal2D();
+		if (!Goal.IsNearlyZero() && !Now.IsNearlyZero() && !Goal.Equals(Now, 1.0e-4))
+		{
+			const double From = FMath::Atan2(Now.Y, Now.X);
+			const double Delta = FMath::FindDeltaAngleRadians(From, FMath::Atan2(Goal.Y, Goal.X));
+			const double Step = FMath::DegreesToRadians(double(Config->FigureTurnSpeed)) * DeltaSeconds * Speed;
+			const double Angle = FMath::Abs(Delta) <= Step ? From + Delta : From + FMath::Sign(Delta) * Step;
+			Each.Shown = FVector(FMath::Cos(Angle), FMath::Sin(Angle), 0.0);
+			PlaceFigure(Index);
+		}
+		if (Each.FallTime >= 0.0f)
+		{
+			Each.FallTime += DeltaSeconds * Speed;
+			const float Share = FMath::Clamp(Each.FallTime / FMath::Max(Config->TowerFallTime, 0.05f), 0.0f, 1.0f);
+			// falling as a weight does, faster and faster, down to the rubble a little above the ground
+			Each.Hover = FMath::Lerp(Each.FallFrom, Each.FallFrom * 0.06f, Share * Share);
+			if (Share >= 1.0f)
+			{
+				Each.FallTime = -1.0f;
+			}
+			PlaceFigure(Index);
+		}
+		if (Each.HitTime >= 0.0f)
+		{
+			Each.HitTime += DeltaSeconds * Speed;
+			if (Each.HitTime >= Config->HitReelTime)
+			{
+				Each.HitTime = -1.0f;
+			}
+			PlaceFigure(Index);
+		}
+	}
 	BuildSiege();
+	UpdateCrumbles(DeltaSeconds * Speed);
 	UpdateGate(DeltaSeconds);
 	UpdateOutline();
 	UpdateMarks();
@@ -2991,7 +4485,7 @@ bool AHexBattleArena::OrderAt(const FString& Order, const FHexCoord& Hex, int32 
 	}
 	const auto HoverAt = [this](const FHexCoord& At)
 	{
-		bHover = GetBattle()->IsOnField(At);
+		bHover = GetBattle()->IsOnField(At) || GetBattle()->IsMachineHex(At);
 		HoverHex = At;
 		HoverPoint = GetHexPoint(At);
 	};
@@ -3011,6 +4505,37 @@ bool AHexBattleArena::OrderAt(const FString& Order, const FHexCoord& Hex, int32 
 		// for trying the camera without a mouse: degrees, and notches of the wheel, as the column and the row of the order
 		MoveCamera(FVector2D::ZeroVector, float(Hex.GetColumn()), 0.0f);
 		ZoomCamera(float(Hex.GetRow()));
+		return true;
+	}
+	if (Order == TEXT("breach"))
+	{
+		// for trying the ruins: the part of the wall on the hex falls at once
+		if (!Battle->BreakWall(Hex))
+		{
+			OutMessage = TEXT("no part of the wall stands there");
+			return false;
+		}
+		return true;
+	}
+	if (Order == TEXT("hit"))
+	{
+		// the cheat key at a hex: what is there takes CheatHitShare of its health
+		HoverAt(Hex);
+		if (!CheatHitUnderCursor())
+		{
+			OutMessage = TEXT("nothing to hit there");
+			return false;
+		}
+		return true;
+	}
+	if (Order == TEXT("damage"))
+	{
+		// for trying the stages of damage: the part of the wall on the hex keeps the share of its health given in percent
+		if (!Battle->DamageWallTo(Hex, Spell / 100.0f))
+		{
+			OutMessage = TEXT("no part of the wall stands there");
+			return false;
+		}
 		return true;
 	}
 	if (Order == TEXT("auto"))
@@ -3088,7 +4613,7 @@ namespace
 		}
 		if (!Arena || !Arena->IsShowing() || !Arena->GetBattles() || Args.IsEmpty())
 		{
-			UE_LOG(LogHexHero, Warning, TEXT("hex.Battle <state|move <Col> <Row>|strike <Unit> [<Col> <Row>]|shoot <Unit>|wait|defend|cast <Spell> <Col> <Row>|hover <Col> <Row>|auto|quick|retreat|close>, while a battle is shown"));
+			UE_LOG(LogHexHero, Warning, TEXT("hex.Battle <state|move <Col> <Row>|strike <Unit> [<Col> <Row>]|shoot <Unit>|wait|defend|cast <Spell> <Col> <Row>|hover <Col> <Row>|breach <Col> <Row>|damage <Col> <Row> <Percent>|hit <Col> <Row>|auto|quick|retreat|close>, while a battle is shown"));
 			return;
 		}
 		const FHexBattle& Battle = Arena->GetBattles()->GetBattle();
@@ -3124,12 +4649,16 @@ namespace
 		{
 			At = Hex(2);
 		}
+		else if (Order == TEXT("damage"))
+		{
+			Spell = Args.IsValidIndex(3) ? FCString::Atoi(*Args[3]) : 50;
+		}
 		FString Message;
 		const bool bDone = Arena->OrderAt(Order, At, Unit, Spell, Message);
 		UE_LOG(LogHexHero, Log, TEXT("hex.Battle %s: %s%s"), *Order, bDone ? TEXT("done") : TEXT("not done"), Message.IsEmpty() ? TEXT("") : *(TEXT(", ") + Message));
 	}
 
 	FAutoConsoleCommandWithWorldAndArgs BattleCommand(TEXT("hex.Battle"),
-		TEXT("The battle shown on its field: state, move <Col> <Row>, strike <Unit> [<Col> <Row> to strike from], shoot <Unit>, wait, defend, cast <Spell> <Col> <Row>, hover <Col> <Row> (for screenshots), camera <Distance> <Pitch>, turn <Degrees> <Notches> (turns the camera and zooms it by notches of the wheel), auto, quick, retreat, close. A unit is its index in state."),
+		TEXT("The battle shown on its field: state, move <Col> <Row>, strike <Unit> [<Col> <Row> to strike from], shoot <Unit>, wait, defend, cast <Spell> <Col> <Row>, hover <Col> <Row> (for screenshots), breach <Col> <Row> (the part of the wall there falls, for trying the ruins), damage <Col> <Row> <Percent> (it keeps that much of its health), hit <Col> <Row> (what the cheat key K does there), camera <Distance> <Pitch>, turn <Degrees> <Notches> (turns the camera and zooms it by notches of the wheel), auto, quick, retreat, close. A unit is its index in state."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&RunBattleCommand));
 }

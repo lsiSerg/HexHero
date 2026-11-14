@@ -464,12 +464,38 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 	EntranceBody->AddSlot().AutoHeight()[MakeHelp(FText::Format(LOCTEXT("EntranceHelp", "Click a cell of plains or hills to put an entrance of the chosen network there, or give it that network; Ctrl+click takes one away. Its exit is the same cell underground, which this does not carve: a red marker cannot be used. {0} over an entrance goes down."),
 		FText::FromString(InArgs._LayerKeys)))];
 
+	// what a click does in the tabs of the heroes, mines, castles and neutrals, as the developer asked on 2026-11-13: place what is chosen,
+	// move, turn or take away what stands there
+	const auto MakePieceRow = [&](EHexPaintTool PieceTool, TFunction<void(UHexPlanetPainter&)> SetPieceTool)
+	{
+		TSharedRef<SUniformGridPanel> Row = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
+		const TPair<EHexPieceAction, FText> Actions[] = {
+			{EHexPieceAction::Place, LOCTEXT("PiecePlace", "Place")}, {EHexPieceAction::Move, LOCTEXT("PieceMove", "Move")},
+			{EHexPieceAction::Turn, LOCTEXT("PieceTurn", "Turn")}, {EHexPieceAction::Remove, LOCTEXT("PieceRemove", "Remove")}};
+		const FText Tips[] = {
+			LOCTEXT("PiecePlaceTip", "A click places what is chosen below; Ctrl+click takes away what stands there"),
+			LOCTEXT("PieceMoveTip", "Press on what stands on a cell and release on the cell it goes to"),
+			LOCTEXT("PieceTurnTip", "A click turns what stands there by PaintPieceTurn degrees of DA_HexPlanet; Ctrl+click turns it back"),
+			LOCTEXT("PieceRemoveTip", "A click takes away what stands there")};
+		for (int32 Index = 0; Index < UE_ARRAY_COUNT(Actions); ++Index)
+		{
+			const EHexPieceAction Action = Actions[Index].Key;
+			const TSharedRef<SButton> Button = MakeButton(MakeLabel(Actions[Index].Value),
+				[SetPieceTool, Action](UHexPlanetPainter& Each) { SetPieceTool(Each); Each.SetPieceAction(Action); },
+				[PieceTool, Action](const UHexPlanetPainter& Each) { return Each.GetTool() == PieceTool && Each.GetPieceAction() == Action; });
+			Button->SetToolTipText(Tips[Index]);
+			Row->AddSlot(Index, 0)[Button];
+		}
+		return Row;
+	};
+
 	// Heroes, on either layer: the player and the class of the heroes a click places
 	const UHexHeroConfig* HeroConfig = UHexHeroConfig::Load();
 	const auto MakeHeroBody = [&]()
 	{
 		TSharedRef<SVerticalBox> Body = SNew(SVerticalBox);
-		Body->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("HeroPlayers", "Player"), 0.0f)];
+		Body->AddSlot().AutoHeight()[MakePieceRow(EHexPaintTool::Hero, [](UHexPlanetPainter& Each) { Each.SetHeroTool(); })];
+		Body->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("HeroPlayers", "Player"))];
 		TSharedRef<SUniformGridPanel> Players = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
 		for (int32 Player = 0; Player < HeroConfig->Players.Num(); ++Player)
 		{
@@ -534,9 +560,10 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 	const auto MakeSiteBody = [&]()
 	{
 		TSharedRef<SVerticalBox> Body = SNew(SVerticalBox);
+		Body->AddSlot().AutoHeight()[MakePieceRow(EHexPaintTool::Site, [](UHexPlanetPainter& Each) { Each.SetSiteTool(); })];
 		for (const bool bMines : {true, false})
 		{
-			Body->AddSlot().AutoHeight()[MakeHeading(bMines ? LOCTEXT("SiteMines", "Mines, owned by the hero's player") : LOCTEXT("SitePiles", "Piles, taken once, and mills"), bMines ? 0.0f : 8.0f)];
+			Body->AddSlot().AutoHeight()[MakeHeading(bMines ? LOCTEXT("SiteMines", "Mines, owned by the hero's player") : LOCTEXT("SitePiles", "Piles, taken once, and mills"))];
 			TSharedRef<SUniformGridPanel> Kinds = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
 			int32 Shown = 0;
 			for (int32 Kind = 0; Kind < SiteConfig->Kinds.Num(); ++Kind)
@@ -587,7 +614,8 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 	const auto MakeNeutralBody = [&]()
 	{
 		TSharedRef<SVerticalBox> Body = SNew(SVerticalBox);
-		Body->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("NeutralFactions", "Creatures of"), 0.0f)];
+		Body->AddSlot().AutoHeight()[MakePieceRow(EHexPaintTool::Neutral, [](UHexPlanetPainter& Each) { Each.SetNeutralTool(); })];
+		Body->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("NeutralFactions", "Creatures of"))];
 		TSharedRef<SUniformGridPanel> Factions = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
 		for (int32 Faction = 0; Faction < NeutralCastles->Factions.Num(); ++Faction)
 		{
@@ -660,7 +688,8 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 	const auto MakeCastleBody = [&]()
 	{
 		TSharedRef<SVerticalBox> CastleBody = SNew(SVerticalBox);
-		CastleBody->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("CastleFactions", "Faction"), 0.0f)];
+		CastleBody->AddSlot().AutoHeight()[MakePieceRow(EHexPaintTool::Castle, [](UHexPlanetPainter& Each) { Each.SetCastleTool(); })];
+		CastleBody->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("CastleFactions", "Faction"))];
 		TSharedRef<SUniformGridPanel> Factions = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
 		for (int32 Faction = 0; Faction < CastleConfig->Factions.Num(); ++Faction)
 		{

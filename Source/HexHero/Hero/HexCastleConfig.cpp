@@ -2,6 +2,7 @@
 
 #include "HexCastleConfig.h"
 #include "HexHero.h"
+#include "Engine/Texture2D.h"
 
 namespace
 {
@@ -21,6 +22,11 @@ namespace
 	TSoftObjectPtr<UStaticMesh> MeshOf(const FString& Name)
 	{
 		return TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(FString::Printf(TEXT("%sSM_PlanetCastle%s.SM_PlanetCastle%s"), CastleMeshFolder, *Name, *Name)));
+	}
+
+	TSoftObjectPtr<UTexture2D> PictureOf(const FString& Name)
+	{
+		return TSoftObjectPtr<UTexture2D>(FSoftObjectPath(FString::Printf(TEXT("/Game/HexPlanet/UI/Portraits/T_Building_%s.T_Building_%s"), *Name, *Name)));
 	}
 
 	/** What tells the factions apart in numbers: the Order of Dawn has better and dearer creatures, the Realm of Decay more and cheaper ones */
@@ -119,6 +125,7 @@ namespace
 			Each.GoldPerDay = Gold[Level];
 			Each.NeedsFort = Fort[Level];
 			Each.Mesh = MeshOf(FString::Printf(TEXT("Hall%d"), Level + 1));
+			Each.Picture = PictureOf(FString::Printf(TEXT("Hall%d"), Level + 1));
 			if (Cost[Level] > 0)
 			{
 				Each.Cost.Add(TEXT("Gold"), Cost[Level]);
@@ -146,6 +153,7 @@ namespace
 			Each.DefenseFactor = Defense[Level];
 			// seen from outside it is the wall, the towers and the gate of the castle (WallMeshes and the rest)
 			Each.NeedsHall = Level > 0 ? 2 : 0;
+			Each.Picture = PictureOf(FString::Printf(TEXT("Fort%d"), Level + 1));
 			Each.Cost.Add(TEXT("Gold"), Gold[Level]);
 			Each.Cost.Add(TEXT("Wood"), Wood[Level]);
 			Each.Cost.Add(TEXT("Ore"), Ore[Level]);
@@ -192,6 +200,7 @@ namespace
 			if (Step == 0)
 			{
 				Each.Mesh = MeshOf(FString::Printf(TEXT("Dwelling%d"), Level + 1));
+				Each.Picture = PictureOf(FString::Printf(TEXT("Dwelling%d"), Level + 1));
 			}
 		}
 		return Dwelling;

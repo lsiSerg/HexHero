@@ -317,6 +317,7 @@ private:
 	void OnNextHero();
 	void OnEndTurn();
 	void OnSkipHero();
+	void OnBattleHit();
 	void OnPlayMode();
 
 	/** Returns true if the mouse is within ClickTolerance of where a button went down */

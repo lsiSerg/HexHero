@@ -136,7 +136,10 @@ float shore = -moatInto;
 # The ground of the field: a layer of the terrain (TerrainLayer of the biome fought on) from above at two sizes, broken in patches, its
 # hollows darker by the height in its alpha, darker away from the field so the field stands out, and darker still underground; since
 # 2026-11-13, as the developer found it flat, patches of the rock of the biome (RockLayer, GroundRockShare), more on the hills around the field,
-# blended by the heights in the alpha of the layers, and the relief of the layers by their normals (GROUND_NORMAL_CODE, GroundRelief)
+# blended by the heights in the alpha of the layers, and the relief of the layers by their normals (GROUND_NORMAL_CODE, GroundRelief); since
+# 2026-11-14, as the developer found it one color, its tone by its relief, which the field gives in the colors of its vertices (BuildGround):
+# red how far a point lies above (1) or below (0) the ground around it, green how steep it is, so hollows are darker (GroundHollowShade),
+# tops lighter and drier (GroundTopLight, GroundDryTint) and slopes rockier (GroundSlopeRock)
 GROUND_MIX_CODE = r"""
 float2 uv = WorldPos.xy / TileSize;
 float2 dx = PosDdx.xy / TileSize;
@@ -146,7 +149,9 @@ float patchNoise = 0.5 + 0.3 * sin(WorldPos.x * 0.0031 + sin(WorldPos.y * 0.0023
     + 0.2 * sin(WorldPos.x * 0.0083 + 2.1) * sin(WorldPos.y * 0.0071 + sin(WorldPos.x * 0.004));
 float4 soil = Colors.SampleGrad(ColorsSampler, float3(uv, TerrainLayer), dx, dy);
 float4 rock = Colors.SampleGrad(ColorsSampler, float3(uv * 0.8 + 0.13, RockLayer), dx * 0.8, dy * 0.8);
-float rockShare = saturate(GroundRockShare + rise * 0.8);
+float convex = Relief.r * 2.0 - 1.0;
+float slope = Relief.g;
+float rockShare = saturate(GroundRockShare + rise * 0.8 + slope * GroundSlopeRock);
 float rockMask = smoothstep(1.0 - rockShare - 0.12, 1.0 - rockShare + 0.12, patchNoise + (rock.a - soil.a) * 0.15);
 """
 GROUND_CODE = GROUND_MIX_CODE + r"""
@@ -156,10 +161,13 @@ color = lerp(color, rock.rgb * lerp(0.75, 1.1, rock.a), rockMask);
 // patches of tone
 float patch = sin(WorldPos.x * 0.0047 + sin(WorldPos.y * 0.0031) * 2.0) * sin(WorldPos.y * 0.0053 + 1.7);
 color *= 1.0 + 0.08 * patch;
+// darker in hollows, lighter and drier on tops
+color *= convex < 0.0 ? lerp(1.0, GroundHollowShade, -convex) : lerp(1.0, GroundTopLight, convex);
+color = lerp(color, color * GroundDryTint.rgb, saturate(convex));
 // the field and the ground around it
 float2 away = abs(WorldPos.xy - FieldCenter.xy) / max(FieldHalf.xy, 1.0);
 float outside = saturate(max(away.x, away.y) - 1.0);
-color *= lerp(1.0, 0.72, smoothstep(0.0, 0.6, outside));
+color *= lerp(FieldGroundTone, 0.72, smoothstep(0.0, 0.6, outside));
 // the moat of a siege: wet banks darker by MoatBankColor out to MoatBankWidth and its bed in MoatBedColor under the water
 if (MoatOn > 0.5)
 {
@@ -184,6 +192,7 @@ def build_ground():
     defaults = unreal.get_default_object(unreal.HexBattleConfig)
     material = open_material(GROUND)
     position = library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1000, 0)
+    relief = library.create_material_expression(material, unreal.MaterialExpressionVertexColor, -1000, -100)
     ddx = library.create_material_expression(material, unreal.MaterialExpressionDDX, -850, 50)
     ddy = library.create_material_expression(material, unreal.MaterialExpressionDDY, -850, 100)
     library.connect_material_expressions(position, '', ddx, '')
@@ -201,13 +210,19 @@ def build_ground():
         ('RockLayer', scalar(material, 'RockLayer', 2.0, 260), ''),
         ('GroundRockShare', scalar(material, 'GroundRockShare', defaults.get_editor_property('ground_rock_share'), 270), ''),
         ('HillHeight', scalar(material, 'HillHeight', defaults.get_editor_property('hill_height'), 280), ''),
-        ('FieldCenter', vector(material, 'FieldCenter', unreal.LinearColor(0.0, 0.0, 0.0, 0.0), 350), '')]
+        ('FieldCenter', vector(material, 'FieldCenter', unreal.LinearColor(0.0, 0.0, 0.0, 0.0), 350), ''),
+        ('Relief', relief, ''),
+        ('GroundSlopeRock', scalar(material, 'GroundSlopeRock', defaults.get_editor_property('ground_slope_rock'), 290), '')]
     connections = mix + [('Underground', scalar(material, 'Underground', 0.0, 300), ''),
         ('FieldHalf', vector(material, 'FieldHalf', unreal.LinearColor(500.0, 700.0, 0.0, 0.0), 400), '')] + moat_connections(material, defaults) + [
         ('MoatBankColor', vector(material, 'MoatBankColor', defaults.get_editor_property('moat_bank_color'), 550), ''),
         ('MoatBedColor', vector(material, 'MoatBedColor', defaults.get_editor_property('moat_bed_color'), 600), ''),
         ('MoatBankWidth', scalar(material, 'MoatBankWidth', defaults.get_editor_property('moat_bank_width'), 650), ''),
-        ('MoatOn', scalar(material, 'MoatOn', 0.0, 660), '')]
+        ('MoatOn', scalar(material, 'MoatOn', 0.0, 660), ''),
+        ('GroundHollowShade', scalar(material, 'GroundHollowShade', defaults.get_editor_property('ground_hollow_shade'), 670), ''),
+        ('GroundTopLight', scalar(material, 'GroundTopLight', defaults.get_editor_property('ground_top_light'), 680), ''),
+        ('GroundDryTint', vector(material, 'GroundDryTint', defaults.get_editor_property('ground_dry_tint'), 690), ''),
+        ('FieldGroundTone', scalar(material, 'FieldGroundTone', defaults.get_editor_property('field_ground_tone'), 695), '')]
     node = custom(material, GROUND_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, connections, 0)
     library.connect_material_property(node, '', unreal.MaterialProperty.MP_BASE_COLOR)
     normal = custom(material, GROUND_NORMAL_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, mix + [('Normals', normals, ''),
@@ -245,9 +260,39 @@ def build_mark():
 
 # A unit: the colors of its vertices times its tint, and by their alpha the color of its side, which glows a little; a mesh without colors
 # of its own (the fallback) is all the color of its side
+# the surface of a figure is not one smooth color, as the developer found them like plasticine on 2026-11-13: a noise of T_HexNoise taken
+# from the three planes of the body at rest (its position before skinning, so it stays on the body as it moves), DetailScale units across,
+# two octaves; UNIT_DETAIL_CODE gives that height, UNIT_CODE lightens and darkens the color by DetailTone of it, UNIT_NORMAL_CODE bumps the
+# normal by DetailBump of its slope on the screen (the derivatives come in from nodes, for ray tracing)
+UNIT_DETAIL_CODE = r"""
+float3 n = abs(normalize(LocalNormal));
+float3 w = pow(n, 4.0);
+w /= max(w.x + w.y + w.z, 0.0001);
+float s = 1.0 / max(DetailScale, 0.1);
+float3 p = LocalPos * s;
+// filtered by how much of the body a pixel covers, as one level of the noise shimmered as the figures moved (2026-11-13)
+float3 dx = LocalDdx * s;
+float3 dy = LocalDdy * s;
+float a = HexNoise.SampleGrad(HexNoiseSampler, p.yz * 0.05, dx.yz * 0.05, dy.yz * 0.05).r * w.x
+    + HexNoise.SampleGrad(HexNoiseSampler, p.xz * 0.05, dx.xz * 0.05, dy.xz * 0.05).r * w.y
+    + HexNoise.SampleGrad(HexNoiseSampler, p.xy * 0.05, dx.xy * 0.05, dy.xy * 0.05).r * w.z;
+float b = HexNoise.SampleGrad(HexNoiseSampler, p.yz * 0.17 + 0.37, dx.yz * 0.17, dy.yz * 0.17).r * w.x
+    + HexNoise.SampleGrad(HexNoiseSampler, p.xz * 0.17 + 0.37, dx.xz * 0.17, dy.xz * 0.17).r * w.y
+    + HexNoise.SampleGrad(HexNoiseSampler, p.xy * 0.17 + 0.37, dx.xy * 0.17, dy.xy * 0.17).r * w.z;
+return a * 0.6 + b * 0.4;
+"""
 UNIT_CODE = r"""
 float3 own = VertexRGB * Tint.rgb;
-return lerp(own, SideColor.rgb * max(max(VertexRGB.r, VertexRGB.g), max(VertexRGB.b, 0.35)), saturate(VertexA * SideColorShare));
+float3 color = lerp(own, SideColor.rgb * max(max(VertexRGB.r, VertexRGB.g), max(VertexRGB.b, 0.35)), saturate(VertexA * SideColorShare));
+return color * (1.0 + (Detail - 0.5) * 2.0 * DetailTone);
+"""
+UNIT_NORMAL_CODE = r"""
+float3 N = normalize(Normal);
+float3 r1 = cross(PosDdy, N);
+float3 r2 = cross(N, PosDdx);
+float det = dot(PosDdx, r1);
+float3 grad = sign(det) * (DetailDdx * r1 + DetailDdy * r2);
+return normalize(abs(det) * N - grad * DetailBump * 12.0);
 """
 
 
@@ -260,9 +305,36 @@ def build_unit():
     tint = vector(material, 'Tint', unreal.LinearColor(1.0, 1.0, 1.0, 1.0), 100)
     side = vector(material, 'SideColor', unreal.LinearColor(0.6, 0.6, 0.6, 1.0), 150)
     share = scalar(material, 'SideColorShare', 0.6, 200)
+    material.set_editor_property('tangent_space_normal', False)
+    # the body at rest is known to the vertex shader alone, so it comes to the pixels through interpolators
+    local = library.create_material_expression(material, unreal.MaterialExpressionVertexInterpolator, -1000, 450)
+    library.connect_material_expressions(library.create_material_expression(material, unreal.MaterialExpressionPreSkinnedPosition, -1200, 450), '', local, '')
+    local_normal = library.create_material_expression(material, unreal.MaterialExpressionVertexInterpolator, -1000, 500)
+    library.connect_material_expressions(library.create_material_expression(material, unreal.MaterialExpressionPreSkinnedNormal, -1200, 500), '', local_normal, '')
+    local_ddx = library.create_material_expression(material, unreal.MaterialExpressionDDX, -850, 420)
+    local_ddy = library.create_material_expression(material, unreal.MaterialExpressionDDY, -850, 440)
+    library.connect_material_expressions(local, '', local_ddx, '')
+    library.connect_material_expressions(local, '', local_ddy, '')
+    detail = custom(material, UNIT_DETAIL_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT1, [('LocalPos', local, ''), ('LocalNormal', local_normal, ''),
+        ('LocalDdx', local_ddx, ''), ('LocalDdy', local_ddy, ''),
+        ('HexNoise', noise_texture(material, 550), ''), ('DetailScale', scalar(material, 'DetailScale', 10.0, 600), '')], 450)
     base = custom(material, UNIT_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, [('VertexRGB', color, ''), ('VertexA', color, 'A'), ('Tint', tint, ''),
-        ('SideColor', side, ''), ('SideColorShare', share, '')], 0)
+        ('SideColor', side, ''), ('SideColorShare', share, ''), ('Detail', detail, ''), ('DetailTone', scalar(material, 'DetailTone', 0.12, 650), '')], 0)
     library.connect_material_property(base, '', unreal.MaterialProperty.MP_BASE_COLOR)
+    position = library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1000, 700)
+    pos_ddx = library.create_material_expression(material, unreal.MaterialExpressionDDX, -850, 700)
+    pos_ddy = library.create_material_expression(material, unreal.MaterialExpressionDDY, -850, 750)
+    library.connect_material_expressions(position, '', pos_ddx, '')
+    library.connect_material_expressions(position, '', pos_ddy, '')
+    detail_ddx = library.create_material_expression(material, unreal.MaterialExpressionDDX, -850, 800)
+    detail_ddy = library.create_material_expression(material, unreal.MaterialExpressionDDY, -850, 850)
+    library.connect_material_expressions(detail, '', detail_ddx, '')
+    library.connect_material_expressions(detail, '', detail_ddy, '')
+    normal = custom(material, UNIT_NORMAL_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, [
+        ('Normal', library.create_material_expression(material, unreal.MaterialExpressionVertexNormalWS, -1000, 900), ''),
+        ('PosDdx', pos_ddx, ''), ('PosDdy', pos_ddy, ''), ('DetailDdx', detail_ddx, ''), ('DetailDdy', detail_ddy, ''),
+        ('DetailBump', scalar(material, 'DetailBump', 0.35, 950), '')], 700)
+    library.connect_material_property(normal, '', unreal.MaterialProperty.MP_NORMAL)
     glow = custom(material, 'return SideColor.rgb * saturate(VertexA * SideColorShare) * Glow;', unreal.CustomMaterialOutputType.CMOT_FLOAT3,
         [('VertexA', color, 'A'), ('SideColor', side, ''), ('SideColorShare', share, ''), ('Glow', scalar(material, 'Glow', 0.12, 250), '')], 300)
     library.connect_material_property(glow, '', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
@@ -592,8 +664,169 @@ float place = HexNoise.SampleLevel(HexNoiseSampler, p * 0.9 + 11.3, 0).r;
 float pulse = pow(saturate(sin(Time * FogPulseRate * 6.2831853 + place * 40.0)), 8.0) * smoothstep(0.55, 0.75, place) * FogPulse;
 float3 color = lerp(FogColor.rgb, FogWispColor.rgb, saturate(churn * 0.6 + wisp)) + FogPulseColor.rgb * pulse;
 float alpha = edge * saturate(0.75 + (churn - 0.5) + wisp * 0.3) * FogLayerOpacity;
+// clear next to the camera, so a bank or the skirt it looks through never hides the field
+alpha *= saturate((distance(WorldPos, CameraPos) - FogCameraClear) / max(FogCameraFade, 1.0));
 return float4(color, alpha);
 """
+
+
+# The fog of war around the field as the fog of war of the planet is (SHROUD_CODE of create_planet_assets.py), as the developer asked on
+# 2026-11-13 when the banks and the skirt of before still looked poor: a post process over the view of the field (M_HexBattleShroud, on the
+# camera of the field), where a bank of cloud ShroudTop high over the ground (GroundZ) lies from FogStart past the box of the field and the
+# castle (FogBox) and is whole from FogEnd on, marched in SHROUD_STEPS looks through the view, ShroudDensity thick, thinner at its top
+# (ShroudTaper), darker at its foot (ShroudBaseShade), lighter and darker in patches (ShroudTone), its edge moved by a noise that drifts and
+# churns (ShroudSoftness, ShroudEdgeNoise, ShroudNoiseSize, ShroudDrift, ShroudChurn), with wisps (ShroudWisp*) and glows that swell and fade
+# (ShroudPulse*); what stands on the ground it covers whole is hidden, and the sky past it is the bank
+BATTLE_SHROUD_STEPS = 8
+BATTLE_SHROUD_CODE = r"""
+struct FShroud
+{
+    float Hash(float3 p)
+    {
+        p = frac(p * 0.1031);
+        p += dot(p, p.zyx + 31.32);
+        return frac((p.x + p.y) * p.z);
+    }
+    float Value(float3 p)
+    {
+        float3 i = floor(p);
+        float3 f = p - i;
+        f = f * f * (3.0 - 2.0 * f);
+        return lerp(lerp(lerp(Hash(i), Hash(i + float3(1, 0, 0)), f.x), lerp(Hash(i + float3(0, 1, 0)), Hash(i + float3(1, 1, 0)), f.x), f.y),
+            lerp(lerp(Hash(i + float3(0, 0, 1)), Hash(i + float3(1, 0, 1)), f.x), lerp(Hash(i + float3(0, 1, 1)), Hash(i + float3(1, 1, 1)), f.x), f.y), f.z);
+    }
+    float Known(float3 at, float4 box, float start, float finish)
+    {
+        float2 nearest = clamp(at.xy, box.xy, box.zw);
+        return 1.0 - smoothstep(start, finish, distance(at.xy, nearest));
+    }
+    float Cover(float known, float3 at, float softness, float edgeNoise, float lift, out float noise)
+    {
+        noise = Value(at) * 0.65 + Value(at * 2.7 + 5.3) * 0.35;
+        if (known > 0.995)
+        {
+            return 0.0;
+        }
+        return smoothstep(0.5 - softness, 0.5 + softness, 1.0 - known + (noise - 0.5) * min(edgeNoise, 0.7) - lift);
+    }
+};
+FShroud shroud;
+float3 scene = SceneColor.rgb;
+float3 cam = CameraPos;
+float3 toPixel = WorldPos - cam;
+float sceneDistance = length(toPixel);
+float3 dir = toPixel / max(sceneDistance, 1.0);
+// the sky, far away: the bank goes on to the horizon
+bool sky = sceneDistance > 60000.0;
+float viewEnd = sky ? 60000.0 : sceneDistance;
+float3 flow = float3(0.3, -0.5, 0.0) * Time * ShroudDrift;
+float churn = Time * ShroudChurn;
+float size = max(ShroudNoiseSize, 1.0);
+float noise = 0.5;
+float ground = 0.0;
+float groundShade = ShroudBaseShade;
+float3 face = cam + dir * viewEnd;
+if (!sky)
+{
+    float known = shroud.Known(WorldPos, FogBox, FogStart, FogEnd);
+    ground = shroud.Cover(known, WorldPos / size + flow + float3(0.0, 0.0, churn), ShroudSoftness, ShroudEdgeNoise, 0.0, noise);
+    groundShade = lerp(ShroudBaseShade, 1.0, saturate((WorldPos.z - GroundZ) / max(ShroudTop, 1.0))) * (1.0 + (noise - 0.5) * ShroudTone);
+}
+// the slab of the bank, from a little under the ground to ShroudTop over it
+float bottom = GroundZ - 40.0;
+float top = GroundZ + ShroudTop;
+float pass = 1.0;
+float light = 0.0;
+float enterT = 0.0;
+float exitT = viewEnd;
+if (abs(dir.z) > 1.0e-5)
+{
+    float t0 = (bottom - cam.z) / dir.z;
+    float t1 = (top - cam.z) / dir.z;
+    enterT = max(min(t0, t1), 0.0);
+    exitT = min(max(t0, t1), viewEnd);
+}
+else if (cam.z > top || cam.z < bottom)
+{
+    exitT = -1.0;
+}
+if (exitT > enterT)
+{
+    float step = (exitT - enterT) / STEPS.0;
+    face = cam + dir * (enterT + min(exitT - enterT, ShroudTop * 2.0) * 0.5);
+    float jitter = frac(shroud.Hash(dir * 4096.0) + View.StateFrameIndexMod8 * 0.618);
+    for (int index = 0; index < STEPS; index++)
+    {
+        float3 at = cam + dir * (enterT + (index + jitter) * step);
+        float up = saturate((at.z - GroundZ) / max(ShroudTop, 1.0));
+        float known = shroud.Known(at, FogBox, FogStart, FogEnd);
+        float cover = shroud.Cover(known, at / size + flow + float3(0.0, 0.0, churn), ShroudSoftness, ShroudEdgeNoise, up * ShroudTaper, noise);
+        float taken = 1.0 - exp(-cover * ShroudDensity * step);
+        light += pass * taken * lerp(ShroudBaseShade, 1.0, up) * (1.0 + (noise - 0.5) * ShroudTone);
+        pass *= 1.0 - taken;
+    }
+}
+// past the bank the sky is the bank seen from above
+if (sky && dir.z < 0.2)
+{
+    float far = shroud.Known(cam + dir * 20000.0, FogBox, FogStart, FogEnd) < 0.5 ? 1.0 : 0.0;
+    ground = max(ground, far);
+}
+light += pass * ground * groundShade;
+float total = 1.0 - pass * (1.0 - ground);
+float3 look = ShroudColor.rgb * (light / max(total, 1.0e-4));
+if (total > 0.01)
+{
+    float wispTime = Time * ShroudWispSpeed;
+    float3 wispAt = face / max(ShroudWispSize, 1.0);
+    float3 bend = float3(shroud.Value(wispAt * 0.6 + float3(wispTime, 0.0, 3.1)), shroud.Value(wispAt * 0.6 + float3(7.7, -wispTime, 0.0)),
+        shroud.Value(wispAt * 0.6 + float3(0.0, 13.3, wispTime))) - 0.5;
+    float ridge = 1.0 - abs(shroud.Value(wispAt + bend * 1.8 + float3(0.4, 0.2, -0.3) * wispTime) * 2.0 - 1.0);
+    float stir = smoothstep(0.4, 0.75, shroud.Value(wispAt * 0.3 - float3(0.2, 0.5, 0.1) * wispTime + 41.0));
+    ridge *= ridge * stir;
+    look *= 1.0 + ridge * ShroudWisp;
+    float3 place = face / max(ShroudPulseSize, 1.0);
+    float3 cell = floor(place);
+    float seed = shroud.Hash(cell + 0.5);
+    float3 heart = float3(shroud.Hash(cell + 11.5), shroud.Hash(cell + 23.5), shroud.Hash(cell + 37.5)) * 0.4 + 0.3;
+    float reach = saturate(1.0 - length(frac(place) - heart) * 3.2);
+    float beat = frac(Time * ShroudPulseRate * (0.6 + 0.8 * seed) + seed * 7.3);
+    float swell = smoothstep(0.0, 0.2, beat) * (1.0 - smoothstep(0.25, 0.75, beat));
+    look += ShroudPulseColor.rgb * (reach * reach * swell * ShroudPulse * (0.6 + ridge));
+}
+return lerp(scene, look * Shade, total);
+""".replace('STEPS', str(BATTLE_SHROUD_STEPS))
+BATTLE_SHROUD_PARAMETERS = ['ShroudColor', 'ShroudTop', 'ShroudDensity', 'ShroudTaper', 'ShroudBaseShade', 'ShroudTone', 'ShroudSoftness', 'ShroudEdgeNoise',
+    'ShroudNoiseSize', 'ShroudDrift', 'ShroudChurn', 'ShroudWisp', 'ShroudWispSize', 'ShroudWispSpeed', 'ShroudPulse', 'ShroudPulseSize', 'ShroudPulseRate',
+    'ShroudPulseColor']
+SHROUD = FOLDER + '/M_HexBattleShroud'
+
+
+def build_shroud():
+    material = open_material(SHROUD)
+    material.set_editor_property('material_domain', unreal.MaterialDomain.MD_POST_PROCESS)
+    material.set_editor_property('blendable_location', unreal.BlendableLocation.BL_SCENE_COLOR_BEFORE_DOF)
+    defaults = unreal.get_default_object(unreal.HexBattleConfig)
+    scene = library.create_material_expression(material, unreal.MaterialExpressionSceneTexture, -1000, 0)
+    scene.set_editor_property('scene_texture_id', unreal.SceneTextureId.PPI_POST_PROCESS_INPUT0)
+    inputs = [('SceneColor', scene, 'Color'), ('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1000, 100), ''),
+        ('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1000, 150), ''),
+        ('Time', library.create_material_expression(material, unreal.MaterialExpressionTime, -1000, 200), ''),
+        ('FogBox', vector4(material, 'FogBox', unreal.LinearColor(-1000.0, -1000.0, 1000.0, 1000.0), 250), ''),
+        ('GroundZ', scalar(material, 'GroundZ', 0.0, 300), ''),
+        ('Shade', scalar(material, 'Shade', 1.0, 320), ''),
+        ('FogStart', scalar(material, 'FogStart', defaults.get_editor_property('fog_start'), 350), ''),
+        ('FogEnd', scalar(material, 'FogEnd', defaults.get_editor_property('fog_end'), 400), '')]
+    y = 450
+    for name in BATTLE_SHROUD_PARAMETERS:
+        assert name in BATTLE_SHROUD_CODE, name
+        value = defaults.get_editor_property(''.join('_' + c.lower() if c.isupper() else c for c in name).lstrip('_'))
+        inputs.append((name, vector(material, name, value, y) if isinstance(value, unreal.LinearColor) else scalar(material, name, value, y), ''))
+        y += 50
+    node = custom(material, BATTLE_SHROUD_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, inputs, 0)
+    library.connect_material_property(node, '', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    library.recompile_material(material)
+    assets.save_asset(SHROUD)
 
 
 def build_fog():
@@ -617,14 +850,22 @@ def build_fog():
         ('FogPulseRate', scalar(material, 'FogPulseRate', defaults.get_editor_property('fog_pulse_rate'), 600), ''),
         ('FogPulseColor', vector(material, 'FogPulseColor', defaults.get_editor_property('fog_pulse_color'), 650), ''),
         ('FogLayer', scalar(material, 'FogLayer', 0.0, 700), ''),
-        ('FogLayerOpacity', scalar(material, 'FogLayerOpacity', 1.0, 750), '')]
+        ('FogLayerOpacity', scalar(material, 'FogLayerOpacity', 1.0, 750), ''),
+        ('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1000, 850), ''),
+        ('FogCameraClear', scalar(material, 'FogCameraClear', defaults.get_editor_property('fog_camera_clear'), 900), ''),
+        ('FogCameraFade', scalar(material, 'FogCameraFade', defaults.get_editor_property('fog_camera_fade'), 950), '')]
     node = custom(material, FOG_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT4, inputs, 0)
     library.connect_material_property(node, '', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
     alpha = library.create_material_expression(material, unreal.MaterialExpressionComponentMask, -400, 100)
     for channel, on in (('r', False), ('g', False), ('b', False), ('a', True)):
         alpha.set_editor_property(channel, on)
     library.connect_material_expressions(node, '', alpha, '')
-    library.connect_material_property(alpha, '', unreal.MaterialProperty.MP_OPACITY)
+    # it thins out where it nears what it lies on, the hills and the trees, as its plane cut them along a hard line, which the developer
+    # found ended the field abruptly on 2026-11-13 (FogSoftness)
+    soft = library.create_material_expression(material, unreal.MaterialExpressionDepthFade, -250, 150)
+    library.connect_material_expressions(scalar(material, 'FogSoftness', defaults.get_editor_property('fog_softness'), 800), '', soft, 'FadeDistance')
+    library.connect_material_expressions(alpha, '', soft, 'Opacity')
+    library.connect_material_property(soft, '', unreal.MaterialProperty.MP_OPACITY)
     library.recompile_material(material)
     assets.save_asset(FOG)
 
@@ -660,7 +901,7 @@ def build_config():
 if not assets.does_directory_exist(FOLDER):
     assets.make_directory(FOLDER)
 # with the argument water only the water of the moat is built, so the other materials are not saved again with the same graphs
-ONLY = [Each for Each in sys.argv[1:] if Each in ('water', 'ground', 'textures', 'prop', 'fog')]
+ONLY = [Each for Each in sys.argv[1:] if Each in ('water', 'ground', 'textures', 'prop', 'fog', 'unit', 'shroud')]
 if ONLY:
     if 'textures' in ONLY:
         import_textures()
@@ -672,6 +913,10 @@ if ONLY:
         build_prop()
     if 'fog' in ONLY:
         build_fog()
+    if 'unit' in ONLY:
+        build_unit()
+    if 'shroud' in ONLY:
+        build_shroud()
     unreal.log('BATTLE %s done' % ' '.join(ONLY))
 else:
     build_ground()
@@ -683,5 +928,6 @@ else:
     import_textures()
     build_prop()
     build_fog()
+    build_shroud()
     build_config()
     unreal.log('BATTLE assets done')

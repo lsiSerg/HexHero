@@ -36,6 +36,8 @@ enum class EHexCursor : uint8
 	BattleStrike,
 	BattleCast,
 	BattleBlocked,
+	/** A hero of its own the hero chosen is pointed to: a second click walks there and the two exchange their armies */
+	Exchange,
 	Num UMETA(Hidden)
 };
 
@@ -55,6 +57,8 @@ enum class EHexStatIcon : uint8
 	Kills,
 	Count,
 	Flies,
+	/** The button in the corner of a stack that upgrades it in a castle */
+	LevelUp,
 	Num UMETA(Hidden)
 };
 

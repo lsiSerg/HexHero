@@ -6,6 +6,7 @@
 #include "UObject/Object.h"
 #include "HexPlanetFile.h"
 #include "HexPlanetLayers.h"
+#include "HexCastleConfig.h"
 #include "HexSites.generated.h"
 
 class AHexPlanet;
@@ -26,8 +27,15 @@ struct FHexSite
 	EHexPlanetLayer Layer = EHexPlanetLayer::Surface;
 	int32 Cell = INDEX_NONE;
 
+	/** How it is turned from where it faces by itself, in degrees, set in the editor; the place of a hero at it turns with it */
+	int32 Yaw = 0;
+
 	/** The player who owns a mine in the game played, INDEX_NONE for nobody */
 	int32 Owner = INDEX_NONE;
+
+	/** The creatures its owner left to guard a mine or a mill, slot by slot, as the developer asked on 2026-11-13: a hero of another player
+	 *  fights them before it takes it (UHexBattles), and they show beside it (UHexSites) */
+	TArray<FHexStack> Guard;
 
 	/** A pile that was taken in the game played, and is not drawn */
 	bool bTaken = false;
@@ -108,10 +116,22 @@ public:
 
 	const UHexSiteConfig* GetConfig() const { return Config; }
 
+	/** What a pile holds in the game played, and the resource of a site, for the panel at the cursor */
+	int32 GetPileAmountOf(const FHexSite& Site) const { return GetPileAmount(Site); }
+	int32 GetResourceOf(const FHexSite& Site) const { return GetSiteResource(Site); }
+
 	const TArray<FHexSite>& GetSites() const { return Sites; }
 
 	/** Returns the site on a cell of a layer that is still there, or null */
 	const FHexSite* FindSiteAt(EHexPlanetLayer Layer, int32 Cell) const;
+
+	/** The site of an Id, to change its guard */
+	const FHexSite* FindSite(int32 Id) const;
+	FHexSite* FindSiteMutable(int32 Id);
+
+	/** Shows the guard a player left at a mine or a mill: a figure of its strongest stack beside the building, in the color of the owner, hidden
+	 *  under the fog of war of the person who plays, as the developer asked on 2026-11-13; every update of the heroes */
+	void UpdateGuards(const class UHexHeroes& Heroes);
 
 	/** Returns the mine or mill that fills a cell, which no hero enters, or the pile that lies on it, which the hero whose way ends there takes */
 	const FHexSite* FindBlockerAt(EHexPlanetLayer Layer, int32 Cell) const;
@@ -208,6 +228,18 @@ private:
 	TArray<FHexSitePopup> Popups;
 
 	TArray<FHexSite> Sites;
+
+	/** The figures of the guards, by the Id of their site, with what they were made for */
+	struct FGuardBody
+	{
+		TWeakObjectPtr<USceneComponent> Figure;
+		int32 Faction = INDEX_NONE;
+		int32 Creature = INDEX_NONE;
+		bool bUpgraded = false;
+		int32 Cell = INDEX_NONE;
+		bool bShown = true;
+	};
+	TMap<int32, FGuardBody> GuardBodies;
 
 	/** What each player has of each resource, by player and resource */
 	TArray<TArray<int32>> Amounts;

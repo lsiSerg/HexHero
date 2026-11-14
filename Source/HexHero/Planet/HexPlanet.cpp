@@ -7836,14 +7836,17 @@ void AHexPlanet::SetHoveredCell(int32 Cell, int32 BrushSize, TConstArrayView<int
 	const bool bNeighbors = BrushSize <= 0 && View.Mode != EHexWireframeMode::Off && View.Scope != EHexWireframeScope::Hover;
 
 	const bool bSameGroup = HoveredGroup.Num() == Group.Num() && (Group.IsEmpty() || FMemory::Memcmp(HoveredGroup.GetData(), Group.GetData(), Group.Num() * sizeof(int32)) == 0);
-	if (Cell == HoveredCell && BrushSize == HighlightBrushSize && bNeighbors == bHighlightNeighbors && bPlay == bHoverPlay && bSameGroup)
+	if (Cell == HoveredCell && BrushSize == HighlightBrushSize && bNeighbors == bHighlightNeighbors && bPlay == bHoverPlay && bSameGroup && !bMarksStale)
 	{
 		return;
 	}
+	bMarksStale = false;
 
 	HoveredCell = Cell;
 	HighlightBrushSize = BrushSize;
 	bHighlightNeighbors = bNeighbors;
+	// Group may be a view of HoveredGroup itself (SetTargetCells), whose memory this assignment frees, so only HoveredGroup is read after it:
+	// reading Group crashed with a cell index out of bounds when the target of a way changed while the cursor was on a castle
 	HoveredGroup = TArray<int32>(Group);
 	bHoverPlay = bPlay;
 
@@ -7863,6 +7866,10 @@ void AHexPlanet::SetHoveredCell(int32 Cell, int32 BrushSize, TConstArrayView<int
 
 		for (const int32 Inside : Set)
 		{
+			if (!Cells.IsValidIndex(Inside))
+			{
+				continue;
+			}
 			for (int32 Side = 0; Side < Cells[Inside].Neighbors.Num(); ++Side)
 			{
 				const int32 Outside = Cells[Inside].Neighbors[Side];
@@ -7874,6 +7881,12 @@ void AHexPlanet::SetHoveredCell(int32 Cell, int32 BrushSize, TConstArrayView<int
 			}
 		}
 	};
+	// the end of the way shown, in the second layer, unless the wireframe outlines the neighbors there
+	const bool bTarget = !bNeighbors && !TargetGroup.IsEmpty();
+	if (bTarget)
+	{
+		MarkEdge(TargetGroup, false);
+	}
 	if (Cells.IsValidIndex(Cell) && BrushSize > 0)
 	{
 		// the cells of the brush, its rings found through the neighbors
@@ -7904,9 +7917,9 @@ void AHexPlanet::SetHoveredCell(int32 Cell, int32 BrushSize, TConstArrayView<int
 			}
 		}
 		// a group of cells is outlined as one, as the three cells of a castle
-		if (!Group.IsEmpty() && Group.Contains(Cell))
+		if (!HoveredGroup.IsEmpty() && HoveredGroup.Contains(Cell))
 		{
-			MarkEdge(Group, true);
+			MarkEdge(HoveredGroup, true);
 		}
 		else
 		{
@@ -7922,12 +7935,38 @@ void AHexPlanet::SetHoveredCell(int32 Cell, int32 BrushSize, TConstArrayView<int
 		if (Instance)
 		{
 			Instance->SetVectorParameterValue(TEXT("MarkPrimaryColor"), PrimaryColor);
+			Instance->SetVectorParameterValue(TEXT("NeighborOutlineColor"), bTarget ? TargetColor : Settings->NeighborOutlineColor);
+			Instance->SetScalarParameterValue(TEXT("SecondaryMarkScale"), bTarget ? TargetWidthScale : Settings->SecondaryMarkScale);
+			Instance->SetScalarParameterValue(TEXT("SecondaryMarkOpacity"), bTarget ? TargetOpacity : Settings->SecondaryMarkOpacity);
 			Instance->SetScalarParameterValue(TEXT("MarkWidth"), bPlayStyle ? Settings->PlayMarkWidth : Settings->MarkWidth);
 			Instance->SetScalarParameterValue(TEXT("MarkMinPixels"), bPlayStyle ? Settings->PlayMarkMinPixels : Settings->MarkMinPixels);
 			Instance->SetScalarParameterValue(TEXT("MarkOpacity"), bPlayStyle ? Settings->PlayMarkOpacity : Settings->MarkOpacity);
 		}
 	}
 	SetCellMarks(Marks);
+}
+
+void AHexPlanet::SetTargetCells(TConstArrayView<int32> InCells, const FLinearColor& Color, float WidthScale, float Opacity)
+{
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+	TArray<int32> Kept;
+	for (const int32 Cell : InCells)
+	{
+		if (Cells.IsValidIndex(Cell))
+		{
+			Kept.AddUnique(Cell);
+		}
+	}
+	if (Kept == TargetGroup && (Kept.IsEmpty() || (Color == TargetColor && WidthScale == TargetWidthScale && Opacity == TargetOpacity)))
+	{
+		return;
+	}
+	TargetGroup = MoveTemp(Kept);
+	TargetColor = Color;
+	TargetWidthScale = WidthScale;
+	TargetOpacity = Opacity;
+	bMarksStale = true;
+	SetHoveredCell(HoveredCell, HighlightBrushSize, HoveredGroup, bHoverPlay);
 }
 
 UMaterialInstanceDynamic* AHexPlanet::GetPreviewMaterial()

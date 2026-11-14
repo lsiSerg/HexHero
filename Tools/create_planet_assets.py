@@ -560,10 +560,16 @@ if (any(markBits > 0u) || holeBits > 0u || reachBits > 0u)
     float towardsOther = dot(LocalUV, float2(cos(other * sideTurn), sin(other * sideTurn))) / cos(3.14159265 / sides);
     float miter = saturate((towardsOther - (1.0 - markWidth)) / pixel);
     float primary = max((float)((markBits.r >> side) & 1u), (float)((markBits.r >> other) & 1u) * miter);
-    float secondary = max((float)((markBits.g >> side) & 1u), (float)((markBits.g >> other) & 1u) * miter);
     float hole = max((float)((holeBits >> side) & 1u), (float)((holeBits >> other) & 1u) * miter);
-    markLine = band * max(max(primary, secondary), hole) * MarkOpacity;
-    markColor = primary > 0.0 ? MarkPrimaryColor.rgb : secondary > 0.0 ? NeighborOutlineColor.rgb : WaterHideOutlineColor.rgb;
+    // the second layer at a width and opacity of its own, the end of a way wider and solid (SecondaryMarkScale, SecondaryMarkOpacity)
+    float secondWidth = markWidth * SecondaryMarkScale;
+    float secondBand = saturate((U - (1.0 - secondWidth)) / pixel);
+    float secondMiter = saturate((towardsOther - (1.0 - secondWidth)) / pixel);
+    float secondary = max((float)((markBits.g >> side) & 1u), (float)((markBits.g >> other) & 1u) * secondMiter);
+    float firstLine = band * max(primary, hole) * MarkOpacity;
+    float secondLine = secondBand * secondary * SecondaryMarkOpacity;
+    markLine = max(firstLine, secondLine);
+    markColor = primary > 0.0 && firstLine >= secondLine ? MarkPrimaryColor.rgb : secondary > 0.0 ? NeighborOutlineColor.rgb : primary > 0.0 ? MarkPrimaryColor.rgb : WaterHideOutlineColor.rgb;
     float reachSide = (float)((reachBits >> side) & 1u);
     float reachOther = (float)((reachBits >> other) & 1u);
     float reachWidth = max(ReachLineWidth, pixel * ReachLineMinPixels);
@@ -1763,7 +1769,7 @@ NOISE = '/Game/HexMap/Textures/T_HexNoise'
 DEFAULT_CUBE = '/Engine/EngineResources/GrayTextureCube'
 # AHexPlanet gives the materials its CellMarks, read with Load, so the default only has to be a 2D texture
 DEFAULT_MARKS = '/Engine/EngineResources/Black'
-MARK_PARAMETERS = ['NeighborOutlineColor', 'WaterHideOutlineColor', 'MarkWidth', 'MarkMinPixels', 'MarkGlow', 'MarkOpacity',
+MARK_PARAMETERS = ['NeighborOutlineColor', 'WaterHideOutlineColor', 'MarkWidth', 'MarkMinPixels', 'MarkGlow', 'MarkOpacity', 'SecondaryMarkScale', 'SecondaryMarkOpacity',
     'ReachLineColor', 'ReachLineWidth', 'ReachLineMinPixels', 'ReachLineOpacity', 'ReachLineGlow', 'ReachGlowWidth', 'ReachGlowOpacity',
     'ReachOutsideColor', 'ReachOutsideShade', 'ReachInsideColor', 'ReachInsideTint']
 WATER_MATERIAL = FOLDER + '/M_HexPlanetWater'
@@ -2814,8 +2820,11 @@ float siegeKeep = noise < 1.0 - siegeFade * (1.0 - SiegeFadeKeep) ? 1.0 : 0.0;
 siegeKeep = 1.0;
 #endif
 """
+# an instance whose EventTime is below -1500 shows no cloth (its V 7 and more), as the towers beside the gate of a siege, whose flags crossed
+# the way in (2026-11-13)
 CASTLE_MASK_CODE = SITE_MASK_CODE.replace('return lerp(solid, noise < SparkleOpacity ? 1.0 : 0.0, spark);',
-    CASTLE_FADE_CODE + 'return lerp(solid, noise < SparkleOpacity ? 1.0 : 0.0, spark) * siegeKeep;')
+    CASTLE_FADE_CODE + 'float cloth = EventTime < -1500.0 && UV.y >= 6.9 ? 0.0 : 1.0;\n'
+    + 'return lerp(solid, noise < SparkleOpacity ? 1.0 : 0.0, spark) * siegeKeep * cloth;')
 assert CASTLE_MASK_CODE != SITE_MASK_CODE
 # A sparkle is a small star drawn tiny in its mesh, with where each corner lies in it as its UV: it grows to SparkleSize around its middle,
 # facing the camera, as it twinkles, each at its own time (the red of its vertices and a number of its instance) and pace (their green), for

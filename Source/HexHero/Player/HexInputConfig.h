@@ -154,6 +154,10 @@ public:
 	UPROPERTY(EditAnywhere, Category="Input|Heroes")
 	TObjectPtr<UInputAction> SkipHeroAction;
 
+	/** A cheat of a battle: what is under the cursor, a unit, a part of the wall or the catapult, takes damage (K) */
+	UPROPERTY(EditAnywhere, Category="Input|Battle")
+	TObjectPtr<UInputAction> BattleHitAction;
+
 	/**
 	 *  Returns the keys of one action from the mapping context as the legend shows them, or nothing if it has none.
 	 *  A key chorded with another action comes after the key of that action, as in Shift+F

@@ -431,6 +431,38 @@ TSoftObjectPtr<UAnimSequence> ChosenAnimation = TSoftObjectPtr<UAnimSequence>(FS
 	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=0, ClampMax=1))
 	float PathLineOpacity = 0.6f;
 
+	/** The outline of what a way ends at (AHexPlanet::SetTargetCells): a foe in PathTargetColor, saturated as the developer asked on 2026-11-13
+	 *  so the white edge of where the hero gets today does not cover it, a hero or castle of its own in PathColor, PathTargetWidthScale times
+	 *  as wide as the outline of the cursor while the game is played and covering PathTargetOpacity of the ground */
+	UPROPERTY(EditAnywhere, Category="Look|Marks")
+	FLinearColor PathTargetColor = FLinearColor(1.0f, 0.02f, 0.01f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=0.1, ClampMax=4))
+	float PathTargetWidthScale = 2.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=0, ClampMax=1))
+	float PathTargetOpacity = 1.0f;
+
+	/** The panel at the cursor while the game is played (UHexHeroes::GetMapTip): whether the creatures of another player and the neutral stacks
+	 *  show their numbers, which a skill of scouting will give one day, else a range of them ("10-19"), as the developer asked on 2026-11-13 */
+	UPROPERTY(EditAnywhere, Category="Look|Tips")
+	bool bTipExactCounts = false;
+
+	/** A rough forecast of a battle there, by the power of the army of the hero chosen against what is there (Claude's): above ForecastEasy
+	 *  times as strong an easy victory, above ForecastLikely a likely one, above ForecastEven an even fight, above ForecastHard a hard one,
+	 *  else deadly; rough on purpose, as the developer asked to leave a battle its surprises */
+	UPROPERTY(EditAnywhere, Category="Look|Tips", meta=(ClampMin=0))
+	float ForecastEasy = 2.5f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Tips", meta=(ClampMin=0))
+	float ForecastLikely = 1.4f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Tips", meta=(ClampMin=0))
+	float ForecastEven = 0.8f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Tips", meta=(ClampMin=0))
+	float ForecastHard = 0.5f;
+
 	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=0, ClampMax=1))
 	float PathMarkOpacity = 0.85f;
 

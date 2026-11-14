@@ -1,0 +1,18 @@
+{
+  "comment": "Photo-scanned obstacles of the field of a battle, CC0, from Poly Haven (https://polyhaven.com/license), as the developer asked on 2026-11-13 for obstacles that are real and textured and light. fetch_battle_models.ps1 downloads each as glTF with its textures at the resolution below to Saved/ModelSources/battle/<id>, blender_build_obstacles.py reduces it to about the triangles of its line and writes Saved/BattleObstacles/<Name>.glb, and import_battle_obstacles.py imports it to /Game/HexPlanet/Battle/Obstacles. The ground is where it stands: open (grass and the like), rocky (the letters of RockyGroundLetters, sand) or cave (the underground).",
+  "resolution": "1k",
+  "models": [
+    {"name": "Boulder", "id": "boulder_01", "triangles": 2400, "grounds": ["open", "cave"]},
+    {"name": "RockSlab", "id": "rock_07", "triangles": 1800, "grounds": ["open", "rocky"]},
+    {"name": "RockLump", "id": "rock_09", "triangles": 1800, "grounds": ["open", "rocky", "cave"]},
+    {"name": "StoneBlock", "id": "stone_01", "triangles": 2000, "grounds": ["open", "cave"]},
+    {"name": "GraniteBoulder", "id": "namaqualand_boulder_04", "triangles": 2400, "grounds": ["open", "rocky"]},
+    {"name": "GraniteMound", "id": "namaqualand_boulder_06", "triangles": 2400, "grounds": ["open", "rocky"]},
+    {"name": "DesertBoulder", "id": "namaqualand_boulder_03", "triangles": 2400, "grounds": ["rocky"]},
+    {"name": "DesertBoulderTall", "id": "namaqualand_boulder_05", "triangles": 2400, "grounds": ["rocky"]},
+    {"name": "DesertBoulders", "id": "namaqualand_boulders_01", "triangles": 3000, "grounds": ["rocky"]},
+    {"name": "CaveRock", "id": "moon_rock_02", "triangles": 1800, "grounds": ["cave"]},
+    {"name": "CaveRockTall", "id": "moon_rock_05", "triangles": 2000, "grounds": ["cave"]},
+    {"name": "CaveRockBroad", "id": "moon_rock_07", "triangles": 2000, "grounds": ["cave"]}
+  ]
+}

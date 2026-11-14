@@ -77,6 +77,7 @@ TArray<FHexNeutralLine> UHexNeutrals::MakeLines() const
 		Line.Count = Neutral.Stack.Count;
 		Line.Layer = GetPlanetLayerName(Neutral.Layer);
 		Line.Cell = Neutral.Cell;
+		Line.Yaw = Neutral.Yaw;
 	}
 	return Lines;
 }
@@ -105,6 +106,7 @@ void UHexNeutrals::SetLines(const TArray<FHexNeutralLine>& Lines)
 			continue;
 		}
 		Neutral.Stack = FHexStack{Faction, Creature, Line.Upgraded, Line.Count};
+		Neutral.Yaw = Line.Yaw;
 		Neutrals.Add(Neutral);
 		NextId = FMath::Max(NextId, Line.Id + 1);
 	}
@@ -132,6 +134,11 @@ bool UHexNeutrals::Save(const FString& PlanetFolder, FString& OutError)
 		Text += FString::Printf(TEXT("%s\n\t\t{\"id\": %d, \"faction\": \"%s\", \"creature\": \"%s\", \"upgraded\": %s, \"count\": %d, \"layer\": \"%s\", \"cell\": %d}"),
 			Index == 0 ? TEXT("") : TEXT(","), Line.Id, *EscapeText(Line.Faction), *EscapeText(Line.Creature), Line.Upgraded ? TEXT("true") : TEXT("false"), Line.Count,
 			*EscapeText(Line.Layer), Line.Cell);
+		if (Line.Yaw != 0)
+		{
+			Text.LeftChopInline(1);
+			Text += FString::Printf(TEXT(", \"yaw\": %d}"), Line.Yaw);
+		}
 	}
 	Text += TEXT("\n\t]\n}\n");
 	if (!FFileHelper::SaveStringToFile(Text, *FilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
@@ -350,11 +357,12 @@ void UHexNeutrals::PlaceBody(const FHexNeutral& Neutral)
 		const FVector3d Direction = (Up * Planet->GetRadius() + Along).GetSafeNormal();
 		const double Ground = Planet->FindGroundRadius(Neutral.Cell, Direction);
 		const FVector3d Point = Direction * (Ground + Hover);
-		const FQuat Turn = FRotator(0.0, Yaw + float((Neutral.Id * 37 + Index * 53) % 40) - 20.0f, 0.0).Quaternion();
+		const FQuat Turn = FRotator(0.0, Yaw + float(Neutral.Yaw) + float((Neutral.Id * 37 + Index * 53) % 40) - 20.0f, 0.0).Quaternion();
 		Figure->SetWorldTransform(FTransform(FRotationMatrix::MakeFromZX(FVector(Up), FVector(South)).ToQuat() * Turn, FVector(Point), FVector(Scale)));
 		Figure->RegisterComponent();
 		HexUnitFigure::Play(Figure, Config, Castles->Factions[Neutral.Stack.Faction].Creatures[Neutral.Stack.Creature].Id, EHexFigureAction::Idle,
 			0.85f + 0.1f * float(Index));
+		HexUnitFigure::Settle(Figure);
 		Body.Figures.Add(Figure);
 	}
 }

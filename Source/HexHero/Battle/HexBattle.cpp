@@ -31,9 +31,26 @@ namespace
 	}
 }
 
-bool FHexBattle::IsOnField(const FHexCoord& Hex) const
+bool FHexBattle::IsInGrid(const FHexCoord& Hex) const
 {
 	return Hex.GetRow() >= 0 && Hex.GetRow() < Rows && Hex.GetColumn() >= 0 && Hex.GetColumn() < Columns;
+}
+
+bool FHexBattle::IsOnField(const FHexCoord& Hex) const
+{
+	return IsInGrid(Hex) || Homes.Contains(Hex);
+}
+
+FHexCoord FHexBattle::GetMachineHex(int32 Side) const
+{
+	// behind the first column of a side: the attacker at the bottom left, an odd row, so three hexes of the field touch it, and the defender
+	// at the bottom right behind the stack of its last row, as the developer asked on 2026-11-14 (at the top right before)
+	return Side == 0 ? FHexCoord::FromOffset(-1, Rows - 2) : FHexCoord::FromOffset(Columns, Rows - 1);
+}
+
+bool FHexBattle::IsMachineHex(const FHexCoord& Hex) const
+{
+	return Units.ContainsByPredicate([&Hex](const FHexBattleUnit& Each) { return Each.IsMachine() && Each.IsAlive() && Each.Hex == Hex; });
 }
 
 int32 FHexBattle::FindUnitAt(const FHexCoord& Hex) const
@@ -72,6 +89,7 @@ void FHexBattle::Start(const FHexBattleSetup& InSetup, const UHexCastleConfig* I
 	Units.Reset();
 	Events.Reset();
 	Obstacles.Reset();
+	Homes.Reset();
 	PassiveSide = INDEX_NONE;
 	Moat.Reset();
 	Walls.Reset();
@@ -133,14 +151,22 @@ void FHexBattle::Start(const FHexBattleSetup& InSetup, const UHexCastleConfig* I
 			Unit.ShotsLeft = Unit.bShoots ? FMath::Max(Stats->Shots, 1) : 0;
 			Unit.Morale = Unit.Has(EHexAbility::Undead) ? 0 : FMath::Clamp(ArmyMorale + Stats->Morale, -3, 3);
 			Unit.Luck = FMath::Clamp(Stats->Luck, -3, 3);
-			const bool bSecond = Placing >= PerColumn;
-			const int32 Row = bSecond ? MoreRows[Placing - PerColumn] : StartRows[Placing];
+			bool bSecond = Placing >= PerColumn;
+			int32 Row = bSecond ? MoreRows[Placing - PerColumn] : StartRows[Placing];
+			// each slot on its own row, the second seven in the column before
+			if (Each.bBySlots && Config && !Config->ArmySlotRows.IsEmpty() && Slot < NumArmySlots * 2)
+			{
+				bSecond = Slot >= NumArmySlots;
+				const TArray<int32>& SlotRows = Config->ArmySlotRows;
+				const int32 Base = SlotRows[FMath::Min(Slot % NumArmySlots, SlotRows.Num() - 1)];
+				Row = FMath::Clamp(FMath::RoundToInt32(double(Base) * double(Rows - 1) / 10.0), 0, Rows - 1);
+			}
 			const int32 Column = Side == 0 ? (bSecond ? 1 : 0) : (bSecond ? Columns - 2 : Columns - 1);
 			Unit.Hex = FHexCoord::FromOffset(Column, Row);
 			++Placing;
 		}
 	}
-	if (Setup.Siege.bWalls || Setup.Siege.bCatapult)
+	if (Setup.Siege.bWalls || Setup.Siege.bCatapult || Setup.Siege.bDefenderCatapult)
 	{
 		PlaceSiege();
 	}
@@ -203,19 +229,13 @@ void FHexBattle::PlaceSiege()
 			}
 		}
 	}
+	Homes.Reset();
 	if (Siege.bCatapult)
 	{
-		// in a corner behind the attacker, on the first free hex of the first two columns from the bottom
-		FHexCoord Place = FHexCoord::FromOffset(0, Rows - 1);
-		for (int32 Each = 0; Each < Rows * 2; ++Each)
-		{
-			const FHexCoord Hex = FHexCoord::FromOffset(Each / Rows, Rows - 1 - Each % Rows);
-			if (FindUnitAt(Hex) == INDEX_NONE)
-			{
-				Place = Hex;
-				break;
-			}
-		}
+		Homes.Add(GetMachineHex(0));
+		// on a hex of its own behind the attacker and to its right, off the field, which three hexes of the first column touch, so stacks
+		// come to strike it there, as the developer asked on 2026-11-13 (it took the first free hex of the field in a corner before)
+		const FHexCoord Place = GetMachineHex(0);
 		FHexBattleUnit& Unit = Units.AddDefaulted_GetRef();
 		Unit.Side = 0;
 		Unit.Slot = INDEX_NONE;
@@ -223,13 +243,39 @@ void FHexBattle::PlaceSiege()
 		Unit.Stats.DisplayName = TEXT("Catapult");
 		Unit.Stats.Health = Config ? Config->CatapultHealth : 400;
 		Unit.Stats.Speed = Config ? Config->CatapultSpeed : 6;
-		Unit.Stats.DamageMin = Config ? Config->CatapultDamageMin : 60;
-		Unit.Stats.DamageMax = Config ? Config->CatapultDamageMax : 110;
+		Unit.Stats.Attack = Config ? Config->CatapultAttack : 10;
+		Unit.Stats.DamageMin = Config ? Config->CatapultStoneMin : 60;
+		Unit.Stats.DamageMax = Config ? Config->CatapultStoneMax : 120;
 		Unit.Count = Unit.StartCount = 1;
 		Unit.TopHealth = Unit.Stats.Health;
 		Unit.bCatapult = true;
+		// it throws stones at the stacks of the other side too, as the developer asked on 2026-11-14
+		Unit.bShoots = true;
+		Unit.ShotsLeft = 999;
 		Unit.RetaliationsLeft = 0;
 		Unit.Hex = Place;
+	}
+	if (Siege.bDefenderCatapult)
+	{
+		Homes.Add(GetMachineHex(1));
+		// the catapult of the garrison, in the yard behind the wall, throwing stones at the stacks of the attacker
+		FHexBattleUnit& Unit = Units.AddDefaulted_GetRef();
+		Unit.Side = 1;
+		Unit.Slot = INDEX_NONE;
+		Unit.CreatureId = TEXT("Catapult");
+		Unit.Stats.DisplayName = TEXT("Catapult");
+		Unit.Stats.Health = Config ? Config->CatapultHealth : 400;
+		Unit.Stats.Speed = Config ? Config->CatapultSpeed : 6;
+		Unit.Stats.Attack = Config ? Config->CatapultAttack : 10;
+		Unit.Stats.DamageMin = Config ? Config->CatapultStoneMin : 60;
+		Unit.Stats.DamageMax = Config ? Config->CatapultStoneMax : 120;
+		Unit.Count = Unit.StartCount = 1;
+		Unit.TopHealth = Unit.Stats.Health;
+		Unit.bCatapult = true;
+		Unit.bShoots = true;
+		Unit.ShotsLeft = 999;
+		Unit.RetaliationsLeft = 0;
+		Unit.Hex = GetMachineHex(1);
 	}
 }
 
@@ -281,18 +327,55 @@ bool FHexBattle::CanStrikeWall(int32 UnitIndex, const FHexCoord& WallHex, const 
 	return Steps.Contains(From);
 }
 
-void FHexBattle::PreviewWallStrike(int32 UnitIndex, int32& OutMin, int32& OutMax) const
+void FHexBattle::GetWallStrikeTurns(int32 UnitIndex, double& OutMin, double& OutMax) const
 {
-	OutMin = OutMax = 0;
+	OutMin = OutMax = 1.0;
 	if (!Units.IsValidIndex(UnitIndex))
 	{
 		return;
 	}
+	if (Units[UnitIndex].bCatapult)
+	{
+		OutMin = FMath::Max(double(Config ? Config->CatapultShotsMin : 1.4f), 1.0);
+		OutMax = FMath::Max(double(Config ? Config->CatapultShotsMax : 2.0f), OutMin);
+		return;
+	}
+	// how strong the stack is against the strongest of its side that stands, by the power of its creatures times their count
+	const auto Power = [](const FHexBattleUnit& Each) { return double(Each.Stats.GetPower()) * FMath::Max(Each.Count, 0); };
 	const FHexBattleUnit& Unit = Units[UnitIndex];
-	const float Share = Config ? Config->WallStrikeShare : 0.35f;
-	const int32 Strikes = Unit.Has(EHexAbility::DoubleStrike) ? 2 : 1;
-	OutMin = FMath::Max(FMath::FloorToInt32(Unit.Stats.DamageMin * Unit.Count * Share), 1) * Strikes;
-	OutMax = FMath::Max(FMath::FloorToInt32(Unit.Stats.DamageMax * Unit.Count * Share), 1) * Strikes;
+	double Strongest = 0.0;
+	for (const FHexBattleUnit& Each : Units)
+	{
+		if (Each.Side == Unit.Side && Each.IsAlive() && !Each.IsMachine())
+		{
+			Strongest = FMath::Max(Strongest, Power(Each));
+		}
+	}
+	const double Share = Strongest > 0.0 ? Power(Unit) / Strongest : 1.0;
+	const double Weak = Config ? Config->WallStrikeWeakShare : 0.25;
+	const double Weakness = FMath::Clamp((1.0 - Share) / FMath::Max(1.0 - Weak, 0.01), 0.0, 1.0);
+	OutMin = FMath::Max(FMath::Lerp(double(Config ? Config->WallStrikeStrongMin : 3.0f), double(Config ? Config->WallStrikeWeakMin : 5.0f), Weakness), 1.0);
+	OutMax = FMath::Max(FMath::Lerp(double(Config ? Config->WallStrikeStrongMax : 4.0f), double(Config ? Config->WallStrikeWeakMax : 6.0f), Weakness), OutMin);
+}
+
+void FHexBattle::GetWallStrikeRange(int32 UnitIndex, int32 MaxHealth, int32& OutMin, int32& OutMax) const
+{
+	double Fewest = 1.0;
+	double Most = 1.0;
+	GetWallStrikeTurns(UnitIndex, Fewest, Most);
+	OutMin = FMath::Max(FMath::CeilToInt32(double(MaxHealth) / Most), 1);
+	OutMax = FMath::Max(FMath::CeilToInt32(double(MaxHealth) / Fewest), OutMin);
+}
+
+void FHexBattle::PreviewWallStrike(int32 UnitIndex, int32& OutMin, int32& OutMax, const FHexCoord& WallHex) const
+{
+	OutMin = OutMax = 0;
+	const FHexBattleWall* Wall = FindWall(WallHex);
+	if (!Units.IsValidIndex(UnitIndex) || !Wall)
+	{
+		return;
+	}
+	GetWallStrikeRange(UnitIndex, Wall->MaxHealth, OutMin, OutMax);
 }
 
 void FHexBattle::DamageWall(int32 Attacker, int32 WallIndex, int32 Damage)
@@ -323,6 +406,67 @@ void FHexBattle::DamageWall(int32 Attacker, int32 WallIndex, int32 Damage)
 	}
 }
 
+bool FHexBattle::BreakWall(const FHexCoord& Hex)
+{
+	const int32 WallIndex = Walls.IndexOfByPredicate([&Hex](const FHexBattleWall& Each) { return Each.Hex == Hex && Each.IsStanding(); });
+	if (WallIndex == INDEX_NONE)
+	{
+		return false;
+	}
+	DamageWall(INDEX_NONE, WallIndex, Walls[WallIndex].Health);
+	return true;
+}
+
+bool FHexBattle::DamageWallTo(const FHexCoord& Hex, float Share)
+{
+	const int32 WallIndex = Walls.IndexOfByPredicate([&Hex](const FHexBattleWall& Each) { return Each.Hex == Hex && Each.IsStanding(); });
+	if (WallIndex == INDEX_NONE)
+	{
+		return false;
+	}
+	const int32 Left = FMath::Clamp(FMath::RoundToInt32(Walls[WallIndex].MaxHealth * Share), 1, Walls[WallIndex].Health);
+	if (Left < Walls[WallIndex].Health)
+	{
+		DamageWall(INDEX_NONE, WallIndex, Walls[WallIndex].Health - Left);
+	}
+	return true;
+}
+
+bool FHexBattle::CheatHit(const FHexCoord& Hex, float Share)
+{
+	if (IsOver())
+	{
+		return false;
+	}
+	const int32 Target = Units.IndexOfByPredicate([&Hex](const FHexBattleUnit& Each) { return Each.Hex == Hex && Each.IsAlive() && !Each.bTower; });
+	if (Target != INDEX_NONE)
+	{
+		const FHexBattleUnit& Unit = Units[Target];
+		const int32 Full = FMath::Max(Unit.StartCount, 1) * FMath::Max(Unit.Stats.Health, 1);
+		DealDamage(INDEX_NONE, Target, FMath::Max(FMath::CeilToInt32(Full * Share), 1));
+		if (!Units.IsValidIndex(Active) || !Units[Active].IsAlive())
+		{
+			EndTurn();
+		}
+		else
+		{
+			CheckEnd();
+		}
+		return true;
+	}
+	const int32 WallIndex = Walls.IndexOfByPredicate([&Hex](const FHexBattleWall& Each) { return Each.Hex == Hex && Each.IsStanding(); });
+	if (WallIndex == INDEX_NONE)
+	{
+		return false;
+	}
+	DamageWall(INDEX_NONE, WallIndex, FMath::Max(FMath::CeilToInt32(Walls[WallIndex].MaxHealth * Share), 1));
+	if (!Units.IsValidIndex(Active) || !Units[Active].IsAlive())
+	{
+		EndTurn();
+	}
+	return true;
+}
+
 bool FHexBattle::StrikeWall(const FHexCoord& WallHex, const FHexCoord& From)
 {
 	if (!CanStrikeWall(Active, WallHex, From))
@@ -332,19 +476,18 @@ bool FHexBattle::StrikeWall(const FHexCoord& WallHex, const FHexCoord& From)
 	const int32 Attacker = Active;
 	DoMove(From);
 	const int32 WallIndex = Walls.IndexOfByPredicate([&WallHex](const FHexBattleWall& Each) { return Each.Hex == WallHex; });
+	// what it deals in a turn is set by how strong it is against the strongest stack of its side, a part of the wall falling in three to
+	// four turns to the strongest and five to six to a weak one
 	const int32 Strikes = Units[Attacker].Has(EHexAbility::DoubleStrike) ? 2 : 1;
+	double Fewest = 1.0;
+	double Most = 1.0;
+	GetWallStrikeTurns(Attacker, Fewest, Most);
+	const int32 PerTurn = FMath::Max(FMath::CeilToInt32(double(Walls[WallIndex].MaxHealth) / Random.FRandRange(Fewest, Most)), 1);
 	for (int32 Strike = 0; Strike < Strikes && Walls[WallIndex].IsStanding(); ++Strike)
 	{
-		const FHexBattleUnit& Unit = Units[Attacker];
 		AddEvent(FHexBattleEvent::EType::Strike, Attacker);
 		Events.Last().Hex = WallHex;
-		const int32 Rolls = FMath::Clamp(Unit.Count, 1, 10);
-		double Sum = 0.0;
-		for (int32 Roll = 0; Roll < Rolls; ++Roll)
-		{
-			Sum += Random.RandRange(Unit.Stats.DamageMin, Unit.Stats.DamageMax);
-		}
-		DamageWall(Attacker, WallIndex, FMath::Max(FMath::FloorToInt32(Sum * Unit.Count / Rolls * (Config ? Config->WallStrikeShare : 0.35f)), 1));
+		DamageWall(Attacker, WallIndex, FMath::Max((PerTurn + Strike) / Strikes, 1));
 	}
 	EndTurn();
 	return true;
@@ -353,7 +496,7 @@ bool FHexBattle::StrikeWall(const FHexCoord& WallHex, const FHexCoord& From)
 bool FHexBattle::CanFireCatapult(const FHexCoord& WallHex) const
 {
 	const FHexBattleWall* Wall = FindWall(WallHex);
-	return !IsOver() && Units.IsValidIndex(Active) && Units[Active].bCatapult && Wall && Wall->IsStanding();
+	return !IsOver() && Units.IsValidIndex(Active) && Units[Active].bCatapult && Units[Active].Side == 0 && Wall && Wall->IsStanding();
 }
 
 bool FHexBattle::FireCatapult(const FHexCoord& WallHex)
@@ -363,13 +506,17 @@ bool FHexBattle::FireCatapult(const FHexCoord& WallHex)
 		return false;
 	}
 	const int32 Catapult = Active;
-	const bool bHit = Random.FRand() < (Config ? Config->CatapultHitChance : 0.8f);
-	const int32 Damage = bHit ? Random.RandRange(Units[Catapult].Stats.DamageMin, Units[Catapult].Stats.DamageMax) : 0;
+	const bool bHit = Random.FRand() < (Config ? Config->CatapultHitChance : 1.0f);
+	const int32 WallIndex = Walls.IndexOfByPredicate([&WallHex](const FHexBattleWall& Each) { return Each.Hex == WallHex; });
+	double Fewest = 1.0;
+	double Most = 1.0;
+	GetWallStrikeTurns(Catapult, Fewest, Most);
+	const int32 Damage = bHit && Walls.IsValidIndex(WallIndex) ? FMath::Max(FMath::CeilToInt32(double(Walls[WallIndex].MaxHealth) / Random.FRandRange(Fewest, Most)), 1) : 0;
 	AddEvent(FHexBattleEvent::EType::CatapultShot, Catapult, INDEX_NONE, Damage);
 	Events.Last().Hex = WallHex;
 	if (bHit)
 	{
-		DamageWall(Catapult, Walls.IndexOfByPredicate([&WallHex](const FHexBattleWall& Each) { return Each.Hex == WallHex; }), Damage);
+		DamageWall(Catapult, WallIndex, Damage);
 	}
 	EndTurn();
 	return true;
@@ -712,7 +859,7 @@ void FHexBattle::EndTurn()
 	BeginTurn(Order[0]);
 }
 
-void FHexBattle::FindReach(int32 UnitIndex, TMap<FHexCoord, int32>& OutSteps, TMap<FHexCoord, FHexCoord>* OutFrom) const
+void FHexBattle::FindReach(int32 UnitIndex, TMap<FHexCoord, int32>& OutSteps, TMap<FHexCoord, FHexCoord>* OutFrom, bool bOnGround) const
 {
 	OutSteps.Reset();
 	if (OutFrom)
@@ -724,22 +871,30 @@ void FHexBattle::FindReach(int32 UnitIndex, TMap<FHexCoord, int32>& OutSteps, TM
 		return;
 	}
 	const FHexBattleUnit& Unit = Units[UnitIndex];
-	const int32 Speed = GetSpeed(Unit);
+	// a catapult drives CatapultMoveHexes, as the developer asked on 2026-11-14, whatever its place in the order of turns
+	const int32 Speed = Unit.bCatapult ? (Config ? Config->CatapultMoveHexes : 4) : GetSpeed(Unit);
 	OutSteps.Add(Unit.Hex, 0);
-	// the machines of a siege stand where they are
-	if (Unit.IsMachine())
+	// the shooters of a tower stand where they are
+	if (Unit.bTower)
 	{
 		return;
 	}
+	// the hexes of the catapults off the field are part of it (IsOnField), so anyone walks onto one once its catapult drove off
 	const auto IsFree = [&](const FHexCoord& Hex) { return IsPassable(Hex, Unit.Side); };
-	if (Unit.bFlies)
+	if (Unit.bFlies && !bOnGround)
 	{
 		// over anything, onto a free hex within its speed
+		TArray<FHexCoord> All = Homes;
 		for (int32 Column = 0; Column < Columns; ++Column)
 		{
 			for (int32 Row = 0; Row < Rows; ++Row)
 			{
-				const FHexCoord Hex = FHexCoord::FromOffset(Column, Row);
+				All.Add(FHexCoord::FromOffset(Column, Row));
+			}
+		}
+		for (const FHexCoord& Hex : All)
+		{
+			{
 				const int32 Distance = Unit.Hex.DistanceTo(Hex);
 				if (Distance > 0 && Distance <= Speed && IsFree(Hex))
 				{
@@ -788,12 +943,41 @@ void FHexBattle::FindReach(int32 UnitIndex, TMap<FHexCoord, int32>& OutSteps, TM
 	}
 }
 
+int32 FHexBattle::CountSteps(const TMap<FHexCoord, FHexCoord>& From, const FHexCoord& Start, const FHexCoord& To)
+{
+	int32 Count = 0;
+	for (FHexCoord At = To; At != Start && Count < 1000; ++Count)
+	{
+		const FHexCoord* Before = From.Find(At);
+		if (!Before)
+		{
+			return -1;
+		}
+		At = *Before;
+	}
+	return Count;
+}
+
 TArray<FHexCoord> FHexBattle::FindPath(int32 UnitIndex, const FHexCoord& To) const
 {
 	TArray<FHexCoord> Path;
 	TMap<FHexCoord, int32> Steps;
 	TMap<FHexCoord, FHexCoord> From;
-	FindReach(UnitIndex, Steps, &From);
+	// a flyer goes over the ground where that way is as straight as its flight, as many steps as hexes, as the developer asked on 2026-11-14,
+	// and takes off only over what is in the way
+	if (Units.IsValidIndex(UnitIndex) && Units[UnitIndex].bFlies)
+	{
+		FindReach(UnitIndex, Steps, &From, true);
+		if (!Steps.Contains(To) || Steps[To] > GetSpeed(Units[UnitIndex]) || Units[UnitIndex].Hex.DistanceTo(To) != CountSteps(From, Units[UnitIndex].Hex, To))
+		{
+			Steps.Reset();
+			From.Reset();
+		}
+	}
+	if (Steps.IsEmpty())
+	{
+		FindReach(UnitIndex, Steps, &From);
+	}
 	if (!Steps.Contains(To))
 	{
 		return Path;
@@ -839,7 +1023,7 @@ bool FHexBattle::CanShoot(int32 UnitIndex, int32 Target) const
 {
 	// the shooters of a tower only a catapult harms, and they shoot whoever stands beside their wall
 	return !IsOver() && UnitIndex == Active && Units.IsValidIndex(Target) && Units[Target].IsAlive() && Units[Target].Side != Units[UnitIndex].Side && !Units[Target].bTower
-		&& Units[UnitIndex].bShoots && Units[UnitIndex].ShotsLeft > 0 && (Units[UnitIndex].bTower || !HasEnemyBeside(UnitIndex));
+		&& Units[UnitIndex].bShoots && Units[UnitIndex].ShotsLeft > 0 && (Units[UnitIndex].bTower || Units[UnitIndex].bCatapult || !HasEnemyBeside(UnitIndex));
 }
 
 bool FHexBattle::CanStrike(int32 UnitIndex, int32 Target, const FHexCoord& From) const
@@ -1515,15 +1699,14 @@ void FHexBattle::PlayAi()
 	}
 	const int32 Me = Active;
 	const FHexBattleUnit& Unit = Units[Me];
-	// the catapult shoots at the wall, and with none left waits
-	if (Unit.bCatapult)
+	// the catapult of the attacker shoots at the wall while a part of it stands, and else at stacks as a shooter does, as that of a castle
+	// does; one that has nothing to shoot at stays where it is
+	if (Unit.bCatapult && Unit.Side == 0)
 	{
-		FHexCoord WallHex;
-		if (!(ChooseCatapultTarget(WallHex) && FireCatapult(WallHex)))
+		if (FHexCoord WallHex; ChooseCatapultTarget(WallHex) && FireCatapult(WallHex))
 		{
-			Defend();
+			return;
 		}
-		return;
 	}
 	// a shooter shoots what it kills most of
 	if (Unit.bShoots && Unit.ShotsLeft > 0 && !HasEnemyBeside(Me))
@@ -1588,8 +1771,8 @@ void FHexBattle::PlayAi()
 	{
 		return;
 	}
-	// the shooters of a tower that see no one wait; a stack of the attacker at the wall strikes it, the gate first
-	if (Unit.bTower)
+	// the shooters of a tower and a catapult that see no one wait; a stack of the attacker at the wall strikes it, the gate first
+	if (Unit.IsMachine())
 	{
 		Defend();
 		return;
