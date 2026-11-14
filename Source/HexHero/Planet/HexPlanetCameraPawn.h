@@ -96,6 +96,9 @@ protected:
 	const UHexPlanetCameraConfig* Settings() const;
 
 public:
+	/** The time within which two clicks at one place are a double click (DoubleClickTime of the config) */
+	float GetDoubleClickTime() const;
+
 
 	/** Constructor */
 	AHexPlanetCameraPawn();

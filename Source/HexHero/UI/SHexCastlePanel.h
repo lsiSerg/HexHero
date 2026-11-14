@@ -94,7 +94,11 @@ private:
 	/** The brushes of the pictures, kept with their textures while the panel lives */
 	TMap<UTexture2D*, TSharedPtr<FSlateBrush>> Brushes;
 	TArray<TStrongObjectPtr<UTexture2D>> Textures;
-	const FSlateBrush* GetBrush(UTexture2D* Texture, float Size);
+	const FSlateBrush* GetBrush(UTexture2D* Texture, float Size, int32 Frames = 1);
+
+	/** A cost as the icons of its resources with their amounts, green where the player has enough and red where not, as the developer asked
+	 *  on 2026-11-14 */
+	TSharedRef<SWidget> MakeCostRow(const TMap<FName, int32>& Cost, int32 Player, const FSlateFontInfo& Font);
 
 	/** Makes the lines of the castle again */
 	void RebuildBody();

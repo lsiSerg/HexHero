@@ -1393,6 +1393,12 @@ public:
 	UPROPERTY(EditAnywhere, Category="Shroud")
 	FLinearColor ShroudDarkColor = FLinearColor(0.0015f, 0.002f, 0.003f, 1.0f);
 
+	/** Underground, a view that dips this far under the tops of the passages, below anything drawn there (the voids, their cliffs and the outer
+	 *  faces of the walls), before it hits something went through the hollow of chunks the shroud does not draw and sees the far side, which
+	 *  the developer saw on 2026-11-14 also just past the horizon: the tops of the passages where it went in stand for the ground there */
+	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=0))
+	float ShroudHollowDepth = 120.0f;
+
 	/** The edge of the shroud: how soft it is, as a share of the way from a cell that is explored to one that is not, how far a noise moves it,
 	 *  as such a share, the size of that noise in world units and how many of its cells it drifts a second */
 	UPROPERTY(EditAnywhere, Category="Shroud", meta=(ClampMin=0.01, ClampMax=0.5))
@@ -1884,6 +1890,11 @@ public:
 
 	UPROPERTY(EditAnywhere, Category="Underground|Light")
 	bool bHeroLightShadows = true;
+
+	/** A light of a hero casts its shadows only while the camera is within this distance of it, 0 for any distance: from further its shadow
+	 *  map is so coarse that the floor shadows itself and the light goes dark (seen on 2026-11-14: dimmer at 3400 and dark at 5000, fine at 3000) */
+	UPROPERTY(EditAnywhere, Category="Underground|Light", meta=(ClampMin=0))
+	float HeroLightShadowDistance = 2600.0f;
 
 	UPROPERTY(EditAnywhere, Category="Underground|Light", meta=(ClampMin=0))
 	float HeroLightSourceRadius = 15.0f;

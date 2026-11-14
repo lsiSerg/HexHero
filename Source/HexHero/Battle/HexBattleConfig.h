@@ -1130,6 +1130,60 @@ public:
 	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=0, ClampMax=2))
 	float FillShare = 0.35f;
 
+	/** The field of a battle underground is lit as the maze is around a hero, as the developer found it far too dark on 2026-11-14 (the sun it
+	 *  borrows is the faint key light of the underground then): the sun takes CaveSunIntensity lux, a warm light without falloff by the square
+	 *  of the distance stands CaveFieldLightHeight over the middle of the field and fades out CaveFieldLightReach hexes away by
+	 *  CaveFieldLightFalloff, casting shadows with bCaveFieldLightShadows (off, as the spires around the field laid long shadows over it), and torches stand around the field every CaveTorchSpacing hexes, CaveTorchMargin hexes out of
+	 *  it, each with a light of its own that flickers. 0 of an intensity or a spacing leaves that out */
+	UPROPERTY(EditAnywhere, Category="Look|Cave", meta=(ClampMin=0))
+	float CaveSunIntensity = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Cave")
+	FLinearColor CaveFieldLightColor = FLinearColor(1.0f, 0.78f, 0.55f, 1.0f);
+
+	/** Unitless, as the light of a hero in the maze */
+	UPROPERTY(EditAnywhere, Category="Look|Cave", meta=(ClampMin=0))
+	float CaveFieldLightIntensity = 9.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Cave", meta=(ClampMin=0))
+	float CaveFieldLightHeight = 900.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Cave", meta=(ClampMin=1))
+	float CaveFieldLightReach = 13.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Cave", meta=(ClampMin=0.1))
+	float CaveFieldLightFalloff = 1.5f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Cave")
+	bool bCaveFieldLightShadows = false;
+
+	/** The mesh of a torch, drawn in the material of the castles, whose fire dances; generate_planet_castles.py Torch makes it */
+	UPROPERTY(EditAnywhere, Category="Look|Cave")
+	TSoftObjectPtr<UStaticMesh> CaveTorchMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Castles/SM_PlanetCastleTorch.SM_PlanetCastleTorch")));
+
+	/** How many times its size a torch is drawn, and how far apart along the edge and out of the field they stand, in hexes */
+	UPROPERTY(EditAnywhere, Category="Look|Cave", meta=(ClampMin=0.1))
+	float CaveTorchScale = 3.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Cave", meta=(ClampMin=0))
+	float CaveTorchSpacing = 3.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Cave", meta=(ClampMin=0))
+	float CaveTorchMargin = 0.45f;
+
+	/** The light of a torch, at the height of its fire: its color, its unitless intensity, its radius in hexes, and how much it flickers */
+	UPROPERTY(EditAnywhere, Category="Look|Cave")
+	FLinearColor CaveTorchLightColor = FLinearColor(1.0f, 0.6f, 0.28f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Look|Cave", meta=(ClampMin=0))
+	float CaveTorchLightIntensity = 5.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Cave", meta=(ClampMin=0.1))
+	float CaveTorchLightReach = 4.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Cave", meta=(ClampMin=0, ClampMax=1))
+	float CaveTorchFlicker = 0.2f;
+
 	/** The camera comes to show the one that strikes or shoots and the one struck when either lies off the screen or within CameraFrameMargin
 	 *  of its width of an edge, as the developer asked on 2026-11-13, far enough that both stand CameraFrameRoom apart of the width of the view */
 	UPROPERTY(EditAnywhere, Category="Camera", meta=(ClampMin=0, ClampMax=0.45))

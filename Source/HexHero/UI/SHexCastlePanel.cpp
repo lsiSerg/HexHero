@@ -174,7 +174,42 @@ void SHexCastlePanel::Tick(const FGeometry& AllottedGeometry, const double InCur
 	}
 }
 
-const FSlateBrush* SHexCastlePanel::GetBrush(UTexture2D* Texture, float Size)
+TSharedRef<SWidget> SHexCastlePanel::MakeCostRow(const TMap<FName, int32>& Cost, int32 Player, const FSlateFontInfo& Font)
+{
+	const TSharedRef<SHorizontalBox> Row = SNew(SHorizontalBox);
+	const UHexSites* Sites = Heroes.IsValid() ? Heroes->GetSites() : nullptr;
+	if (!Sites)
+	{
+		return Row;
+	}
+	// in the order of the resources, each its icon and its amount
+	const UHexSiteConfig* SiteConfig = Sites->GetConfig();
+	for (int32 Resource = 0; Resource < SiteConfig->Resources.Num(); ++Resource)
+	{
+		const FHexResourceInfo& Info = SiteConfig->Resources[Resource];
+		const int32* Amount = Cost.Find(Info.Id);
+		if (!Amount || *Amount <= 0)
+		{
+			continue;
+		}
+		const bool bEnough = Sites->GetAmount(Player, Resource) >= *Amount;
+		const FLinearColor Color = bEnough ? FLinearColor(0.45f, 0.95f, 0.4f, 1.0f) : FLinearColor(1.0f, 0.36f, 0.3f, 1.0f);
+		const float IconSize = float(Font.Size) * 2.2f;
+		const FSlateBrush* Brush = GetBrush(Info.Icon.LoadSynchronous(), IconSize, Info.IconFrames);
+		Row->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(0.0f, 0.0f, 2.0f, 0.0f)
+		[
+			Brush ? StaticCastSharedRef<SWidget>(SNew(SBox).WidthOverride(IconSize).HeightOverride(IconSize)[SNew(SImage).Image(Brush)])
+				: StaticCastSharedRef<SWidget>(SNew(STextBlock).Font(Font).ColorAndOpacity(Color).Text(FText::FromString(Info.DisplayName)))
+		];
+		Row->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(0.0f, 0.0f, 8.0f, 0.0f)
+		[
+			SNew(STextBlock).Font(Font).ColorAndOpacity(Color).Text(FText::AsNumber(*Amount)).ToolTipText(FText::FromString(Info.DisplayName))
+		];
+	}
+	return Row;
+}
+
+const FSlateBrush* SHexCastlePanel::GetBrush(UTexture2D* Texture, float Size, int32 Frames)
 {
 	if (!Texture)
 	{
@@ -188,6 +223,12 @@ const FSlateBrush* SHexCastlePanel::GetBrush(UTexture2D* Texture, float Size)
 	Brush->SetResourceObject(Texture);
 	Brush->ImageSize = FVector2D(Size, Size);
 	Brush->DrawAs = ESlateBrushDrawType::Image;
+	// a strip of frames side by side, as the icons are, shows its first; the count is given, as the size of a texture an editor build still
+	// compiles is not known yet
+	if (Frames > 1)
+	{
+		Brush->SetUVRegion(FBox2f(FVector2f::ZeroVector, FVector2f(1.0f / float(Frames), 1.0f)));
+	}
 	Textures.Emplace(Texture);
 	Brushes.Add(Texture, Brush);
 	return Brush.Get();
@@ -676,18 +717,26 @@ void SHexCastlePanel::RebuildBody()
 				{
 					Tip += FString::Printf(TEXT(": dwellings x%.1f, walls x%.1f"), Of.GrowthFactor, Of.DefenseFactor);
 				}
+				// what it gives, then what it costs as icons, green where there is enough and red where not, and why not
+				const FSlateFontInfo TipFont = FCoreStyle::GetDefaultFontStyle("Regular", 11);
+				const TSharedRef<SVerticalBox> TipBox = SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight()[MakeText(Tip, TipFont, CastleTextColor)];
 				if (bBuilt)
 				{
-					Tip += TEXT("\nBuilt");
+					TipBox->AddSlot().AutoHeight().Padding(0.0f, 3.0f, 0.0f, 0.0f)[MakeText(TEXT("Built"), TipFont, FLinearColor(0.45f, 0.95f, 0.4f, 1.0f))];
 				}
 				else
 				{
-					Tip += TEXT("\n") + Sites->DescribeCost(Of.Cost);
+					TipBox->AddSlot().AutoHeight().Padding(0.0f, 5.0f, 0.0f, 0.0f)[MakeCostRow(Of.Cost, Castle->Owner, TipFont)];
 					if (bNext && !bCan)
 					{
-						Tip += TEXT("\n") + Why;
+						TipBox->AddSlot().AutoHeight().Padding(0.0f, 4.0f, 0.0f, 0.0f)[MakeText(Why, TipFont, FLinearColor(1.0f, 0.36f, 0.3f, 1.0f))];
 					}
 				}
+				const TSharedRef<SToolTip> BuildTip = SNew(SToolTip).BorderImage(NoBorder)
+					[
+						SNew(SBorder).BorderImage(White).BorderBackgroundColor(FLinearColor(0.02f, 0.02f, 0.03f, 0.92f)).Padding(FMargin(10.0f, 7.0f))[TipBox]
+					];
 				const FLinearColor Back = bBuilt ? FLinearColor(0.06f, 0.16f, 0.08f, 1.0f) : bCan ? FLinearColor(0.55f, 0.4f, 0.08f, 1.0f)
 					: bNext ? FLinearColor(0.11f, 0.09f, 0.07f, 1.0f) : FLinearColor(0.05f, 0.05f, 0.06f, 1.0f);
 				const float Fade = bBuilt || bNext ? 1.0f : 0.35f;
@@ -734,7 +783,7 @@ void SHexCastlePanel::RebuildBody()
 					.IsFocusable(false)
 					.ButtonStyle(FCoreStyle::Get(), "NoBorder")
 					.ContentPadding(0.0f)
-					.ToolTipText(FText::FromString(Tip))
+					.ToolTip(BuildTip)
 					.OnClicked_Lambda([OnClick]() { return OnClick(); })
 					[
 						Tile
@@ -771,6 +820,13 @@ void SHexCastlePanel::RebuildBody()
 			{
 				Price += FString::Printf(TEXT(" + %d %s"), Each.CostResourceAmount, *Each.CostResource.ToString().ToLower());
 			}
+			// what one costs, as icons green or red by whether there is enough for one
+			TMap<FName, int32> OneCost;
+			OneCost.Add(TEXT("Gold"), Stats.Gold);
+			if (!Each.CostResource.IsNone() && Each.CostResourceAmount > 0)
+			{
+				OneCost.Add(Each.CostResource, Each.CostResourceAmount);
+			}
 			const FString Tip = Most > 0 ? FString::Printf(TEXT("Up to %d"), Most) : FString(Offered > 0 ? TEXT("Not enough to pay for one") : TEXT("None offered until next week"));
 			const TSharedRef<SWidget> Card = SNew(SBorder).BorderImage(White).BorderBackgroundColor(FLinearColor(0.05f, 0.05f, 0.065f, 1.0f)).Padding(4.0f)
 				.ToolTip(MakeCreatureTip(Stats, Each.bFlies, FString::Printf(TEXT("%s each; %d offered, %d more a week"), *Price, Offered, Castles->GetWeeklyGrowth(*Castle, Creature)), Creature, Level >= 2))
@@ -782,7 +838,7 @@ void SHexCastlePanel::RebuildBody()
 						SNew(SVerticalBox)
 						+ SVerticalBox::Slot().AutoHeight()[MakeText(Stats.DisplayName, Font, Offered > 0 ? CastleTextColor : CastleDimColor)]
 						+ SVerticalBox::Slot().AutoHeight()[MakeText(FString::Printf(TEXT("%d to hire"), Offered), Small, Offered > 0 ? CastleHeadColor : CastleDimColor)]
-						+ SVerticalBox::Slot().AutoHeight()[MakeText(Price, Tiny, CastleDimColor)]
+						+ SVerticalBox::Slot().AutoHeight()[MakeCostRow(OneCost, Castle->Owner, Small)]
 						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 3.0f, 0.0f, 0.0f)
 						[
 							SNew(SHorizontalBox)

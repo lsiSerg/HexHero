@@ -1148,6 +1148,25 @@ void UHexHeroes::KeepChosen()
 	}
 }
 
+float UHexHeroes::GetCheapestStep(const FHexHero& Hero) const
+{
+	const AHexPlanet* Planet = GetPlanet(Hero.Layer);
+	if (!Planet || !Planet->GetGrid().GetCells().IsValidIndex(Hero.Cell))
+	{
+		return -1.0f;
+	}
+	float Cheapest = -1.0f;
+	for (const int32 Neighbor : Planet->GetGrid().GetCells()[Hero.Cell].Neighbors)
+	{
+		const float Cost = GetStepCost(*Planet, &Hero, Hero.Cell, Neighbor);
+		if (Cost >= 0.0f && (Cheapest < 0.0f || Cost < Cheapest))
+		{
+			Cheapest = Cost;
+		}
+	}
+	return Cheapest;
+}
+
 bool UHexHeroes::CanMove(const FHexHero& Hero) const
 {
 	const AHexPlanet* Planet = GetPlanet(Hero.Layer);
@@ -4533,7 +4552,8 @@ bool UHexHeroes::MoveAiToSite(int32 Id, const HexHeroPath::FField& Ways, bool& b
 	{
 		// what its player has seen and does not own, and no other hero of its player goes for already
 		const EHexSiteGoal Goal = Sites->GetGoal(Site, Player, GetWeek());
-		if (Goal == EHexSiteGoal::None || IsHidden(Player, Site.Layer, Site.Cell)
+		// a site its guard holds is a fight, weighed with the foes below
+		if (Goal == EHexSiteGoal::None || IsHidden(Player, Site.Layer, Site.Cell) || (Site.Owner != Player && UHexCastles::HasCreatures(Site.Guard))
 			|| Heroes.ContainsByPredicate([&](const FHexHero& Other) { return Other.Id != Id && Other.Player == Player && Other.AiSiteId == Site.Id; }))
 		{
 			continue;
@@ -4648,6 +4668,29 @@ bool UHexHeroes::MoveAiToSite(int32 Id, const HexHeroPath::FField& Ways, bool& b
 					Foe.Power = Battles->GetArmyPower(TArray<FHexStack>{Neutral.Stack});
 					Foe.Key = FString::Printf(TEXT("neutral %d"), Neutral.Id);
 				}
+			}
+		}
+		// a mine or mill of another player or of nobody that its guard holds, which a hero fights for before it takes it
+		for (const FHexSite& Site : Sites->GetSites())
+		{
+			if (Site.Owner == Player || !UHexCastles::HasCreatures(Site.Guard) || Sites->GetGoal(Site, Player, GetWeek()) == EHexSiteGoal::None
+				|| IsHidden(Player, Site.Layer, Site.Cell) || FindHeroAt(Site.Layer, Site.Cell))
+			{
+				continue;
+			}
+			const float Reach = DayPoints * (bMain ? 1.0f : Site.Owner >= 0 ? Config->AiLostMineReachDays : Config->AiMineReachDays);
+			const float Cost = GetSiteWayCost(Ways, Site.Layer, Site.Cell);
+			if (Cost >= 0.0f && Cost <= Reach)
+			{
+				FFoe& Foe = Foes.AddDefaulted_GetRef();
+				Foe.Cost = Cost;
+				Foe.Layer = Site.Layer;
+				Foe.Cell = Site.Cell;
+				Foe.Request.Kind = EHexBattleKind::Site;
+				Foe.Request.SiteId = Site.Id;
+				Foe.bNeutral = true;
+				Foe.Power = Battles->GetArmyPower(Site.Guard);
+				Foe.Key = FString::Printf(TEXT("site %d"), Site.Id);
 			}
 		}
 		Foes.Sort([](const FFoe& A, const FFoe& B) { return A.Cost / A.Rank < B.Cost / B.Rank; });

@@ -4,6 +4,7 @@
 #include "HexHeroConfig.h"
 #include "HexCastles.h"
 #include "HexHeroes.h"
+#include "HexHeroPath.h"
 #include "HexSiteConfig.h"
 #include "HexSites.h"
 #include "Fonts/FontMeasure.h"
@@ -34,6 +35,7 @@ void SHexHeroPanel::Construct(const FArguments& InArgs)
 {
 	OnHeroChosen = InArgs._OnHeroChosen;
 	OnCastleChosen = InArgs._OnCastleChosen;
+	OnHeroGo = InArgs._OnHeroGo;
 	OnEndTurn = InArgs._OnEndTurn;
 	OnRestart = InArgs._OnRestart;
 	OnSkip = InArgs._OnSkip;
@@ -466,10 +468,20 @@ void SHexHeroPanel::RebuildList()
 							}
 							FNumberFormattingOptions Options;
 							Options.SetMaximumFractionalDigits(1);
-							return FText::Format(LOCTEXT("Movement", "Movement {0} of {1}{2}{3}"), FText::AsNumber(Each->MovePoints, &Options),
+							// points left that pay for no step: a step there costs more than they are, and they go with the day
+							FText Short = FText::GetEmpty();
+							if (Each->MovePoints > 0.0f)
+							{
+								const float Cheapest = WeakHeroes->GetCheapestStep(*Each);
+								if (Cheapest > 0.0f && !HexHeroPath::CanStep(Cheapest, Each->MovePoints, WeakHeroes->GetMaxMovePoints(*Each)))
+								{
+									Short = FText::Format(LOCTEXT("TooFew", ", too few: a step costs {0}"), FText::AsNumber(Cheapest, &Options));
+								}
+							}
+							return FText::Format(LOCTEXT("Movement", "Movement {0} of {1}{2}{3}{4}"), FText::AsNumber(Each->MovePoints, &Options),
 								FText::AsNumber(WeakHeroes->GetMaxMovePoints(*Each), &Options),
 								Each->Layer == EHexPlanetLayer::Underground ? LOCTEXT("Below", ", below") : FText::GetEmpty(),
-								Each->bSkipped ? LOCTEXT("Skipped", ", skipped") : FText::GetEmpty());
+								Each->bSkipped ? LOCTEXT("Skipped", ", skipped") : FText::GetEmpty(), Short);
 						})
 					]
 					+ SVerticalBox::Slot()
@@ -487,6 +499,32 @@ void SHexHeroPanel::RebuildList()
 								return TOptional<float>(Each ? Each->MovePoints / FMath::Max(WeakHeroes->GetMaxMovePoints(*Each), 0.01f) : 0.0f);
 							})
 						]
+					]
+				]
+				// Go, while it has a way it does not walk and the turn is the person's, as the developer asked on 2026-11-14
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				.Padding(6.0f, 0.0f, 0.0f, 0.0f)
+				[
+					SNew(SButton)
+					.IsFocusable(false)
+					.ContentPadding(FMargin(10.0f, 3.0f))
+					.ButtonColorAndOpacity(FLinearColor(0.25f, 0.55f, 0.2f, 1.0f))
+					.ToolTipText(LOCTEXT("GoTip", "Walk the way shown (Space)"))
+					.Visibility_Lambda([WeakHeroes, Id]()
+					{
+						const FHexHero* Each = WeakHeroes.IsValid() ? WeakHeroes->FindHero(Id) : nullptr;
+						return Each && WeakHeroes->IsPlaying() && WeakHeroes->IsPersonTurn() && Each->TargetCell != INDEX_NONE && !Each->bWalking
+							&& Each->MovePoints > 0.0f ? EVisibility::Visible : EVisibility::Collapsed;
+					})
+					.OnClicked_Lambda([this, Id]()
+					{
+						OnHeroGo.ExecuteIfBound(Id);
+						return FReply::Handled();
+					})
+					[
+						SNew(STextBlock).Font(Small).ColorAndOpacity(FLinearColor::White).Text(LOCTEXT("Go", "Go"))
 					]
 				]
 			]

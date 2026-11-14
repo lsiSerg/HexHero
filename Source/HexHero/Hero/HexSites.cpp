@@ -116,6 +116,7 @@ void UHexSites::SetLines(const TArray<FHexSiteLine>& Lines)
 			UE_LOG(LogHexHero, Error, TEXT("Sites: the site %d (%s) of sites.json has no Id, kind, cell or layer of its own, and is left out"), Line.Id, *Line.Kind);
 			continue;
 		}
+		Site.Guard = MakeStartGuard(Site);
 		Kept.Add(Site);
 	}
 	Sites = MoveTemp(Kept);
@@ -152,6 +153,41 @@ const FHexSite* UHexSites::FindSite(int32 Id) const
 FHexSite* UHexSites::FindSiteMutable(int32 Id)
 {
 	return Sites.FindByPredicate([Id](const FHexSite& Each) { return Each.Id == Id; });
+}
+
+TArray<FHexStack> UHexSites::MakeStartGuard(const FHexSite& Site) const
+{
+	TArray<FHexStack> Guard;
+	const UHexCastleConfig* Castles = UHexCastleConfig::Load();
+	if (!Config || !Config->Kinds.IsValidIndex(Site.Kind) || !Castles || Castles->Factions.IsEmpty())
+	{
+		return Guard;
+	}
+	const FName KindId = Config->Kinds[Site.Kind].Id;
+	const FHexSiteGuardRule* Rule = Config->Guards.FindByPredicate([KindId](const FHexSiteGuardRule& Each) { return Each.Kind == KindId; });
+	if (!Rule || Rule->Share <= 0.0f || Rule->Weeks <= 0.0f)
+	{
+		return Guard;
+	}
+	// by a hash of the site alone, so a site has the same guard in every game
+	FRandomStream Random(int32(HashCombine(GetTypeHash(Site.Id), HashCombine(GetTypeHash(Site.Cell), GetTypeHash(int32(Site.Layer) * 7919 + 17)))));
+	if (Random.FRand() >= Rule->Share)
+	{
+		return Guard;
+	}
+	FHexStack& Stack = Guard.AddDefaulted_GetRef();
+	Stack.Faction = Random.RandHelper(Castles->Factions.Num());
+	const TArray<FHexCreature>& Creatures = Castles->Factions[Stack.Faction].Creatures;
+	if (Creatures.IsEmpty())
+	{
+		Guard.Reset();
+		return Guard;
+	}
+	const int32 Low = FMath::Clamp(FMath::Min(Rule->LevelMin, Rule->LevelMax), 1, Creatures.Num());
+	const int32 High = FMath::Clamp(FMath::Max(Rule->LevelMin, Rule->LevelMax), 1, Creatures.Num());
+	Stack.Creature = Random.RandRange(Low, High) - 1;
+	Stack.Count = FMath::Max(1, FMath::RoundToInt32(float(Creatures[Stack.Creature].Growth) * Rule->Weeks * Random.FRandRange(0.8f, 1.2f)));
+	return Guard;
 }
 
 void UHexSites::UpdateGuards(const UHexHeroes& Heroes)
@@ -279,6 +315,7 @@ int32 UHexSites::AddSite(EHexPlanetLayer Layer, int32 Cell, int32 Kind, FString&
 	Site.Kind = Kind;
 	Site.Layer = Layer;
 	Site.Cell = Cell;
+	Site.Guard = MakeStartGuard(Site);
 	Sites.Add(Site);
 	bEdited = SortSiteLines(MakeLines()) != SavedLines;
 	bDirty[int32(Layer)] = true;
@@ -708,7 +745,7 @@ void UHexSites::Restart()
 	for (FHexSite& Site : Sites)
 	{
 		Site.Owner = INDEX_NONE;
-		Site.Guard.Reset();
+		Site.Guard = MakeStartGuard(Site);
 		Site.bTaken = false;
 		Site.VisitedWeek = 0;
 		Site.FormerOwners = 0;

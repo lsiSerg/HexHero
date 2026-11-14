@@ -610,7 +610,16 @@ def upgrade():
     return mesh
 
 
-MESHES = [('Flag', flag), ('Yard', yard), ('Upgrade', upgrade)] + [('Wall%d' % level, lambda level=level: wall(level)) for level in range(4)] + [
+def torch():
+    """A torch on a tall iron stand with a foot of stone, which stands around the field of a battle underground, as the developer asked on
+    2026-11-14 for light and torches there: its fire burns and dances as the braziers of a castle do"""
+    mesh = Mesh()
+    stone_cylinder(mesh, (0.0, 0.0, -SKIRT), 7.0, SKIRT + 5.0, sides=8, top_radius=5.5, tone=0.8, seed=120)
+    add_brazier(mesh, (0.0, 0.0, 5.0), 121, stand=40.0)
+    return mesh
+
+
+MESHES = [('Flag', flag), ('Yard', yard), ('Upgrade', upgrade), ('Torch', torch)] + [('Wall%d' % level, lambda level=level: wall(level)) for level in range(4)] + [
     ('Tower%d' % level, lambda level=level: tower(level)) for level in (2, 3)] + [('Gate%d' % level, lambda level=level: gate(level)) for level in range(4)] + [
     ('Hall%d' % level, lambda level=level: hall(level)) for level in (1, 2, 3)] + [('Dwelling%d' % level, lambda level=level: dwelling(level)) for level in range(1, 8)]
 # the meshes of the castle of one piece that came before, which the import deletes
@@ -620,7 +629,11 @@ OLD_MESHES = ['Base', 'Fort1', 'Fort2', 'Fort3']
 def main():
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
     manifest = {'meshes': [], 'old': ['SM_PlanetCastle' + name for name in OLD_MESHES]}
+    # words after the file name write only the meshes whose names hold one, so the import takes those alone
+    words = sys.argv[1:]
     for name, make in MESHES:
+        if words and not any(word in name for word in words):
+            continue
         asset = 'SM_PlanetCastle' + name
         triangles = write_glb(make(), os.path.join(OUTPUT_FOLDER, asset + '.glb'), asset, True)
         manifest['meshes'].append({'name': asset, 'triangles': triangles})

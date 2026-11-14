@@ -6,6 +6,8 @@
 #include "Engine/DataAsset.h"
 #include "HexSiteConfig.generated.h"
 
+class UTexture2D;
+
 class UMaterialInterface;
 class UStaticMesh;
 
@@ -29,6 +31,15 @@ struct FHexResourceInfo
 	/** How much of it a player has when a game starts */
 	UPROPERTY(EditAnywhere, Category="Resource", meta=(ClampMin=0))
 	int32 StartAmount = 0;
+
+	/** Its icon beside a cost in a castle, as the developer asked on 2026-11-14; a strip of frames, of which the first shows. import_ui_icons.py
+	 *  gives the one generate_ui_icons.py draws while it has none */
+	UPROPERTY(EditAnywhere, Category="Resource")
+	TSoftObjectPtr<UTexture2D> Icon;
+
+	/** How many frames side by side Icon holds, of which the first shows */
+	UPROPERTY(EditAnywhere, Category="Resource", meta=(ClampMin=1))
+	int32 IconFrames = 8;
 };
 
 /** What a site is to the game */
@@ -94,6 +105,37 @@ struct FHexSiteKind
 	UPROPERTY(EditAnywhere, Category="Site")
 	TSoftObjectPtr<UStaticMesh> Mesh;
 };
+
+/** Creatures of nobody that guard the sites of a kind when a game starts, as the developer asked on 2026-11-14: the basic mines may stand
+ *  without, the others need a guard, not a strong one. A hero fights them before it takes the site (UHexBattles, a battle of the kind Site) */
+USTRUCT(BlueprintType)
+struct FHexSiteGuardRule
+{
+	GENERATED_BODY()
+
+	/** Id of the kind of site */
+	UPROPERTY(EditAnywhere, Category="Guard")
+	FName Kind;
+
+	/** The share of the sites of that kind that have a guard, chosen by a hash of each site, so it is the same in every game */
+	UPROPERTY(EditAnywhere, Category="Guard", meta=(ClampMin=0, ClampMax=1))
+	float Share = 1.0f;
+
+	/** The levels of creatures, 1 to 7, of which the guard is one, of any faction, by the same hash */
+	UPROPERTY(EditAnywhere, Category="Guard", meta=(ClampMin=1, ClampMax=7))
+	int32 LevelMin = 1;
+
+	UPROPERTY(EditAnywhere, Category="Guard", meta=(ClampMin=1, ClampMax=7))
+	int32 LevelMax = 2;
+
+	/** How many weeks of the growth of its dwelling the guard counts, a fifth more or less */
+	UPROPERTY(EditAnywhere, Category="Guard", meta=(ClampMin=0))
+	float Weeks = 1.0f;
+};
+
+/** Returns the guards of the sites a config has when it holds none: every rare mine and gold mine, a third of the sawmills and quarries,
+ *  half of the mills, with numbers of Claude's */
+TArray<FHexSiteGuardRule> MakeDefaultSiteGuards();
 
 /** How many sites of a kind the generation scatters over a planet */
 USTRUCT(BlueprintType)
@@ -271,6 +313,10 @@ public:
 	/** How Generate of the Mines tab scatters the sites over the planet */
 	UPROPERTY(EditAnywhere, Category="Generation")
 	FHexSiteGeneration Generation;
+
+	/** The guards of nobody that sites of a kind have when a game starts; MakeDefaultSiteGuards when empty, and a kind with no line has none */
+	UPROPERTY(EditAnywhere, Category="Rules")
+	TArray<FHexSiteGuardRule> Guards;
 
 	/** How many days of the income of the mine of its resource a mill gives, once a week */
 	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=0))

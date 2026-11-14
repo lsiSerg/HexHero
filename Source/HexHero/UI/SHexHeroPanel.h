@@ -25,6 +25,8 @@ public:
 		SLATE_EVENT(FOnHexHeroChosen, OnHeroChosen)
 		/** A line of a castle was clicked */
 		SLATE_EVENT(FOnHexHeroChosen, OnCastleChosen)
+		/** Go beside a hero that has a way: it walks it */
+		SLATE_EVENT(FOnHexHeroChosen, OnHeroGo)
 		/** The button that ends the day was clicked */
 		SLATE_EVENT(FSimpleDelegate, OnEndTurn)
 		/** The button that starts the game again was clicked */
@@ -58,6 +60,7 @@ private:
 	TSharedPtr<SVerticalBox> List;
 	FOnHexHeroChosen OnHeroChosen;
 	FOnHexHeroChosen OnCastleChosen;
+	FOnHexHeroChosen OnHeroGo;
 
 	/** The revision of the castles the lines were made for (UHexCastles::GetRevision) */
 	int32 ListedCastles = -1;

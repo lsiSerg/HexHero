@@ -2562,9 +2562,11 @@ void AHexPlanet::Tick(float DeltaTime)
 
 	// the light of the hero, for now over the focus of the camera where it stands in this frame (the view target, as the camera manager has the
 	// frame before, so the light would trail the camera), and the fog of the underground clears around it
+	FVector3d LightCamera = FVector3d::ZeroVector;
 	if (const AActor* ViewTarget = PlayerController ? PlayerController->GetViewTarget() : nullptr)
 	{
 		HeroFocus = FindViewFocus(ViewTarget->GetActorLocation(), ViewTarget->GetActorForwardVector());
+		LightCamera = ViewTarget->GetActorLocation();
 		bHasHeroFocus = true;
 	}
 	// each hero of the layer lights around itself, those nearest that focus; on a planet without heroes the focus stands in for one, as it did
@@ -2589,7 +2591,7 @@ void AHexPlanet::Tick(float DeltaTime)
 	}
 	if (bHasHeroFocus && Settings->bHeroLight)
 	{
-		UpdateHeroLight(LayerLights);
+		UpdateHeroLight(LayerLights, LightCamera);
 	}
 	// and on the surface the land away from them lies in shade
 	if (bHasHeroFocus && Settings->bHeroShade)
@@ -7011,7 +7013,7 @@ UPointLightComponent* AHexPlanet::MakeHeroLight()
 	return Light;
 }
 
-void AHexPlanet::UpdateHeroLight(TConstArrayView<FVector4d> Lights)
+void AHexPlanet::UpdateHeroLight(TConstArrayView<FVector4d> Lights, const FVector3d& Camera)
 {
 	// hex.PlanetHeroLight: 0 none, 2 without shadows; the forced light of L lights everything without them
 	const int32 Mode = CVarHexPlanetHeroLight.GetValueOnGameThread();
@@ -7050,7 +7052,9 @@ void AHexPlanet::UpdateHeroLight(TConstArrayView<FVector4d> Lights)
 			Light->AttenuationRadius = AttenuationRadius;
 			Light->MarkRenderStateDirty();
 		}
-		const bool bShadows = Index < NumShadows;
+		// and only while the camera is within HeroLightShadowDistance of it: from further its shadow map is so coarse that the floor shadows
+		// itself and the light goes dark, which the developer saw on 2026-11-14, while its shadows hardly show from there anyway
+		const bool bShadows = Index < NumShadows && (Settings->HeroLightShadowDistance <= 0.0f || FVector3d::Dist(Camera, Position) <= Settings->HeroLightShadowDistance);
 		if (bool(Light->CastShadows) != bShadows)
 		{
 			Light->SetCastShadows(bShadows);

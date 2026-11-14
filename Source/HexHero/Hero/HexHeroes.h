@@ -350,6 +350,10 @@ public:
 	/** Returns the points of movement a hero has each day */
 	float GetMaxMovePoints(const FHexHero& Hero) const;
 
+	/** What the cheapest step onto a cell beside a hero costs, or -1 where it can step nowhere, so the panel says when the points left pay for
+	 *  no step, as the developer found heroes stop with 1 of 10 left on sand on 2026-11-14 */
+	float GetCheapestStep(const FHexHero& Hero) const;
+
 	/** Returns the hero chosen, or null */
 	/** Returns the hero chosen, null while a castle is chosen in its place: either a hero or a castle is chosen, as the developer decided on
 	 *  2026-11-11 */

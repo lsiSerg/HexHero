@@ -295,6 +295,15 @@ if (fogSpace && shroudFloorDisc > 0.0 && -shroudFloorB - sqrt(shroudFloorDisc) >
     shroudAt = CameraPos + fogDir * (-shroudFloorB - sqrt(shroudFloorDisc));
     shroudNone = false;
 }
+// and where the view dips ShroudHollowDepth under the tops of the passages, below anything drawn there, before it hits something, it went
+// through the hollow of chunks that are not drawn and shows the far side, which the developer saw on 2026-11-14 with a hero and the lit maze
+// there, also just past the horizon: the tops of the passages where the view goes in stand for the ground there too
+float shroudDeepest = clamp(-shroudFloorB, 0.0, fogEnd);
+if (!fogSpace && shroudFloorDisc > 0.0 && PlanetRadius > 0.0 && fogEnd > shroudDeepest + 1.0
+    && length(CameraPos + fogDir * shroudDeepest) < shroudFloor - ShroudHollowDepth)
+{
+    shroudAt = CameraPos + fogDir * max(-shroudFloorB - sqrt(shroudFloorDisc), 0.0);
+}
 if (Shroud > 0.5 && !shroudNone)
 {
     SHROUD_COMMON
@@ -305,7 +314,7 @@ if (Shroud > 0.5 && !shroudNone)
     fogResult = lerp(fogResult, ShroudDarkColor.rgb, shroudCover);
 }
 '''.replace('SHROUD_COMMON', SHROUD_COMMON_CODE)
-SHROUD_DARK_PARAMETERS = ['ShroudDarkColor', 'ShroudSoftness', 'ShroudEdgeNoise', 'ShroudNoiseSize', 'ShroudDrift']
+SHROUD_DARK_PARAMETERS = ['ShroudDarkColor', 'ShroudHollowDepth', 'ShroudSoftness', 'ShroudEdgeNoise', 'ShroudNoiseSize', 'ShroudDrift']
 for _name in SHROUD_DARK_PARAMETERS:
     assert _name in SHROUD_DARK_CODE, _name
 

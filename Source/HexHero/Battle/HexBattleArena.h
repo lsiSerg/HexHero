@@ -468,6 +468,12 @@ private:
 	/** Lays marks built at the height of the field on its hills, subdividing their triangles so they follow the ground */
 	void DrapeOnGround(TArray<FVector>& Vertices, TArray<int32>& Triangles, TArray<FVector>& Normals, TArray<FLinearColor>& Colors) const;
 	void BuildProps();
+
+	/** Underground, the light over the field and the torches around it (CaveFieldLight* and CaveTorch* of the config) */
+	void BuildCaveLight();
+
+	/** The lights of the torches, which flicker in Tick, with a phase each */
+	TArray<TPair<TObjectPtr<UPointLightComponent>, float>> TorchLights;
 	void PlaceFigures();
 	void ClearField();
 	void UpdateMarks();

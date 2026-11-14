@@ -442,6 +442,11 @@ AHexPlanetCameraPawn::AHexPlanetCameraPawn()
 	// its bias comes from the planet camera config in BeginPlay
 }
 
+float AHexPlanetCameraPawn::GetDoubleClickTime() const
+{
+	return Settings()->DoubleClickTime;
+}
+
 const UHexPlanetCameraConfig* AHexPlanetCameraPawn::Settings() const
 {
 	return LoadedPlanetCameraConfig ? LoadedPlanetCameraConfig.Get() : GetDefault<UHexPlanetCameraConfig>();

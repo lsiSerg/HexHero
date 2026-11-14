@@ -16,6 +16,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 SOURCE = os.path.join(ROOT, 'Saved', 'HexUi')
 FOLDER = '/Game/HexPlanet/UI'
 CONFIG = FOLDER + '/DA_HexUi'
+SITES = '/Game/HexPlanet/Sites/DA_HexSites'
 
 # each cursor of EHexCursor, the picture it shows and its size in pixels of Slate; the pictures are drawn at twice that
 CURSORS = [
@@ -102,6 +103,23 @@ def main():
             icons.append(look)
         config.set_editor_property('stat_icons', icons)
     assets.save_asset(CONFIG, only_if_is_dirty=False)
+    # the icons of the resources go to their resources in DA_HexSites, while a resource has none
+    sites = unreal.load_asset(SITES)
+    if sites:
+        resources = sites.get_editor_property('resources')
+        given = 0
+        # an element of an array is a copy, so each changed one is put back
+        for index in range(len(resources)):
+            resource = resources[index]
+            picture = 'Res' + str(resource.get_editor_property('id'))
+            if picture in pictures and (reset or not resource.get_editor_property('icon')):
+                resource.set_editor_property('icon', pictures[picture])
+                resources[index] = resource
+                given += 1
+        sites.modify()
+        sites.set_editor_property('resources', resources)
+        assets.save_asset(SITES, only_if_is_dirty=False)
+        unreal.log('UI: %d resources of DA_HexSites took an icon' % given)
     unreal.log('UI: %d pictures imported, DA_HexUi has %d cursors and %d icons' % (len(pictures), len(config.get_editor_property('cursors')),
                                                                                    len(config.get_editor_property('stat_icons'))))
 

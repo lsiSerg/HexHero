@@ -826,13 +826,14 @@ void AHexBattleArena::Show(UHexBattles* InBattles, const FPostProcessSettings& P
 				Directional->MarkRenderStateDirty();
 			}
 			SunColor = Light->GetLightColor();
-			Light->SetIntensity(SunIntensity * (Each ? Each->SunShare : 1.0f));
+			// underground the sun it borrows is the faint key light of the maze, so the field takes a light of its own
+			Light->SetIntensity(Battles->IsUnderground() && Config->CaveSunIntensity > 0.0f ? Config->CaveSunIntensity : SunIntensity * (Each ? Each->SunShare : 1.0f));
 			Light->SetLightColor(Each ? Each->SunColor : FLinearColor::White);
 		}
 		It->SetActorRotation(FRotator(Config->SunPitch, Config->SunYaw, 0.0));
 		// the fill from the other side
 		FillLight->SetWorldRotation(FRotator(Config->FillPitch, Config->SunYaw + 180.0f, 0.0f));
-		FillLight->SetIntensity(SunIntensity * (Each ? Each->SunShare : 1.0f) * Config->FillShare);
+		FillLight->SetIntensity((Battles->IsUnderground() && Config->CaveSunIntensity > 0.0f ? Config->CaveSunIntensity : SunIntensity * (Each ? Each->SunShare : 1.0f)) * Config->FillShare);
 		FillLight->SetLightColor(Config->FillColor);
 		FillLight->SetVisibility(Config->FillShare > 0.0f);
 		break;
@@ -869,6 +870,7 @@ void AHexBattleArena::Show(UHexBattles* InBattles, const FPostProcessSettings& P
 	BuildGrid();
 	const double GridMs = Lap();
 	BuildProps();
+	BuildCaveLight();
 	const double PropsMs = Lap();
 	BuildSiege();
 	const double SiegeMs = Lap();
@@ -1035,8 +1037,115 @@ void AHexBattleArena::Hide()
 	SetActorHiddenInGame(true);
 }
 
+void AHexBattleArena::BuildCaveLight()
+{
+	TorchLights.Reset();
+	if (!Battles.IsValid() || !Battles->IsUnderground() || !Config)
+	{
+		return;
+	}
+	const FBox2D Box(FieldMin, FieldMax);
+	const FVector2D Middle = Box.GetCenter();
+	const double Hex = Config->HexRadius;
+	// the light over the middle of the field, as the light of a hero in the maze
+	if (Config->CaveFieldLightIntensity > 0.0f)
+	{
+		UPointLightComponent* Light = NewObject<UPointLightComponent>(this);
+		Light->SetupAttachment(Root);
+		Light->SetMobility(EComponentMobility::Movable);
+		Light->bUseInverseSquaredFalloff = false;
+		Light->SetLightFalloffExponent(Config->CaveFieldLightFalloff);
+		Light->SetIntensityUnits(ELightUnits::Unitless);
+		Light->SetIntensity(Config->CaveFieldLightIntensity);
+		Light->SetLightColor(Config->CaveFieldLightColor);
+		const double LightReach = Hex * 2.0 * double(Config->CaveFieldLightReach);
+		Light->SetAttenuationRadius(float(FMath::Sqrt(LightReach * LightReach + FMath::Square(double(Config->CaveFieldLightHeight)))));
+		Light->SetSourceRadius(float(Hex * 0.5));
+		Light->SetCastShadows(Config->bCaveFieldLightShadows);
+		Light->bCastVolumetricShadow = false;
+		Light->SetWorldLocation(FVector(Middle.X, Middle.Y, GetActorLocation().Z + GetShownGroundHeight(Middle) + Config->CaveFieldLightHeight));
+		Light->RegisterComponent();
+		Props.Add(Light);
+	}
+	// torches around the edge of the field, a little out of it, each with a light that flickers
+	UStaticMesh* TorchMesh = Config->CaveTorchMesh.LoadSynchronous();
+	const UHexCastleConfig* CastleConfig = UHexCastleConfig::Load();
+	if (!CastleMaterial && CastleConfig)
+	{
+		if (UMaterialInterface* Parent = CastleConfig->Material.LoadSynchronous())
+		{
+			CastleMaterial = UMaterialInstanceDynamic::Create(Parent, this);
+			HexMaterialConfig::Apply(CastleMaterial, UHexSiteConfig::Load());
+			HexMaterialConfig::Apply(CastleMaterial, CastleConfig);
+			CastleMaterial->SetScalarParameterValue(TEXT("SiegeFadeRadius"), Config->SiegeFadeRadius);
+			CastleMaterial->SetScalarParameterValue(TEXT("SiegeFadeKeep"), Config->SiegeFadeKeep);
+		}
+	}
+	if (!TorchMesh || Config->CaveTorchSpacing <= 0.0f)
+	{
+		return;
+	}
+	UInstancedStaticMeshComponent* Torches = NewObject<UInstancedStaticMeshComponent>(this);
+	Torches->SetupAttachment(Root);
+	Torches->SetMobility(EComponentMobility::Movable);
+	Torches->SetStaticMesh(TorchMesh);
+	Torches->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	Torches->SetNumCustomDataFloats(11);
+	Torches->bAffectDynamicIndirectLighting = false;
+	if (CastleMaterial)
+	{
+		Torches->SetMaterial(0, CastleMaterial);
+	}
+	Torches->RegisterComponent();
+	Props.Add(Torches);
+	const FBox2D Ring = Box.ExpandBy(Hex * 2.0 * double(Config->CaveTorchMargin));
+	const double Step = Hex * 2.0 * double(Config->CaveTorchSpacing);
+	const double TorchHeight = TorchMesh->GetBounds().BoxExtent.Z * 2.0 * double(Config->CaveTorchScale);
+	const auto AddTorch = [&](const FVector2D& At, int32 Index)
+	{
+		// the heights of the ground are from the arena, which stands far below the planet
+		const FVector Ground(At.X, At.Y, GetActorLocation().Z + GetShownGroundHeight(At));
+		const float Data[11] = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, -1000.0f, 0.0f, -1000.0f, 0.0f, 0.0f};
+		const int32 Instance = Torches->AddInstance(FTransform(FRotator(0.0, double((Index * 47) % 360), 0.0), Ground - GetActorLocation(), FVector(Config->CaveTorchScale)), false);
+		Torches->SetCustomData(Instance, MakeArrayView(Data), true);
+		if (Config->CaveTorchLightIntensity <= 0.0f)
+		{
+			return;
+		}
+		UPointLightComponent* Light = NewObject<UPointLightComponent>(this);
+		Light->SetupAttachment(Root);
+		Light->SetMobility(EComponentMobility::Movable);
+		Light->bUseInverseSquaredFalloff = false;
+		Light->SetLightFalloffExponent(2.0f);
+		Light->SetIntensityUnits(ELightUnits::Unitless);
+		Light->SetIntensity(Config->CaveTorchLightIntensity);
+		Light->SetLightColor(Config->CaveTorchLightColor);
+		Light->SetAttenuationRadius(float(Hex * 2.0 * double(Config->CaveTorchLightReach)));
+		Light->SetCastShadows(false);
+		Light->SetWorldLocation(Ground + FVector(0.0, 0.0, TorchHeight * 1.05));
+		Light->RegisterComponent();
+		Props.Add(Light);
+		TorchLights.Add({Light, float(Index) * 1.618f});
+	};
+	// along each side of the ring, its corners once
+	int32 Count = 0;
+	const FVector2D Corners[4] = {Ring.Min, FVector2D(Ring.Max.X, Ring.Min.Y), Ring.Max, FVector2D(Ring.Min.X, Ring.Max.Y)};
+	for (int32 Side = 0; Side < 4; ++Side)
+	{
+		const FVector2D From = Corners[Side];
+		const FVector2D To = Corners[(Side + 1) % 4];
+		const int32 Steps = FMath::Max(1, FMath::RoundToInt32(FVector2D::Distance(From, To) / Step));
+		for (int32 Index = 0; Index < Steps; ++Index)
+		{
+			AddTorch(FMath::Lerp(From, To, double(Index) / double(Steps)), Count++);
+		}
+	}
+	UE_LOG(LogHexHero, Log, TEXT("Battle field: underground, %d torches"), Count);
+}
+
 void AHexBattleArena::ClearField()
 {
+	TorchLights.Reset();
 	for (const TObjectPtr<USceneComponent>& Prop : Props)
 	{
 		if (Prop)
@@ -4394,6 +4503,19 @@ void AHexBattleArena::Tick(float DeltaSeconds)
 	}
 	Gather();
 	UpdateDebugView();
+	// the torches of a field underground flicker, each at its own pace
+	if (!TorchLights.IsEmpty())
+	{
+		const float Time = GetWorld()->GetTimeSeconds();
+		for (const TPair<TObjectPtr<UPointLightComponent>, float>& Torch : TorchLights)
+		{
+			if (Torch.Key)
+			{
+				const float Wave = 0.6f * FMath::Sin(Time * 9.0f + Torch.Value) + 0.4f * FMath::Sin(Time * 23.0f + Torch.Value * 3.1f);
+				Torch.Key->SetIntensity(Config->CaveTorchLightIntensity * (1.0f + Config->CaveTorchFlicker * Wave));
+			}
+		}
+	}
 	// the wall dissolves in front of the hex under the cursor
 	if (CastleMaterial)
 	{

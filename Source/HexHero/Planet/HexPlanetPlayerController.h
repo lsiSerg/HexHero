@@ -293,6 +293,19 @@ private:
 	/** Chooses a castle from the list of the panel of the heroes and shows it; the one chosen already opens its panel */
 	void ShowCastle(int32 Id);
 
+	/** A click on a hero or castle in the list of the panel of the heroes or on its mark at the edge of the screen: it chooses and shows it,
+	 *  and a second within DoubleClickTime opens its army or its castle */
+	void OnListHero(int32 Id);
+	void OnListCastle(int32 Id);
+	void OnListHeroGo(int32 Id);
+
+	/** Returns true when a click in the list is the second on the same hero or castle within DoubleClickTime */
+	bool IsListDoubleClick(bool bCastle, int32 Id);
+
+	int32 LastListId = 0;
+	bool bLastListCastle = false;
+	double LastListTime = -1.0;
+
 	/** Returns the brush, made on the surface of the planet when first needed, or null without one */
 	UHexPlanetPainter* GetPainter();
 

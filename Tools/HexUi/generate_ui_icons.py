@@ -519,6 +519,80 @@ def draw_icon_level_up(c):
     c.fill(disc, (0.55, 0.38, 0.08))
     c.fill(union(shaft, head), (1.0, 0.9, 0.45))
 
+# the icons of the resources, drawn at 40 pixels, as the developer asked on 2026-11-14 for the costs in a castle with icons
+
+def draw_res_gold(c):
+    # a stack of coins and one leaning on it
+    for index, y in enumerate((46, 38, 30)):
+        coin = union(ellipse(c, 28, y, 17, 7), polygon(c, [(11, y), (45, y), (45, y + 5), (11, y + 5)]), ellipse(c, 28, y + 5, 17, 7))
+        c.outline(coin, 2.6)
+        c.fill(coin, (0.86, 0.62, 0.12))
+        c.fill(ellipse(c, 28, y, 14.5, 5.2), (1.0, 0.84, 0.3))
+    leaning = ellipse(c, 47, 32, 9, 15, 0.35)
+    c.outline(leaning, 2.6)
+    c.fill(leaning, (0.95, 0.75, 0.2))
+    c.fill(ellipse(c, 47, 32, 5.5, 10.5, 0.35), (1.0, 0.88, 0.42))
+    c.glint()
+
+
+def draw_res_wood(c):
+    for ax, ay, bx, by in ((10, 46, 50, 30), (14, 30, 54, 16)):
+        log = capsule(c, ax, ay, bx, by, 8.5)
+        c.outline(log, 2.6)
+        c.fill(log, (0.55, 0.34, 0.17))
+        end = circle(c, bx, by, 7.5)
+        c.outline(end, 1.6)
+        c.fill(end, (0.86, 0.66, 0.4))
+        c.fill(circle(c, bx, by, 3.5), (0.7, 0.5, 0.28), shade=0.0)
+
+
+def draw_res_ore(c):
+    lump = polygon(c, [(10, 40), (16, 22), (30, 12), (46, 16), (56, 30), (52, 48), (34, 56), (16, 52)])
+    c.outline(lump, 2.8)
+    c.fill(lump, (0.48, 0.47, 0.5))
+    c.fill(polygon(c, [(18, 26), (30, 16), (42, 20), (34, 30), (22, 32)]), (0.62, 0.61, 0.65))
+    for x, y, r in ((24, 42, 3.5), (40, 36, 4.0), (44, 24, 2.6), (32, 48, 2.4)):
+        c.fill(circle(c, x, y, r), (0.72, 0.42, 0.22), shade=0.0)
+
+
+def draw_res_mercury(c):
+    flask = union(circle(c, 32, 42, 16), polygon(c, [(26, 10), (38, 10), (38, 30), (26, 30)]))
+    c.outline(flask, 2.8)
+    c.fill(flask, (0.75, 0.8, 0.86))
+    c.fill(cut(circle(c, 32, 42, 13), polygon(c, [(0, 0), (64, 0), (64, 38), (0, 38)])), (0.55, 0.6, 0.68))
+    c.fill(polygon(c, [(24, 6), (40, 6), (40, 11), (24, 11)]), (0.45, 0.3, 0.2))
+    c.fill(ellipse(c, 25, 38, 3, 6, 0.4), (0.95, 0.97, 1.0), shade=0.0)
+    c.glint()
+
+
+def draw_res_sulfur(c):
+    heap = polygon(c, [(6, 52), (16, 34), (26, 24), (36, 22), (46, 30), (58, 52)])
+    c.outline(heap, 2.8)
+    c.fill(heap, (0.88, 0.8, 0.18))
+    for x, y, r in ((22, 44, 5), (36, 36, 6), (46, 46, 4.5), (30, 50, 4)):
+        c.fill(circle(c, x, y, r), (1.0, 0.94, 0.4))
+
+
+def draw_res_crystal(c):
+    shards = [polygon(c, [(22, 56), (16, 30), (24, 10), (32, 30), (30, 56)]),
+              polygon(c, [(32, 56), (34, 24), (44, 6), (50, 26), (42, 56)]),
+              polygon(c, [(42, 56), (48, 36), (58, 30), (56, 46), (52, 56)])]
+    c.outline(union(*shards), 2.6)
+    for shard, color in zip(shards, ((0.85, 0.18, 0.25), (0.95, 0.3, 0.35), (0.75, 0.14, 0.22))):
+        c.fill(shard, color)
+    c.fill(polygon(c, [(40, 14), (44, 8), (46, 22)]), (1.0, 0.7, 0.72), shade=0.0)
+    c.glint()
+
+
+def draw_res_gems(c):
+    gem = polygon(c, [(10, 24), (20, 12), (44, 12), (54, 24), (32, 56)])
+    c.outline(gem, 2.8)
+    c.fill(gem, (0.25, 0.75, 0.95))
+    c.fill(polygon(c, [(10, 24), (54, 24), (32, 56)]), (0.15, 0.55, 0.85))
+    c.fill(polygon(c, [(20, 12), (32, 24), (44, 12)]), (0.6, 0.92, 1.0))
+    c.glint()
+
+
 # name, drawing, pixels, hot spot (0 to 1 of the picture), whether it is a cursor, frames a second
 ICONS = [
     ('Default', draw_default, 64, (5 / 64, 4 / 64), True),
@@ -550,6 +624,13 @@ ICONS = [
     ('IconCount', draw_icon_count, 40, (0.5, 0.5), False),
     ('IconFlies', draw_icon_flies, 40, (0.5, 0.5), False),
     ('IconLevelUp', draw_icon_level_up, 40, (0.5, 0.5), False),
+    ('ResGold', draw_res_gold, 40, (0.5, 0.5), False),
+    ('ResWood', draw_res_wood, 40, (0.5, 0.5), False),
+    ('ResOre', draw_res_ore, 40, (0.5, 0.5), False),
+    ('ResMercury', draw_res_mercury, 40, (0.5, 0.5), False),
+    ('ResSulfur', draw_res_sulfur, 40, (0.5, 0.5), False),
+    ('ResCrystal', draw_res_crystal, 40, (0.5, 0.5), False),
+    ('ResGems', draw_res_gems, 40, (0.5, 0.5), False),
 ]
 
 # how fast each plays, frames a second; the rest at DEFAULT_RATE

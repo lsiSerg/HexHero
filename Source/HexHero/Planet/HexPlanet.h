@@ -1109,7 +1109,7 @@ private:
 	 *  with in its W how far the light reaches there, the first ShadowLights of DA_HexHeroes with shadows, and gives the motes and the fog where
 	 *  they stand */
 	UPointLightComponent* MakeHeroLight();
-	void UpdateHeroLight(TConstArrayView<FVector4d> Lights);
+	void UpdateHeroLight(TConstArrayView<FVector4d> Lights, const FVector3d& Camera);
 
 	/** The focus of the camera in the frame drawn, where the light of the hero stands, which the fog clears around (FogFocus of
 	 *  M_HexUndergroundFog), and whether there is one */

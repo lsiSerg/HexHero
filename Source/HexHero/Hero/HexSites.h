@@ -133,6 +133,9 @@ public:
 	 *  under the fog of war of the person who plays, as the developer asked on 2026-11-13; every update of the heroes */
 	void UpdateGuards(const class UHexHeroes& Heroes);
 
+	/** Returns the guard of nobody a site has when a game starts, by Guards of DA_HexSites and a hash of the site, empty for none */
+	TArray<FHexStack> MakeStartGuard(const FHexSite& Site) const;
+
 	/** Returns the mine or mill that fills a cell, which no hero enters, or the pile that lies on it, which the hero whose way ends there takes */
 	const FHexSite* FindBlockerAt(EHexPlanetLayer Layer, int32 Cell) const;
 	const FHexSite* FindPileAt(EHexPlanetLayer Layer, int32 Cell) const;

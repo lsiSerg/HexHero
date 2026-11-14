@@ -147,8 +147,9 @@ void AHexPlanetPlayerController::BeginPlay()
 		const UHexInputConfig* InputConfig = GetDefault<UHexMapSettings>()->LoadInputConfig();
 		TWeakObjectPtr<AHexPlanetPlayerController> WeakThis(this);
 		SAssignNew(HeroPanel, SHexHeroPanel)
-			.OnHeroChosen(FOnHexHeroChosen::CreateUObject(this, &AHexPlanetPlayerController::ShowHero))
-			.OnCastleChosen(FOnHexHeroChosen::CreateUObject(this, &AHexPlanetPlayerController::ShowCastle))
+			.OnHeroChosen(FOnHexHeroChosen::CreateUObject(this, &AHexPlanetPlayerController::OnListHero))
+			.OnCastleChosen(FOnHexHeroChosen::CreateUObject(this, &AHexPlanetPlayerController::OnListCastle))
+			.OnHeroGo(FOnHexHeroChosen::CreateUObject(this, &AHexPlanetPlayerController::OnListHeroGo))
 			.OnEndTurn(FSimpleDelegate::CreateUObject(this, &AHexPlanetPlayerController::EndHeroTurn))
 			.OnRestart(FSimpleDelegate::CreateUObject(this, &AHexPlanetPlayerController::RestartGame))
 			.OnProject([WeakThis](const FVector& Point, FVector2D& OutScreen)
@@ -470,12 +471,11 @@ void AHexPlanetPlayerController::ClickGame(bool bDouble)
 		{
 			if (bCastle)
 			{
-				ShowCastle(Id);
+				OnListCastle(Id);
 			}
 			else if (Heroes->CanChoose(Id))
 			{
-				Heroes->Select(Id);
-				ShowHero(Id);
+				OnListHero(Id);
 			}
 			return;
 		}
@@ -778,6 +778,11 @@ void AHexPlanetPlayerController::ShowCastle(int32 Id)
 		OnCastleOpened(Id);
 		return;
 	}
+	// another castle closes what the panel shows, as the developer asked on 2026-11-14
+	if (CastlePanel.IsValid())
+	{
+		CastlePanel->Close();
+	}
 	if (Heroes->SelectCastle(Id))
 	{
 		if (AHexPlanetCameraPawn* CameraPawn = GetCameraPawn())
@@ -958,6 +963,60 @@ void AHexPlanetPlayerController::RestartGame()
 		OnHeroMessage(TEXT("A new game: day 1"));
 		ShowHero(Heroes->GetSelectedId());
 	}
+}
+
+bool AHexPlanetPlayerController::IsListDoubleClick(bool bCastle, int32 Id)
+{
+	const double Now = FPlatformTime::Seconds();
+	const AHexPlanetCameraPawn* CameraPawn = GetCameraPawn();
+	const float Window = CameraPawn ? CameraPawn->GetDoubleClickTime() : 0.4f;
+	const bool bDouble = LastListId == Id && bLastListCastle == bCastle && Now - LastListTime <= double(Window);
+	LastListId = bDouble ? 0 : Id;
+	bLastListCastle = bCastle;
+	LastListTime = Now;
+	return bDouble;
+}
+
+void AHexPlanetPlayerController::OnListHero(int32 Id)
+{
+	// a click chooses the hero and brings the camera to it, a second one opens its army, as the developer asked on 2026-11-14
+	const bool bDouble = IsListDoubleClick(false, Id);
+	ShowHero(Id);
+	const UHexHeroes* Heroes = GetHeroes();
+	if (bDouble && Heroes && Heroes->GetSelectedId() == Id)
+	{
+		OnArmyOpened(Id, 0);
+	}
+}
+
+void AHexPlanetPlayerController::OnListHeroGo(int32 Id)
+{
+	// Go beside a hero in the list: it is chosen, and walks its way as the key would send it
+	UHexHeroes* Heroes = GetHeroes();
+	if (!Heroes || !Heroes->CanChoose(Id))
+	{
+		return;
+	}
+	if (Heroes->GetSelectedId() != Id || Heroes->GetSelectedCastleId() != 0)
+	{
+		Heroes->Select(Id);
+	}
+	if (CastlePanel.IsValid())
+	{
+		CastlePanel->Close();
+	}
+	FString Message;
+	if (!Heroes->Go(Id, Message) && !Message.IsEmpty())
+	{
+		OnHeroMessage(Message);
+	}
+}
+
+void AHexPlanetPlayerController::OnListCastle(int32 Id)
+{
+	// a click chooses the castle and brings the camera to it, a second one, or a click on the one chosen, opens it and comes close
+	IsListDoubleClick(true, Id);
+	ShowCastle(Id);
 }
 
 void AHexPlanetPlayerController::ShowHero(int32 Id)

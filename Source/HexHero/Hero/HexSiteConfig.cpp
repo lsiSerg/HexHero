@@ -102,8 +102,33 @@ TArray<FHexSiteShare> MakeDefaultSiteShares()
 	};
 }
 
+TArray<FHexSiteGuardRule> MakeDefaultSiteGuards()
+{
+	const auto Make = [](const TCHAR* Kind, float Share, int32 LevelMin, int32 LevelMax, float Weeks)
+	{
+		FHexSiteGuardRule Rule;
+		Rule.Kind = Kind;
+		Rule.Share = Share;
+		Rule.LevelMin = LevelMin;
+		Rule.LevelMax = LevelMax;
+		Rule.Weeks = Weeks;
+		return Rule;
+	};
+	return {
+		Make(TEXT("GoldMine"), 1.0f, 2, 3, 1.0f),
+		Make(TEXT("Sawmill"), 0.35f, 1, 1, 1.0f),
+		Make(TEXT("OreMine"), 0.35f, 1, 1, 1.0f),
+		Make(TEXT("MercuryLab"), 1.0f, 1, 2, 1.0f),
+		Make(TEXT("SulfurMine"), 1.0f, 1, 2, 1.0f),
+		Make(TEXT("CrystalCave"), 1.0f, 1, 2, 1.0f),
+		Make(TEXT("GemMine"), 1.0f, 1, 2, 1.0f),
+		Make(TEXT("Mill"), 0.5f, 1, 2, 0.75f),
+	};
+}
+
 UHexSiteConfig::UHexSiteConfig()
 {
+	Guards = MakeDefaultSiteGuards();
 	Resources = MakeDefaultResources();
 	Kinds = MakeDefaultSiteKinds();
 	Generation.Shares = MakeDefaultSiteShares();
@@ -124,6 +149,10 @@ void UHexSiteConfig::PostLoad()
 	if (Generation.Shares.IsEmpty())
 	{
 		Generation.Shares = MakeDefaultSiteShares();
+	}
+	if (Guards.IsEmpty())
+	{
+		Guards = MakeDefaultSiteGuards();
 	}
 }
 
