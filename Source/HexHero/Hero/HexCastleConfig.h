@@ -353,6 +353,17 @@ public:
 	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=0, ClampMax=60))
 	float AiCastleReachDays = 5.0f;
 
+	/** What a player the game moves builds, in order, as the Id of a building and the level to build it to, as the developer asked on
+	 *  2026-11-14 that it grows its town to buy an army: of the next AiBuildLookahead steps not reached it builds the first it can, and keeps
+	 *  the gold of the first of them while it waits for it, hiring with what is left but on the first day of a week, when it hires all */
+	UPROPERTY(EditAnywhere, Category="AI")
+	TArray<FString> AiBuildOrder = {TEXT("Dwelling1:1"), TEXT("Dwelling2:1"), TEXT("Hall:2"), TEXT("Dwelling3:1"), TEXT("Fort:1"), TEXT("Dwelling4:1"),
+		TEXT("Dwelling1:2"), TEXT("Dwelling2:2"), TEXT("Hall:3"), TEXT("Dwelling5:1"), TEXT("Dwelling3:2"), TEXT("Fort:2"), TEXT("Dwelling4:2"),
+		TEXT("Dwelling6:1"), TEXT("Dwelling5:2"), TEXT("Fort:3"), TEXT("Dwelling7:1"), TEXT("Dwelling6:2"), TEXT("Dwelling7:2")};
+
+	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=1, ClampMax=10))
+	int32 AiBuildLookahead = 3;
+
 	/** A castle is nearly round and has no ground of its own, as the developer asked on 2026-11-11: it stands on the ground of its cells
 	 *  and follows it. Its wall is WallSegments stretches of a mesh along a circle of WallRadius radii of a cell around the corner its
 	 *  cells share, counted from GateAngle so every gate has the same gap, each stood on the ground where it lies, but for those within

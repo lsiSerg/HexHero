@@ -8,6 +8,7 @@
 #include "HexHeroConfig.h"
 #include "HexBiomeConfig.h"
 #include "HexPlanet.h"
+#include "HexPlanetConfig.h"
 #include "HexPlanetObjects.h"
 #include "HexPlanetRivers.h"
 #include "HexPlanetUnderground.h"
@@ -511,6 +512,11 @@ TArray<int32> UHexHeroes::GetActivePlayers() const
 void UHexHeroes::BeginTurn(int32 Player)
 {
 	TurnPlayer = Player;
+	// battles weighed are kept while the armies stay as they were, as their key holds the power of the hero's army
+	if (AiForecasts.Num() > 4096)
+	{
+		AiForecasts.Reset();
+	}
 	PendingNextFrom = 0;
 	SelectedCastleId = 0;
 	AiHeroId = 0;
@@ -534,8 +540,15 @@ void UHexHeroes::BeginTurn(int32 Player)
 		{
 			Castles->RunAi(Player);
 		}
-		// with no person in the game the players it moves take their turns a second apart
-		AiTurnWait = Heroes.ContainsByPredicate([this](const FHexHero& Each) { return !IsPlayerAi(Each.Player); }) ? 0.0f : 1.0f;
+		// with no person in the game the players it moves take their turns a second apart, and the fog of war and the light shown are those of
+		// whose turn it is, so its heroes open the maze as they walk it, as the developer watched a game of the game alone on 2026-11-14 and saw
+		// the heroes of all but the first in the dark
+		const bool bPerson = Heroes.ContainsByPredicate([this](const FHexHero& Each) { return !IsPlayerAi(Each.Player); });
+		AiTurnWait = bPerson ? 0.0f : 1.0f;
+		if (!bPerson)
+		{
+			ViewPlayer = Player;
+		}
 		UE_LOG(LogHexHero, Log, TEXT("Heroes: day %d, %s moves, by the game"), Day, *Name);
 		OnMessage.Broadcast(FString::Printf(TEXT("%s moves"), *Name));
 		return;
@@ -1003,6 +1016,7 @@ bool UHexHeroes::StartPlay(FString& OutProblem)
 		return false;
 	}
 	bPlaying = true;
+	StartPlayers = GetActivePlayers();
 	// every player knows the land around its heroes
 	ExploreAll();
 	// the players move in turns: the one whose turn it was when the game stopped for editing goes on, else the first; and the fog of war
@@ -1013,6 +1027,71 @@ bool UHexHeroes::StartPlay(FString& OutProblem)
 	UE_LOG(LogHexHero, Log, TEXT("Heroes: the game is played, day %d"), Day);
 	BeginTurn(Active.Contains(TurnPlayer) ? TurnPlayer : Active[0]);
 	return true;
+}
+
+void UHexHeroes::SetPlayerAuto(int32 Player, bool bAuto)
+{
+	if (bAuto)
+	{
+		AutoPlayers.Add(Player);
+		// its heroes move from where the turn stands
+		for (FHexHero& Hero : Heroes)
+		{
+			if (Hero.Player == Player)
+			{
+				Hero.bAiDone = false;
+			}
+		}
+		AiHeroId = 0;
+	}
+	else
+	{
+		AutoPlayers.Remove(Player);
+	}
+	++ListRevision;
+	UE_LOG(LogHexHero, Log, TEXT("Heroes: %s is moved by %s"), *Config->GetPlayer(Player).Name, bAuto ? TEXT("the game for a while") : TEXT("a person again"));
+}
+
+void UHexHeroes::CheckGameEnd()
+{
+	if (!bPlaying || StartPlayers.Num() < 2)
+	{
+		return;
+	}
+	const TArray<int32> Active = GetActivePlayers();
+	const bool bPersons = StartPlayers.ContainsByPredicate([this](int32 Player) { return !IsPlayerAi(Player); });
+	const bool bPersonLeft = Active.ContainsByPredicate([this](int32 Player) { return !IsPlayerAi(Player); });
+	const bool bAiLeft = Active.ContainsByPredicate([this](int32 Player) { return IsPlayerAi(Player); });
+	FString Text;
+	bool bWon = false;
+	if (bPersons && !bPersonLeft)
+	{
+		// every person is out: the game won first
+		TArray<FString> Names;
+		for (const int32 Player : Active)
+		{
+			Names.Add(Config->GetPlayer(Player).Name);
+		}
+		Text = Names.IsEmpty() ? FString(TEXT("Defeat: no hero and no castle of yours is left"))
+			: FString::Printf(TEXT("Defeat: no hero and no castle of yours is left, and %s holds the land"), *FString::Join(Names, TEXT(" and ")));
+	}
+	else if (Active.Num() <= 1 || (bPersons && !bAiLeft && Active.Num() == 1))
+	{
+		const int32 Winner = Active.IsEmpty() ? INDEX_NONE : Active[0];
+		bWon = Winner != INDEX_NONE && !IsPlayerAi(Winner);
+		Text = Winner == INDEX_NONE ? FString(TEXT("Nobody is left: the game is over"))
+			: bWon ? FString::Printf(TEXT("Victory: %s took everything, no hero and no castle of another player is left"), *Config->GetPlayer(Winner).Name)
+			: FString::Printf(TEXT("%s took everything: the game is over"), *Config->GetPlayer(Winner).Name);
+	}
+	else
+	{
+		return;
+	}
+	bPlaying = false;
+	PendingNextFrom = 0;
+	UE_LOG(LogHexHero, Log, TEXT("Heroes: day %d, the game ends: %s"), Day, *Text);
+	OnMessage.Broadcast(Text);
+	OnGameOver.Broadcast(bWon, Text);
 }
 
 void UHexHeroes::StopPlay()
@@ -1815,12 +1894,13 @@ void UHexHeroes::FindFieldFor(const FHexHero& Hero, HexHeroPath::FField& OutFiel
 		return Cost < 0.0f ? -1.0f : Cost * (Layer == 0 && Rivers ? Rivers->GetCrossingFactor(From, To) : 1.0f);
 	};
 	// a hero may go through an entrance or exit its player has seen, to the same cell of the other layer, where no hero it knows of stands;
-	// a hero the game moves only where its player has seen the other side too, as it keeps to what it explored
+	// a hero the game moves too where its player has not seen the other side, which then is as far as its way goes there, as it keeps to what
+	// it explored (until 2026-11-14 it did not go through at all then, so it never went down)
 	const auto GetLink = [&](int32 Layer, int32 Cell)
 	{
 		const int32 Other = 1 - Layer;
 		if (!Planets[Other] || Planets[Other]->GetGrid().GetCells().Num() != NumCells || !IsKnown(Layer, Cell) || !IsUsableEntrance(*Planets[Layer], Cell)
-			|| (IsKnown(Other, Cell) ? Occupied.Contains(Other * NumCells + Cell) : !bThroughUnknown))
+			|| (IsKnown(Other, Cell) && Occupied.Contains(Other * NumCells + Cell)))
 		{
 			return -1.0f;
 		}
@@ -2072,6 +2152,14 @@ bool UHexHeroes::VisitSite(FHexHero& Hero, FString& OutMessage)
 		else if (!IsPlayerAi(Hero.Player))
 		{
 			OnArmyOpened.Broadcast(Hero.Id, FriendId);
+		}
+		else if (FHexHero* Leader = FindHeroMutable(FriendId); Leader && Castles && GetAiMainHero(Hero.Player) == FriendId)
+		{
+			// a hero of the game brings its leader an army: the strongest stacks of both go to the leader, the rest stays with it
+			const float Before = Castles->GetPower(Leader->Army);
+			Castles->SplitStrongest(Leader->Army, Hero.Army);
+			OutMessage = FString::Printf(TEXT("%s brings %s an army, which counts %.0f now against %.0f"), *Hero.Name, *Leader->Name, Castles->GetPower(Leader->Army), Before);
+			UE_LOG(LogHexHero, Log, TEXT("Heroes: %s"), *OutMessage);
 		}
 		++ListRevision;
 		++MapRevision;
@@ -2902,6 +2990,7 @@ void UHexHeroes::Restart()
 	const TArray<int32> Active = GetActivePlayers();
 	if (bPlaying && !Active.IsEmpty())
 	{
+		StartPlayers = Active;
 		SelectedId = 0;
 		BeginTurn(Active[0]);
 	}
@@ -3068,6 +3157,8 @@ void UHexHeroes::UpdateBody(FHexHero& Hero)
 		Body->SetupAttachment(Planet->GetRootComponent());
 		Body->SetMobility(EComponentMobility::Movable);
 		Body->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		// no place in the scene of Lumen, as the other pieces of the planet
+		Body->bAffectDynamicIndirectLighting = Planet->GetSettings() && Planet->GetSettings()->AreSmallObjectsInLumen();
 		Body->SetCanEverAffectNavigation(false);
 		if (UMaterialInterface* Material = Config->HeroMaterial.LoadSynchronous())
 		{
@@ -4080,6 +4171,12 @@ void UHexHeroes::Update(float DeltaTime, const FVector3d* ViewPoint)
 	{
 		return;
 	}
+	// a battle or a step that took the last hero and castle of a player may end the game
+	CheckGameEnd();
+	if (!bPlaying && !StartPlayers.IsEmpty())
+	{
+		StartPlayers.Reset();
+	}
 
 	for (int32 Index = 0; Index < Heroes.Num(); ++Index)
 	{
@@ -4414,7 +4511,7 @@ void UHexHeroes::UpdateAi(float DeltaTime)
 	}
 }
 
-bool UHexHeroes::MoveAiToSite(int32 Id, const HexHeroPath::FField& Ways, bool& bOutSent)
+bool UHexHeroes::MoveAiToSite(int32 Id, const HexHeroPath::FField& Ways, bool& bOutSent, bool bBreakThrough)
 {
 	bOutSent = false;
 	const FHexHero* Hero = FindHero(Id);
@@ -4441,96 +4538,223 @@ bool UHexHeroes::MoveAiToSite(int32 Id, const HexHeroPath::FField& Ways, bool& b
 		{
 			continue;
 		}
-		const float Reach = DayPoints * (Goal == EHexSiteGoal::LostMine ? Config->AiLostMineReachDays : Goal == EHexSiteGoal::Mine ? Config->AiMineReachDays : Config->AiPileReachDays);
+		// the hero that leads the army takes only what lies within a day, as it has fights to go to
+		const float Reach = DayPoints * (GetAiMainHero(Player) == Id ? 1.0f
+			: Goal == EHexSiteGoal::LostMine ? Config->AiLostMineReachDays : Goal == EHexSiteGoal::Mine ? Config->AiMineReachDays : Config->AiPileReachDays);
 		const float Cost = GetSiteWayCost(Ways, Site.Layer, Site.Cell);
 		if (Reach > 0.0f && Cost >= 0.0f && Cost <= Reach)
 		{
 			Goals.Add({Cost / Reach, Cost, &Site, Goal});
 		}
 	}
-	// and a castle of nobody or of another player that its army can take, by the cell of it the way to which is the cheapest
-	if (Castles)
+	// and what it would fight: a castle of nobody or of another player, a hero of another player out of a castle, a neutral stack; the nearest
+	// first, each weighed by battles fought in advance, as the developer asked on 2026-11-14 that it grows strong enough to break into the
+	// other zones and take everything
+	if (Castles && Battles && Battles->GetConfig())
 	{
-		const float Reach = DayPoints * Castles->GetConfig()->AiCastleReachDays;
-		for (const FHexCastle& Castle : Castles->GetCastles())
+		struct FFoe
 		{
-			float LossShare = 0.0f;
-			if (Castle.Owner == Player || IsHidden(Player, Castle.Layer, Castle.Cells[0])
-				|| !UHexCastles::Resolve(Castles->GetAttack(*Hero), Castles->GetDefense(Castle), 1.0f, 1.0f, LossShare))
-			{
-				continue;
-			}
-			float Cost = -1.0f;
+			float Cost = 0.0f;
+			EHexPlanetLayer Layer = EHexPlanetLayer::Surface;
 			int32 Cell = INDEX_NONE;
-			for (const int32 Each : Castle.Cells)
-			{
-				const float Way = GetSiteWayCost(Ways, Castle.Layer, Each);
-				if (Way >= 0.0f && (Cost < 0.0f || Way < Cost))
-				{
-					Cost = Way;
-					Cell = Each;
-				}
-			}
-			if (Reach > 0.0f && Cost >= 0.0f && Cost <= Reach)
-			{
-				FString Message;
-				if (Send(Id, Castle.Layer, Cell, Message))
-				{
-					bOutSent = true;
-					UE_LOG(LogHexHero, Log, TEXT("Heroes: %s, moved by the game, goes for the castle on cell %d of the %s, %.1f points away"), *FindHero(Id)->Name, Cell,
-						GetPlanetLayerName(Castle.Layer), Cost);
-					return true;
-				}
-			}
-		}
-	}
-	// and a hero of another player or a neutral stack its army outweighs enough, within a reach of its own
-	if (Battles && Battles->GetConfig())
-	{
-		const UHexBattleConfig* BattleConfig = Battles->GetConfig();
-		const float Reach = DayPoints * BattleConfig->AiAttackReachDays;
-		const float Mine = Battles->GetArmyPower(Hero->Army) * (1.0f + 0.05f * float(FMath::Max(Hero->Attack, 0)));
-		struct FFoe { float Cost; EHexPlanetLayer Layer; int32 Cell; };
-		TArray<FFoe> Foes;
-		const auto Consider = [&](EHexPlanetLayer Layer, int32 Cell, float Power)
-		{
-			if (IsHidden(Player, Layer, Cell) || Mine < Power * BattleConfig->AiAttackMargin)
-			{
-				return;
-			}
-			const float Cost = GetSiteWayCost(Ways, Layer, Cell, nullptr, Player);
-			if (Reach > 0.0f && Cost >= 0.0f && Cost <= Reach)
-			{
-				Foes.Add({Cost, Layer, Cell});
-			}
+			FHexBattleRequest Request;
+			bool bNeutral = false;
+			float Power = 0.0f;
+			FString Key;
+			/** Its way is weighed this many times as cheap when the foes are ordered */
+			float Rank = 1.0f;
 		};
-		for (const FHexHero& Other : Heroes)
+		TArray<FFoe> Foes;
+		// the hero that leads the army goes for what it beats however far it lies on the ways it knows, so it breaks into the other zones
+		// rather than gathering what its land gives again week after week; the others, and any breaking through, within their reach
+		const bool bMain = GetAiMainHero(Player) == Id;
+		const float CastleReach = bMain ? TNumericLimits<float>::Max() : DayPoints * Castles->GetConfig()->AiCastleReachDays;
+		const float FoeReach = bBreakThrough || bMain ? TNumericLimits<float>::Max() : DayPoints * Battles->GetConfig()->AiAttackReachDays;
+		const float Mine = Battles->GetArmyPower(Hero->Army);
+		if (!bBreakThrough)
 		{
-			if (Other.Player != Player && Other.CastleId == 0)
+			for (const FHexCastle& Castle : Castles->GetCastles())
 			{
-				Consider(Other.Layer, Other.Cell, Battles->GetArmyPower(Other.Army) * (1.0f + 0.05f * float(FMath::Max(Other.Defense, 0))));
+				if (Castle.Owner == Player || IsHidden(Player, Castle.Layer, Castle.Cells[0]))
+				{
+					continue;
+				}
+				float Cost = -1.0f;
+				int32 Cell = INDEX_NONE;
+				for (const int32 Each : Castle.Cells)
+				{
+					const float Way = GetSiteWayCost(Ways, Castle.Layer, Each);
+					if (Way >= 0.0f && (Cost < 0.0f || Way < Cost))
+					{
+						Cost = Way;
+						Cell = Each;
+					}
+				}
+				if (CastleReach > 0.0f && Cost >= 0.0f && Cost <= CastleReach)
+				{
+					FFoe& Foe = Foes.AddDefaulted_GetRef();
+					Foe.Cost = Cost;
+					Foe.Layer = Castle.Layer;
+					Foe.Cell = Cell;
+					Foe.Request.Kind = EHexBattleKind::Castle;
+					Foe.Request.CastleId = Castle.Id;
+					Foe.Key = FString::Printf(TEXT("castle %d"), Castle.Id);
+					// a castle gives armies, so it comes before the rest, and one taken from its player before all, as the developer asked
+					Foe.Rank = Player >= 0 && Player < 32 && (Castle.FormerOwners & (1u << Player)) != 0 ? Config->AiLostCastleRank : Config->AiCastleRank;
+				}
+			}
+			for (const FHexHero& Other : Heroes)
+			{
+				if (Other.Player == Player || Other.CastleId != 0 || IsHidden(Player, Other.Layer, Other.Cell))
+				{
+					continue;
+				}
+				const float Cost = GetSiteWayCost(Ways, Other.Layer, Other.Cell, nullptr, Player);
+				if (FoeReach > 0.0f && Cost >= 0.0f && Cost <= FoeReach)
+				{
+					FFoe& Foe = Foes.AddDefaulted_GetRef();
+					Foe.Cost = Cost;
+					Foe.Layer = Other.Layer;
+					Foe.Cell = Other.Cell;
+					Foe.Request.Kind = EHexBattleKind::Hero;
+					Foe.Request.DefenderHero = Other.Id;
+					Foe.Power = Battles->GetArmyPower(Other.Army);
+					Foe.Key = FString::Printf(TEXT("hero %d"), Other.Id);
+				}
 			}
 		}
+		int32 Hidden = 0;
+		int32 Far = 0;
 		if (Neutrals)
 		{
 			for (const FHexNeutral& Neutral : Neutrals->GetNeutrals())
 			{
-				Consider(Neutral.Layer, Neutral.Cell, Battles->GetArmyPower(TArray<FHexStack>{Neutral.Stack}));
+				if (IsHidden(Player, Neutral.Layer, Neutral.Cell))
+				{
+					++Hidden;
+					continue;
+				}
+				const float Cost = GetSiteWayCost(Ways, Neutral.Layer, Neutral.Cell, nullptr, Player);
+				Far += Cost < 0.0f || Cost > FoeReach ? 1 : 0;
+				if (FoeReach > 0.0f && Cost >= 0.0f && Cost <= FoeReach)
+				{
+					FFoe& Foe = Foes.AddDefaulted_GetRef();
+					Foe.Cost = Cost;
+					Foe.Layer = Neutral.Layer;
+					Foe.Cell = Neutral.Cell;
+					Foe.Request.Kind = EHexBattleKind::Neutral;
+					Foe.Request.NeutralId = Neutral.Id;
+					Foe.bNeutral = true;
+					Foe.Power = Battles->GetArmyPower(TArray<FHexStack>{Neutral.Stack});
+					Foe.Key = FString::Printf(TEXT("neutral %d"), Neutral.Id);
+				}
 			}
 		}
-		Foes.Sort([](const FFoe& A, const FFoe& B) { return A.Cost < B.Cost; });
+		Foes.Sort([](const FFoe& A, const FFoe& B) { return A.Cost / A.Rank < B.Cost / B.Rank; });
+		if (bBreakThrough)
+		{
+			UE_LOG(LogHexHero, Verbose, TEXT("Heroes: %s, moved by the game, would break through: %d stacks it reaches, %d it sees but does not reach, %d unseen; its army counts %.0f"),
+				*Hero->Name, Foes.Num(), Far, Hidden, Mine);
+		}
+		// the goal it set out for first, while it is still there and nothing it beats lies within a day
+		if (!Hero->AiGoal.IsEmpty())
+		{
+			const int32 Goal = Foes.IndexOfByPredicate([Hero](const FFoe& Foe) { return Foe.Key == Hero->AiGoal; });
+			const bool bPressing = Goal != INDEX_NONE && Foes.ContainsByPredicate([&](const FFoe& Foe)
+			{
+				return Foe.Key != Hero->AiGoal && !Foe.bNeutral && Foe.Cost <= DayPoints && (Foe.Power <= 0.0f || Mine >= Foe.Power * 1.5f);
+			});
+			if (Goal == INDEX_NONE || bPressing)
+			{
+				UE_LOG(LogHexHero, Log, TEXT("Heroes: %s, moved by the game, leaves its goal, %s"), *Hero->Name, Goal == INDEX_NONE ? TEXT("which is gone") : TEXT("for something nearer"));
+				FindHeroMutable(Id)->AiGoal.Reset();
+			}
+			else
+			{
+				Foes.Swap(0, Goal);
+			}
+		}
+		int32 Weighed = 0;
 		for (const FFoe& Foe : Foes)
 		{
+			// an army far weaker than what it would fight is not weighed at all, and one far stronger wins for little
+			if (Foe.Power > 0.0f && Mine < Foe.Power * 0.4f)
+			{
+				if (bBreakThrough)
+				{
+					UE_LOG(LogHexHero, Verbose, TEXT("Heroes: %s, moved by the game, does not break through %s, %.1f points away: it counts %.0f"), *Hero->Name, *Foe.Key, Foe.Cost, Foe.Power);
+				}
+				continue;
+			}
+			const bool bSure = Foe.Power > 0.0f && Mine >= Foe.Power * 8.0f;
+			FHexBattleRequest Request = Foe.Request;
+			Request.Attacker = Id;
+			Request.Layer = Foe.Layer;
+			Request.Cell = Foe.Cell;
+			const FString Key = FString::Printf(TEXT("%d %s %.0f"), Id, *Foe.Key, Mine);
+			FVector2f Result(1.0f, 0.0f);
+			if (const FVector2f* Known = AiForecasts.Find(Key))
+			{
+				Result = *Known;
+			}
+			else if (bSure)
+			{
+				Result = FVector2f(1.0f, Foe.Power / Mine);
+			}
+			else
+			{
+				if (Weighed >= Config->AiForecastMax)
+				{
+					continue;
+				}
+				++Weighed;
+				// a castle nobody defends has nothing to fight
+				float Win = 1.0f;
+				float Loss = 0.0f;
+				if (Battles->Forecast(Request, Config->AiForecastTries, Win, Loss))
+				{
+					Result = FVector2f(Win, Loss);
+				}
+				AiForecasts.Add(Key, Result);
+				UE_LOG(LogHexHero, Verbose, TEXT("Heroes: %s, moved by the game, weighs a fight with %s: wins %.0f%%, loses %.0f%%"), *Hero->Name, *Foe.Key, Result.X * 100.0f, Result.Y * 100.0f);
+			}
+			const float MaxLoss = Foe.bNeutral && !bBreakThrough && Foe.Key != Hero->AiGoal ? Config->AiNeutralLossShare : Config->AiLossShare;
+			if (Result.X < Config->AiWinShare || Result.Y > MaxLoss)
+			{
+				if (bBreakThrough)
+				{
+					UE_LOG(LogHexHero, Verbose, TEXT("Heroes: %s, moved by the game, does not break through %s, %.1f points away: wins %.0f%%, loses %.0f%%"), *Hero->Name,
+						*Foe.Key, Foe.Cost, Result.X * 100.0f, Result.Y * 100.0f);
+				}
+				continue;
+			}
 			FString Message;
 			if (Send(Id, Foe.Layer, Foe.Cell, Message))
 			{
 				bOutSent = true;
-				UE_LOG(LogHexHero, Log, TEXT("Heroes: %s, moved by the game, goes to fight on cell %d of the %s, %.1f points away"), *FindHero(Id)->Name, Foe.Cell,
-					GetPlanetLayerName(Foe.Layer), Foe.Cost);
+				FHexHero* Sent = FindHeroMutable(Id);
+				Sent->AiGoal = Foe.Key;
+				Sent->AiGoalLayer = Foe.Layer;
+				Sent->AiGoalCell = Foe.Cell;
+				UE_LOG(LogHexHero, Log, TEXT("Heroes: %s, moved by the game, goes to fight %s on cell %d of the %s, %.1f points away (wins %.0f%%, loses %.0f%%)"),
+					*FindHero(Id)->Name, *Foe.Key, Foe.Cell, GetPlanetLayerName(Foe.Layer), Foe.Cost, Result.X * 100.0f, Result.Y * 100.0f);
+				return true;
+			}
+			// a fight more than a day away it waits for, as for a site
+			if (Foe.Cost > Hero->MovePoints + UE_KINDA_SMALL_NUMBER && Foe.Cost <= DayPoints * 2.0f)
+			{
+				FHexHero* Kept = FindHeroMutable(Id);
+				Kept->TargetCell = INDEX_NONE;
+				Kept->VisitCell = INDEX_NONE;
 				return true;
 			}
 		}
 	}
+	if (bBreakThrough)
+	{
+		return false;
+	}
+
 	// the nearest by the share of its reach first
 	Goals.Sort([](const FGoal& A, const FGoal& B) { return A.Share != B.Share ? A.Share < B.Share : A.Site->Id < B.Site->Id; });
 	for (int32 Index = 0; Index < FMath::Min(Goals.Num(), 4); ++Index)
@@ -4563,6 +4787,151 @@ bool UHexHeroes::MoveAiToSite(int32 Id, const HexHeroPath::FField& Ways, bool& b
 	return false;
 }
 
+int32 UHexHeroes::GetAiCarrier(int32 Player) const
+{
+	const int32 Main = GetAiMainHero(Player);
+	const FHexHero* Best = nullptr;
+	for (const FHexHero& Hero : Heroes)
+	{
+		Best = Hero.Player == Player && Hero.Id != Main && (!Best || Hero.Id < Best->Id) ? &Hero : Best;
+	}
+	return Best ? Best->Id : 0;
+}
+
+bool UHexHeroes::MoveAiCarry(int32 Id, const HexHeroPath::FField& Ways)
+{
+	const FHexHero* Hero = FindHero(Id);
+	if (!Hero || !Castles || GetAiCarrier(Hero->Player) != Id)
+	{
+		return false;
+	}
+	const FHexHero* Leader = FindHero(GetAiMainHero(Hero->Player));
+	if (!Leader || Leader->CastleId != 0)
+	{
+		return false;
+	}
+	const float LeaderPower = FMath::Max(Castles->GetPower(Leader->Army), 1.0f);
+	// with an army worth bringing it goes to the leader, wherever it is on the ways it knows
+	TArray<FHexStack> Gain = Leader->Army;
+	TArray<FHexStack> Carried = Hero->Army;
+	Castles->SplitStrongest(Gain, Carried);
+	const float Worth = Castles->GetPower(Gain) - LeaderPower;
+	FString Message;
+	if (Worth >= LeaderPower * Config->AiCarryShare && GetSiteWayCost(Ways, Leader->Layer, Leader->Cell) >= 0.0f && Send(Id, Leader->Layer, Leader->Cell, Message))
+	{
+		UE_LOG(LogHexHero, Log, TEXT("Heroes: %s, moved by the game, brings %s an army worth %.0f"), *Hero->Name, *Leader->Name, Worth);
+		return true;
+	}
+	// else to the castle of its own whose army is worth the most to the leader
+	const FHexCastle* Best = nullptr;
+	int32 BestCell = INDEX_NONE;
+	float BestWorth = 0.0f;
+	for (const FHexCastle& Castle : Castles->GetCastles())
+	{
+		if (Castle.Owner != Hero->Player)
+		{
+			continue;
+		}
+		const float Offer = Castles->GetAiOffer(Castle, *Leader);
+		if (Offer < LeaderPower * Config->AiCarryShare || Offer <= BestWorth)
+		{
+			continue;
+		}
+		// in it already, it takes the army now and sets out next time
+		if (Hero->CastleId == Castle.Id)
+		{
+			Castles->AiTake(Castle.Id, *FindHeroMutable(Id));
+			return false;
+		}
+		for (const int32 Cell : Castle.Cells)
+		{
+			if (GetSiteWayCost(Ways, Castle.Layer, Cell) >= 0.0f)
+			{
+				Best = &Castle;
+				BestCell = Cell;
+				BestWorth = Offer;
+				break;
+			}
+		}
+	}
+	if (Best && Send(Id, Best->Layer, BestCell, Message))
+	{
+		UE_LOG(LogHexHero, Log, TEXT("Heroes: %s, moved by the game, goes to castle %d for an army for %s"), *Hero->Name, Best->Id, *Leader->Name);
+		return true;
+	}
+	return false;
+}
+
+int32 UHexHeroes::GetAiMainHero(int32 Player) const
+{
+	// the first of its heroes, kept while it lives, so the army does not pass from one to another as their strengths change
+	const FHexHero* Best = nullptr;
+	for (const FHexHero& Hero : Heroes)
+	{
+		Best = Hero.Player == Player && (!Best || Hero.Id < Best->Id) ? &Hero : Best;
+	}
+	return Best ? Best->Id : 0;
+}
+
+bool UHexHeroes::MoveAiHome(int32 Id, const HexHeroPath::FField& Ways, bool bAny)
+{
+	const FHexHero* Hero = FindHero(Id);
+	// only the hero that leads the army of its player goes home for more
+	if (!Hero || !Castles || !Battles || GetAiMainHero(Hero->Player) != Id)
+	{
+		return false;
+	}
+	const float Mine = FMath::Max(Battles->GetArmyPower(Hero->Army), 1.0f);
+	// with a hero to carry its armies it goes home only when a castle lies within a day
+	const float Reach = FMath::Max(GetMaxMovePoints(*Hero), 1.0f) * (GetAiCarrier(Hero->Player) != 0 ? 1.0f : Config->AiReinforceDays);
+	const FHexCastle* Best = nullptr;
+	int32 BestCell = INDEX_NONE;
+	float BestCost = 0.0f;
+	for (const FHexCastle& Castle : Castles->GetCastles())
+	{
+		if (Castle.Owner != Hero->Player)
+		{
+			continue;
+		}
+		// in it already, it takes what is there now
+		if (Hero->CastleId == Castle.Id)
+		{
+			if (Castles->GetAiOffer(Castle, *Hero) > 0.0f)
+			{
+				Castles->AiTake(Castle.Id, *FindHeroMutable(Id));
+			}
+			continue;
+		}
+		// with nothing else to do it still goes only for a tenth of its army or more, so it does not walk to and fro for a few creatures
+		const float Offer = Castles->GetAiOffer(Castle, *Hero);
+		if (Offer < Mine * (bAny ? 0.1f : Config->AiReinforceShare))
+		{
+			continue;
+		}
+		for (const int32 Cell : Castle.Cells)
+		{
+			const float Cost = GetSiteWayCost(Ways, Castle.Layer, Cell);
+			if (Cost >= 0.0f && Cost <= Reach && (!Best || Cost < BestCost))
+			{
+				Best = &Castle;
+				BestCell = Cell;
+				BestCost = Cost;
+			}
+		}
+	}
+	if (!Best)
+	{
+		return false;
+	}
+	FString Message;
+	if (Send(Id, Best->Layer, BestCell, Message))
+	{
+		UE_LOG(LogHexHero, Log, TEXT("Heroes: %s, moved by the game, goes home to castle %d for its army, %.1f points away"), *Hero->Name, Best->Id, BestCost);
+		return true;
+	}
+	return false;
+}
+
 bool UHexHeroes::MoveAi(int32 Id)
 {
 	const FHexHero* Hero = FindHero(Id);
@@ -4579,8 +4948,57 @@ bool UHexHeroes::MoveAi(int32 Id)
 	HexHeroPath::FField Ways;
 	FindFieldFor(*Hero, Ways, false);
 
-	// first what it can gather and the mines to take, or to take back
+	// a hero but the leader flees from a hero of another player that it sees within AiFleeDays and that counts AiFleePower times its army,
+	// into the nearest castle of its own, as the developer asked on 2026-11-14 ("слабкі герої намагаються втекти?")
+	if (GetAiMainHero(Hero->Player) != Id && Hero->CastleId == 0 && Castles)
+	{
+		const float Mine = FMath::Max(Castles->GetPower(Hero->Army), 1.0f);
+		bool bThreat = false;
+		for (const FHexHero& Other : Heroes)
+		{
+			if (Other.Player != Hero->Player && Other.Layer == Hero->Layer && !IsHidden(Hero->Player, Other.Layer, Other.Cell)
+				&& Castles->GetPower(Other.Army) >= Mine * Config->AiFleePower)
+			{
+				const float Cost = GetSiteWayCost(Ways, Other.Layer, Other.Cell, nullptr, Hero->Player);
+				bThreat |= Cost >= 0.0f && Cost <= GetMaxMovePoints(*Hero) * Config->AiFleeDays;
+			}
+		}
+		const FHexCastle* Refuge = nullptr;
+		int32 RefugeCell = INDEX_NONE;
+		float RefugeCost = 0.0f;
+		for (int32 Index = 0; bThreat && Index < Castles->GetCastles().Num(); ++Index)
+		{
+			const FHexCastle& Castle = Castles->GetCastles()[Index];
+			if (Castle.Owner != Hero->Player)
+			{
+				continue;
+			}
+			for (const int32 Cell : Castle.Cells)
+			{
+				const float Cost = GetSiteWayCost(Ways, Castle.Layer, Cell);
+				if (Cost >= 0.0f && (!Refuge || Cost < RefugeCost))
+				{
+					Refuge = &Castle;
+					RefugeCell = Cell;
+					RefugeCost = Cost;
+				}
+			}
+		}
+		FString Fled;
+		if (Refuge && Send(Id, Refuge->Layer, RefugeCell, Fled))
+		{
+			UE_LOG(LogHexHero, Log, TEXT("Heroes: %s, moved by the game, flees into castle %d from a hero far stronger"), *Hero->Name, Refuge->Id);
+			return true;
+		}
+	}
+
+	// the leader first takes the army its castles have for it, the carrier brings it one, then what it beats and gathers, the mines to take
+	// or take back
 	bool bSent = false;
+	if (MoveAiHome(Id, Ways, false) || MoveAiCarry(Id, Ways))
+	{
+		return true;
+	}
 	if (MoveAiToSite(Id, Ways, bSent))
 	{
 		return bSent;
@@ -4651,23 +5069,46 @@ bool UHexHeroes::MoveAi(int32 Id)
 	if (BestNode != INDEX_NONE)
 	{
 		FString Message;
-		return Send(Id, EHexPlanetLayer(BestNode / NumCells), BestNode % NumCells, Message);
+		const bool bWent = Send(Id, EHexPlanetLayer(BestNode / NumCells), BestNode % NumCells, Message);
+		UE_LOG(LogHexHero, Verbose, TEXT("Heroes: %s, moved by the game, goes to explore from cell %d of the %s, %d steps from the unexplored, %.1f points away%s"), *Hero->Name,
+			BestNode % NumCells, GetPlanetLayerName(EHexPlanetLayer(BestNode / NumCells)), Near[BestNode], Ways.Costs[BestNode], bWent ? TEXT("") : *(TEXT(": ") + Message));
+		return bWent;
 	}
 
-	// nothing left to open within reach: through the nearest entrance or exit of its layer whose other side its player has not seen
+	// nothing left to open within reach: through the nearest entrance or exit of its layer whose other side its player has not seen, or
+	// whose network below has passages its player has not explored, as a castle opens the land around it on both layers, the exits near it
+	// too, and its heroes never went down until 2026-11-14
 	int32 Best = INDEX_NONE;
 	{
 		const EHexPlanetLayer Other = GetOtherLayer(Hero->Layer);
+		TSet<int32> OpenNetworks;
+		const AHexPlanet* Below = GetPlanet(EHexPlanetLayer::Underground);
+		const HexPlanetUnderground::FReport* Report = Below ? Below->GetUndergroundReport() : nullptr;
+		const TBitArray<>* BelowExplored = Shroud->GetExplored(Hero->Player, EHexPlanetLayer::Underground);
+		if (Report && Below->IsDataLoaded())
+		{
+			for (int32 Cell = 0; Cell < Report->CellNetworks.Num() && Cell < NumCells; ++Cell)
+			{
+				if (Report->CellNetworks[Cell] >= 0 && HexPlanetUnderground::IsPassage(int8(Below->GetCellLevel(Cell)))
+					&& !(BelowExplored && BelowExplored->IsValidIndex(Cell) && (*BelowExplored)[Cell]))
+				{
+					OpenNetworks.Add(Report->CellNetworks[Cell]);
+				}
+			}
+		}
 		float BestCost = 0.0f;
 		for (const FHexEntrance& Entrance : Planet->GetEntrances())
 		{
 			const int32 Cell = Entrance.Cell;
-			if (!IsUsableEntrance(*Planet, Cell) || Shroud->IsExplored(Hero->Player, Other, Cell) || FindHeroAt(Other, Cell)
+			// underground with nothing left to explore it goes back up, by an exit to land its player has not seen first, else the nearest
+			const bool bNew = !Shroud->IsExplored(Hero->Player, Other, Cell) || (Hero->Layer == EHexPlanetLayer::Surface && OpenNetworks.Contains(Entrance.Network));
+			const bool bUnseen = bNew || Hero->Layer == EHexPlanetLayer::Underground;
+			if (!IsUsableEntrance(*Planet, Cell) || !bUnseen || FindHeroAt(Other, Cell)
 				|| (Cell != Hero->Cell && !Ways.IsReached(GetNode(Hero->Layer, Cell))))
 			{
 				continue;
 			}
-			const float Cost = Cell == Hero->Cell ? 0.0f : Ways.Costs[GetNode(Hero->Layer, Cell)];
+			const float Cost = (Cell == Hero->Cell ? 0.0f : Ways.Costs[GetNode(Hero->Layer, Cell)]) + (bNew ? 0.0f : 100000.0f);
 			if (Best == INDEX_NONE || Cost < BestCost)
 			{
 				Best = Cell;
@@ -4677,12 +5118,84 @@ bool UHexHeroes::MoveAi(int32 Id)
 	}
 	if (Best == INDEX_NONE)
 	{
-		UE_LOG(LogHexHero, Log, TEXT("Heroes: %s, moved by the game, finds nothing more to explore from cell %d of the %s"), *Hero->Name, Hero->Cell, GetPlanetLayerName(Hero->Layer));
+		// nothing left to explore or take: it breaks through a guard in its way, else goes home for what its castles have and waits there
+		if (MoveAiToSite(Id, Ways, bSent, true))
+		{
+			return bSent;
+		}
+		if (MoveAiHome(Id, Ways, true))
+		{
+			return true;
+		}
+		// why it goes for none of the castles of the others, for the log
+		FString Castled;
+		for (const FHexCastle& Castle : Castles ? Castles->GetCastles() : TArray<FHexCastle>())
+		{
+			if (Castle.Owner != Hero->Player)
+			{
+				const float Cost = GetSiteWayCost(Ways, Castle.Layer, Castle.Cells[0]);
+				Castled += FString::Printf(TEXT(" castle %d %s%s;"), Castle.Id, IsHidden(Hero->Player, Castle.Layer, Castle.Cells[0]) ? TEXT("unseen") : TEXT("seen"),
+					Cost >= 0.0f ? *FString::Printf(TEXT(" %.1f points away"), Cost) : TEXT(" out of reach"));
+			}
+		}
+		UE_LOG(LogHexHero, Log, TEXT("Heroes: %s, moved by the game, finds nothing more to explore from cell %d of the %s;%s"), *Hero->Name, Hero->Cell,
+			GetPlanetLayerName(Hero->Layer), *Castled);
+		// a hero but the leader waits in a castle of its own nobody holds, so it does not stand in a narrow way the leader takes
+		if (GetAiMainHero(Hero->Player) != Id && Hero->CastleId == 0 && Castles)
+		{
+			for (const FHexCastle& Castle : Castles->GetCastles())
+			{
+				FString Why;
+				if (Castle.Owner == Hero->Player && !Castles->FindGuard(Castle) && GetSiteWayCost(Ways, Castle.Layer, Castle.Cells[0]) >= 0.0f
+					&& Send(Id, Castle.Layer, Castle.Cells[0], Why))
+				{
+					UE_LOG(LogHexHero, Log, TEXT("Heroes: %s, moved by the game, waits in castle %d"), *FindHero(Id)->Name, Castle.Id);
+					return true;
+				}
+			}
+		}
+		// nor on an entrance or an exit, where it would keep a hero of its player on the other side from coming through, nor in a narrow way,
+		// whose open cells around it lie in more than one run, where it would stand in the way of the others, as the developer asked on
+		// 2026-11-14: it goes to the nearest open cell that is neither
+		const auto IsNarrow = [&](int32 Cell)
+		{
+			const auto& Around = Cells[Cell].Neighbors;
+			int32 Runs = 0;
+			for (int32 K = 0; K < Around.Num(); ++K)
+			{
+				const bool bOpen = IsOpenGround(Hero->Layer, Around[K]);
+				const bool bBefore = IsOpenGround(Hero->Layer, Around[(K + Around.Num() - 1) % Around.Num()]);
+				Runs += bOpen && !bBefore ? 1 : 0;
+			}
+			return Runs > 1 || Planet->FindEntrance(Cell) != INDEX_NONE;
+		};
+		if (Hero->CastleId == 0 && IsNarrow(Hero->Cell))
+		{
+			int32 Spot = INDEX_NONE;
+			for (int32 Cell = 0; Cell < NumCells; ++Cell)
+			{
+				const int32 Node = GetNode(Hero->Layer, Cell);
+				if (Cell != Hero->Cell && Ways.IsReached(Node) && Ways.Costs[Node] <= Hero->MovePoints && !IsNarrow(Cell)
+					&& (Spot == INDEX_NONE || Ways.Costs[Node] < Ways.Costs[GetNode(Hero->Layer, Spot)]))
+				{
+					Spot = Cell;
+				}
+			}
+			FString Why;
+			if (Spot != INDEX_NONE && Send(Id, Hero->Layer, Spot, Why))
+			{
+				UE_LOG(LogHexHero, Log, TEXT("Heroes: %s, moved by the game, steps out of a narrow way to cell %d"), *FindHero(Id)->Name, Spot);
+				return true;
+			}
+		}
 		return false;
 	}
 	// through it: to the same cell of the other layer
 	FString Message;
-	return Send(Id, GetOtherLayer(Hero->Layer), Best, Message);
+	const bool bWent = Send(Id, GetOtherLayer(Hero->Layer), Best, Message);
+	UE_LOG(LogHexHero, Log, TEXT("Heroes: %s, moved by the game, goes through the entrance on cell %d to the %s%s"), *FindHero(Id)->Name, Best,
+		GetPlanetLayerName(GetOtherLayer(FindHero(Id)->Layer)), bWent ? TEXT("") : *(TEXT(": ") + Message));
+	return bWent;
 }
 
 bool UHexHeroes::GetLights(EHexPlanetLayer Layer, const FVector3d& Focus, TArray<FHexHeroLight>& OutLights) const
@@ -4696,8 +5209,8 @@ bool UHexHeroes::GetLights(EHexPlanetLayer Layer, const FVector3d& Focus, TArray
 	const float Share = TriedShare >= 0.0f ? TriedShare : Config->LightMoveShare;
 	for (const FHexHero& Hero : Heroes)
 	{
-		// a hero under the fog of war lights nothing the person sees
-		if (Hero.Layer != Layer || (IsShroudOn() && IsHidden(ViewPlayer, Hero.Layer, Hero.Cell)))
+		// a hero under the fog of war lights nothing the person sees; one that shows, as it steps into the fog or out of it, lights as it shows
+		if (Hero.Layer != Layer || (IsShroudOn() && !IsSeen(Hero)))
 		{
 			continue;
 		}

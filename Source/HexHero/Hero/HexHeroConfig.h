@@ -77,6 +77,175 @@ struct FHexHeroPlayer
 };
 
 /** Returns the classes and players a config has when it holds none */
+/**
+ *  How a map of zones is made (Zones of FHexPlanetGeneration, which the panel of a new planet sets), as the developer asked on 2026-11-14 ("згенеруй карту на 3 гравці - з
+ *  них один ігрок, 1 АІ і один ніхто - пусті замки, шахти, у кожного має бути зона на карті, в яку будуть від 2 до 4 входів у сумі, на
+ *  поверхні чи через підземелля, кожний прохід захищається нейтралом", and then for up to 8 zones): the planet split into zones around its
+ *  equator by ranges of mountains, a sea at each pole, each zone reached by MinAccesses to MaxAccesses ways in, passes over the ranges and
+ *  networks of the underground, each guarded by a neutral stack a hero beats after a week of hiring; a castle of the person, of each player
+ *  the game moves and empty ones of nobody, and mines and piles on both layers (HexZoneMap, HexZonePieces). Every number is Claude's
+ */
+USTRUCT(BlueprintType)
+struct FHexZoneMapGeneration
+{
+	GENERATED_BODY()
+
+	/** The land inside the zones, as FHexPlanetGeneration takes it: mostly land, with ranges of its own that make a maze */
+	UPROPERTY(EditAnywhere, Category="Zone map|Terrain", meta=(ClampMin=0, ClampMax=1))
+	double LandShare = 0.9;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Terrain", meta=(ClampMin=0, ClampMax=1))
+	double ShallowsShare = 0.5;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Terrain", meta=(ClampMin=0, ClampMax=1))
+	double HillShare = 0.3;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Terrain", meta=(ClampMin=0, ClampMax=1))
+	double MountainShare = 0.16;
+
+	/** Moisture of the land, as FHexPlanetGeneration takes it: land far from the sea is dry, and a map of zones has little sea */
+	UPROPERTY(EditAnywhere, Category="Zone map|Terrain", meta=(ClampMin=-0.5, ClampMax=0.5))
+	double Moisture = 0.3;
+
+	/** Latitude in degrees from which the poles are sea, moved by a noise up to PolarWobble degrees either way */
+	UPROPERTY(EditAnywhere, Category="Zone map|Zones", meta=(ClampMin=30, ClampMax=85))
+	float PolarLatitude = 58.0f;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Zones", meta=(ClampMin=0, ClampMax=20))
+	float PolarWobble = 6.0f;
+
+	/** How far a noise moves the borders of the zones from straight meridians, and how fine that noise is */
+	UPROPERTY(EditAnywhere, Category="Zone map|Zones", meta=(ClampMin=0, ClampMax=1))
+	float ZoneWarp = 0.12f;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Zones", meta=(ClampMin=0.1, ClampMax=20))
+	float ZoneWarpScale = 2.5f;
+
+	/** Turns of the zones around the axis that are tried, the one with the fewest pentagons in a range kept, as a pentagon is never a mountain */
+	UPROPERTY(EditAnywhere, Category="Zone map|Zones", meta=(ClampMin=1, ClampMax=360))
+	int32 RotationTries = 36;
+
+	/** Share of the cells next to a range that thicken it, by a noise, so a range is two to four cells wide */
+	UPROPERTY(EditAnywhere, Category="Zone map|Zones", meta=(ClampMin=0, ClampMax=1))
+	float RangeThickShare = 0.5f;
+
+	/** Ways into each zone, passes and entrances of networks that lead to another zone together */
+	UPROPERTY(EditAnywhere, Category="Zone map|Ways", meta=(ClampMin=1, ClampMax=8))
+	int32 MinAccesses = 2;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Ways", meta=(ClampMin=1, ClampMax=8))
+	int32 MaxAccesses = 4;
+
+	/** Most passes over the range between two zones, and most networks of the underground that join zones */
+	UPROPERTY(EditAnywhere, Category="Zone map|Ways", meta=(ClampMin=0, ClampMax=4))
+	int32 MaxPasses = 2;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Ways", meta=(ClampMin=0, ClampMax=3))
+	int32 MaxLinkNetworks = 2;
+
+	/** How far a pass may lie from its place along the range, as a share of the range */
+	UPROPERTY(EditAnywhere, Category="Zone map|Ways", meta=(ClampMin=0, ClampMax=0.4))
+	float PassJitter = 0.12f;
+
+	/** Steps from the castle of its zone an entrance of a network that joins zones lies, and one of a network of the zone alone */
+	UPROPERTY(EditAnywhere, Category="Zone map|Ways", meta=(ClampMin=2))
+	int32 LinkEntranceMinSteps = 6;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Ways", meta=(ClampMin=2))
+	int32 LinkEntranceMaxSteps = 14;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Ways", meta=(ClampMin=2))
+	int32 OwnEntranceMinSteps = 5;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Ways", meta=(ClampMin=2))
+	int32 OwnEntranceMaxSteps = 18;
+
+	/** Networks of the underground each zone has to itself, two entrances each, for its mines below */
+	UPROPERTY(EditAnywhere, Category="Zone map|Ways", meta=(ClampMin=0, ClampMax=2))
+	int32 OwnNetworks = 1;
+
+	/** Cells an entrance keeps from a range, and from another entrance or a castle */
+	UPROPERTY(EditAnywhere, Category="Zone map|Ways", meta=(ClampMin=1))
+	int32 EntranceRangeClear = 3;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Ways", meta=(ClampMin=1))
+	int32 EntranceSpacing = 5;
+
+	/** Five zones or more lie in two rings, this many degrees north and south of the equator; up to four in one ring on it */
+	UPROPERTY(EditAnywhere, Category="Zone map|Zones", meta=(ClampMin=0, ClampMax=45))
+	float RingLatitude = 26.0f;
+
+	/** Castles of nobody in a zone of nobody, the first in its middle and the others this many degrees north and south of it, as far as
+	 *  there is room; a zone of a player has its own castle in its middle */
+	UPROPERTY(EditAnywhere, Category="Zone map|Castles", meta=(ClampMin=1, ClampMax=3))
+	int32 NobodyCastles = 2;
+
+	/** Empty castles of nobody in the zone of a player besides its own, north and south of it, as the developer asked on 2026-11-14 */
+	UPROPERTY(EditAnywhere, Category="Zone map|Castles", meta=(ClampMin=0, ClampMax=2))
+	int32 PlayerZoneNobodyCastles = 1;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Castles", meta=(ClampMin=0, ClampMax=45))
+	float NobodyCastleLatitude = 14.0f;
+
+	/** The players and their factions and the class of their heroes, by their Ids */
+	UPROPERTY(EditAnywhere, Category="Zone map|Castles")
+	int32 PersonPlayer = 0;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Castles")
+	int32 AiPlayer = 1;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Castles")
+	FString PersonFaction = TEXT("Dawn");
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Castles")
+	FString AiFaction = TEXT("Decay");
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Castles")
+	FString HeroClass = TEXT("Knight");
+
+	/** How many more sites than DA_HexSites places, on both layers, as the developer asked not to spare them ("не шкодуй") */
+	UPROPERTY(EditAnywhere, Category="Zone map|Pieces", meta=(ClampMin=0, ClampMax=10))
+	float SiteDensity = 2.0f;
+
+	/** Each zone has at least a mine of every resource and this many piles on its land, so a player grows in its zone alone, as the developer
+	 *  asked on 2026-11-14 ("в кожній зоні має бути достатньо ресурсів щоб прокачатися"); what the scattering left out is put ZoneSiteMinSteps
+	 *  to ZoneSiteMaxSteps from a castle of the zone, and the neutral stacks guard them by how far they lie from the castles of their zone */
+	UPROPERTY(EditAnywhere, Category="Zone map|Pieces", meta=(ClampMin=0, ClampMax=40))
+	int32 ZoneMinPiles = 8;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Pieces", meta=(ClampMin=1))
+	int32 ZoneSiteMinSteps = 4;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Pieces", meta=(ClampMin=1))
+	int32 ZoneSiteMaxSteps = 16;
+
+	/** The guard of a way in: a stack of a creature of these levels, as many as the army a hero has after GuardWeeks beats with small losses,
+	 *  as the developer asked on 2026-11-14 ("щоб за 2 тижні накоплення військ було достатньо для пробиття без суттевої втрати юнітів героя"),
+	 *  which battles fought GuardTries times find: the army a hero starts with and GuardWeeks of what the dwellings of the first GuardDwellings
+	 *  levels offer, of the weaker of the two factions, wins at least half of them losing at most GuardMaxLoss of its power on average against
+	 *  the largest stack, of which GuardShare stands there */
+	UPROPERTY(EditAnywhere, Category="Zone map|Guards", meta=(ClampMin=1, ClampMax=7))
+	int32 GuardLevelMin = 3;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Guards", meta=(ClampMin=1, ClampMax=7))
+	int32 GuardLevelMax = 4;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Guards", meta=(ClampMin=0, ClampMax=8))
+	float GuardWeeks = 1.0f;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Guards", meta=(ClampMin=0, ClampMax=1))
+	float GuardMaxLoss = 0.15f;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Guards", meta=(ClampMin=1, ClampMax=7))
+	int32 GuardDwellings = 4;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Guards", meta=(ClampMin=0.1, ClampMax=2))
+	float GuardShare = 0.9f;
+
+	UPROPERTY(EditAnywhere, Category="Zone map|Guards", meta=(ClampMin=1, ClampMax=9))
+	int32 GuardTries = 3;
+};
+
 TArray<FHexHeroClass> MakeDefaultHeroClasses();
 TArray<FHexHeroPlayer> MakeDefaultHeroPlayers();
 
@@ -243,6 +412,64 @@ public:
 	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=0, ClampMax=60))
 	float AiLostMineReachDays = 7.0f;
 
+	/** A hero of such a player fights a hero, a castle or a neutral stack within its reach when the battle, fought AiForecastTries times
+	 *  in advance, is won at least AiWinShare of the times and costs it at most AiLossShare of the power of its army on average, as the
+	 *  developer asked on 2026-11-14 that it gathers, builds and hires to break into the other zones and take everything; it weighs at
+	 *  most AiForecastMax foes a move, the nearest first */
+	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=0, ClampMax=1))
+	float AiWinShare = 0.65f;
+
+	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=0, ClampMax=1))
+	float AiLossShare = 0.6f;
+
+	/** Losses it bears to fight a neutral stack while it has anything else to do; past that only a stack that stands in its way to the rest of
+	 *  the map, when nothing else is left, for AiLossShare */
+	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=0, ClampMax=1))
+	float AiNeutralLossShare = 0.25f;
+
+	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=1, ClampMax=9))
+	int32 AiForecastTries = 3;
+
+	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=1, ClampMax=32))
+	int32 AiForecastMax = 6;
+
+	/** Its strongest hero goes back to a castle of its own within this many days to take the creatures there, when they count at least
+	 *  AiReinforceShare of its army, or when it has nothing better to do */
+	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=0, ClampMax=30))
+	float AiReinforceDays = 4.0f;
+
+	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=0, ClampMax=10))
+	float AiReinforceShare = 0.35f;
+
+	/** A hero of such a player after its leader carries the armies of its castles to the leader, as the developer asked on 2026-11-14, once they
+	 *  would add this share to the army of the leader; the leader then goes home only for a castle within a day */
+	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=0, ClampMax=10))
+	float AiCarryShare = 0.2f;
+
+	/** A hero but the leader flees into a castle of its own from a hero of another player it sees within AiFleeDays whose army counts
+	 *  AiFleePower times its own, as the developer asked on 2026-11-14 */
+	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=0, ClampMax=10))
+	float AiFleeDays = 1.5f;
+
+	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=1, ClampMax=100))
+	float AiFleePower = 3.0f;
+
+	/** A castle a hero takes counts as this many times nearer than a hero or a neutral stack, and one taken from its player before as nearer
+	 *  still, as the developer asked on 2026-11-14 that castles, which give armies, come first, those lost above all */
+	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=1, ClampMax=100))
+	float AiCastleRank = 2.0f;
+
+	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=1, ClampMax=100))
+	float AiLostCastleRank = 3.0f;
+
+	/** Most heroes such a player hires, one a day in a castle with gold left for AiHeroGoldReserve, as the developer asked on 2026-11-14
+	 *  that it buys heroes to take land faster; with none it hires one whatever is left */
+	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=0, ClampMax=8))
+	int32 AiMaxHeroes = 4;
+
+	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=0))
+	int32 AiHeroGoldReserve = 500;
+
 	/** Seconds the camera stays where a hero of such a player went into the fog of war, before the game goes on with it or the next, and
 	 *  seconds it stays where one is about to come out of the fog, before it does, so the person sees where it went and where it comes from,
 	 *  as the developer asked on 2026-11-11; the hero waits meanwhile */
@@ -270,6 +497,10 @@ public:
 	/** The players, by index in heroes.json; MakeDefaultHeroPlayers when empty */
 	UPROPERTY(EditAnywhere, Category="Rules")
 	TArray<FHexHeroPlayer> Players;
+
+	/** How a map of zones is made */
+	UPROPERTY(EditAnywhere, Category="Zone map")
+	FHexZoneMapGeneration ZoneMap;
 
 	/** Each hero lights the land and the underground around itself, as the developer asked on 2026-11-10, as the focus of the camera did before
 	 *  there were heroes and still does on a planet without any: the day of the surface (bHeroShade of DA_HexPlanet) and the light, the clear

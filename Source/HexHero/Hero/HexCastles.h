@@ -97,6 +97,9 @@ struct FHexCastle
 	int32 StartOwner = INDEX_NONE;
 	int32 Owner = INDEX_NONE;
 
+	/** The players it was taken from, a bit each, so a player the game moves wants it back first */
+	uint32 FormerOwners = 0;
+
 	/** The level of each building of its faction, 0 for not built */
 	TArray<int32> Levels;
 
@@ -318,8 +321,19 @@ public:
 	 *  on 2026-11-13 for two heroes beside a castle */
 	TArray<const FHexHero*> FindVisitors(const FHexCastle& Castle) const;
 
-	/** A player the game moves builds what it can in each of its castles and hires into their garrisons */
+	/** A player the game moves builds in each of its castles by AiBuildOrder, hires a hero when it has none or gold to spare, and hires its
+	 *  creatures into a hero of its own in or beside the castle, else into the garrison */
 	void RunAi(int32 Player);
+
+	/** A hero of a player the game moves in a castle of its own takes what the castle has: it hires what it can and takes the garrison */
+	void AiTake(int32 CastleId, FHexHero& Hero);
+
+	/** What a hero of its owner would gain by taking from a castle, weighed: of its army, the garrison and what the gold of the owner hires
+	 *  there the strongest seven stacks go with it */
+	float GetAiOffer(const FHexCastle& Castle, const FHexHero& Hero) const;
+
+	/** Gives an army the strongest seven stacks of it and a garrison, the same kinds joined, and the garrison the rest */
+	void SplitStrongest(TArray<FHexStack>& InOutArmy, TArray<FHexStack>& InOutGarrison) const;
 
 	/** Returns "12 Sentinel" for a stack, a line for an army, and a line about the castle on a cell for the panel at the cursor */
 	FString DescribeStack(const FHexStack& Stack) const;

@@ -31,6 +31,8 @@ namespace
 		{TEXT("Heroes"), TEXT("hex.Cheat catapult [Hero]"), TEXT("A catapult for the hero chosen or named, which shoots at the walls of castles")},
 		{TEXT("Heroes"), TEXT("hex.Hero points <Amount> [Hero]"), TEXT("More points of movement today, or fewer with a negative amount")},
 		{TEXT("Heroes"), TEXT("hex.Hero startarmy [Hero|all]"), TEXT("The army a hero has now becomes the one it starts with, which the save keeps")},
+		{TEXT("Game"), TEXT("hex.Cheat autoplay [on|off] [Player]"), TEXT("The game plays for you, or the player named, by the rules of its AI, until turned off; not saved")},
+		{TEXT("Game"), TEXT("hex.Cheat speed [Times]"), TEXT("The game runs so many times as fast, up to 20, as slomo does; without a number at its own speed")},
 		{TEXT("Map"), TEXT("hex.Cheat reveal [Player]"), TEXT("The person who plays, or the player named, has explored all of both layers")},
 		{TEXT("Map"), TEXT("hex.Cheat enemies [on|off]"), TEXT("Marks every neutral stack and hero of another player with a line and its name, under the fog of war too")},
 		{TEXT("Map"), TEXT("hex.PlanetShroud 0"), TEXT("No fog of war while it is 0; 1 brings it back as it was")},

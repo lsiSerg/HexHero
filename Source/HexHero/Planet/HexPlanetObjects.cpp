@@ -2299,6 +2299,7 @@ void UHexPlanetObjects::ApplyChunk(int32 Chunk, const TArray<FInstance>& Instanc
 				Component->ShadowCacheInvalidationBehavior = EShadowCacheInvalidationBehavior::Rigid;
 			}
 			Component->bAffectDistanceFieldLighting = false;
+			Component->bAffectDynamicIndirectLighting = Settings && Settings->AreSmallObjectsInLumen();
 			Component->SetCullDistances(0, int32(Set.CullDistance));
 			// hidden with the rest while hex.PlanetObjects hides them, a rim also while hex.PlanetRims does
 			Component->SetVisibility(IsSlotShown(Slot) && IsChunkShown(Chunk));

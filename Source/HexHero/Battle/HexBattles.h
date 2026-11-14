@@ -59,6 +59,14 @@ public:
 	/** Starts a battle: shown when a person fights in it or sees it, else fought at once. Returns false and why when there is none to fight */
 	bool Begin(const FHexBattleRequest& Request, FString& OutMessage);
 
+	/** What a battle of a request would bring onto the field, as Begin starts it; false and why when there is none to fight */
+	bool MakeSetup(const FHexBattleRequest& InRequest, FHexBattleSetup& OutSetup, FString& OutMessage, int32* OutGuardSlots, bool* OutGuardAlone) const;
+
+	/** Fights a battle of a request Tries times in advance, the game on both sides, as a player the game moves weighs a fight (UHexHeroes::
+	 *  MoveAiToSite): the share of them the attacker wins and the share of the power of its army it loses on average. False when there is
+	 *  nothing to fight, as a castle nobody defends */
+	bool Forecast(const FHexBattleRequest& InRequest, int32 Tries, float& OutWinShare, float& OutLossShare) const;
+
 	/** A battle is on the field */
 	bool IsShown() const { return bShown; }
 

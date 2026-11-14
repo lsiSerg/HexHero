@@ -305,6 +305,9 @@ namespace HexPlanetUnderground
 		/** Generates the biomes again for the levels read, ignoring underground/biomes.txt, and writes it, leaving levels.txt and entrances.json
 		 *  as they are */
 		bool bNewBiomes = false;
+
+		/** Entrances to take where entrances.json is missing, as a map of zones places them (HexZoneMap), counted as placed */
+		TOptional<TArray<FHexEntrance>> GivenEntrances;
 	};
 
 	/** The underground of a planet, read from its files or generated */

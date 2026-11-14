@@ -253,6 +253,34 @@ void AHexPlanetPlayerController::OnHeroMessage(const FString& Message)
 	}
 }
 
+void AHexPlanetPlayerController::OnGameOver(bool bWon, const FString& Text)
+{
+	if (Dialog.IsValid())
+	{
+		CloseDialog();
+	}
+	SHexDialog::FButton NewGame;
+	NewGame.Label = NSLOCTEXT("HexPlanet", "GameOverNew", "New game");
+	NewGame.OnClicked = FOnHexDialogButton::CreateLambda([this](const FString&)
+	{
+		// from day 1, where the heroes start, and played at once
+		if (UHexHeroes* Heroes = GetHeroes())
+		{
+			Heroes->Restart();
+			SetPlayMode(true);
+		}
+		return FText::GetEmpty();
+	});
+	SHexDialog::FButton Close;
+	Close.Label = NSLOCTEXT("HexPlanet", "GameOverClose", "Look at the map");
+	Close.OnClicked = FOnHexDialogButton::CreateLambda([](const FString&) { return FText::GetEmpty(); });
+	ShowDialog(SNew(SHexDialog)
+		.Title(bWon ? NSLOCTEXT("HexPlanet", "Victory", "Victory") : NSLOCTEXT("HexPlanet", "GameOver", "Game over"))
+		.Message(FText::FromString(Text))
+		.Buttons(TArray<SHexDialog::FButton>{NewGame, Close})
+		.OnClosed_UObject(this, &AHexPlanetPlayerController::CloseDialog));
+}
+
 void AHexPlanetPlayerController::OnHeroTravelled(int32 Id)
 {
 	// the camera goes down or up with the hero chosen; another hero goes alone
@@ -1393,6 +1421,7 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 			BoundHeroes = Heroes;
 			Heroes->GetCastles()->OnCastleOpened.AddUObject(this, &AHexPlanetPlayerController::OnCastleOpened);
 			Heroes->OnMessage.AddUObject(this, &AHexPlanetPlayerController::OnHeroMessage);
+			Heroes->OnGameOver.AddUObject(this, &AHexPlanetPlayerController::OnGameOver);
 			Heroes->OnHeroTravelled.AddUObject(this, &AHexPlanetPlayerController::OnHeroTravelled);
 			Heroes->OnHeroChosen.AddUObject(this, &AHexPlanetPlayerController::OnHeroChosen);
 			Heroes->OnHeroSent.AddUObject(this, &AHexPlanetPlayerController::OnHeroSent);

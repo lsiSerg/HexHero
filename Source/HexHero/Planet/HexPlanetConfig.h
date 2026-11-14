@@ -926,6 +926,15 @@ public:
 	UPROPERTY(EditAnywhere, Category="Floes")
 	bool bFloeShadows = true;
 
+	/** Whether the pieces of the planet, its objects, boulders, floes, sites, piles, castles, heroes and the figures of the neutral stacks, take
+	 *  a place in the scene of Lumen, whose cards of them filled its surface cache past its atlas ("Lumen surface cache atlas oversubscribed",
+	 *  2026-11-14, in the editor mostly the castles and figures); they still take its light, only their own bounced light goes */
+	UPROPERTY(EditAnywhere, Category="Objects")
+	bool bSmallObjectsInLumen = false;
+
+	/** bSmallObjectsInLumen, or hex.PlanetSmallObjectsLumen when it is 0 or 1, read as the components are made, for comparing the two */
+	bool AreSmallObjectsInLumen() const;
+
 	/** Colors of floes (M_HexPlanetFloe): their top, of snow and old ice, their sides, blue ice, and what lies under the water */
 	UPROPERTY(EditAnywhere, Category="Floes")
 	FLinearColor FloeTopColor = FLinearColor(0.66f, 0.72f, 0.78f);

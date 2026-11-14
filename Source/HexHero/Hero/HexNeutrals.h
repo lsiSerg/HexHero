@@ -112,7 +112,7 @@ public:
 
 	/** Scatters stacks over both layers in place of all there are, by NeutralGeneration of DA_HexBattle; another layout each time without a
 	 *  seed. Returns how many it placed and says how */
-	int32 Generate(FString& OutReport, const int32* Seed = nullptr);
+	int32 Generate(FString& OutReport, const int32* Seed = nullptr, bool bFromAllCastles = false);
 	bool Clear();
 
 	/** A line for the panel at the cursor about the stack on a cell, empty without one */

@@ -1,0 +1,8 @@
+{
+	"version": 1,
+	"ai": [1],
+	"heroes": [
+		{"id": 1, "name": "Bohdan", "class": "Knight", "player": 0, "layer": "Surface", "cell": 7540},
+		{"id": 2, "name": "Yaroslava", "class": "Knight", "player": 1, "layer": "Surface", "cell": 4044}
+	]
+}

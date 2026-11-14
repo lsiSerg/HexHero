@@ -1,0 +1,22 @@
+{
+	"version": 1,
+	"name": "Realms",
+	"description": "Three zones: yours, the game's and an empty one of nobody, each reached by 2 to 4 guarded ways",
+	"frequency": 32,
+	"seed": 2026,
+	"sortOrder": 50,
+	"generation":
+	{
+		"start": "Random",
+		"landShare": 0.9,
+		"shallowsShare": 0.5,
+		"hillShare": 0.3,
+		"mountainShare": 0.16,
+		"continentSize": 1,
+		"coastDetail": 5,
+		"moisture": 0.3,
+		"zones": 3,
+		"aiPlayers": 1
+	}
+}
+

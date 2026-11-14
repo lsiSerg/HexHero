@@ -10,6 +10,9 @@
 #include "HexSiteConfig.h"
 #include "HexSiteGenerator.h"
 #include "HexSphereGrid.h"
+#include "HexPlanetConfig.h"
+#include "HexPlanetGenerator.h"
+#include "HexZoneMap.h"
 #include "Misc/AutomationTest.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -747,6 +750,56 @@ bool FHexHeroShroudTest::RunTest(const FString& Parameters)
 	{
 		const FVector2d UV = HexShroud::GetFieldUV(Axis);
 		TestTrue(TEXT("Every axis lies in the map"), UV.X >= 0.0 && UV.X <= 1.0 && UV.Y >= 0.0 && UV.Y <= 1.0);
+	}
+	return true;
+}
+
+#endif
+
+#if WITH_DEV_AUTOMATION_TESTS
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHexHeroZoneMapTest, "HexHero.Hero.ZoneMap",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FHexHeroZoneMapTest::RunTest(const FString& Parameters)
+{
+	// a map of 2 to 8 zones: each reaches all its land and no other zone past the guards, and has 2 to 4 ways in (HexZoneMap::Check), and the
+	// same seed gives the same map
+	const FHexZoneMapGeneration Settings;
+	const UHexPlanetConfig& Config = *GetDefault<UHexPlanetConfig>();
+	struct FCase { int32 Frequency; int32 Zones; int32 Ai; };
+	for (const FCase& Case : {FCase{20, 2, 1}, FCase{32, 3, 1}, FCase{32, 5, 2}, FCase{48, 8, 3}})
+	{
+		const FHexSphereGrid Grid = FHexSphereGrid::Build(Case.Frequency);
+		FHexPlanetManifest Manifest;
+		Manifest.Frequency = Case.Frequency;
+		Manifest.Seed = 2026;
+		Manifest.Generation.LandShare = Settings.LandShare;
+		Manifest.Generation.ShallowsShare = Settings.ShallowsShare;
+		Manifest.Generation.HillShare = Settings.HillShare;
+		Manifest.Generation.MountainShare = Settings.MountainShare;
+		Manifest.Generation.Moisture = Settings.Moisture;
+		TArray<int8> Base;
+		HexPlanetGenerator::GenerateLevels(Grid, Manifest, Config, Base);
+		HexZoneMap::FResult Result;
+		int32 Seed = 0;
+		HexZoneMap::GenerateGood(Grid, Base, Settings, Case.Zones, Case.Ai, Manifest.Seed, Result, &Seed);
+		const FString Name = FString::Printf(TEXT("%d zones at frequency %d"), Case.Zones, Case.Frequency);
+		AddInfo(FString::Printf(TEXT("%s, seed %d: %s, %d guards, %d entrances%s"), *Name, Seed, *Result.Ways, Result.Guards.Num(), Result.Entrances.Num(),
+			Result.IsGood() ? TEXT("") : *(TEXT("; ") + FString::Join(Result.Problems, TEXT("; ")))));
+		TestTrue(*(Name + TEXT(" has no problems")), Result.IsGood());
+		TestEqual(*(Name + TEXT(": its zones")), Result.Zones.Num(), Case.Zones);
+		int32 Ai = 0;
+		for (const HexZoneMap::FZone& Zone : Result.Zones)
+		{
+			TestTrue(*(Name + TEXT(": a castle in each zone")), !Zone.Castles.IsEmpty());
+			Ai += Zone.Role == HexZoneMap::ERole::Ai ? 1 : 0;
+			TestTrue(*(Name + TEXT(": a hero for each player")), (Zone.Player >= 0) == (Zone.HeroCell != INDEX_NONE));
+		}
+		TestEqual(*(Name + TEXT(": the zones of the game")), Ai, Case.Ai);
+		HexZoneMap::FResult Again;
+		HexZoneMap::Generate(Grid, Base, Settings, Case.Zones, Case.Ai, Seed, Again);
+		TestTrue(*(Name + TEXT(": the same again")), Again.Levels == Result.Levels && Again.Guards.Num() == Result.Guards.Num());
 	}
 	return true;
 }

@@ -4,6 +4,7 @@
 #include "HexBattleConfig.h"
 #include "HexHeroAnimInstance.h"
 #include "HexHero.h"
+#include "HAL/IConsoleManager.h"
 #include "AnimationRuntime.h"
 #include "Animation/AnimSequence.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -94,6 +95,10 @@ USceneComponent* HexUnitFigure::Make(UObject* Owner, USceneComponent* Parent, co
 	{
 		return nullptr;
 	}
+	// a figure takes no place in the scene of Lumen, whose cards of the figures of the neutral stacks and the castles filled its surface cache
+	// in the editor ("oversubscribed", 2026-11-14); hex.PlanetSmallObjectsLumen 1 puts them back
+	const IConsoleVariable* Forced = IConsoleManager::Get().FindConsoleVariable(TEXT("hex.PlanetSmallObjectsLumen"));
+	Drawn->bAffectDynamicIndirectLighting = (Forced && Forced->GetInt() == 1) || Config->bDecorInLumen;
 	// as high as its look says, or a fallback by its level
 	const float Height = Look && Mesh ? Look->Height : 30.0f + 8.0f * float(Level);
 	OutScale = Height * HeightScale / MeshHeight;

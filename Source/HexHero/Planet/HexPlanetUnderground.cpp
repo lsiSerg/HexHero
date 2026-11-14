@@ -1365,7 +1365,16 @@ void HexPlanetUnderground::Load(const FString& PlanetFolder, const FHexSphereGri
 		}
 	}
 
-	const bool bLevelsFile = bSaved && HexPlanetFile::HasLevels(DataFolder);
+	// entrances given by the caller, written as if placed
+	bool bGivenEntrances = false;
+	if (!bHaveEntrances && Options.GivenEntrances.IsSet())
+	{
+		Out.Entrances = Options.GivenEntrances.GetValue();
+		bHaveEntrances = true;
+		bGivenEntrances = true;
+	}
+
+	const bool bLevelsFile = bSaved && HexPlanetFile::HasLevels(DataFolder) && !bGivenEntrances;
 	bool bHaveLevels = false;
 	if (bLevelsFile && !bNewMaze)
 	{
@@ -1395,6 +1404,7 @@ void HexPlanetUnderground::Load(const FString& PlanetFolder, const FHexSphereGri
 		Out.bGeneratedLevels = true;
 		Out.GenerateSeconds = Result.Seconds;
 	}
+	Out.bPlacedEntrances |= bGivenEntrances;
 
 	const bool bBiomesFile = bSaved && HexPlanetFile::HasBiomes(DataFolder);
 	if (BiomeLetters.IsEmpty())

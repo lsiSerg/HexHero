@@ -32,19 +32,14 @@ float UHexBattles::GetArmyPower(TConstArrayView<FHexStack> Army) const
 	return Power;
 }
 
-bool UHexBattles::Begin(const FHexBattleRequest& InRequest, FString& OutMessage)
+bool UHexBattles::MakeSetup(const FHexBattleRequest& InRequest, FHexBattleSetup& Setup, FString& OutMessage, int32* OutGuardSlots, bool* OutGuardAlone) const
 {
 	UHexCastles* Castles = Heroes ? Heroes->GetCastles() : nullptr;
-	FHexHero* Attacker = Heroes ? Heroes->FindHeroMutable(InRequest.Attacker) : nullptr;
+	const FHexHero* Attacker = Heroes ? Heroes->FindHero(InRequest.Attacker) : nullptr;
 	// a neutral stack beside a castle the hero in it sent out onto, which attacks the castle (UHexHeroes::Sally)
 	const FHexNeutral* NeutralAttacker = !Attacker && InRequest.Kind == EHexBattleKind::Castle && Heroes && Heroes->GetNeutrals() ? Heroes->GetNeutrals()->Find(InRequest.NeutralId) : nullptr;
 	if ((!Attacker && !NeutralAttacker) || !Castles || !Config)
 	{
-		return false;
-	}
-	if (bShown || bPending)
-	{
-		OutMessage = TEXT("another battle is being fought");
 		return false;
 	}
 	const auto MakeSide = [this](const FHexHero& Hero)
@@ -62,7 +57,6 @@ bool UHexBattles::Begin(const FHexBattleRequest& InRequest, FString& OutMessage)
 		Side.bAi = !Heroes->IsPlaying() || Heroes->IsPlayerAi(Hero.Player);
 		return Side;
 	};
-	FHexBattleSetup Setup;
 	if (Attacker)
 	{
 		Setup.Sides[0] = MakeSide(*Attacker);
@@ -76,8 +70,8 @@ bool UHexBattles::Begin(const FHexBattleRequest& InRequest, FString& OutMessage)
 		Side.bAi = true;
 		Side.Name = FString::Printf(TEXT("%s %s"), *UHexNeutrals::DescribeCount(NeutralAttacker->Stack.Count), *UHexNeutrals::Plural(Heroes->GetNeutrals()->GetCreatureName(NeutralAttacker->Stack)).ToLower());
 	}
-	GuardSlots = 0;
-	bGuardAlone = false;
+	int32 GuardSlotsMade = 0;
+	bool bGuardAloneMade = false;
 	switch (InRequest.Kind)
 	{
 	case EHexBattleKind::Hero:
@@ -104,7 +98,7 @@ bool UHexBattles::Begin(const FHexBattleRequest& InRequest, FString& OutMessage)
 			if (Guard)
 			{
 				Side = MakeSide(*Guard);
-				GuardSlots = Guard->Army.Num();
+				GuardSlotsMade = Guard->Army.Num();
 			}
 			// the guard in its slots, and the garrison in its own behind them
 			while (Side.Stacks.Num() < NumArmySlots && Guard)
@@ -115,10 +109,10 @@ bool UHexBattles::Begin(const FHexBattleRequest& InRequest, FString& OutMessage)
 			Side.bAi = Castle->Owner < 0 || !Heroes->IsPlaying() || Heroes->IsPlayerAi(Castle->Owner);
 			// the hero in the castle fights for it behind its walls with its own army, and the garrison only once no hero holds it, as the
 			// developer asked on 2026-11-13 (both fought together before); a guard without an army leaves it to the garrison
-			bGuardAlone = Guard && UHexCastles::HasCreatures(Guard->Army);
-			if (!bGuardAlone)
+			bGuardAloneMade = Guard && UHexCastles::HasCreatures(Guard->Army);
+			if (!bGuardAloneMade)
 			{
-				GuardSlots = Guard ? NumArmySlots : 0;
+				GuardSlotsMade = Guard ? NumArmySlots : 0;
 				Side.Stacks.Append(Castle->Garrison);
 			}
 			Side.DefenseFactor = Config->bCastleDefenseFactor ? Castles->GetFortFactor(*Castle) : 1.0f;
@@ -194,6 +188,67 @@ bool UHexBattles::Begin(const FHexBattleRequest& InRequest, FString& OutMessage)
 	// the catapult of the attacker, at the walls of a castle and on an open field alike, as the developer asked on 2026-11-14
 	Setup.Siege.bCatapult = Attacker && Attacker->bCatapult;
 	Setup.Siege.bMoat = Setup.Siege.bWalls && Config->bSiegeMoat;
+	if (OutGuardSlots)
+	{
+		*OutGuardSlots = GuardSlotsMade;
+	}
+	if (OutGuardAlone)
+	{
+		*OutGuardAlone = bGuardAloneMade;
+	}
+	return true;
+}
+
+bool UHexBattles::Forecast(const FHexBattleRequest& InRequest, int32 Tries, float& OutWinShare, float& OutLossShare) const
+{
+	FHexBattleSetup Setup;
+	FString Message;
+	OutWinShare = 0.0f;
+	OutLossShare = 0.0f;
+	if (!MakeSetup(InRequest, Setup, Message, nullptr, nullptr))
+	{
+		return false;
+	}
+	const UHexCastles* Castles = Heroes->GetCastles();
+	Setup.Sides[0].bAi = Setup.Sides[1].bAi = true;
+	const float Before = GetArmyPower(Setup.Sides[0].Stacks);
+	int32 Won = 0;
+	float Lost = 0.0f;
+	Tries = FMath::Max(Tries, 1);
+	for (int32 Try = 0; Try < Tries; ++Try)
+	{
+		Setup.Seed = HashCombine(GetTypeHash(InRequest.Cell), HashCombine(GetTypeHash(InRequest.Attacker), GetTypeHash(Try + 1)));
+		FHexBattle Fight;
+		Fight.Start(Setup, Castles->GetConfig(), Config);
+		Fight.PlayToEnd();
+		Won += Fight.GetWinner() == 0 ? 1 : 0;
+		Lost += Before > 0.0f ? 1.0f - FMath::Clamp(GetArmyPower(Fight.GetSurvivors(0)) / Before, 0.0f, 1.0f) : 1.0f;
+	}
+	OutWinShare = float(Won) / Tries;
+	OutLossShare = Lost / Tries;
+	return true;
+}
+
+bool UHexBattles::Begin(const FHexBattleRequest& InRequest, FString& OutMessage)
+{
+	UHexCastles* Castles = Heroes ? Heroes->GetCastles() : nullptr;
+	FHexHero* Attacker = Heroes ? Heroes->FindHeroMutable(InRequest.Attacker) : nullptr;
+	// a neutral stack beside a castle the hero in it sent out onto, which attacks the castle (UHexHeroes::Sally)
+	const FHexNeutral* NeutralAttacker = !Attacker && InRequest.Kind == EHexBattleKind::Castle && Heroes && Heroes->GetNeutrals() ? Heroes->GetNeutrals()->Find(InRequest.NeutralId) : nullptr;
+	if ((!Attacker && !NeutralAttacker) || !Castles || !Config)
+	{
+		return false;
+	}
+	if (bShown || bPending)
+	{
+		OutMessage = TEXT("another battle is being fought");
+		return false;
+	}
+	FHexBattleSetup Setup;
+	if (!MakeSetup(InRequest, Setup, OutMessage, &GuardSlots, &bGuardAlone))
+	{
+		return false;
+	}
 	Request = InRequest;
 	Setup.Seed = HashCombine(HashCombine(GetTypeHash(Heroes->GetDay()), GetTypeHash(InRequest.Cell)), HashCombine(GetTypeHash(InRequest.Attacker), GetTypeHash(++Count)));
 	// the ground of the field is the biome where it is fought

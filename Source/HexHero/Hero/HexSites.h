@@ -151,7 +151,7 @@ public:
 	/** Scatters sites over both layers in place of all there are (HexSiteGenerator, Generation of DA_HexSites): on the ground a hero walks,
 	 *  off the entrances, where heroes start and what stands on cells, some near where each player starts. The seed chooses the layout; without
 	 *  one each call gives another, the first that of the seed of the planet. Returns how many sites there are now, and says what it did */
-	int32 Generate(FString& OutReport, const int32* Seed = nullptr);
+	int32 Generate(FString& OutReport, const int32* Seed = nullptr, float DensityScale = 1.0f, const TBitArray<>* SurfaceAvoid = nullptr);
 
 	/** Takes every site off the planet. Returns false if there is none */
 	bool Clear();

@@ -1337,6 +1337,7 @@ void AHexBattleArena::BuildProps()
 			Component->SetMobility(EComponentMobility::Movable);
 			Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 			Component->SetNumCustomDataFloats(5);
+			Component->bAffectDynamicIndirectLighting = Config && (Config->bDecorInLumen || IConsoleManager::Get().FindConsoleVariable(TEXT("hex.PlanetSmallObjectsLumen"))->GetInt() == 1);
 			Component->RegisterComponent();
 			Props.Add(Component);
 		}

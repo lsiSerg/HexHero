@@ -7,6 +7,7 @@
 #include "Widgets/Input/SCheckBox.h"
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Input/SSpinBox.h"
+#include "HexHeroConfig.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
@@ -170,6 +171,39 @@ void SHexNewPlanetPanel::Construct(const FArguments& InArgs)
 		.Value_Lambda([this]() { return float(Manifest.Generation.Moisture); })
 		.OnValueChanged_Lambda([this](float Value) { Manifest.Generation.Moisture = FMath::RoundToDouble(Value * 100.0) / 100.0; }),
 		LOCTEXT("MoistureTip", "Drier gives more desert and steppe, wetter more forest and swamp"));
+
+	// a map of zones for players, as the developer asked on 2026-11-14 for a slider of them, up to 8: 0 makes none
+	AddRow(RandomRows, LOCTEXT("Zones", "Zones"),
+		SNew(SSpinBox<int32>)
+		.MinValue(0)
+		.MaxValue(8)
+		.Value_Lambda([this]() { return Manifest.Generation.Zones; })
+		.OnValueChanged_Lambda([this](int32 Value)
+		{
+			// one zone is none; the land of a map of zones takes the shares it is made for when the zones are turned on
+			Value = Value == 1 ? (Manifest.Generation.Zones == 0 ? 2 : 0) : Value;
+			if (Manifest.Generation.Zones == 0 && Value >= 2)
+			{
+				const FHexZoneMapGeneration& Zone = UHexHeroConfig::Load()->ZoneMap;
+				Manifest.Generation.LandShare = Zone.LandShare;
+				Manifest.Generation.ShallowsShare = Zone.ShallowsShare;
+				Manifest.Generation.HillShare = Zone.HillShare;
+				Manifest.Generation.MountainShare = Zone.MountainShare;
+				Manifest.Generation.Moisture = Zone.Moisture;
+			}
+			Manifest.Generation.Zones = Value;
+			Manifest.Generation.AiPlayers = FMath::Clamp(Manifest.Generation.AiPlayers, 1, FMath::Max(Value - 1, 1));
+		}),
+		LOCTEXT("ZonesTip", "A map of zones for players, 2 to 8, or 0 for none: ranges of mountains split the land, and each zone is reached by 2 to 4 ways, passes and the underground, each guarded by neutral creatures a hero beats after a week. Zone 0 is yours, the others of the game or empty castles of nobody. A Medium planet or larger fits 5 zones or more"));
+
+	AddRow(RandomRows, LOCTEXT("AiPlayers", "AI players"),
+		SNew(SSpinBox<int32>)
+		.MinValue(1)
+		.MaxValue(7)
+		.IsEnabled_Lambda([this]() { return Manifest.Generation.Zones >= 2; })
+		.Value_Lambda([this]() { return Manifest.Generation.AiPlayers; })
+		.OnValueChanged_Lambda([this](int32 Value) { Manifest.Generation.AiPlayers = FMath::Clamp(Value, 1, FMath::Max(Manifest.Generation.Zones - 1, 1)); }),
+		LOCTEXT("AiPlayersTip", "Zones of the game, the furthest from yours; the zones left over have empty castles of nobody"));
 
 	Rows->AddSlot()
 	.AutoHeight()

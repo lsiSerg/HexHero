@@ -56,6 +56,9 @@
 #include "Algo/BinarySearch.h"
 #include "Async/ParallelFor.h"
 #include "HexHeroConfig.h"
+#include "HexZoneMap.h"
+#include "HexZonePieces.h"
+#include "JsonObjectConverter.h"
 #include "HexCastles.h"
 #include "HexHeroes.h"
 #include "HexShroud.h"
@@ -1594,12 +1597,18 @@ void AHexPlanet::StartUndergroundData()
 	// the task reads only its copies, and writes the files it generated in place of those that were missing; a planet not saved keeps them in memory
 	UndergroundData = MakeShared<FUndergroundData>();
 	UndergroundData->StartTime = FPlatformTime::Seconds();
+	// a map of zones just generated gives its entrances, for which the maze is generated
+	HexPlanetUnderground::FLoadOptions Options;
+	if (!SurfacePlanet->ZoneEntrances.IsEmpty())
+	{
+		Options.GivenEntrances = SurfacePlanet->ZoneEntrances;
+	}
 	DataTask = UE::Tasks::Launch(UE_SOURCE_LOCATION,
 		[Work = UndergroundData, Frequency = Manifest.Frequency, ChunkSteps = Settings->ChunkSteps, Folder = PlanetFolder, SurfaceLevels = SurfacePlanet->GetLevels(),
-			PlanetManifest = Manifest, Letters = BiomeLetters]()
+			PlanetManifest = Manifest, Letters = BiomeLetters, Options]()
 		{
 			Work->Grid = FHexSphereGrid::Build(Frequency, ChunkSteps);
-			HexPlanetUnderground::Load(Folder, Work->Grid, SurfaceLevels, PlanetManifest, Letters, HexPlanetUnderground::FLoadOptions(), Work->Loaded);
+			HexPlanetUnderground::Load(Folder, Work->Grid, SurfaceLevels, PlanetManifest, Letters, Options, Work->Loaded);
 			Work->Ms = (FPlatformTime::Seconds() - Work->StartTime) * 1000.0;
 		});
 }
@@ -2473,6 +2482,18 @@ void AHexPlanet::Tick(float DeltaTime)
 			BuildPlanet();
 		}
 		return;
+	}
+
+	// the castles, heroes, mines and guards of a map of zones, once its underground has its data
+	if (bZonePiecesPending && ZoneFile.IsValid())
+	{
+		const AHexPlanet* UndergroundPlanet = GetLayerPlanet(EHexPlanetLayer::Underground);
+		if (!UndergroundPlanet || UndergroundPlanet->IsDataLoaded())
+		{
+			bZonePiecesPending = false;
+			FString Report;
+			HexZonePieces::Place(*this, *ZoneFile, Report);
+		}
 	}
 
 	// a rebuild of changed levels that has ended is shown, and the changes made while it ran start the next
@@ -3829,6 +3850,27 @@ void AHexPlanet::SetCloudParameters(UMaterialInstanceDynamic* Target) const
 void AHexPlanet::BuildLevels()
 {
 	HexPlanetGenerator::GenerateLevels(Grid, Manifest, *Settings, Levels);
+	ZoneEntrances.Reset();
+	ZoneFile.Reset();
+	bZonePiecesPending = false;
+	if (PlanetLayer != EHexPlanetLayer::Surface || Manifest.Generation.Zones < 2)
+	{
+		return;
+	}
+	// a map of zones over the land generated, as the developer asked on 2026-11-14: its ranges, passes and entrances now, its castles, heroes,
+	// mines and guards once the planet and its underground are built
+	const double StartTime = FPlatformTime::Seconds();
+	const UHexHeroConfig* HeroConfig = UHexHeroConfig::Load();
+	HexZoneMap::FResult Result;
+	int32 ZoneSeed = Manifest.Seed;
+	HexZoneMap::GenerateGood(Grid, Levels, HeroConfig->ZoneMap, Manifest.Generation.Zones, Manifest.Generation.AiPlayers, Manifest.Seed, Result, &ZoneSeed);
+	Levels = Result.Levels;
+	ZoneEntrances = Result.Entrances;
+	ZoneFile = MakeShared<FHexZonesFile>(HexZoneMap::MakeFile(Result, ZoneSeed));
+	bZonePiecesPending = true;
+	UE_LOG(LogHexHero, Log, TEXT("Zones: %d zones with the seed %d in %.0f ms: %s, %d guards, %d entrances%s"), Result.Zones.Num(), ZoneSeed,
+		(FPlatformTime::Seconds() - StartTime) * 1000.0, *Result.Ways, Result.Guards.Num(), Result.Entrances.Num(),
+		Result.IsGood() ? TEXT("") : *FString::Printf(TEXT("; problems: %s"), *FString::Join(Result.Problems, TEXT("; "))));
 }
 
 bool AHexPlanet::SaveAs(const FString& Name, FString& OutError)
@@ -3882,6 +3924,11 @@ bool AHexPlanet::SaveAs(const FString& Name, FString& OutError)
 	if (UHexHeroes* AllHeroes = GetHeroes(); AllHeroes && !AllHeroes->Save(Folder, OutError))
 	{
 		return false;
+	}
+	// and what its map of zones placed where
+	if (FString Json; ZoneFile.IsValid() && FJsonObjectConverter::UStructToJsonObjectString(*ZoneFile, Json))
+	{
+		FFileHelper::SaveStringToFile(Json, *HexPlanetFile::GetFilePath(Folder, HexZoneMap::ZonesFile), FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
 	}
 
 	const FString SavedFolder = HexPlanetFile::PlanetExists(Folder) ? Folder : PlanetFolder;
@@ -5549,6 +5596,7 @@ void AHexPlanet::CreateBoulderComponents(const UHexPlanetKitConfig* Config)
 		Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		Component->SetCastShadow(Boulders.bCastShadow);
 		Component->bAffectDistanceFieldLighting = false;
+		Component->bAffectDynamicIndirectLighting = Settings->AreSmallObjectsInLumen();
 		Component->SetCullDistances(0, int32(Boulders.CullDistance));
 		Component->RegisterComponent();
 		BoulderComponents.Add(Component);
@@ -6286,6 +6334,7 @@ void AHexPlanet::CreateFloeComponents(const UHexPlanetKitConfig* Config)
 		Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		Component->SetCastShadow(Settings->bFloeShadows && !bDeep);
 		Component->bAffectDistanceFieldLighting = false;
+		Component->bAffectDynamicIndirectLighting = Settings->AreSmallObjectsInLumen();
 		Component->SetCullDistances(0, int32(Settings->FloeCullDistance));
 		// far floes stand still, so their shadows need not be drawn anew every frame
 		Component->WorldPositionOffsetDisableDistance = int32(Settings->FloeMotionDistance);
@@ -8067,4 +8116,16 @@ FString AHexPlanet::GetCellDebugText(int32 Cell) const
 		bUnderground ? (HexPlanetUnderground::IsPassage(int8(GetCellLevel(Cell))) ? TEXT("passage") : TEXT("void")) : LevelNames[GetCellLevel(Cell) + 2], *BiomeName, *Objects->GetCellText(Cell), *Rivers->GetCellText(Cell),
 		Rivers->GetCellText(Cell).IsEmpty() ? TEXT("") : TEXT("\n"), *(PieceText + ReliefText), Each.Face, Each.Chunk,
 		Latitude, Longitude, Grid.GetCellArea(Cell) / MeanCellArea * 100.0, Grid.GetCellSideRatio(Cell));
+}
+
+namespace
+{
+	TAutoConsoleVariable<int32> CVarSmallObjectsLumen(TEXT("hex.PlanetSmallObjectsLumen"), -1,
+		TEXT("Whether the small things of the planet and of the field of a battle take a place in the scene of Lumen, read as their components are made: -1 as bSmallObjectsInLumen of DA_HexPlanet has it, 0 never, 1 always; for comparing the two"));
+}
+
+bool UHexPlanetConfig::AreSmallObjectsInLumen() const
+{
+	const int32 Forced = CVarSmallObjectsLumen.GetValueOnGameThread();
+	return Forced >= 0 ? Forced != 0 : bSmallObjectsInLumen;
 }

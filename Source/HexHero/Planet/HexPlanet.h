@@ -15,6 +15,8 @@
 #include "Tasks/Task.h"
 #include "HexPlanet.generated.h"
 
+struct FHexZonesFile;
+
 class ADirectionalLight;
 class UMaterialInstanceDynamic;
 class UMaterialInterface;
@@ -614,6 +616,9 @@ public:
 	/** Returns the forests, bushes, stones and decor of the cells */
 	UHexPlanetObjects* GetObjects() const { return Objects; }
 
+	/** The config of the layer, DA_HexPlanet or DA_HexUnderground */
+	const UHexPlanetConfig* GetSettings() const { return Settings; }
+
 	/** Returns the walls on the lips of the passages, empty without UHexPlanetConfig::bWalls, and the values they are built with */
 	const HexPlanetWalls::FWalls& GetWalls() const { return *Walls; }
 	const HexPlanetWalls::FParams& GetWallParams() const { return WallParams; }
@@ -849,6 +854,13 @@ private:
 	 *  read after a rebuild of either layer changed the levels */
 	TArray<FHexEntrance> Entrances;
 	mutable HexPlanetUnderground::FReport UndergroundReport;
+
+	/** A map of zones (Zones of the generation of the manifest), on the surface: its entrances, which the underground takes when it generates
+	 *  its maze, what zones.json holds, and whether its castles, heroes, sites and guards wait for the planet to be built with its underground
+	 *  (HexZonePieces::Place, from Tick) */
+	TArray<FHexEntrance> ZoneEntrances;
+	TSharedPtr<FHexZonesFile> ZoneFile;
+	bool bZonePiecesPending = false;
 	mutable bool bUndergroundReportDirty = false;
 
 	/** Marks the report of the underground to be checked again, after the levels of a layer changed */
@@ -1324,7 +1336,8 @@ private:
 	/** Gives a material that hides cells the centers of a cell, its neighbors and theirs, of which it hides the first Count */
 	void SetHideCells(UMaterialInstanceDynamic* Target, int32 Cell, int32 Count) const;
 
-	/** Generates the levels by the generation settings of the planet, see HexPlanetGenerator */
+	/** Generates the levels by the generation settings of the planet, see HexPlanetGenerator, and on the surface a map of zones over them when
+	 *  the generation asks for one (HexZoneMap) */
 	void BuildLevels();
 
 	/** Takes the levels from levels.txt of the planet, or generates them when it has none or it is not valid */

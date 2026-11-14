@@ -1,0 +1,11 @@
+{
+	"version": 1,
+	"castles": [
+		{"id": 1, "faction": "Dawn", "layer": "Surface", "cells": [7485, 7513, 7514], "owner": 0},
+		{"id": 2, "faction": "Dawn", "layer": "Surface", "cells": [5545, 5568, 5569], "owner": -1, "garrison": []},
+		{"id": 3, "faction": "Decay", "layer": "Surface", "cells": [592, 623, 593], "owner": -1, "garrison": []},
+		{"id": 4, "faction": "Dawn", "layer": "Surface", "cells": [813, 836, 837], "owner": -1, "garrison": []},
+		{"id": 5, "faction": "Decay", "layer": "Surface", "cells": [4003, 4023, 4024], "owner": 1},
+		{"id": 6, "faction": "Decay", "layer": "Surface", "cells": [3769, 3798, 3799], "owner": -1, "garrison": []}
+	]
+}

@@ -65,6 +65,16 @@ struct FHexPlanetGeneration
 	/** Added to the moisture of the land, which is 1 at the coast: below 0 gives more desert and steppe, above 0 more forest and swamp */
 	UPROPERTY()
 	double Moisture = 0.0;
+
+	/** A map of so many zones for players, 2 to 8, as the developer asked on 2026-11-14 for a slider of them in the panel of a new planet,
+	 *  or 0 for none: ranges of mountains split the land into zones, each reached by a few ways a neutral stack guards (HexZoneMap), with a
+	 *  castle of the person in zone 0, of the game in AiPlayers more and empty castles of nobody in the rest. Its castles, heroes, mines and
+	 *  guards are placed once the planet is built (HexZonePieces) and written with it, and zones.json tells where they went */
+	UPROPERTY()
+	int32 Zones = 0;
+
+	UPROPERTY()
+	int32 AiPlayers = 1;
 };
 
 /**

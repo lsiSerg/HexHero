@@ -404,7 +404,7 @@ void UHexNeutrals::Update()
 	}
 }
 
-int32 UHexNeutrals::Generate(FString& OutReport, const int32* Seed)
+int32 UHexNeutrals::Generate(FString& OutReport, const int32* Seed, bool bFromAllCastles)
 {
 	if (!Heroes || !Config || !Castles || Castles->Factions.IsEmpty())
 	{
@@ -447,7 +447,8 @@ int32 UHexNeutrals::Generate(FString& OutReport, const int32* Seed)
 		{
 			for (const FHexCastle& Castle : AllCastles->GetCastles())
 			{
-				if (Castle.Layer == Layer && Castle.StartOwner >= 0)
+				// a map of zones counts from every castle, so each zone has weak stacks near its castles and stronger ones further out
+				if (Castle.Layer == Layer && (Castle.StartOwner >= 0 || bFromAllCastles))
 				{
 					for (const int32 Cell : Castle.Cells)
 					{

@@ -875,6 +875,10 @@ public:
 	UPROPERTY(EditAnywhere, Category="Look|Border", meta=(ClampMin=0))
 	int32 ForestCount = 620;
 
+	/** Whether the obstacles and the decor around the field take a place in the scene of Lumen, as bSmallObjectsInLumen of the planet */
+	UPROPERTY(EditAnywhere, Category="Field")
+	bool bDecorInLumen = false;
+
 	/** How far past the rocks the forest goes on, under the fog, in hexes, and the grounds by their letters whose forest is of rocks and
 	 *  stones (RockyDecor), as a desert has no wood, as the developer asked on 2026-11-13 */
 	UPROPERTY(EditAnywhere, Category="Look|Border", meta=(ClampMin=0))

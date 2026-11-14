@@ -134,6 +134,13 @@ struct FHexHero
 	/** The site a hero of such a player goes for, so another hero of its player takes another, 0 for none */
 	int32 AiSiteId = 0;
 
+	/** What a hero of such a player set out to fight, a castle, a hero or a neutral stack, which it keeps to day after day until it is gone or
+	 *  something more pressing comes within a day, as the developer asked on 2026-11-14 ("потрібно герою дати ціль від якої він не відходить,
+	 *  поки ціль щось не поміняє критично"): the key of the foe (UHexHeroes::MoveAiToSite), its layer and cell, empty for none */
+	FString AiGoal;
+	EHexPlanetLayer AiGoalLayer = EHexPlanetLayer::Surface;
+	int32 AiGoalCell = INDEX_NONE;
+
 	/** Whether the person who watches saw it when the game last looked, on the turn of its player: where that changes the camera stays a
 	 *  moment (UHexHeroes::NoteSeen) */
 	bool bWasSeen = true;
@@ -303,7 +310,12 @@ public:
 
 	/** Whether the game moves the heroes of a player by itself, as the Heroes tab of the palette sets and heroes.json keeps: such a hero gathers
 	 *  what its player has seen, takes mines and walks to open the map (MoveAi) */
-	bool IsPlayerAi(int32 Player) const { return AiPlayers.Contains(Player); }
+	bool IsPlayerAi(int32 Player) const { return AiPlayers.Contains(Player) || AutoPlayers.Contains(Player); }
+
+	/** A player of a person the game moves for a while, as the developer asked on 2026-11-14 for a cheat (hex.Cheat autoplay); not saved, so
+	 *  heroes.json keeps who a person plays */
+	void SetPlayerAuto(int32 Player, bool bAuto);
+	bool IsPlayerAuto(int32 Player) const { return AutoPlayers.Contains(Player); }
 	void SetPlayerAi(int32 Player, bool bAi);
 
 	/** Whether the fog of war hides a cell from a player */
@@ -541,6 +553,12 @@ public:
 	DECLARE_MULTICAST_DELEGATE_OneParam(FOnMessage, const FString&);
 	FOnMessage OnMessage;
 
+	/** The game ended, as the developer asked on 2026-11-14: a player whose heroes and castles are all gone is out, and the persons lose when
+	 *  none of them is left, or win when the players left are theirs alone, whoever got there first (CheckGameEnd). True when a person won,
+	 *  with a line about it */
+	DECLARE_MULTICAST_DELEGATE_TwoParams(FOnGameOver, bool, const FString&);
+	FOnGameOver OnGameOver;
+
 	/** Returns the cost of a step of a hero from a cell of a layer across a side to the neighbor there, or a negative value if it cannot be
 	 *  taken; null for any hero, when no hero blocks */
 	float GetStepCost(const AHexPlanet& Planet, const FHexHero* Hero, int32 From, int32 To) const;
@@ -652,6 +670,15 @@ private:
 	int32 GroundRevision = 0;
 	bool bPlaying = false;
 
+	/** The players hex.Cheat autoplay gives the game for a while */
+	TSet<int32> AutoPlayers;
+
+	/** The players that had a hero or a castle when the game started, of whom the last left wins */
+	TArray<int32> StartPlayers;
+
+	/** Ends the game once one side is left, see OnGameOver */
+	void CheckGameEnd();
+
 	/** The lines heroes.json holds, by which a step of Undo back to them leaves nothing to save */
 	TArray<FHexHeroLine> SavedLines;
 	int32 ListRevision = 0;
@@ -743,9 +770,33 @@ private:
 	/** Whether a cell holds what a hero of a player fights rather than walks onto: a neutral stack, or a hero of another player out of a castle */
 	bool IsFoeAt(int32 Player, EHexPlanetLayer Layer, int32 Cell) const;
 
-	/** Sends a hero the game moves to the best of the sites its player has seen and wants (UHexSites::GetGoal) within the reach of its kind.
-	 *  Returns true if it went for one or waits for tomorrow to go on, bOutSent whether it set out */
-	bool MoveAiToSite(int32 Id, const HexHeroPath::FField& Ways, bool& bOutSent);
+	/** Sends a hero the game moves to the best of the sites its player has seen and wants (UHexSites::GetGoal) within the reach of its kind,
+	 *  or to fight a castle, a hero or a neutral stack it beats in battles fought in advance (UHexBattles::Forecast): a neutral stack only for
+	 *  losses of AiNeutralLossShare, or of AiLossShare with bBreakThrough, when nothing else is left for it, as a guard of a way to another
+	 *  zone. Returns true if it went for one or waits for tomorrow to go on, bOutSent whether it set out */
+	bool MoveAiToSite(int32 Id, const HexHeroPath::FField& Ways, bool& bOutSent, bool bBreakThrough = false);
+
+	/** Sends a hero the game moves into a castle of its own within AiReinforceDays to take what is there (UHexCastles::AiTake), when that
+	 *  counts AiReinforceShare of its army, or anything at all with bAny. Returns true if it went */
+	bool MoveAiHome(int32 Id, const HexHeroPath::FField& Ways, bool bAny);
+
+public:
+	/** The hero of a player the game moves that leads its army: the strongest, which alone takes the creatures of its castles, so the army is
+	 *  not spread over its heroes, while the others gather and explore. 0 for none */
+	int32 GetAiMainHero(int32 Player) const;
+
+	/** The hero of such a player that brings its leader the armies of its castles, as the developer asked on 2026-11-14 ("щоб герої слабші
+	 *  підносили армії для основного - щоб той не вертався постійно"): the first after the leader. 0 for none */
+	int32 GetAiCarrier(int32 Player) const;
+private:
+
+	/** The carrier takes an army from a castle of its own and brings it to the leader, whose army takes the strongest stacks of both, when it
+	 *  is worth AiCarryShare of the army of the leader. Returns true if it went */
+	bool MoveAiCarry(int32 Id, const HexHeroPath::FField& Ways);
+
+	/** Battles weighed in advance this turn, by the hero, what it fights and the power of its army, so a hero does not fight them again with
+	 *  each step it takes */
+	TMap<FString, FVector2f> AiForecasts;
 
 	/** A hero that stands beside the site it was sent to visits it, paying as for a step. Returns false and why not */
 	bool VisitSite(FHexHero& Hero, FString& OutMessage);

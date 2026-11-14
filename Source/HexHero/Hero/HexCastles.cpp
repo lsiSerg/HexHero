@@ -8,6 +8,7 @@
 #include "HexHeroes.h"
 #include "HexMaterialConfig.h"
 #include "HexPlanet.h"
+#include "HexPlanetConfig.h"
 #include "HexPlanetFile.h"
 #include "HexPlanetLayers.h"
 #include "HexPlanetUnderground.h"
@@ -19,6 +20,8 @@
 #include "HAL/FileManager.h"
 #include "HAL/IConsoleManager.h"
 #include "JsonObjectConverter.h"
+#include "Dom/JsonObject.h"
+#include "Serialization/JsonSerializer.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Misc/FileHelper.h"
 
@@ -145,6 +148,17 @@ void UHexCastles::Init(AHexPlanet* InSurface, UHexHeroes* InHeroes)
 		FHexCastlesFile File;
 		if (FJsonObjectConverter::JsonObjectStringToUStruct(Text, &File))
 		{
+			// a garrison given empty, as of a castle of nobody that stands empty, is a garrison set; the struct cannot tell it from none
+			TSharedPtr<FJsonObject> Object;
+			const TArray<TSharedPtr<FJsonValue>>* Lines = nullptr;
+			if (FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text), Object) && Object.IsValid() && Object->TryGetArrayField(TEXT("castles"), Lines))
+			{
+				for (int32 Index = 0; Index < Lines->Num() && Index < File.Castles.Num(); ++Index)
+				{
+					const TSharedPtr<FJsonObject>* Line = nullptr;
+					File.Castles[Index].bGarrisonSet = (*Lines)[Index]->TryGetObject(Line) && (*Line)->HasField(TEXT("garrison"));
+				}
+			}
 			SetLines(File.Castles);
 			SavedLines = SortCastleLines(File.Castles);
 			bEdited = SortCastleLines(MakeLines()) != SavedLines;
@@ -538,6 +552,7 @@ void UHexCastles::ResetCastle(FHexCastle& Castle) const
 {
 	const FHexFaction& Faction = Config->Factions[Castle.Faction];
 	Castle.Owner = Castle.StartOwner;
+	Castle.FormerOwners = 0;
 	Castle.BuiltToday = 0;
 	Castle.bHeroHiredToday = false;
 	Castle.EventTime = -1000.0;
@@ -1464,6 +1479,10 @@ FString UHexCastles::Visit(FHexHero& Hero, int32 CastleId, int32 Cell, bool bSho
 		{
 			OnCastleOpened.Broadcast(CastleId);
 		}
+		else if (Heroes->GetAiMainHero(Hero.Player) == Hero.Id || Heroes->GetAiCarrier(Hero.Player) == Hero.Id)
+		{
+			AiTake(CastleId, Hero);
+		}
 		return Out ? FString::Printf(TEXT("%s goes into the %s, and %s comes out"), *Hero.Name, *CastleName, *Out->Name)
 			: FString::Printf(TEXT("%s goes into the %s and guards it"), *Hero.Name, *CastleName);
 	}
@@ -1511,6 +1530,10 @@ FString UHexCastles::Visit(FHexHero& Hero, int32 CastleId, int32 Cell, bool bSho
 		}
 	}
 	Castle->Garrison.Reset();
+	if (Before >= 0 && Before < 32)
+	{
+		Castle->FormerOwners |= 1u << Before;
+	}
 	Castle->Owner = Hero.Player;
 	Castle->EventTime = Surface && Surface->GetWorld() ? Surface->GetWorld()->GetTimeSeconds() : 0.0;
 	Enter();
@@ -1561,8 +1584,39 @@ TArray<FHexStack> UHexCastles::MakeStartArmy(int32 Player) const
 	return Army;
 }
 
+namespace
+{
+	/** Reads a step of AiBuildOrder, "Dwelling3:2", into the index of the building in the faction and the level */
+	bool ParseBuildStep(const FHexFaction& Faction, const FString& Step, int32& OutBuilding, int32& OutLevel)
+	{
+		FString Id;
+		FString Level;
+		if (!Step.Split(TEXT(":"), &Id, &Level))
+		{
+			Id = Step;
+			Level = TEXT("1");
+		}
+		OutBuilding = Faction.Buildings.IndexOfByPredicate([&Id](const FHexBuilding& Each) { return Each.Id.ToString().Equals(Id, ESearchCase::IgnoreCase); });
+		OutLevel = FCString::Atoi(*Level);
+		return OutBuilding != INDEX_NONE && OutLevel > 0;
+	}
+}
+
 void UHexCastles::RunAi(int32 Player)
 {
+	UHexSites* Sites = Heroes ? Heroes->GetSites() : nullptr;
+	const UHexHeroConfig* HeroConfig = Heroes ? Heroes->GetConfig() : nullptr;
+	if (!Sites || !HeroConfig)
+	{
+		return;
+	}
+	const bool bNewWeek = (Heroes->GetDay() - 1) % FMath::Max(HeroConfig->DaysPerWeek, 1) == 0;
+	int32 NumHeroes = 0;
+	for (const FHexHero& Hero : Heroes->GetHeroes())
+	{
+		NumHeroes += Hero.Player == Player ? 1 : 0;
+	}
+	const int32 GoldIndex = Sites->GetConfig()->FindResource(TEXT("Gold"));
 	for (int32 Index = 0; Index < Castles.Num(); ++Index)
 	{
 		if (Castles[Index].Owner != Player)
@@ -1571,37 +1625,184 @@ void UHexCastles::RunAi(int32 Player)
 		}
 		const int32 Id = Castles[Index].Id;
 		const FHexFaction& Faction = Config->Factions[Castles[Index].Faction];
-		// the dwellings first, from the lowest, then the fort and the hall, then what can be upgraded
-		TArray<int32> Order;
-		for (int32 Pass = 0; Pass < 2; ++Pass)
-		{
-			for (int32 Building = 0; Building < Faction.Buildings.Num(); ++Building)
-			{
-				const bool bNewDwelling = Faction.Buildings[Building].Type == EHexBuildingType::Dwelling && Castles[Index].Levels[Building] == 0;
-				if (bNewDwelling == (Pass == 0))
-				{
-					Order.Add(Building);
-				}
-			}
-		}
 		FString Message;
-		for (const int32 Building : Order)
+		// the next steps of the order not reached: the first that can be built now, and the gold the first of them needs is kept
+		int32 Reserve = 0;
+		int32 Looked = 0;
+		bool bBuilt = false;
+		for (const FString& Step : Config->AiBuildOrder)
 		{
-			if (CanBuild(Castles[Index], Building) && Build(Id, Building, Message))
+			int32 Building = INDEX_NONE;
+			int32 Level = 0;
+			if (!ParseBuildStep(Faction, Step, Building, Level) || Castles[Index].Levels[Building] >= Level)
+			{
+				continue;
+			}
+			if (Looked == 0 && Faction.Buildings[Building].Levels.IsValidIndex(Castles[Index].Levels[Building]))
+			{
+				// the gold of the next building is kept only once it has the rest of what that costs, else it would be kept for nothing
+				TMap<FName, int32> Rest = Faction.Buildings[Building].Levels[Castles[Index].Levels[Building]].Cost;
+				const int32 Gold = Rest.FindRef(TEXT("Gold"));
+				Rest.Remove(TEXT("Gold"));
+				Reserve = Sites->CanPay(Player, Rest) ? Gold : 0;
+			}
+			if (!bBuilt && CanBuild(Castles[Index], Building) && Build(Id, Building, Message))
+			{
+				bBuilt = true;
+				Reserve = 0;
+			}
+			if (++Looked >= Config->AiBuildLookahead || bBuilt)
 			{
 				break;
 			}
 		}
-		// and every creature it can pay for, the best first, into the garrison
-		for (int32 Creature = NumCreatureLevels - 1; Creature >= 0; --Creature)
+		// past the order, whatever it can
+		if (Looked == 0)
 		{
-			const int32 Count = GetHireMax(Castles[Index], Creature);
-			if (Count > 0)
+			for (int32 Building = 0; Building < Faction.Buildings.Num() && !bBuilt; ++Building)
 			{
-				Hire(Id, Creature, Count, 0, Message);
+				bBuilt = CanBuild(Castles[Index], Building) && Build(Id, Building, Message);
+			}
+		}
+		// a hero: when it has none left, at any price, else up to AiMaxHeroes with gold to spare
+		const int32 Gold = GoldIndex != INDEX_NONE ? Sites->GetAmount(Player, GoldIndex) : 0;
+		const int32* HeroGold = Config->HeroCost.Find(TEXT("Gold"));
+		if (NumHeroes == 0 || (NumHeroes < HeroConfig->AiMaxHeroes && Gold >= (HeroGold ? *HeroGold : 0) + HeroConfig->AiHeroGoldReserve))
+		{
+			const int32 Class = Heroes->GetDay() % FMath::Max(HeroConfig->Classes.Num(), 1);
+			if (HireHero(Id, Class, Message) > 0)
+			{
+				++NumHeroes;
+				UE_LOG(LogHexHero, Log, TEXT("Castles: %s, moved by the game, hires a hero in castle %d"), *GetPlayerName(Player), Id);
+			}
+		}
+		// its creatures into its strongest hero in or beside it, else into the garrison: all of them on the first day of a week, else with
+		// the gold the next building does not need
+		const TArray<const FHexHero*> Visitors = FindVisitors(Castles[Index]);
+		const int32 Main = Heroes->GetAiMainHero(Player);
+		const int32 Carrier = Heroes->GetAiCarrier(Player);
+		const FHexHero* Strongest = nullptr;
+		for (const FHexHero* Each : Visitors)
+		{
+			Strongest = Each->Id == Main || (Each->Id == Carrier && !Strongest) ? Each : Strongest;
+		}
+		if (Strongest)
+		{
+			AiTake(Id, *Heroes->FindHeroMutable(Strongest->Id));
+			continue;
+		}
+		// on the first day of a week all of it, else what the next building does not need
+		int32 Budget = bNewWeek ? TNumericLimits<int32>::Max() : FMath::Max((GoldIndex != INDEX_NONE ? Sites->GetAmount(Player, GoldIndex) : 0) - Reserve, 0);
+		for (int32 Creature = NumCreatureLevels - 1; Creature >= 0 && Budget > 0; --Creature)
+		{
+			const int32 Level = GetLevel(Castles[Index], EHexBuildingType::Dwelling, Creature);
+			const int32 Price = Faction.Creatures.IsValidIndex(Creature) ? FMath::Max(Faction.Creatures[Creature].GetStats(Level >= 2).Gold, 1) : 1;
+			const int32 Count = FMath::Min(GetHireMax(Castles[Index], Creature), Budget / Price);
+			if (Count > 0 && Hire(Id, Creature, Count, 0, Message))
+			{
+				Budget = Budget == TNumericLimits<int32>::Max() ? Budget : Budget - Count * Price;
 			}
 		}
 	}
+}
+
+void UHexCastles::SplitStrongest(TArray<FHexStack>& InOutArmy, TArray<FHexStack>& InOutGarrison) const
+{
+	// every stack of both, the same kinds joined, the strongest seven to the army and the rest to the garrison
+	TArray<FHexStack> All;
+	for (const TArray<FHexStack>* Each : {&InOutArmy, &InOutGarrison})
+	{
+		for (const FHexStack& Stack : *Each)
+		{
+			if (Stack.Count <= 0)
+			{
+				continue;
+			}
+			FHexStack* Same = All.FindByPredicate([&Stack](const FHexStack& Other) { return Other.IsSameKind(Stack); });
+			if (Same)
+			{
+				Same->Count += Stack.Count;
+			}
+			else
+			{
+				All.Add(Stack);
+			}
+		}
+	}
+	All.Sort([this](const FHexStack& A, const FHexStack& B) { return GetPower(MakeArrayView(&A, 1)) > GetPower(MakeArrayView(&B, 1)); });
+	InOutArmy.Reset();
+	InOutGarrison.Reset();
+	for (int32 Index = 0; Index < All.Num(); ++Index)
+	{
+		(Index < NumArmySlots ? InOutArmy : InOutGarrison).Add(All[Index]);
+	}
+	// what is left past the seven slots of the garrison too is too weak to keep
+	InOutGarrison.SetNum(FMath::Min(InOutGarrison.Num(), NumArmySlots));
+}
+
+void UHexCastles::AiTake(int32 CastleId, FHexHero& Hero)
+{
+	FHexCastle* Castle = FindCastleMutable(CastleId);
+	if (!Castle || Castle->Owner != Hero.Player)
+	{
+		return;
+	}
+	FString Message;
+	// what it can hire, into the garrison, the best first
+	for (int32 Creature = NumCreatureLevels - 1; Creature >= 0; --Creature)
+	{
+		const int32 Count = GetHireMax(*Castle, Creature);
+		if (Count > 0)
+		{
+			Hire(CastleId, Creature, Count, 0, Message);
+		}
+	}
+	// then the strongest stacks of the garrison and its army go with it, the rest stays
+	const float Before = GetPower(Hero.Army);
+	SplitStrongest(Hero.Army, Castle->Garrison);
+	// and the catapult of the garrison, for the walls of others
+	if (Castle->bCatapult && !Hero.bCatapult)
+	{
+		Castle->bCatapult = false;
+		Hero.bCatapult = true;
+	}
+	if (GetPower(Hero.Army) > Before)
+	{
+		Touch(*Castle);
+		UE_LOG(LogHexHero, Log, TEXT("Castles: %s, moved by the game, takes the strongest of castle %d, its army now %s"), *Hero.Name, CastleId, *DescribeArmy(Hero.Army));
+	}
+}
+
+float UHexCastles::GetAiOffer(const FHexCastle& Castle, const FHexHero& Hero) const
+{
+	TArray<FHexStack> Garrison = Castle.Garrison;
+	const UHexSites* Sites = Heroes ? Heroes->GetSites() : nullptr;
+	if (Sites && Castle.Owner != INDEX_NONE)
+	{
+		// hired as AiTake hires, the best first, out of one purse: each level alone would count the same gold again
+		const FHexFaction& Faction = Config->Factions[Castle.Faction];
+		int32 Gold = Sites->GetAmount(Castle.Owner, Sites->GetConfig()->FindResource(TEXT("Gold")));
+		for (int32 Creature = NumCreatureLevels - 1; Creature >= 0 && Gold > 0; --Creature)
+		{
+			const int32 Level = GetLevel(Castle, EHexBuildingType::Dwelling, Creature);
+			if (Level <= 0 || !Faction.Creatures.IsValidIndex(Creature))
+			{
+				continue;
+			}
+			const int32 Price = FMath::Max(Faction.Creatures[Creature].GetStats(Level >= 2).Gold, 1);
+			const int32 Count = FMath::Min(GetHireMax(Castle, Creature), Gold / Price);
+			if (Count > 0)
+			{
+				Garrison.Add(FHexStack{Castle.Faction, Creature, Level >= 2, Count});
+				Gold -= Count * Price;
+			}
+		}
+	}
+	// what the army would gain by it, as only seven stacks go with it
+	TArray<FHexStack> Army = Hero.Army;
+	const float Before = GetPower(Army);
+	SplitStrongest(Army, Garrison);
+	return FMath::Max(GetPower(Army) - Before, 0.0f);
 }
 
 FString UHexCastles::DescribeStack(const FHexStack& Stack) const
@@ -1744,6 +1945,8 @@ void UHexCastles::Rebuild(EHexPlanetLayer Layer)
 			Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 			Component->SetNumCustomDataFloats(11);
 			Component->SetCullDistances(0, int32(Config->CullDistance));
+			// no place in the scene of Lumen: the cards of the walls, gates and buildings of the castles filled its surface cache in the editor
+			Component->bAffectDynamicIndirectLighting = Planet->GetSettings() && Planet->GetSettings()->AreSmallObjectsInLumen();
 			if (Material)
 			{
 				Component->SetMaterial(0, Material);
@@ -2133,6 +2336,25 @@ namespace
 			{
 				Message = FString::Printf(TEXT("Cheat: %s gets %d %s"), *Hero->Name, Stack.Count, *Stats->DisplayName);
 			}
+		}
+		else if (Action == TEXT("autoplay"))
+		{
+			// the game moves the player of the person, or the player named, until it is turned off; not saved
+			const int32 Player = Args.IsValidIndex(2) && Args[2].IsNumeric() ? FCString::Atoi(*Args[2]) : Heroes->GetShroudPlayer();
+			const bool bOn = Args.IsValidIndex(1) ? Args[1].Equals(TEXT("on"), ESearchCase::IgnoreCase) || Args[1] == TEXT("1") : !Heroes->IsPlayerAuto(Player);
+			Heroes->SetPlayerAuto(Player, bOn);
+			Message = bOn ? FString::Printf(TEXT("Cheat: the game plays for %s; hex.Cheat autoplay off gives it back"), *Heroes->GetConfig()->GetPlayer(Player).Name)
+				: FString::Printf(TEXT("Cheat off: %s is yours again"), *Heroes->GetConfig()->GetPlayer(Player).Name);
+		}
+		else if (Action == TEXT("speed"))
+		{
+			// the game runs so many times as fast, as slomo does
+			const float Speed = Args.IsValidIndex(1) ? FMath::Clamp(FCString::Atof(*Args[1]), 0.1f, 20.0f) : 1.0f;
+			if (AWorldSettings* WorldSettings = World ? World->GetWorldSettings() : nullptr)
+			{
+				WorldSettings->SetTimeDilation(Speed);
+			}
+			Message = FString::Printf(TEXT("Cheat: the game runs %g times as fast"), Speed);
 		}
 		else if (Action == TEXT("passive"))
 		{

@@ -1,0 +1,13 @@
+{
+	"version": 1,
+	"entrances": [
+		{"cell": 847, "network": "A", "side": 4, "exitSide": 4},
+		{"cell": 1064, "network": "D", "side": 5, "exitSide": 5},
+		{"cell": 2853, "network": "D", "side": 1, "exitSide": 1},
+		{"cell": 3677, "network": "A", "side": 3, "exitSide": 3},
+		{"cell": 7129, "network": "B", "side": 5, "exitSide": 5},
+		{"cell": 7466, "network": "B", "side": 0, "exitSide": 0},
+		{"cell": 8421, "network": "C", "side": 4, "exitSide": 4},
+		{"cell": 8567, "network": "C", "side": 5, "exitSide": 5}
+	]
+}

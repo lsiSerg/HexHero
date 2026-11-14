@@ -268,6 +268,9 @@ private:
 	/** Shows a line of the heroes on the screen, as why one does not go */
 	void OnHeroMessage(const FString& Message);
 
+	/** The game ended: a dialog says who won, with a new game or back to the map */
+	void OnGameOver(bool bWon, const FString& Text);
+
 public:
 
 	/** Whether a battle is shown on its field */

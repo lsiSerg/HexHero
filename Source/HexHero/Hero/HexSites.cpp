@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "HexSites.h"
+#include "HexPlanetConfig.h"
 #include "HexHero.h"
 #include "HexHeroConfig.h"
 #include "HexCastles.h"
@@ -310,7 +311,7 @@ bool UHexSites::Clear()
 	return true;
 }
 
-int32 UHexSites::Generate(FString& OutReport, const int32* Seed)
+int32 UHexSites::Generate(FString& OutReport, const int32* Seed, float DensityScale, const TBitArray<>* SurfaceAvoid)
 {
 	const UHexHeroes* Heroes = Surface ? Surface->GetHeroes() : nullptr;
 	if (!Config || !Heroes || !Surface->IsBuilt())
@@ -325,6 +326,8 @@ int32 UHexSites::Generate(FString& OutReport, const int32* Seed)
 
 	HexSiteGenerator::FInput Input;
 	Input.Settings = Settings;
+	// a map of zones asks for more of them (SiteDensity of its settings)
+	Input.Settings.Density *= FMath::Max(DensityScale, 0.0f);
 	Input.Seed = Seed ? *Seed : Surface->GetManifest().Seed * 7919 + GenerateCount++ * 104729;
 	for (const FHexSiteShare& Share : Settings.Shares)
 	{
@@ -390,6 +393,11 @@ int32 UHexSites::Generate(FString& OutReport, const int32* Seed)
 				}
 			}
 		}
+	}
+	// and the cells the caller keeps free, as the passes of a map of zones
+	if (SurfaceAvoid && SurfaceAvoid->Num() == NumCells && Input.Avoid[0].Num() == NumCells)
+	{
+		Input.Avoid[0].CombineWithBitwiseOR(*SurfaceAvoid, EBitwiseOperatorFlags::MaintainSize);
 	}
 	// where the heroes start, and for each player where its first one does
 	TMap<int32, const FHexHero*> First;
@@ -875,6 +883,8 @@ void UHexSites::Rebuild(EHexPlanetLayer Layer)
 			// the colors of the resource and of the owner, and when it was taken
 			Component->SetNumCustomDataFloats(7);
 			Component->SetCullDistances(0, int32(Config->CullDistance));
+			// small, so no place in the scene of Lumen, as the objects of the planet
+			Component->bAffectDynamicIndirectLighting = Planet->GetSettings() && Planet->GetSettings()->AreSmallObjectsInLumen();
 			if (Shown)
 			{
 				Component->SetMaterial(0, Shown);

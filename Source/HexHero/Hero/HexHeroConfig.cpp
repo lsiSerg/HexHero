@@ -50,6 +50,11 @@ TArray<FHexHeroPlayer> MakeDefaultHeroPlayers()
 		{TEXT("Blue"), FLinearColor(0.07f, 0.2f, 0.8f, 1.0f)},
 		{TEXT("Green"), FLinearColor(0.1f, 0.5f, 0.1f, 1.0f)},
 		{TEXT("Gold"), FLinearColor(0.85f, 0.6f, 0.08f, 1.0f)},
+		// four more since 2026-11-14, as a map of zones has up to eight players
+		{TEXT("Purple"), FLinearColor(0.42f, 0.1f, 0.62f, 1.0f)},
+		{TEXT("Teal"), FLinearColor(0.05f, 0.5f, 0.5f, 1.0f)},
+		{TEXT("Orange"), FLinearColor(0.9f, 0.35f, 0.05f, 1.0f)},
+		{TEXT("Pink"), FLinearColor(0.85f, 0.3f, 0.55f, 1.0f)},
 	};
 }
 
@@ -68,9 +73,11 @@ void UHexHeroConfig::PostLoad()
 	{
 		Classes = MakeDefaultHeroClasses();
 	}
-	if (Players.IsEmpty())
+	// an asset saved with fewer players takes the ones it lacks, as a map of zones has up to eight
+	const TArray<FHexHeroPlayer> Defaults = MakeDefaultHeroPlayers();
+	for (int32 Index = Players.Num(); Index < Defaults.Num(); ++Index)
 	{
-		Players = MakeDefaultHeroPlayers();
+		Players.Add(Defaults[Index]);
 	}
 }
 
