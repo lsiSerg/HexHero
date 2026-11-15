@@ -4,6 +4,7 @@
 #include "HexLastView.h"
 #include "HexHero.h"
 #include "HexMapManifest.h"
+#include "HexMapSettings.h"
 #include "HexMapLoader.h"
 #include "Engine/World.h"
 #include "Dom/JsonObject.h"
@@ -121,6 +122,12 @@ void HexLastView::SetPlanetOpen(bool bPlanet)
 
 bool HexLastView::ShouldOpenPlanet(const UWorld* World)
 {
+	if (!World || World->URL.HasOption(HexMapLoader::MapOption))
+	{
+		return false;
+	}
+
+	// what was open last, else at a first start the planet of the settings, if there is one
 	FHexLastView View;
-	return World && !World->URL.HasOption(HexMapLoader::MapOption) && Load(View) && View.bPlanetOpen;
+	return Load(View) ? View.bPlanetOpen : !GetDefault<UHexMapSettings>()->DefaultPlanet.IsEmpty();
 }

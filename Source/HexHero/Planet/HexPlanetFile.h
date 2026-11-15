@@ -708,7 +708,8 @@ namespace HexPlanetFile
 	FString GetWritableRoot();
 
 	/** In a packaged game, whose Content is read only, copies the files of a planet it shipped with that the writable root lacks when
-	 *  it opens, so edits and generated files are saved and read back; nothing in builds with the editor */
+	 *  it opens, so edits and generated files are saved and read back; a copy made from another version of the shipped files (its
+	 *  shipped.version) is moved to Saved/PlanetBackups first and made anew; nothing in builds with the editor */
 	void KeepWritableCopy(const FString& Folder);
 
 	/** Returns the full path of a file of a planet, in the first root that has the folder of the planet, or in the writable root. Folder is

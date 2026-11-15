@@ -7,11 +7,16 @@
 #include "HexLastView.h"
 #include "JsonObjectConverter.h"
 #include "Kismet/GameplayStatics.h"
+#include "Misc/Crc.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "HexMapSettings.h"
 
 namespace
 {
+	/** The file in the writable copy of a shipped planet that holds the version of the shipped files it was made from */
+	[[maybe_unused]] constexpr const TCHAR* VersionFileName = TEXT("shipped.version");
+
 	/** Letters of the levels of each layer */
 	const FHexLevelLetter SurfaceLetters[] = {{TEXT('D'), -2}, {TEXT('S'), -1}, {TEXT('P'), 0}, {TEXT('H'), 1}, {TEXT('M'), 2}};
 	const FHexLevelLetter UndergroundLetters[] = {{TEXT('V'), -2}, {TEXT('P'), 0}};
@@ -56,8 +61,42 @@ void HexPlanetFile::KeepWritableCopy(const FString& Folder)
 	// before the folder, so a copy of the tree stopped at the first subfolder; a file the copy has already is never overwritten
 	TArray<FString> Files;
 	IFileManager::Get().FindFilesRecursive(Files, *Shipped, TEXT("*"), true, false);
+	Files.Sort();
 	int32 Copied = 0;
 	int32 Failed = 0;
+
+	// the copy remembers which version of the planet it was made from (a CRC of the names and contents of the shipped files), so a build
+	// that ships the planet changed puts a fresh copy in place of the one an older build made, which would else hide the new files, as
+	// the developer found with a demo unpacked over an older one on 2026-11-15; the old copy, with whatever its player saved in it, is
+	// moved to Saved/PlanetBackups and not deleted
+	uint32 Version = 0;
+	for (const FString& File : Files)
+	{
+		const FTCHARToUTF8 Name(*File.Mid(Shipped.Len()));
+		Version = FCrc::MemCrc32(Name.Get(), Name.Length(), Version);
+		TArray<uint8> Data;
+		if (FFileHelper::LoadFileToArray(Data, *File))
+		{
+			Version = FCrc::MemCrc32(Data.GetData(), Data.Num(), Version);
+		}
+	}
+	const FString VersionText = FString::Printf(TEXT("%08x"), Version);
+	const FString VersionFile = FPaths::Combine(Copy, VersionFileName);
+	FString CopyVersion;
+	if (IFileManager::Get().DirectoryExists(*Copy) && (!FFileHelper::LoadFileToString(CopyVersion, *VersionFile) || CopyVersion.TrimStartAndEnd() != VersionText))
+	{
+		const FString Backups = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("PlanetBackups"));
+		const FString Backup = FPaths::Combine(Backups, FString::Printf(TEXT("%s-%s"), *Folder, *FDateTime::Now().ToString(TEXT("%Y%m%d-%H%M%S"))));
+		IFileManager::Get().MakeDirectory(*Backups, true);
+		if (IFileManager::Get().Move(*Backup, *Copy))
+		{
+			UE_LOG(LogHexHero, Log, TEXT("Planet: the build ships another version of %s than its copy was made from; the old copy is in %s"), *Folder, *Backup);
+		}
+		else
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("Planet: the copy of %s is of another version than the build ships, but could not be moved to %s; it is kept"), *Folder, *Backup);
+		}
+	}
 
 	for (const FString& File : Files)
 	{
@@ -78,6 +117,10 @@ void HexPlanetFile::KeepWritableCopy(const FString& Folder)
 	{
 		UE_LOG(LogHexHero, Log, TEXT("Planet: copied %d files of %s to %s, where it is saved%s"), Copied, *Folder, *Copy,
 			Failed > 0 ? *FString::Printf(TEXT(", %d could not be copied"), Failed) : TEXT(""));
+	}
+	if (Failed == 0 && (!FFileHelper::LoadFileToString(CopyVersion, *VersionFile) || CopyVersion.TrimStartAndEnd() != VersionText))
+	{
+		FFileHelper::SaveStringToFile(VersionText, *VersionFile);
 	}
 #endif
 }
@@ -1323,6 +1366,13 @@ FString HexPlanetFile::FindPlanetToOpen(const UWorld* World)
 		{
 			return Folder;
 		}
+	}
+
+	// the planet of the settings, which the demo starts on
+	const FString Default = Find(GetDefault<UHexMapSettings>()->DefaultPlanet);
+	if (!Default.IsEmpty())
+	{
+		return Default;
 	}
 
 	return Planets.IsEmpty() ? FString() : Planets[0].Folder;

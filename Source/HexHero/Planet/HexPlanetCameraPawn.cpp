@@ -21,6 +21,7 @@
 #include "HexBattleConfig.h"
 #include "HexCameraConfig.h"
 #include "HexCameraPawn.h"
+#include "HexCastles.h"
 #include "HexHeroes.h"
 #include "HexInputConfig.h"
 #include "HexLastView.h"
@@ -885,6 +886,18 @@ void AHexPlanetCameraPawn::Tick(float DeltaTime)
 				TravelTo(SavedLayer, SavedPlacement, true);
 			}
 		}
+		StartViewFrames = !bSaved && !PendingPlanetPlacement.IsSet() && PendingFocusCell == INDEX_NONE ? StartViewMaxFrames : 0;
+	}
+
+	// a planet without a view saved starts over the first castle, else the first hero, of a player a person moves, as from above the
+	// pole the demo showed Realms as sea and ice (2026-11-15); tried each frame until the heroes are read, as they may come later
+	if (StartViewFrames > 0)
+	{
+		--StartViewFrames;
+		if (PlaceOverPersonStart())
+		{
+			StartViewFrames = 0;
+		}
 	}
 
 	// while a battle is fought on its own field the camera of the planet waits, and its input moves the camera of the field
@@ -1663,6 +1676,50 @@ bool AHexPlanetCameraPawn::ShowCell(EHexPlanetLayer Layer, int32 Cell)
 	// nor does it scroll away from the cell on the other layer once it is there
 	HoldEdgeScroll();
 	return TravelTo(Layer, Placement);
+}
+
+bool AHexPlanetCameraPawn::PlaceOverPersonStart()
+{
+	const UHexHeroes* Heroes = Planet ? Planet->GetHeroes() : nullptr;
+	const UHexPlanetLayers* PlanetLayers = UHexPlanetLayers::Get(GetWorld());
+	// the heroes and who plays them are read with the castles; none yet, it waits for them
+	if (!Heroes || Heroes->GetHeroes().IsEmpty() || !PlanetLayers)
+	{
+		return false;
+	}
+	const auto IsPerson = [Heroes](int32 Player) { return Player >= 0 && !Heroes->IsPlayerAi(Player); };
+	const auto Place = [this, PlanetLayers](EHexPlanetLayer Layer, TConstArrayView<int32> Cells)
+	{
+		const AHexPlanet* Target = PlanetLayers->GetPlanet(Layer);
+		if (!Target || !Target->IsDataLoaded())
+		{
+			return false;
+		}
+		FVector3d Direction = FVector3d::ZeroVector;
+		for (const int32 Cell : Cells)
+		{
+			Direction += Target->GetGrid().GetCells().IsValidIndex(Cell) ? Target->GetGrid().GetCells()[Cell].Center : FVector3d::ZeroVector;
+		}
+		return PlaceOver(Layer, FVector(Direction), Settings()->FirstViewDistance);
+	};
+	if (const UHexCastles* Castles = Heroes->GetCastles())
+	{
+		for (const FHexCastle& Castle : Castles->GetCastles())
+		{
+			if (IsPerson(Castle.Owner))
+			{
+				return Place(Castle.Layer, Castle.Cells);
+			}
+		}
+	}
+	for (const FHexHero& Hero : Heroes->GetHeroes())
+	{
+		if (IsPerson(Hero.Player))
+		{
+			return Place(Hero.Layer, MakeArrayView(&Hero.Cell, 1));
+		}
+	}
+	return false;
 }
 
 bool AHexPlanetCameraPawn::PlaceOver(EHexPlanetLayer Layer, const FVector& Direction, float MaxDistance)

@@ -89,6 +89,11 @@ public:
 	UPROPERTY(EditAnywhere, Category="Camera", meta=(ClampMin=100))
 	float PlayStartDistance = 1100.0f;
 
+	/** A planet without a view saved opens with the camera over the first castle, else the first hero, of a player a person moves, at
+	 *  most this far, as the demo opened Realms from above its pole (2026-11-15) */
+	UPROPERTY(EditAnywhere, Category="Camera", meta=(ClampMin=100))
+	float FirstViewDistance = 3000.0f;
+
 	/** How far, in pixels, the mouse may move while the middle button is down for its release to count as a click, which centers the cell
 	 *  under the mouse; further it drags the planet, as the left button does when the brush is off */
 	UPROPERTY(EditAnywhere, Category="Camera", meta=(ClampMin=0))

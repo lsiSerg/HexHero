@@ -57,6 +57,12 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category="Planet", meta=(ContentDir))
 	FDirectoryPath PlanetObjectsFolder;
 
+	/** The folder of the planet the game opens when nothing else says which: no ?Planet= in the URL and no planet in LastView.json, and
+	 *  with no LastView.json at all also in place of the flat map and its menu, so the demo starts on it (Realms, as the developer asked on
+	 *  2026-11-15). Empty or not found: the planet of the lowest sortOrder, and the flat map at a first start */
+	UPROPERTY(Config, EditAnywhere, Category="Planet")
+	FString DefaultPlanet;
+
 	/** Loads the terrain levels, lowest first */
 	TArray<const UHexLevelConfig*> LoadLevels() const;
 

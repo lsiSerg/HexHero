@@ -283,6 +283,14 @@ private:
 	/** Cell that a focus asked for before the planet was built */
 	int32 PendingFocusCell = INDEX_NONE;
 
+	/** Frames left to try the start over the castle or hero of the person (PlaceOverPersonStart) on a planet without a view saved */
+	int32 StartViewFrames = 0;
+	static constexpr int32 StartViewMaxFrames = 300;
+
+	/** Puts the camera over the first castle, else the first hero, of a player a person moves, at FirstViewDistance; false while there
+	 *  is none or the heroes are not read yet */
+	bool PlaceOverPersonStart();
+
 	/** Distance that the waiting focus asked for */
 	TOptional<float> PendingFocusDistance;
 
