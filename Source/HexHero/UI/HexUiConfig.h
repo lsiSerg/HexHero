@@ -38,6 +38,12 @@ enum class EHexCursor : uint8
 	BattleBlocked,
 	/** A hero of its own the hero chosen is pointed to: a second click walks there and the two exchange their armies */
 	Exchange,
+	/** Aboard a boat, ashore from one, and ashore to fight, as the developer asked on 2026-11-15 */
+	Board,
+	Land,
+	LandAttack,
+	/** A cell a spell of the planet that steps (Dimension door, Teleport) may be cast on while it is aimed, as the developer asked on 2026-11-15 */
+	Teleport,
 	Num UMETA(Hidden)
 };
 
@@ -59,6 +65,13 @@ enum class EHexStatIcon : uint8
 	Flies,
 	/** The button in the corner of a stack that upgrades it in a castle */
 	LevelUp,
+	/** The attributes of a hero in the panel at the cursor, as the developer asked on 2026-11-15 */
+	SpellPower,
+	Knowledge,
+	Experience,
+	Movement,
+	/** A castle in the list of the heroes can build something this turn, as the developer asked on 2026-11-15 */
+	Build,
 	Num UMETA(Hidden)
 };
 

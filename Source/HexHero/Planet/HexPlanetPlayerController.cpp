@@ -19,6 +19,13 @@
 #include "SHexDialog.h"
 #include "HexCastles.h"
 #include "SHexCastlePanel.h"
+#include "SHexChoiceDialog.h"
+#include "SHexSpellBook.h"
+#include "SHexEconomyPanel.h"
+#include "GameFramework/WorldSettings.h"
+#include "HexBattle.h"
+#include "HexBattleConfig.h"
+#include "Framework/Application/SlateApplication.h"
 #include "SHexHeroPanel.h"
 #include "SHexEdgeMarkers.h"
 #include "SHexBattlePanel.h"
@@ -33,11 +40,16 @@
 #include "SHexMapTip.h"
 #include "HexHeroes.h"
 #include "HexSites.h"
+#include "HexSiteConfig.h"
+#include "HexNeutrals.h"
+#include "HexHeroConfig.h"
+#include "HexUiConfig.h"
 #include "SHexPlanetPalette.h"
 #include "HexPlanetPainter.h"
 #include "HexPlanetUnderground.h"
 #include "HexHero.h"
 #include "TimerManager.h"
+#include "Containers/Ticker.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Styling/CoreStyle.h"
 #include "Widgets/Layout/SBorder.h"
@@ -88,6 +100,36 @@ namespace
 		const auto Has = [&Args](const TCHAR* Word) { return Args.ContainsByPredicate([Word](const FString& Arg) { return Arg.Equals(Word, ESearchCase::IgnoreCase); }); };
 		Controller->OrderAt(FCString::Atoi(*Args[0]), Has(TEXT("click")), Has(TEXT("ctrl")));
 	}
+
+	// a key pressed and released a tenth of a second later through Slate, as the keyboard gives it, so it reaches the widget with the keyboard
+	// or else the game, for test runs that have no keyboard
+	void RunKeyCommand(const TArray<FString>& Args, UWorld* World)
+	{
+		const FKey Key = Args.IsEmpty() ? FKey() : FKey(FName(*Args[0]));
+		if (!Key.IsValid() || !FSlateApplication::IsInitialized())
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("hex.Key <Key> [ctrl] [shift]: a key by its name in the engine (Escape, H, SpaceBar), pressed and released"));
+			return;
+		}
+		const auto Has = [&Args](const TCHAR* Word) { return Args.ContainsByPredicate([Word](const FString& Arg) { return Arg.Equals(Word, ESearchCase::IgnoreCase); }); };
+		const bool bCtrl = Has(TEXT("ctrl"));
+		const bool bShift = Has(TEXT("shift"));
+		const FModifierKeysState Modifiers(bShift, false, bCtrl, false, false, false, false, false, false);
+		const FKeyEvent Event(Key, Modifiers, 0, false, 0, 0);
+		FSlateApplication::Get().ProcessKeyDownEvent(Event);
+		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([Event](float)
+		{
+			if (FSlateApplication::IsInitialized())
+			{
+				FSlateApplication::Get().ProcessKeyUpEvent(Event);
+			}
+			return false;
+		}), 0.1f);
+		UE_LOG(LogHexHero, Log, TEXT("hex.Key: %s%s%s"), bCtrl ? TEXT("Ctrl+") : TEXT(""), bShift ? TEXT("Shift+") : TEXT(""), *Key.ToString());
+	}
+
+	FAutoConsoleCommandWithWorldAndArgs KeyCommand(TEXT("hex.Key"), TEXT("hex.Key <Key> [ctrl] [shift]: a key pressed and released as the keyboard gives it, for test runs"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&RunKeyCommand));
 
 	FAutoConsoleCommandWithWorldAndArgs OrderCommand(TEXT("hex.Order"), TEXT("hex.Order <Cell> [click] [ctrl]: a right click on a cell, or a left one, with Ctrl held, as the mouse gives them"),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&RunOrderCommand));
@@ -150,8 +192,31 @@ void AHexPlanetPlayerController::BeginPlay()
 			.OnHeroChosen(FOnHexHeroChosen::CreateUObject(this, &AHexPlanetPlayerController::OnListHero))
 			.OnCastleChosen(FOnHexHeroChosen::CreateUObject(this, &AHexPlanetPlayerController::OnListCastle))
 			.OnHeroGo(FOnHexHeroChosen::CreateUObject(this, &AHexPlanetPlayerController::OnListHeroGo))
+			.OnHeroArmy(FOnHexHeroChosen::CreateUObject(this, &AHexPlanetPlayerController::OnListHeroArmy))
+			.OnHeroMagic(FOnHexHeroChosen::CreateUObject(this, &AHexPlanetPlayerController::OpenPlanetMagic))
 			.OnEndTurn(FSimpleDelegate::CreateUObject(this, &AHexPlanetPlayerController::EndHeroTurn))
 			.OnRestart(FSimpleDelegate::CreateUObject(this, &AHexPlanetPlayerController::RestartGame))
+			.OnEconomy(FSimpleDelegate::CreateUObject(this, &AHexPlanetPlayerController::OpenEconomy))
+			.OnAuto_Lambda([WeakThis]()
+			{
+				if (WeakThis.IsValid())
+				{
+					WeakThis->ToggleAutoplay();
+				}
+			})
+			.IsAuto_Lambda([WeakThis]() { return WeakThis.IsValid() && WeakThis->IsAutoplay(); })
+			.OnSpeed_Lambda([WeakThis]()
+			{
+				if (WeakThis.IsValid())
+				{
+					WeakThis->CycleGameSpeed();
+				}
+			})
+			.SpeedText_Lambda([WeakThis]()
+			{
+				const AWorldSettings* Settings = WeakThis.IsValid() && WeakThis->GetWorld() ? WeakThis->GetWorld()->GetWorldSettings() : nullptr;
+				return FText::FromString(FString::Printf(TEXT("%gx"), Settings ? Settings->TimeDilation : 1.0f));
+			})
 			.OnProject([WeakThis](const FVector& Point, FVector2D& OutScreen)
 			{
 				// a point of the way of the hero chosen, where it shows: on the layer shown, on the side of the planet towards the camera
@@ -181,13 +246,25 @@ void AHexPlanetPlayerController::BeginPlay()
 			{
 				return WeakThis.IsValid() && WeakThis->LocateForMarker(Point, Layer, OutScreen, OutDirection);
 			})
-			.IsBlocked_Lambda([WeakThis]() { return WeakThis.IsValid() && (WeakThis->MapMenu.IsValid() || WeakThis->Dialog.IsValid()); });
+			.IsBlocked_Lambda([WeakThis]() { return WeakThis.IsValid() && (WeakThis->MapMenu.IsValid() || WeakThis->Dialog.IsValid() || WeakThis->IsModalOpen()); })
+			.OnFocus([WeakThis](FVector3d& OutFocus)
+			{
+				// where the camera looks on the layer shown
+				const AHexPlanet* Planet = WeakThis.IsValid() ? WeakThis->GetPlanet() : nullptr;
+				const AActor* ViewTarget = Planet ? WeakThis->GetViewTarget() : nullptr;
+				if (!ViewTarget)
+				{
+					return false;
+				}
+				OutFocus = Planet->FindViewFocus(ViewTarget->GetActorLocation(), ViewTarget->GetActorForwardVector());
+				return !OutFocus.IsNearlyZero();
+			});
 		ViewportClient->AddViewportWidgetContent(EdgeMarkers.ToSharedRef(), 100);
 
 		// the cursor of the game over everything, and the sheet of the cheats under it
 		SAssignNew(GameCursor, SHexGameCursor);
 		ViewportClient->AddViewportWidgetContent(GameCursor.ToSharedRef(), 1000);
-		SAssignNew(CheatSheet, SHexCheatSheet).Visibility(EVisibility::Collapsed);
+		SAssignNew(CheatSheet, SHexCheatSheet).Visibility(EVisibility::Collapsed).OnClose(FSimpleDelegate::CreateUObject(this, &AHexPlanetPlayerController::ToggleCheatSheet));
 		ViewportClient->AddViewportWidgetContent(CheatSheet.ToSharedRef(), 900);
 
 		// the panel of a castle, shown while a person looks into one of its own
@@ -198,8 +275,23 @@ void AHexPlanetPlayerController::BeginPlay()
 				{
 					WeakThis->OnHeroMessage(Message);
 				}
+			})
+			.OnSpellBook([WeakThis](int32 HeroId)
+			{
+				if (WeakThis.IsValid())
+				{
+					WeakThis->OpenSpellBook(HeroId);
+				}
 			});
-		ViewportClient->AddViewportWidgetContent(CastlePanel.ToSharedRef());
+		// over the panel of the heroes and the buttons, which its shade covers, under the marks at the edges and the tip at the cursor
+		ViewportClient->AddViewportWidgetContent(CastlePanel.ToSharedRef(), 60);
+		SAssignNew(SpellBook, SHexSpellBook).OnCast(FOnHexSpellCast::CreateUObject(this, &AHexPlanetPlayerController::OnPlanetSpellChosen));
+		ViewportClient->AddViewportWidgetContent(SpellBook.ToSharedRef(), 70);
+		// the economy of the person, from the button on the bar of the resources
+		SAssignNew(EconomyPanel, SHexEconomyPanel);
+		ViewportClient->AddViewportWidgetContent(EconomyPanel.ToSharedRef(), 70);
+		SAssignNew(ChoiceDialog, SHexChoiceDialog).OnChosen(FOnHexChoice::CreateUObject(this, &AHexPlanetPlayerController::OnChoice));
+		ViewportClient->AddViewportWidgetContent(ChoiceDialog.ToSharedRef(), 80);
 
 		// Edit and Play at the top left, with the palette of the brush below them
 		SAssignNew(ModeBar, SHexModeBar)
@@ -337,7 +429,32 @@ void AHexPlanetPlayerController::SetPlayMode(bool bOn)
 	{
 		SetPaintMode(false);
 	}
-	ShowHero(Heroes->GetSelectedId());
+	// the camera stands over the hero or the castle chosen at once, as the developer asked on 2026-11-15, rather than gliding there
+	AHexPlanetCameraPawn* CameraPawn = GetCameraPawn();
+	const FHexHero* Hero = Heroes->GetSelected();
+	const FHexCastle* Castle = !Hero && Heroes->GetCastles() ? Heroes->GetCastles()->FindCastle(Heroes->GetSelectedCastleId()) : nullptr;
+	const UHexPlanetLayers* PlanetLayers = UHexPlanetLayers::Get(GetWorld());
+	const AHexPlanet* Planet = (Hero || Castle) && PlanetLayers ? PlanetLayers->GetPlanet(Hero ? Hero->Layer : Castle->Layer) : nullptr;
+	bool bPlaced = false;
+	if (CameraPawn && Planet && Planet->IsDataLoaded() && Planet->GetGrid().GetCells().Num() > 0)
+	{
+		FVector3d Direction = FVector3d::ZeroVector;
+		const TArray<FHexSphereCell>& Cells = Planet->GetGrid().GetCells();
+		if (Hero && Cells.IsValidIndex(Hero->Cell))
+		{
+			Direction = Cells[Hero->Cell].Center;
+		}
+		for (int32 Index = 0; Castle && Index < 3; ++Index)
+		{
+			Direction += Cells.IsValidIndex(Castle->Cells[Index]) ? Cells[Castle->Cells[Index]].Center : FVector3d::ZeroVector;
+		}
+		bPlaced = CameraPawn->PlaceOver(Hero ? Hero->Layer : Castle->Layer, FVector(Direction));
+	}
+	// else as before, gliding there
+	if (!bPlaced && Hero)
+	{
+		ShowHero(Hero->Id);
+	}
 }
 
 bool AHexPlanetPlayerController::IsBattleShown() const
@@ -464,6 +581,23 @@ void AHexPlanetPlayerController::ClickGame(bool bDouble)
 	{
 		return;
 	}
+	// a Dimension door aimed: the cell clicked, on the layer of its hero
+	if (AimSpell != INDEX_NONE)
+	{
+		const FHexHero* Hero = Heroes->FindHero(MagicHeroId);
+		if (!Hero || !Planet || Planet->GetLayer() != Hero->Layer || MouseCell == INDEX_NONE)
+		{
+			OnHeroMessage(TEXT("Click a cell within the outline, on the layer of the hero"));
+			return;
+		}
+		FString Message;
+		if (Heroes->CastAdventure(MagicHeroId, AimSpell, MouseCell, 0, Message))
+		{
+			CancelAim();
+		}
+		OnHeroMessage(Message);
+		return;
+	}
 	// a click on a mark at the edge of the screen chooses its hero or castle and shows it
 	if (bool bCastle = false; EdgeMarkers.IsValid())
 	{
@@ -498,8 +632,10 @@ void AHexPlanetPlayerController::ClickGame(bool bDouble)
 	const bool bWayToCastle = (bAlt || bPointedIn) && Castle && Chosen && Chosen->CastleId != Castle->Id && !Under && !Chosen->bWalking;
 	if (Castle && !bWayToCastle && Castle->Owner == Heroes->GetShroudPlayer() && !Heroes->IsHidden(Castle->Owner, Castle->Layer, MouseCell))
 	{
+		// a second click on the castle chosen opens it, however long after the first, as the developer asked on 2026-11-15
+		const bool bChosenAlready = Heroes->GetSelectedCastleId() == Castle->Id;
 		Heroes->SelectCastle(Castle->Id);
-		if (bDouble)
+		if (bDouble || bChosenAlready)
 		{
 			OnCastleOpened(Castle->Id);
 		}
@@ -558,7 +694,395 @@ void AHexPlanetPlayerController::ClickGame(bool bDouble)
 bool AHexPlanetPlayerController::IsCursorOnUi() const
 {
 	return (EdgeMarkers.IsValid() && EdgeMarkers->IsCursorOnMarks()) || (CastlePanel.IsValid() && CastlePanel->IsUnderCursor())
-		|| (BattlePanel.IsValid() && BattlePanel->IsCursorOnButtons());
+		|| (BattlePanel.IsValid() && BattlePanel->IsCursorOnButtons()) || IsModalOpen();
+}
+
+bool AHexPlanetPlayerController::IsModalOpen() const
+{
+	return (CastlePanel.IsValid() && CastlePanel->IsOpen()) || (SpellBook.IsValid() && SpellBook->IsOpen()) || (ChoiceDialog.IsValid() && ChoiceDialog->IsOpen())
+		|| (EconomyPanel.IsValid() && EconomyPanel->IsOpen())
+		|| (CheatSheet.IsValid() && CheatSheet->IsOpen());
+}
+
+bool AHexPlanetPlayerController::CloseOpenUi()
+{
+	// the menu and the dialogs take Escape themselves
+	if (MapMenu.IsValid() || Dialog.IsValid())
+	{
+		return true;
+	}
+	// a Dimension door aimed is taken back
+	if (AimSpell != INDEX_NONE)
+	{
+		CancelAim();
+		return true;
+	}
+	// the one on top first
+	if (CheatSheet.IsValid() && CheatSheet->IsOpen())
+	{
+		ToggleCheatSheet();
+		return true;
+	}
+	if (ChoiceDialog.IsValid() && ChoiceDialog->IsOpen())
+	{
+		ChoiceDialog->Cancel();
+		return true;
+	}
+	if (EconomyPanel.IsValid() && EconomyPanel->IsOpen())
+	{
+		EconomyPanel->Close();
+		return true;
+	}
+	if (SpellBook.IsValid() && SpellBook->IsOpen())
+	{
+		SpellBook->Close();
+		return true;
+	}
+	if (CastlePanel.IsValid() && CastlePanel->IsOpen())
+	{
+		CastlePanel->Close();
+		return true;
+	}
+	if (IsBattleShown() && BattlePanel.IsValid() && BattlePanel->HandleEscape())
+	{
+		return true;
+	}
+	return false;
+}
+
+void AHexPlanetPlayerController::OpenSpellBook(int32 HeroId, bool bPlanetOnly)
+{
+	const UHexHeroes* Heroes = GetHeroes();
+	const FHexHero* Hero = Heroes ? Heroes->FindHero(HeroId) : nullptr;
+	const UHexBattleConfig* Battle = UHexBattleConfig::Load();
+	if (!Hero || !SpellBook.IsValid() || !Battle)
+	{
+		return;
+	}
+	MagicHeroId = HeroId;
+	CancelAim();
+	// what its skills make of each spell, as a battle would
+	FHexBattleSideSetup Side;
+	Side.SpellPower = Hero->SpellPower;
+	Heroes->FillBattleMagic(*Hero, Side, Battle);
+	TArray<FHexSpellBookEntry> Entries;
+	// the spells of the planet first, which a click casts when the hero may now, and their reach
+	const bool bOwn = Heroes->CanChoose(HeroId);
+	for (const int32 Spell : Heroes->GetAdventureSpells(*Hero))
+	{
+		const FHexSpell& Each = Battle->Spells[Spell];
+		FHexSpellBookEntry& Entry = Entries.AddDefaulted_GetRef();
+		Entry.Spell = Spell;
+		Entry.ManaCost = Heroes->GetAdventureManaCost(*Hero, Spell);
+		FString Why;
+		Entry.bCastable = bOwn && Heroes->CanCastAdventure(*Hero, Spell, &Why);
+		const int32 Reach = Heroes->GetAdventureReach(*Hero, Spell);
+		Entry.Detail = Reach == MAX_int32 ? FString(TEXT("The whole layer")) : Reach > 0 ? FString::Printf(TEXT("Within %d cells"), Reach) : FString(TEXT("On the planet"));
+		if (!Entry.bCastable && !Why.IsEmpty())
+		{
+			Entry.Detail += FString::Printf(TEXT(". %s"), *Why);
+		}
+	}
+	for (const int32 Spell : bPlanetOnly ? TArray<int32>() : Side.KnownSpells)
+	{
+		const FHexSpell& Each = Battle->Spells[Spell];
+		const int32 School = int32(Each.School);
+		FHexSpellBookEntry& Entry = Entries.AddDefaulted_GetRef();
+		Entry.Spell = Spell;
+		Entry.ManaCost = FMath::Max(FMath::RoundToInt32(Each.ManaCost * (1.0f - FMath::Clamp(Side.SchoolManaCut[School], 0.0f, 0.9f))), 1);
+		const float Power = float(Each.Power + Each.PowerPerSpellPower * FMath::Max(Hero->SpellPower, 0)) * Side.SchoolPower[School] * (Each.IsDamage() ? 1.0f + Side.SpellDamageBonus : 1.0f);
+		if (Each.Power + Each.PowerPerSpellPower > 0)
+		{
+			Entry.Detail = FString::Printf(TEXT("Power %d"), FMath::RoundToInt32(Power));
+		}
+		if (Each.Kind == EHexSpellKind::Effect)
+		{
+			Entry.Detail = FString::Printf(TEXT("Lasts %d rounds"), Each.bPermanent ? 999 : FMath::Max(Each.BaseRounds + Each.RoundsPerSpellPower * FMath::Max(Hero->SpellPower, 0), 1));
+		}
+		if (Each.bMassAtExpert && Side.bSchoolMass[School])
+		{
+			Entry.Detail += TEXT(", on every stack");
+		}
+	}
+	SpellBook->Open(bPlanetOnly ? FString::Printf(TEXT("The magic of %s on the planet"), *Hero->Name) : FString::Printf(TEXT("The spell book of %s"), *Hero->Name), Hero->Mana, Heroes->GetMaxMana(*Hero), Entries);
+}
+
+void AHexPlanetPlayerController::OnPlanetSpellChosen(int32 Spell)
+{
+	UHexHeroes* Heroes = GetHeroes();
+	const FHexHero* Hero = Heroes ? Heroes->FindHero(MagicHeroId) : nullptr;
+	const UHexBattleConfig* Battle = UHexBattleConfig::Load();
+	if (SpellBook.IsValid())
+	{
+		SpellBook->Close();
+	}
+	if (!Hero || !Battle || !Battle->Spells.IsValidIndex(Spell) || !Battle->Spells[Spell].IsAdventure())
+	{
+		return;
+	}
+	FString Why;
+	if (!Heroes->CanCastAdventure(*Hero, Spell, &Why))
+	{
+		OnHeroMessage(Why);
+		return;
+	}
+	const FHexSpell& Each = Battle->Spells[Spell];
+	if (IsStepSpell(Each.Adventure))
+	{
+		// the outline shows where it may step, on its layer, and the next click there casts it
+		AimSpell = Spell;
+		Heroes->Select(Hero->Id);
+		Heroes->SetAimCells(Hero->Id, Heroes->GetDoorCells(*Hero, Spell));
+		if (AHexPlanetCameraPawn* CameraPawn = GetCameraPawn(); CameraPawn && (!GetPlanet() || GetPlanet()->GetLayer() != Hero->Layer))
+		{
+			CameraPawn->ShowCell(Hero->Layer, Hero->Cell);
+		}
+		if (HeroPanel.IsValid())
+		{
+			HeroPanel->SetHint(FString::Printf(TEXT("%s: click a cell within the outline to step there; the right button or Escape takes it back"), *Each.DisplayName));
+		}
+		return;
+	}
+	if (Each.Adventure == EHexAdventureSpell::TownPortal)
+	{
+		const TArray<int32> Castles = Heroes->GetPortalCastles(*Hero, Spell);
+		const UHexCastles* AllCastles = Heroes->GetCastles();
+		if (Castles.Num() > 1 && ChoiceDialog.IsValid() && AllCastles)
+		{
+			// which of them, from Advanced of its school
+			PortalSpell = Spell;
+			PortalCastles = Castles;
+			TArray<FHexChoice> Choices;
+			for (const int32 Id : Castles)
+			{
+				const FHexCastle* Castle = AllCastles->FindCastle(Id);
+				FHexChoice& Choice = Choices.AddDefaulted_GetRef();
+				Choice.Title = Castle ? AllCastles->GetCastleName(*Castle) : FString::FromInt(Id);
+				Choice.Text = Castle ? FString::Printf(TEXT("%s, garrison: %s"), Castle->Layer == EHexPlanetLayer::Underground ? TEXT("underground") : TEXT("on the surface"),
+					*AllCastles->DescribeArmy(Castle->Garrison)) : FString();
+				Choice.Color = FLinearColor(0.95f, 0.85f, 0.45f, 1.0f);
+			}
+			FHexChoice& Stay = Choices.AddDefaulted_GetRef();
+			Stay.Title = TEXT("Not now");
+			Stay.Text = TEXT("the hero stays where it is");
+			Stay.Color = FLinearColor(0.8f, 0.8f, 0.8f, 1.0f);
+			ChoiceDialog->Open(TEXT("portal"), FString::Printf(TEXT("%s opens a town portal"), *Hero->Name), TEXT("Into which castle?"), Choices, Choices.Num() - 1);
+			return;
+		}
+		CastPlanetSpell(Spell, INDEX_NONE, Castles.IsEmpty() ? 0 : Castles[0]);
+		return;
+	}
+	CastPlanetSpell(Spell, INDEX_NONE, 0);
+}
+
+void AHexPlanetPlayerController::CastPlanetSpell(int32 Spell, int32 Cell, int32 CastleId)
+{
+	UHexHeroes* Heroes = GetHeroes();
+	if (!Heroes)
+	{
+		return;
+	}
+	FString Message;
+	Heroes->CastAdventure(MagicHeroId, Spell, Cell, CastleId, Message);
+	OnHeroMessage(Message);
+}
+
+void AHexPlanetPlayerController::CancelAim()
+{
+	if (AimSpell == INDEX_NONE)
+	{
+		return;
+	}
+	AimSpell = INDEX_NONE;
+	if (HeroPanel.IsValid())
+	{
+		HeroPanel->SetHint(FString());
+	}
+	if (UHexHeroes* Heroes = GetHeroes())
+	{
+		Heroes->SetAimCells(0, {});
+	}
+}
+
+void AHexPlanetPlayerController::OnHeroTeleported(int32 Id)
+{
+	const UHexHeroes* Heroes = GetHeroes();
+	if (Heroes && Heroes->CanChoose(Id) && !Heroes->IsPlayerAi(Heroes->FindHero(Id) ? Heroes->FindHero(Id)->Player : 0))
+	{
+		ShowHero(Id);
+	}
+}
+
+void AHexPlanetPlayerController::UpdateChoices()
+{
+	UHexHeroes* Heroes = GetHeroes();
+	if (!ChoiceDialog.IsValid() || !Heroes || IsBattleShown() || !Heroes->IsPersonTurn())
+	{
+		return;
+	}
+	// the castle of a Town portal is being chosen
+	if (PortalSpell != INDEX_NONE)
+	{
+		if (!ChoiceDialog->IsOpen())
+		{
+			PortalSpell = INDEX_NONE;
+			PortalCastles.Reset();
+		}
+		return;
+	}
+	const UHexHeroConfig* Config = Heroes->GetConfig();
+	const FHexHeroOffer& Offer = Heroes->GetOffer();
+	const FHexHero* Hero = Offer.IsSet() ? Heroes->FindHero(Offer.HeroId) : Heroes->FindPendingLevelUp();
+	if (!Hero || !Config)
+	{
+		if (ChoiceDialog->IsOpen())
+		{
+			ChoiceDialog->Close();
+		}
+		return;
+	}
+	const FString Key = Offer.IsSet() ? FString::Printf(TEXT("offer %d %d %d %d"), Offer.HeroId, Offer.NeutralId, Offer.ShipyardId, Offer.Cell)
+		: FString::Printf(TEXT("level %d %d"), Hero->Id, Hero->PendingLevelUps[0].Level);
+	if (ChoiceDialog->IsOpen() && ChoiceDialog->GetKey() == Key)
+	{
+		return;
+	}
+	const UHexUiConfig* Ui = UHexUiConfig::Load();
+	TArray<FHexChoice> Choices;
+	if (Offer.IsShipyard())
+	{
+		// a shipyard builds a boat onto the sea beside it, as the developer asked on 2026-11-15
+		const UHexSites* Sites = Heroes->GetSites();
+		const bool bCan = Sites && Sites->CanPay(Hero->Player, Offer.BoatCost);
+		FHexChoice& Build = Choices.AddDefaulted_GetRef();
+		Build.Title = FString::Printf(TEXT("Build a boat for %s"), Sites ? *Sites->DescribeCost(Offer.BoatCost) : TEXT("?"));
+		Build.Text = bCan ? TEXT("it lies on the sea beside the shipyard, for any hero to go aboard") : TEXT("there is not enough in the treasury");
+		Build.Color = bCan ? FLinearColor(0.45f, 0.8f, 1.0f, 1.0f) : FLinearColor(0.6f, 0.45f, 0.4f, 1.0f);
+		const int32 Wood = Sites ? Sites->GetConfig()->FindResource(TEXT("Wood")) : INDEX_NONE;
+		if (Sites && Sites->GetConfig()->Resources.IsValidIndex(Wood))
+		{
+			Build.Icon = Sites->GetConfig()->Resources[Wood].Icon;
+			Build.IconFrames = Sites->GetConfig()->Resources[Wood].IconFrames;
+		}
+		FHexChoice& Leave = Choices.AddDefaulted_GetRef();
+		Leave.Title = TEXT("Not now");
+		Leave.Text = TEXT("the shipyard builds whenever a hero comes back");
+		Leave.Color = FLinearColor(0.8f, 0.8f, 0.8f, 1.0f);
+		ChoiceDialog->Open(Key, FString::Printf(TEXT("%s visits a shipyard"), *Hero->Name), TEXT("The shipwrights offer to build a boat. Going aboard or ashore takes the rest of a day."), Choices, 1);
+	}
+	else if (Offer.IsChest())
+	{
+		FHexChoice& Gold = Choices.AddDefaulted_GetRef();
+		Gold.Title = FString::Printf(TEXT("%d gold"), Offer.Gold);
+		Gold.Text = TEXT("for the treasury of your castles");
+		Gold.Color = FLinearColor(1.0f, 0.8f, 0.3f, 1.0f);
+		if (const UHexSites* Sites = Heroes->GetSites(); Sites && Sites->GetConfig()->Resources.IsValidIndex(0))
+		{
+			Gold.Icon = Sites->GetConfig()->Resources[0].Icon;
+			Gold.IconFrames = Sites->GetConfig()->Resources[0].IconFrames;
+		}
+		FHexChoice& Experience = Choices.AddDefaulted_GetRef();
+		Experience.Title = FString::Printf(TEXT("%d experience"), Offer.Experience);
+		Experience.Text = FString::Printf(TEXT("for %s, at level %d with %d of %d"), *Hero->Name, Hero->Level, Hero->Experience, Config->GetLevelExperience(Hero->Level + 1));
+		Experience.Color = FLinearColor(0.6f, 0.85f, 1.0f, 1.0f);
+		Experience.Icon = Ui->FindIcon(EHexStatIcon::Experience);
+		Experience.IconFrames = Ui->FindIconLook(EHexStatIcon::Experience) ? Ui->FindIconLook(EHexStatIcon::Experience)->Frames : 1;
+		ChoiceDialog->Open(Key, FString::Printf(TEXT("%s finds a treasure chest"), *Hero->Name), TEXT("Take the gold, or give it away to the poor for the experience."), Choices);
+	}
+	else if (Offer.IsSet())
+	{
+		const FString Name = Heroes->GetNeutrals() ? UHexNeutrals::Plural(Heroes->GetNeutrals()->GetCreatureName(Offer.Stack)).ToLower() : FString(TEXT("creatures"));
+		FHexChoice& Join = Choices.AddDefaulted_GetRef();
+		Join.Title = Offer.bFree ? TEXT("Let them join") : FString::Printf(TEXT("Pay %d gold and let them join"), Offer.Gold);
+		Join.Text = FString::Printf(TEXT("%d %s go into the army of %s"), Offer.Stack.Count, *Name, *Hero->Name);
+		Join.Color = FLinearColor(0.45f, 1.0f, 0.45f, 1.0f);
+		Join.Icon = Ui->FindIcon(EHexStatIcon::Count);
+		Join.IconFrames = Ui->FindIconLook(EHexStatIcon::Count) ? Ui->FindIconLook(EHexStatIcon::Count)->Frames : 1;
+		FHexChoice& Fight = Choices.AddDefaulted_GetRef();
+		Fight.Title = TEXT("Fight them");
+		Fight.Text = TEXT("they will not offer again");
+		Fight.Color = FLinearColor(1.0f, 0.45f, 0.35f, 1.0f);
+		Fight.Icon = Ui->FindIcon(EHexStatIcon::Attack);
+		Fight.IconFrames = Ui->FindIconLook(EHexStatIcon::Attack) ? Ui->FindIconLook(EHexStatIcon::Attack)->Frames : 1;
+		ChoiceDialog->Open(Key, FString::Printf(TEXT("The %s want to join %s"), *Name, *Hero->Name),
+			Offer.bFree ? TEXT("Impressed by the army and its diplomacy, they offer to join it for nothing.") : TEXT("Impressed by the army, they offer to join it for gold."), Choices);
+	}
+	else
+	{
+		const FHexLevelUp& LevelUp = Hero->PendingLevelUps[0];
+		for (const FHexHeroSkill& Skill : LevelUp.Offers)
+		{
+			const FHexSkillInfo* Info = Config->FindSkill(Skill.Skill);
+			FHexChoice& Choice = Choices.AddDefaulted_GetRef();
+			Choice.Title = FString::Printf(TEXT("%s %s"), GetSkillLevelName(Skill.Level), Info ? *Info->DisplayName : TEXT("?"));
+			if (Info)
+			{
+				const FString Value = FString::FromInt(FMath::RoundToInt32(Info->GetValue(Skill.Level) * (Info->Skill == EHexSkill::Mysticism ? 1.0f : 100.0f)));
+				const FString Second = FString::FromInt(FMath::RoundToInt32(Info->GetValue(Skill.Level, true) * 100.0f));
+				Choice.Text = Info->Description.Replace(TEXT("{0}"), *Value).Replace(TEXT("{1}"), *Second);
+				Choice.Icon = Info->Icon;
+			}
+			Choice.Color = Skill.Level > 1 ? FLinearColor(1.0f, 0.82f, 0.35f, 1.0f) : FLinearColor(0.6f, 0.9f, 1.0f, 1.0f);
+		}
+		ChoiceDialog->Open(Key, FString::Printf(TEXT("%s rises to level %d"), *Hero->Name, LevelUp.Level),
+			FString::Printf(TEXT("%s. Choose a skill:"), *LevelUp.Raised), Choices);
+	}
+}
+
+void AHexPlanetPlayerController::OnChoice(int32 Index)
+{
+	UHexHeroes* Heroes = GetHeroes();
+	if (!Heroes)
+	{
+		return;
+	}
+	// the castle of a Town portal, or Not now
+	if (PortalSpell != INDEX_NONE)
+	{
+		const int32 Spell = PortalSpell;
+		const TArray<int32> Castles = MoveTemp(PortalCastles);
+		PortalSpell = INDEX_NONE;
+		PortalCastles.Reset();
+		if (Castles.IsValidIndex(Index))
+		{
+			CastPlanetSpell(Spell, INDEX_NONE, Castles[Index]);
+		}
+		return;
+	}
+	FString Message;
+	if (Heroes->GetOffer().IsSet())
+	{
+		Heroes->AnswerOffer(Index == 0, Message);
+	}
+	else if (const FHexHero* Hero = Heroes->FindPendingLevelUp())
+	{
+		Heroes->ChooseLevelUp(Hero->Id, Index, Message);
+	}
+	if (!Message.IsEmpty())
+	{
+		OnHeroMessage(Message);
+	}
+}
+
+namespace
+{
+	// for test runs, which have no mouse: a panel to open, "army <Hero>", "book <Hero>" or "castle <Castle>", taken once and set back
+	TAutoConsoleVariable<FString> CVarOpenPanel(TEXT("hex.OpenPanel"), TEXT(""),
+		TEXT("Opens a panel for a test run: army <Hero>, book <Hero> or castle <Castle>, by Id, or economy; set back to empty once taken"));
+}
+
+void AHexPlanetPlayerController::OnListHeroArmy(int32 Id)
+{
+	UHexHeroes* Heroes = GetHeroes();
+	if (!Heroes || !Heroes->CanChoose(Id))
+	{
+		return;
+	}
+	if (Heroes->GetSelectedId() != Id || Heroes->GetSelectedCastleId() != 0)
+	{
+		ShowHero(Id);
+	}
+	OnArmyOpened(Id, 0);
 }
 
 void AHexPlanetPlayerController::UpdateGameCursor(bool bRay, const FVector& Origin, const FVector& Direction)
@@ -604,6 +1128,11 @@ void AHexPlanetPlayerController::UpdateGameCursor(bool bRay, const FVector& Orig
 		{
 			Cursor = EHexCursor::Choose;
 		}
+		else if (const FHexHero* Aiming = Heroes && AimSpell != INDEX_NONE ? Heroes->FindHero(MagicHeroId) : nullptr)
+		{
+			// a spell that steps, aimed: where it may land, else nowhere
+			Cursor = MouseCell != INDEX_NONE && Heroes->GetDoorCells(*Aiming, AimSpell).Contains(MouseCell) ? EHexCursor::Teleport : EHexCursor::Blocked;
+		}
 		else if (Heroes && MouseCell != INDEX_NONE)
 		{
 			const FHexHero* Under = bRay ? Heroes->FindHeroAlongRay(Planet->GetLayer(), Origin, Direction) : nullptr;
@@ -622,6 +1151,9 @@ void AHexPlanetPlayerController::UpdateGameCursor(bool bRay, const FVector& Orig
 			case UHexHeroes::EOrder::Portal: Cursor = EHexCursor::Portal; break;
 			case UHexHeroes::EOrder::Swap: Cursor = EHexCursor::Swap; break;
 			case UHexHeroes::EOrder::Exchange: Cursor = EHexCursor::Exchange; break;
+			case UHexHeroes::EOrder::Board: Cursor = EHexCursor::Board; break;
+			case UHexHeroes::EOrder::Land: Cursor = EHexCursor::Land; break;
+			case UHexHeroes::EOrder::LandAttack: Cursor = EHexCursor::LandAttack; break;
 			default: break;
 			}
 		}
@@ -632,7 +1164,16 @@ void AHexPlanetPlayerController::UpdateGameCursor(bool bRay, const FVector& Orig
 		FHexMapTip Tip;
 		const AHexPlanet* TipPlanet = GetPlanet();
 		UHexHeroes* TipHeroes = GetHeroes();
-		if (!bBlocked && !IsBattleShown() && TipPlanet && TipHeroes && IsPlayMode() && !IsBrushArmed() && MouseCell != INDEX_NONE)
+		// a hero of the list under the cursor: the same panel, beside its row, as the developer asked on 2026-11-15
+		FVector2D ListAnchor;
+		const int32 ListHero = HeroPanel.IsValid() && !IsModalOpen() && !IsBattleShown() ? HeroPanel->GetHoveredHero(ListAnchor) : 0;
+		const FHexHero* ListHeroData = ListHero != 0 && TipHeroes && IsPlayMode() ? TipHeroes->FindHero(ListHero) : nullptr;
+		MapTip->SetAnchor(ListHeroData ? TOptional<FVector2D>(ListAnchor) : TOptional<FVector2D>());
+		if (ListHeroData)
+		{
+			TipHeroes->GetMapTip(ListHeroData->Layer, ListHeroData->Cell, ListHeroData, Tip, true);
+		}
+		else if (!bBlocked && !IsBattleShown() && TipPlanet && TipHeroes && IsPlayMode() && !IsBrushArmed() && MouseCell != INDEX_NONE)
 		{
 			const FHexHero* Under = bRay ? TipHeroes->FindHeroAlongRay(TipPlanet->GetLayer(), Origin, Direction) : nullptr;
 			TipHeroes->GetMapTip(TipPlanet->GetLayer(), MouseCell, Under, Tip);
@@ -840,6 +1381,13 @@ void AHexPlanetPlayerController::OrderGame()
 		}
 		return;
 	}
+	// the right button takes back a Dimension door aimed
+	if (AimSpell != INDEX_NONE)
+	{
+		CancelAim();
+		OnHeroMessage(TEXT("The dimension door is taken back"));
+		return;
+	}
 	const AHexPlanet* Planet = GetPlanet();
 	UHexHeroes* Heroes = GetHeroes();
 	if (!Planet || !Heroes || !Heroes->IsPersonTurn() || IsBrushArmed() || MouseCell == INDEX_NONE)
@@ -954,6 +1502,42 @@ void AHexPlanetPlayerController::WalkHero()
 	}
 }
 
+void AHexPlanetPlayerController::OpenEconomy()
+{
+	UHexHeroes* Heroes = GetHeroes();
+	if (EconomyPanel.IsValid() && Heroes)
+	{
+		EconomyPanel->Open(Heroes, Heroes->GetShroudPlayer());
+	}
+}
+
+void AHexPlanetPlayerController::ToggleAutoplay()
+{
+	// the person who plays, whose fog of war is shown
+	if (UHexHeroes* Heroes = GetHeroes())
+	{
+		const int32 Person = Heroes->GetShroudPlayer();
+		const bool bOn = !Heroes->IsPlayerAuto(Person);
+		Heroes->SetPlayerAuto(Person, bOn);
+		OnHeroMessage(bOn ? TEXT("The game plays for you; Auto gives it back") : TEXT("You play again"));
+	}
+}
+
+bool AHexPlanetPlayerController::IsAutoplay() const
+{
+	const UHexHeroes* Heroes = GetHeroes();
+	return Heroes && Heroes->IsPlayerAuto(Heroes->GetShroudPlayer());
+}
+
+void AHexPlanetPlayerController::CycleGameSpeed()
+{
+	if (AWorldSettings* Settings = GetWorld() ? GetWorld()->GetWorldSettings() : nullptr)
+	{
+		const float Now = Settings->TimeDilation;
+		Settings->SetTimeDilation(Now < 1.5f ? 2.0f : Now < 3.5f ? 5.0f : 1.0f);
+	}
+}
+
 void AHexPlanetPlayerController::RestartGame()
 {
 	UHexHeroes* Heroes = GetHeroes();
@@ -979,14 +1563,15 @@ bool AHexPlanetPlayerController::IsListDoubleClick(bool bCastle, int32 Id)
 
 void AHexPlanetPlayerController::OnListHero(int32 Id)
 {
-	// a click chooses the hero and brings the camera to it, a second one opens its army, as the developer asked on 2026-11-14
-	const bool bDouble = IsListDoubleClick(false, Id);
-	ShowHero(Id);
+	// a click chooses the hero and brings the camera to it, and a click on the one chosen opens its army, as the developer asked on
+	// 2026-11-15 (two clicks within the time of a double click until then)
 	const UHexHeroes* Heroes = GetHeroes();
-	if (bDouble && Heroes && Heroes->GetSelectedId() == Id)
+	if (Heroes && Heroes->GetSelectedId() == Id && Heroes->GetSelectedCastleId() == 0)
 	{
 		OnArmyOpened(Id, 0);
+		return;
 	}
+	ShowHero(Id);
 }
 
 void AHexPlanetPlayerController::OnListHeroGo(int32 Id)
@@ -1337,7 +1922,9 @@ void AHexPlanetPlayerController::ToggleCheatSheet()
 			const AHexPlanet* Planet = CameraPawn ? CameraPawn->GetPlanet() : nullptr;
 			CheatSheet->Refresh(Planet && Planet->IsBuilt() ? Planet->GetHeroes() : nullptr);
 		}
-		CheatSheet->SetVisibility(bShow ? EVisibility::HitTestInvisible : EVisibility::Collapsed);
+		// modal while it shows: it takes the mouse and, given the keyboard in PlayerTick, the keys
+		CheatSheet->SetVisibility(bShow ? EVisibility::Visible : EVisibility::Collapsed);
+		FlushPressedKeys();
 	}
 }
 
@@ -1388,6 +1975,71 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 		return;
 	}
 
+	// a panel a test run asks for
+	if (const FString Asked = CVarOpenPanel.GetValueOnGameThread(); !Asked.IsEmpty())
+	{
+		CVarOpenPanel->Set(TEXT(""), ECVF_SetByConsole);
+		FString Kind = Asked;
+		FString Id;
+		Asked.Split(TEXT(" "), &Kind, &Id);
+		const int32 Which = FCString::Atoi(*Id);
+		if (Kind == TEXT("army"))
+		{
+			OnArmyOpened(Which, 0);
+		}
+		else if (Kind == TEXT("book"))
+		{
+			OpenSpellBook(Which);
+		}
+		else if (Kind == TEXT("castle"))
+		{
+			OnCastleOpened(Which);
+		}
+		else if (Kind == TEXT("economy"))
+		{
+			OpenEconomy();
+		}
+	}
+	// a Dimension door aimed goes with the turn or the hero chosen
+	if (AimSpell != INDEX_NONE)
+	{
+		const UHexHeroes* Aiming = GetHeroes();
+		if (!Aiming || !Aiming->IsPersonTurn() || Aiming->GetSelectedId() != MagicHeroId || IsBattleShown())
+		{
+			CancelAim();
+		}
+	}
+	// the choices that wait for the person, and the keyboard for the panel that is open, given back to the game when it closes
+	if (!(SpellBook.IsValid() && SpellBook->IsOpen()))
+	{
+		UpdateChoices();
+	}
+	const bool bModal = IsModalOpen();
+	if (HeroPanel.IsValid())
+	{
+		HeroPanel->SetHintHidden(bModal);
+	}
+	if (UHexHeroes* Holding = GetHeroes())
+	{
+		Holding->HoldPendingNext(bModal);
+	}
+	if (bModal)
+	{
+		const TSharedPtr<SWidget> Focus = CheatSheet.IsValid() && CheatSheet->IsOpen() ? StaticCastSharedPtr<SWidget>(CheatSheet)
+			: ChoiceDialog.IsValid() && ChoiceDialog->IsOpen() ? StaticCastSharedPtr<SWidget>(ChoiceDialog)
+			: SpellBook.IsValid() && SpellBook->IsOpen() ? StaticCastSharedPtr<SWidget>(SpellBook)
+			: EconomyPanel.IsValid() && EconomyPanel->IsOpen() ? StaticCastSharedPtr<SWidget>(EconomyPanel) : StaticCastSharedPtr<SWidget>(CastlePanel);
+		if (Focus.IsValid() && !Focus->HasKeyboardFocus())
+		{
+			FSlateApplication::Get().SetAllUserFocus(Focus, EFocusCause::SetDirectly);
+		}
+	}
+	else if (bModalShown)
+	{
+		FSlateApplication::Get().SetAllUserFocusToGameViewport();
+	}
+	bModalShown = bModal;
+
 	// a battle on its field takes the mouse, and the planet waits
 	if (IsBattleShown())
 	{
@@ -1425,6 +2077,10 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 		{
 			CastlePanel->Close();
 		}
+	}
+	if (IsModalOpen())
+	{
+		Cell = INDEX_NONE;
 	}
 	MouseCell = Cell;
 
@@ -1482,6 +2138,7 @@ void AHexPlanetPlayerController::PlayerTick(float DeltaTime)
 			Heroes->OnMessage.AddUObject(this, &AHexPlanetPlayerController::OnHeroMessage);
 			Heroes->OnGameOver.AddUObject(this, &AHexPlanetPlayerController::OnGameOver);
 			Heroes->OnHeroTravelled.AddUObject(this, &AHexPlanetPlayerController::OnHeroTravelled);
+			Heroes->OnHeroTeleported.AddUObject(this, &AHexPlanetPlayerController::OnHeroTeleported);
 			Heroes->OnHeroChosen.AddUObject(this, &AHexPlanetPlayerController::OnHeroChosen);
 			Heroes->OnHeroSent.AddUObject(this, &AHexPlanetPlayerController::OnHeroSent);
 			Heroes->OnArmyOpened.AddUObject(this, &AHexPlanetPlayerController::OnArmyOpened);

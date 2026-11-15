@@ -27,6 +27,15 @@ struct FHexSite
 	EHexPlanetLayer Layer = EHexPlanetLayer::Surface;
 	int32 Cell = INDEX_NONE;
 
+	/** Where it stands when a game starts, which sites.json keeps: a boat moves with the hero that sails it, and lies where it went ashore */
+	int32 StartCell = INDEX_NONE;
+
+	/** The hero that sails a boat, 0 for none: the boat is drawn under it, and lies nowhere else meanwhile */
+	int32 Captain = 0;
+
+	/** A boat a shipyard built in the game played, which sites.json does not keep and a new game takes away */
+	bool bBuilt = false;
+
 	/** How it is turned from where it faces by itself, in degrees, set in the editor; the place of a hero at it turns with it */
 	int32 Yaw = 0;
 
@@ -140,6 +149,37 @@ public:
 	const FHexSite* FindBlockerAt(EHexPlanetLayer Layer, int32 Cell) const;
 	const FHexSite* FindPileAt(EHexPlanetLayer Layer, int32 Cell) const;
 
+	/** A chest: the experience it gives in place of its gold, and a hero takes one or the other; returns what happened */
+	int32 GetChestExperience(const FHexSite& Site) const;
+	FString TakeChest(int32 Player, const FString& HeroName, EHexPlanetLayer Layer, int32 Cell, bool bGold, bool bShown);
+
+	/** The boat that lies on a cell of the sea, which nobody sails, or null */
+	const FHexSite* FindBoatAt(EHexPlanetLayer Layer, int32 Cell) const;
+
+	/** A hero goes aboard a boat, by their Ids, and ashore, the boat lying on a cell of the sea then */
+	void SetCaptain(int32 BoatId, int32 HeroId);
+	void LeaveBoat(int32 BoatId, int32 Cell);
+
+	/** A shipyard builds a boat on a cell of the sea, for the game played alone. Returns its Id, or 0 */
+	int32 AddBuiltBoat(EHexPlanetLayer Layer, int32 Cell);
+
+	/** A hero takes the artifact that lies on a cell, as a pile, or one a chest held: it is gone, and its name floats up. Returns false without one */
+	bool TakePickup(EHexPlanetLayer Layer, int32 Cell, const FString& Text, const FLinearColor& Color, bool bShown);
+
+	/** A hash of a site and of the game, by which the artifact it holds is chosen */
+	uint32 GetSiteHash(const FHexSite& Site) const;
+
+	/** Puts shipyards on the coasts and boats on the sea beside them, ShipyardsPerThousandCoast and BoatsPerThousandCoast of DA_HexSites, besides
+	 *  what there is; returns how many of each */
+	FIntPoint ScatterCoast(int32 Seed, float DensityScale = 1.0f);
+
+	/** Makes up to Count vaults on the land of the surface, as the developer asked on 2026-11-15 for closed places with one way in, much in
+	 *  them and that way guarded: a cell and the six around it walled by a ring of forest or mountains a cell wide, but for one cell of it, the
+	 *  gate, where a strong neutral stack stands; inside an artifact, a chest and piles. Only where the wall cuts no way of the land around it
+	 *  in two, away from castles, where heroes start, entrances and the other vaults. Returns how many; the levels, forests, sites and stacks
+	 *  are those of the planet, saved with it */
+	int32 MakeVaults(int32 Count, int32 Seed, FString& OutReport);
+
 	/** Where the hero that took the mine or the mill of a cell stands on that cell, on the ground (HeroPlace of its kind); false for a cell
 	 *  without one, or while it is not seated on the ground yet */
 	bool GetHeroPoint(EHexPlanetLayer Layer, int32 Cell, FVector3d& OutPoint) const;
@@ -154,7 +194,8 @@ public:
 	/** Scatters sites over both layers in place of all there are (HexSiteGenerator, Generation of DA_HexSites): on the ground a hero walks,
 	 *  off the entrances, where heroes start and what stands on cells, some near where each player starts. The seed chooses the layout; without
 	 *  one each call gives another, the first that of the seed of the planet. Returns how many sites there are now, and says what it did */
-	int32 Generate(FString& OutReport, const int32* Seed = nullptr, float DensityScale = 1.0f, const TBitArray<>* SurfaceAvoid = nullptr);
+	int32 Generate(FString& OutReport, const int32* Seed = nullptr, float DensityScale = 1.0f, const TBitArray<>* SurfaceAvoid = nullptr, bool bAddPickups = false, int32 OnlyType = -1,
+		float ClusterShare = -1.0f);
 
 	/** Takes every site off the planet. Returns false if there is none */
 	bool Clear();

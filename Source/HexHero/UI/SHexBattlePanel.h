@@ -35,6 +35,9 @@ public:
 	/** Returns true while the cursor is on a button of the panel, where a click is not one on the field */
 	bool IsCursorOnButtons() const;
 
+	/** Escape, as the developer asked on 2026-11-15: closes the spell book, else gives OK to how the battle ended. False when nothing is open */
+	bool HandleEscape();
+
 	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
 	virtual int32 OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements,
 		int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override;
@@ -48,7 +51,15 @@ private:
 	TSharedPtr<SWidget> SpellBox;
 	TSharedPtr<SWidget> ResultBox;
 	FString QueueKey;
-	bool bSpellsOpen = false;
+
+	/** The stacks of the queue as it shows them, each with its unit, which the cursor on it outlines on the field, as the developer asked on
+	 *  2026-11-15 */
+	TArray<TPair<TSharedPtr<SWidget>, int32>> QueueItems;
+	int32 QueueHovered = INDEX_NONE;
+
+	/** The spell book of the hero of the person, which the button Spell or a click on the hero beside the field opens */
+	TSharedPtr<class SHexSpellBook> SpellBook;
+	void OpenSpellBook();
 
 	/** The panel at the cursor: what it shows now, made again when that changes, and where it stands */
 	TSharedPtr<SBorder> TooltipBox;

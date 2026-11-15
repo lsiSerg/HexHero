@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SHexBattlePanel.h"
+#include "SHexSpellBook.h"
 #include "HexBattleArena.h"
 #include "HexBattleConfig.h"
 #include "HexBattles.h"
@@ -61,32 +62,6 @@ void SHexBattlePanel::Construct(const FArguments& InArgs)
 	const auto Running = [Weak]() { return Weak.IsValid() && Weak->GetBattles() && !Weak->GetBattles()->GetBattle().IsOver(); };
 	const auto Person = [Weak]() { return Weak.IsValid() && Weak->GetBattles() && Weak->GetBattles()->GetPersonSide() != INDEX_NONE; };
 
-	// the spells of the hero whose turn it is
-	TSharedRef<SVerticalBox> Spells = SNew(SVerticalBox);
-	if (const UHexBattleConfig* Config = UHexBattleConfig::Load())
-	{
-		for (int32 Index = 0; Index < Config->Spells.Num(); ++Index)
-		{
-			const FHexSpell& Spell = Config->Spells[Index];
-			Spells->AddSlot().AutoHeight().Padding(0.0f, 1.0f)
-			[
-				MakeButton(FText::FromString(FString::Printf(TEXT("%s  (%d mana)"), *Spell.DisplayName, Spell.ManaCost)),
-					[this, Weak, Index]() { if (Weak.IsValid()) { Weak->AimSpell(Index); } bSpellsOpen = false; },
-					[Weak, Index, Can]()
-					{
-						if (!Can())
-						{
-							return false;
-						}
-						const FHexBattle& Battle = Weak->GetBattles()->GetBattle();
-						const int32 Side = Battle.GetUnits()[Battle.GetActive()].Side;
-						return Battle.CanCastAny(Side) && Battle.GetConfig()->Spells[Index].ManaCost <= Battle.GetMana(Side);
-					},
-					FText::FromString(Spell.Description))
-			];
-		}
-	}
-
 	ChildSlot
 	[
 		SNew(SOverlay)
@@ -139,14 +114,6 @@ void SHexBattlePanel::Construct(const FArguments& InArgs)
 		+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Bottom).Padding(0.0f, 0.0f, 0.0f, 12.0f)
 		[
 			SNew(SVerticalBox).Visibility(EVisibility::SelfHitTestInvisible)
-			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.0f, 0.0f, 0.0f, 4.0f)
-			[
-				SAssignNew(SpellBox, SBorder).BorderImage(WhiteBrush()).BorderBackgroundColor(PanelBack).Padding(6.0f)
-				.Visibility_Lambda([this]() { return bSpellsOpen ? EVisibility::Visible : EVisibility::Collapsed; })
-				[
-					Spells
-				]
-			]
 			// whose turn it is, and what a click where the cursor is would do with what it is likely to deal and kill, as the developer asked on
 			// 2026-11-12
 			+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center).Padding(0.0f, 0.0f, 0.0f, 4.0f)
@@ -181,17 +148,9 @@ void SHexBattlePanel::Construct(const FArguments& InArgs)
 						LOCTEXT("WaitTip", "The stack acts after all the others this round, the slowest first"))]
 					+ SHorizontalBox::Slot().AutoWidth()[MakeButton(LOCTEXT("Defend", "Defend (Space)"), [Weak]() { if (Weak.IsValid()) { Weak->OrderDefend(); } }, Can,
 						LOCTEXT("DefendTip", "The stack ends its turn with more Defense until its next one"))]
-					+ SHorizontalBox::Slot().AutoWidth()[MakeButton(LOCTEXT("Spell", "Spell"), [this]() { bSpellsOpen = !bSpellsOpen; },
-						[Weak, Can]()
-						{
-							if (!Can())
-							{
-								return false;
-							}
-							const FHexBattle& Battle = Weak->GetBattles()->GetBattle();
-							return Battle.CanCastAny(Battle.GetUnits()[Battle.GetActive()].Side);
-						},
-						LOCTEXT("SpellTip", "The hero casts a spell, once a round, for its mana; choose one, then click where it goes, the right button to keep it"))]
+					+ SHorizontalBox::Slot().AutoWidth()[MakeButton(LOCTEXT("Spell", "Spell book"), [this]() { OpenSpellBook(); },
+						[Weak, Person, Running]() { return Weak.IsValid() && Person() && Running() && Weak->GetBattles()->GetBattle().GetSide(Weak->GetBattles()->GetPersonSide()).HeroId != 0; },
+						LOCTEXT("SpellTip", "The spell book of your hero, also by a click on the hero beside the field: it casts a spell once a round, for its mana; choose one, then click where it goes, the right button to keep it"))]
 					+ SHorizontalBox::Slot().AutoWidth()[MakeButton(LOCTEXT("Auto", "Auto"), [Weak]() { if (Weak.IsValid()) { Weak->OrderAuto(); } },
 						[Running, Person]() { return Running() && Person(); }, LOCTEXT("AutoTip", "The game fights for you, and again you with a second press"))]
 					+ SHorizontalBox::Slot().AutoWidth()[MakeButton(LOCTEXT("Quick", "Quick"), [Weak]() { if (Weak.IsValid()) { Weak->OrderQuick(); } }, Running,
@@ -270,15 +229,54 @@ void SHexBattlePanel::Construct(const FArguments& InArgs)
 				]
 			]
 		]
+		// the spell book of the hero, over everything, with its shade
+		+ SOverlay::Slot()
+		[
+			SAssignNew(SpellBook, SHexSpellBook)
+			.OnClosed_Lambda([]() { FSlateApplication::Get().SetAllUserFocusToGameViewport(); })
+			.OnCast_Lambda([Weak](int32 Spell)
+			{
+				if (Weak.IsValid())
+				{
+					Weak->AimSpell(Spell);
+				}
+			})
+		]
 	];
+}
+
+bool SHexBattlePanel::HandleEscape()
+{
+	if (SpellBook.IsValid() && SpellBook->IsOpen())
+	{
+		SpellBook->Close();
+		return true;
+	}
+	if (ResultBox.IsValid() && ResultBox->GetVisibility().IsVisible() && Arena.IsValid())
+	{
+		Arena->OrderClose();
+		return true;
+	}
+	return false;
 }
 
 bool SHexBattlePanel::IsCursorOnButtons() const
 {
 	const FVector2D Cursor = FSlateApplication::Get().GetCursorPos();
-	for (const TSharedPtr<SWidget>& Each : {ButtonBar, SpellBox, ResultBox})
+	if (SpellBook.IsValid() && SpellBook->IsOpen())
+	{
+		return true;
+	}
+	for (const TSharedPtr<SWidget>& Each : {ButtonBar, ResultBox})
 	{
 		if (Each.IsValid() && Each->GetVisibility().IsVisible() && Each->GetTickSpaceGeometry().IsUnderLocation(Cursor))
+		{
+			return true;
+		}
+	}
+	for (const TPair<TSharedPtr<SWidget>, int32>& Item : QueueItems)
+	{
+		if (Item.Key.IsValid() && Item.Key->GetTickSpaceGeometry().IsUnderLocation(Cursor))
 		{
 			return true;
 		}
@@ -306,14 +304,23 @@ void SHexBattlePanel::RebuildQueue()
 	}
 	QueueKey = Key;
 	QueueBox->ClearChildren();
+	QueueItems.Reset();
+	TWeakObjectPtr<AHexBattleArena> Weak = Arena;
 	for (int32 Index = 0; Index < Queue.Num(); ++Index)
 	{
 		const FHexBattleUnit& Unit = Battle.GetUnits()[Queue[Index]];
 		FLinearColor Color = Battles->GetSideColor(Unit.Side);
 		Color.A = Index == 0 ? 0.95f : 0.7f;
+		const int32 UnitIndex = Queue[Index];
+		TSharedPtr<SBorder> Item;
 		QueueBox->AddSlot().AutoWidth().Padding(2.0f, 0.0f)
 		[
-			SNew(SBorder).BorderImage(WhiteBrush()).BorderBackgroundColor(Color).Padding(FMargin(6.0f, 3.0f))
+			SAssignNew(Item, SBorder).BorderImage(WhiteBrush()).Padding(FMargin(6.0f, 3.0f))
+			.BorderBackgroundColor_Lambda([Weak, Color, UnitIndex]()
+			{
+				// lighter while its unit is under the cursor on the field, or this one under it here
+				return Weak.IsValid() && Weak->GetOutlinedUnit() == UnitIndex ? FLinearColor::LerpUsingHSV(Color, FLinearColor::White, 0.45f) : Color;
+			})
 			[
 				SNew(SBox).MinDesiredWidth(Index == 0 ? 96.0f : 72.0f)
 				[
@@ -322,6 +329,7 @@ void SHexBattlePanel::RebuildQueue()
 				]
 			]
 		];
+		QueueItems.Add({Item, UnitIndex});
 	}
 }
 
@@ -439,10 +447,76 @@ void SHexBattlePanel::Tick(const FGeometry& AllottedGeometry, const double InCur
 	SCompoundWidget::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
 	RebuildQueue();
 	RebuildTooltip(AllottedGeometry);
-	if (Arena.IsValid() && !Arena->CanOrder())
+	if (!Arena.IsValid())
 	{
-		bSpellsOpen = false;
+		return;
 	}
+	// the stack of the queue under the cursor is outlined on the field
+	int32 Hovered = INDEX_NONE;
+	const FVector2D Cursor = FSlateApplication::Get().GetCursorPos();
+	for (const TPair<TSharedPtr<SWidget>, int32>& Item : QueueItems)
+	{
+		if (Item.Key.IsValid() && Item.Key->GetTickSpaceGeometry().IsUnderLocation(Cursor))
+		{
+			Hovered = Item.Value;
+		}
+	}
+	// only when the cursor moves onto another, so hex.Battle queue holds one for a test run
+	Hovered = SpellBook.IsValid() && SpellBook->IsOpen() ? int32(INDEX_NONE) : Hovered;
+	if (Hovered != QueueHovered)
+	{
+		QueueHovered = Hovered;
+		Arena->SetQueueHover(Hovered);
+	}
+	// a click on the hero beside the field opens its spell book
+	if (Arena->TakeSpellBookRequest())
+	{
+		OpenSpellBook();
+	}
+	if (SpellBook.IsValid() && SpellBook->IsOpen() && !SpellBook->HasKeyboardFocus())
+	{
+		FSlateApplication::Get().SetAllUserFocus(SpellBook, EFocusCause::SetDirectly);
+	}
+}
+
+void SHexBattlePanel::OpenSpellBook()
+{
+	const UHexBattles* Battles = Arena.IsValid() ? Arena->GetBattles() : nullptr;
+	const int32 Side = Battles ? Battles->GetPersonSide() : INDEX_NONE;
+	if (!Battles || Side == INDEX_NONE || !SpellBook.IsValid())
+	{
+		return;
+	}
+	const FHexBattle& Battle = Battles->GetBattle();
+	const UHexBattleConfig* Config = Battle.GetConfig();
+	if (!Config || Battle.GetSide(Side).HeroId == 0 || Battle.IsOver())
+	{
+		return;
+	}
+	// what it may cast now: on the turn of a stack of its own, once a round, for its mana
+	const bool bTurn = Arena->CanOrder() && Battle.CanCastAny(Side);
+	TArray<FHexSpellBookEntry> Entries;
+	for (int32 Spell = 0; Spell < Config->Spells.Num(); ++Spell)
+	{
+		if (!Battle.KnowsSpell(Side, Spell))
+		{
+			continue;
+		}
+		const FHexSpell& Each = Config->Spells[Spell];
+		FHexSpellBookEntry& Entry = Entries.AddDefaulted_GetRef();
+		Entry.Spell = Spell;
+		Entry.ManaCost = Battle.GetManaCost(Side, Spell);
+		Entry.bCastable = bTurn && Entry.ManaCost <= Battle.GetMana(Side);
+		const int32 Power = Battle.GetSpellPower(Side, Spell);
+		Entry.Detail = Power > 0 && Each.Kind != EHexSpellKind::Effect && Each.Kind != EHexSpellKind::Dispel ? FString::Printf(TEXT("Power %d"), Power) : FString();
+		if (Battle.IsMassCast(Side, Each))
+		{
+			Entry.Detail += Entry.Detail.IsEmpty() ? TEXT("On every stack") : TEXT(", on every stack");
+		}
+	}
+	const FHexBattleSideSetup& Setup = Battle.GetSide(Side);
+	SpellBook->Open(FString::Printf(TEXT("The spell book of %s%s"), *Setup.HeroName, Battle.HasCast(Side) ? TEXT(" (cast this round)") : TEXT("")), Battle.GetMana(Side),
+		FMath::Max(Setup.Mana, Battle.GetMana(Side)), Entries);
 }
 
 int32 SHexBattlePanel::OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements,

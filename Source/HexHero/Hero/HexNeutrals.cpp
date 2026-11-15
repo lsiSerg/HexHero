@@ -165,10 +165,12 @@ const FHexNeutral* UHexNeutrals::Find(int32 Id) const
 	return Neutrals.FindByPredicate([Id](const FHexNeutral& Each) { return Each.Id == Id; });
 }
 
-bool UHexNeutrals::IsFree(EHexPlanetLayer Layer, int32 Cell) const
+bool UHexNeutrals::IsFree(EHexPlanetLayer Layer, int32 Cell, bool bSea) const
 {
 	const AHexPlanet* Planet = Heroes ? Heroes->GetLayerPlanet(Layer) : nullptr;
-	if (!Planet || !Planet->GetGrid().GetCells().IsValidIndex(Cell) || !Heroes->IsOpenGround(Layer, Cell) || Planet->GetGrid().GetCells()[Cell].IsPentagon())
+	// a stack of the land on open ground, one of the sea on the sea
+	if (!Planet || !Planet->GetGrid().GetCells().IsValidIndex(Cell) || (bSea ? !Heroes->IsSea(Layer, Cell) : !Heroes->IsOpenGround(Layer, Cell))
+		|| Planet->GetGrid().GetCells()[Cell].IsPentagon())
 	{
 		return false;
 	}
@@ -183,9 +185,11 @@ int32 UHexNeutrals::Add(EHexPlanetLayer Layer, int32 Cell, const FHexStack& Stac
 		OutProblem = TEXT("there is no such creature");
 		return 0;
 	}
-	if (!IsFree(Layer, Cell))
+	const bool bSea = Castles->Factions.IsValidIndex(Stack.Faction) && Castles->Factions[Stack.Faction].bSea;
+	if (!IsFree(Layer, Cell, bSea))
 	{
-		OutProblem = TEXT("a neutral stack stands only on open ground with nothing else on it, and not on an entrance");
+		OutProblem = bSea ? TEXT("a stack of the sea stands only on the sea with nothing else there")
+			: TEXT("a neutral stack stands only on open ground with nothing else on it, and not on an entrance");
 		return 0;
 	}
 	FHexNeutral& Neutral = Neutrals.AddDefaulted_GetRef();
@@ -329,6 +333,7 @@ void UHexNeutrals::PlaceBody(const FHexNeutral& Neutral)
 	}
 	RemoveBody(Neutral.Id);
 	FBody& Body = Bodies.Add(Neutral.Id);
+	Body.bAtSea = Heroes->IsSea(Neutral.Layer, Neutral.Cell);
 	Body.Cell = Neutral.Cell;
 	Body.Layer = Neutral.Layer;
 	Body.Count = Neutral.Stack.Count;
@@ -355,7 +360,8 @@ void UHexNeutrals::PlaceBody(const FHexNeutral& Neutral)
 		}
 		const FVector3d Along = (South * Offsets[Index].Y + East * Offsets[Index].X) * (NumFigures > 1 ? Step : 0.0);
 		const FVector3d Direction = (Up * Planet->GetRadius() + Along).GetSafeNormal();
-		const double Ground = Planet->FindGroundRadius(Neutral.Cell, Direction);
+		// on the water at sea
+		const double Ground = Heroes->IsSea(Neutral.Layer, Neutral.Cell) ? Planet->GetRadius() : Planet->FindGroundRadius(Neutral.Cell, Direction);
 		const FVector3d Point = Direction * (Ground + Hover);
 		const FQuat Turn = FRotator(0.0, Yaw + float(Neutral.Yaw) + float((Neutral.Id * 37 + Index * 53) % 40) - 20.0f, 0.0).Quaternion();
 		Figure->SetWorldTransform(FTransform(FRotationMatrix::MakeFromZX(FVector(Up), FVector(South)).ToQuat() * Turn, FVector(Point), FVector(Scale)));
@@ -364,6 +370,7 @@ void UHexNeutrals::PlaceBody(const FHexNeutral& Neutral)
 			0.85f + 0.1f * float(Index));
 		HexUnitFigure::Settle(Figure);
 		Body.Figures.Add(Figure);
+		Body.Rests.Add(Figure->GetComponentTransform());
 	}
 }
 
@@ -401,6 +408,24 @@ void UHexNeutrals::Update()
 			}
 			Bodies[Neutral.Id].bShown = bShown;
 		}
+		// on the sea the figures rise, fall and roll on the waves, each at its own pace
+		if (Body && Body->bAtSea && Body->bShown && Config)
+		{
+			const double Time = Planet->GetWorld() ? Planet->GetWorld()->GetTimeSeconds() : 0.0;
+			for (int32 Index = 0; Index < Body->Figures.Num() && Index < Body->Rests.Num(); ++Index)
+			{
+				USceneComponent* Figure = Body->Figures[Index].Get();
+				if (!Figure)
+				{
+					continue;
+				}
+				const FTransform& Rest = Body->Rests[Index];
+				const double Phase = Time * double(Config->NeutralSeaBobSpeed) * UE_DOUBLE_TWO_PI + Neutral.Id * 1.3 + Index * 2.1;
+				const FVector Up = Rest.GetLocation().GetSafeNormal();
+				const FQuat Roll(Rest.GetRotation().GetForwardVector(), FMath::DegreesToRadians(double(Config->NeutralSeaRoll) * FMath::Sin(Phase * 0.7)));
+				Figure->SetWorldLocationAndRotation(Rest.GetLocation() + Up * (double(Config->NeutralSeaBob) * FMath::Sin(Phase)), Roll * Rest.GetRotation());
+			}
+		}
 	}
 }
 
@@ -416,6 +441,26 @@ int32 UHexNeutrals::Generate(FString& OutReport, const int32* Seed, bool bFromAl
 	FRandomStream Random(Seed ? *Seed : int32(FPlatformTime::Cycles() & 0x7fffffff));
 	int32 Placed = 0;
 	int32 Guards = 0;
+	int32 AtSea = 0;
+	// the factions of the land, and the creatures of the sea, which stand on the sea alone
+	TArray<int32> Land;
+	int32 SeaFaction = INDEX_NONE;
+	for (int32 Faction = 0; Faction < Castles->Factions.Num(); ++Faction)
+	{
+		if (Castles->Factions[Faction].bSea)
+		{
+			SeaFaction = SeaFaction == INDEX_NONE ? Faction : SeaFaction;
+		}
+		else
+		{
+			Land.Add(Faction);
+		}
+	}
+	if (Land.IsEmpty())
+	{
+		OutReport = TEXT("no faction of the land");
+		return 0;
+	}
 	for (const EHexPlanetLayer Layer : {EHexPlanetLayer::Surface, EHexPlanetLayer::Underground})
 	{
 		const AHexPlanet* Planet = Heroes->GetLayerPlanet(Layer);
@@ -485,20 +530,39 @@ int32 UHexNeutrals::Generate(FString& OutReport, const int32* Seed, bool bFromAl
 			}
 			return true;
 		};
-		const auto PlaceAt = [&](int32 Cell)
+		// whether something worth guarding lies near a cell: a site of any kind
+		const UHexSites* NearSites = Heroes->GetSites();
+		const auto IsIdle = [&](int32 Cell)
+		{
+			if (!NearSites)
+			{
+				return false;
+			}
+			for (const FHexSite& Site : NearSites->GetSites())
+			{
+				if (Site.Layer == Layer && Cells.IsValidIndex(Site.Cell) && FVector3d::Distance(Cells[Site.Cell].Center, Cells[Cell].Center) < CellStep * (Rules.IdleReach + 0.5))
+				{
+					return false;
+				}
+			}
+			return true;
+		};
+		const auto PlaceAt = [&](int32 Cell, bool bOpenGround = false)
 		{
 			const int32 Away = Steps[Cell];
 			if (Away != INDEX_NONE && Away < Rules.StartClearSteps)
 			{
 				return false;
 			}
-			const int32 Tier = FMath::Clamp((Away == INDEX_NONE ? Rules.MaxTier * Rules.TierSteps : Away) / FMath::Max(Rules.TierSteps, 1) + (Layer == EHexPlanetLayer::Underground ? 1 : 0),
-				0, Rules.MaxTier);
-			const int32 Faction = Random.RandRange(0, Castles->Factions.Num() - 1);
+			// on open ground with nothing worth guarding near it, weaker
+			const bool bIdle = bOpenGround && IsIdle(Cell);
+			const int32 Tier = FMath::Clamp((Away == INDEX_NONE ? Rules.MaxTier * Rules.TierSteps : Away) / FMath::Max(Rules.TierSteps, 1) + (Layer == EHexPlanetLayer::Underground ? 1 : 0)
+				- (bIdle ? Rules.IdleTierDrop : 0), 0, Rules.MaxTier);
+			const int32 Faction = Land[Random.RandRange(0, Land.Num() - 1)];
 			const int32 MaxLevel = FMath::Min(Castles->Factions[Faction].Creatures.Num() - 1, NumCreatureLevels - 1);
 			const int32 Level = FMath::Clamp(Tier + Random.RandRange(0, 1), 0, MaxLevel);
 			const FHexCreature& Creature = Castles->Factions[Faction].Creatures[Level];
-			const float Weeks = (Rules.WeeksBase + Rules.WeeksPerTier * Tier) * (1.0f + Random.FRandRange(-Rules.WeeksSpread, Rules.WeeksSpread));
+			const float Weeks = (Rules.WeeksBase + Rules.WeeksPerTier * Tier) * (1.0f + Random.FRandRange(-Rules.WeeksSpread, Rules.WeeksSpread)) * (bIdle ? Rules.IdleWeeksShare : 1.0f);
 			const FHexStack Stack{Faction, Level, Random.FRand() < Rules.UpgradedPerTier * Tier, FMath::Max(FMath::RoundToInt32(Creature.Growth * Weeks), 1)};
 			FString Problem;
 			if (Add(Layer, Cell, Stack, Problem) == 0)
@@ -588,15 +652,56 @@ int32 UHexNeutrals::Generate(FString& OutReport, const int32* Seed, bool bFromAl
 			{
 				break;
 			}
-			if (IsFree(Layer, Cell) && FarFromTaken(Cell) && PlaceAt(Cell))
+			if (IsFree(Layer, Cell) && FarFromTaken(Cell) && PlaceAt(Cell, true))
 			{
 				++Roaming;
 			}
 		}
 		UE_LOG(LogHexHero, Log, TEXT("Neutrals: the %s has %d open cells, %d stacks in narrow places of %d wanted, %d on open ground of %d wanted"), GetPlanetLayerName(Layer), Open, Passes,
 			Wanted, Roaming, WantedOpen);
+		// and the creatures of the sea on the sea of the surface, as the developer asked on 2026-11-15
+		if (Layer == EHexPlanetLayer::Surface && SeaFaction != INDEX_NONE)
+		{
+			TArray<int32> Sea;
+			for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+			{
+				if (IsFree(Layer, Cell, true))
+				{
+					Sea.Add(Cell);
+				}
+			}
+			for (int32 Index = Sea.Num() - 1; Index > 0; --Index)
+			{
+				Sea.Swap(Index, Random.RandRange(0, Index));
+			}
+			const int32 WantedSea = FMath::RoundToInt32(Sea.Num() * Rules.SeaPerThousand / 1000.0f);
+			const TArray<FHexCreature>& Creatures = Castles->Factions[SeaFaction].Creatures;
+			for (const int32 Cell : Sea)
+			{
+				if (AtSea >= WantedSea || Creatures.IsEmpty())
+				{
+					break;
+				}
+				if (!FarFromTaken(Cell))
+				{
+					continue;
+				}
+				const int32 Tier = Random.RandRange(FMath::Min(Rules.SeaTierMin, Rules.MaxTier), Rules.MaxTier);
+				const int32 Level = FMath::Clamp(Tier + Random.RandRange(0, 1), 0, FMath::Min(Creatures.Num(), NumCreatureLevels) - 1);
+				const float Weeks = (Rules.WeeksBase + Rules.WeeksPerTier * Tier) * (1.0f + Random.FRandRange(-Rules.WeeksSpread, Rules.WeeksSpread));
+				const FHexStack Stack{SeaFaction, Level, Random.FRand() < Rules.UpgradedPerTier * Tier, FMath::Max(FMath::RoundToInt32(Creatures[Level].Growth * Weeks), 1)};
+				FString Problem;
+				if (Add(Layer, Cell, Stack, Problem) != 0)
+				{
+					Taken.Add(Cell);
+					++Placed;
+					++AtSea;
+				}
+			}
+			UE_LOG(LogHexHero, Log, TEXT("Neutrals: %d stacks of the sea of %d wanted on %d cells of it"), AtSea, WantedSea, Sea.Num());
+		}
 	}
-	OutReport = FString::Printf(TEXT("%d neutral stacks, %d of them beside mines and mills"), Placed, Guards);
+	OutReport = FString::Printf(TEXT("%d neutral stacks, %d of them beside mines and mills, %d at sea"), Placed, Guards, AtSea);
 	UE_LOG(LogHexHero, Log, TEXT("Neutrals: generated %s"), *OutReport);
 	return Placed;
 }

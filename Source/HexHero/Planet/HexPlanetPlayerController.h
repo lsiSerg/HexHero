@@ -60,6 +60,50 @@ class AHexPlanetPlayerController : public APlayerController
 	/** Panel of the castle a person looks into, at the right; a click outside it closes it */
 	TSharedPtr<SHexCastlePanel> CastlePanel;
 
+	/** The spell book of a hero on the map, and the choices the person must make (a skill of a new level, a chest, creatures that offer to
+	 *  join), each over a shade that blocks the map, as the developer asked on 2026-11-15 */
+	TSharedPtr<class SHexSpellBook> SpellBook;
+
+	/** The economy of the person (SHexEconomyPanel), from the button on the bar of the resources */
+	TSharedPtr<class SHexEconomyPanel> EconomyPanel;
+	void OpenEconomy();
+
+	/** The game plays for the person while it is on, and it sees what it saw (UHexHeroes::SetPlayerAuto), from the button Auto */
+	void ToggleAutoplay();
+	bool IsAutoplay() const;
+
+	/** How fast the game runs, 1x, 2x and 5x in turn, as the time dilation of the world, from the button of the speed */
+	void CycleGameSpeed();
+	TSharedPtr<class SHexChoiceDialog> ChoiceDialog;
+
+	/** Whether a panel that takes the mouse and the keys is open: the castle or the army, the spell book, a choice; the planet then neither
+	 *  moves nor picks, and the panel has the keyboard */
+	bool bModalShown = false;
+
+	/** Shows the spell book of a hero on the map: its spells of battles, and its spells of the planet, which a click casts; with bPlanetOnly
+	 *  those of the planet alone (Magic of the list of heroes, as the developer asked on 2026-11-15) */
+	void OpenSpellBook(int32 HeroId, bool bPlanetOnly = false);
+	void OpenPlanetMagic(int32 HeroId) { OpenSpellBook(HeroId, true); }
+
+	/** A spell of the planet clicked in the book: cast at once, a Dimension door aimed by the next click on a cell of the outline shown, a Town
+	 *  portal into the castle chosen among several (UHexHeroes::CastAdventure) */
+	void OnPlanetSpellChosen(int32 Spell);
+	void CastPlanetSpell(int32 Spell, int32 Cell, int32 CastleId);
+	void CancelAim();
+
+	/** The hero whose book is open or whose spell is aimed, the spell aimed, and the castles a Town portal offers in the choice up */
+	int32 MagicHeroId = 0;
+	int32 AimSpell = INDEX_NONE;
+	int32 PortalSpell = INDEX_NONE;
+	TArray<int32> PortalCastles;
+
+	/** A hero of the person stepped through a Dimension door: the camera goes with it */
+	void OnHeroTeleported(int32 Id);
+
+	/** Puts up the choice that waits for the person: an offer, else the skill of a level a hero rose to */
+	void UpdateChoices();
+	void OnChoice(int32 Index);
+
 	/** Shows the army of a hero of the person, and of another it met, in the panel of the castles (UHexHeroes::OnArmyOpened) */
 	void OnArmyOpened(int32 HeroId, int32 OtherId);
 
@@ -143,6 +187,16 @@ public:
 	/** Returns true while the cursor is on what of the UI of the planet is clicked and no widget takes input for itself: the marks at the edges
 	 *  of the screen and the panel of a castle, where the camera does not scroll (buttons: AHexCameraPawn::IsCursorOnClickable) */
 	bool IsCursorOnUi() const;
+
+	/** Whether a panel that takes the mouse and the keys is open: the castle or the army, the spell book, a choice, the sheet of the cheats; the
+	 *  planet then neither moves nor picks, and the panel has the keyboard, as the developer asked on 2026-11-15 that any UI where the mouse
+	 *  chooses be modal */
+	bool IsModalOpen() const;
+
+	/** Escape (and M, MapMenuAction) while the game runs, as the developer asked on 2026-11-15: closes the UI on top, the sheet of the cheats, a
+	 *  choice that has an answer for it, the spell book, the panel of a castle or army, or in a battle its spell book or how it ended; false
+	 *  when nothing is open, and the menu opens then. A choice the person must make stays and takes it */
+	bool CloseOpenUi();
 
 	/** For the marks at the edges of the screen: gives where a point of a layer shows on the viewport when it is in view, and returns true,
 	 *  else the way to it across the screen: towards where it would show, or for one behind the planet or on the other layer the way over
@@ -298,6 +352,9 @@ private:
 	void OnListHero(int32 Id);
 	void OnListCastle(int32 Id);
 	void OnListHeroGo(int32 Id);
+
+	/** The button beside a hero in the list that opens its army, its skills and its spell book */
+	void OnListHeroArmy(int32 Id);
 
 	/** Returns true when a click in the list is the second on the same hero or castle within DoubleClickTime */
 	bool IsListDoubleClick(bool bCastle, int32 Id);

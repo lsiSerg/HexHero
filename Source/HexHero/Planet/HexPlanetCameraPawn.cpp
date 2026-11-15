@@ -1020,8 +1020,10 @@ void AHexPlanetCameraPawn::Tick(float DeltaTime)
 	{
 		HoldEdgeScroll();
 	}
+	// held, the edge scrolls again only once the cursor has left the zone of the edge and comes back to it, as the developer asked on
+	// 2026-11-15, when a glide to the hero of a mark at the edge stopped as the mouse moved away from it through that zone
 	if (float HeldX = 0.0f, HeldY = 0.0f; bEdgeScrollHeld && (!MarksController || !MarksController->GetMousePosition(HeldX, HeldY)
-		|| FVector2D::Distance(FVector2D(HeldX, HeldY), EdgeHoldMouse) > double(Settings()->EdgeScrollHoldDistance)))
+		|| AHexCameraPawn::GetEdgeScrollInput(Cast<APlayerController>(GetController()), EdgeScrollCurve, Settings()->EdgeScrollMargin).IsNearlyZero()))
 	{
 		bEdgeScrollHeld = false;
 	}
@@ -1316,7 +1318,7 @@ void AHexPlanetCameraPawn::UpdateBattleCamera(float DeltaTime)
 	{
 		HoldEdgeScroll();
 	}
-	if (bEdgeScrollHeld && (!bMouse || FVector2D::Distance(FVector2D(MouseX, MouseY), EdgeHoldMouse) > double(Settings()->EdgeScrollHoldDistance)))
+	if (bEdgeScrollHeld && (!bMouse || AHexCameraPawn::GetEdgeScrollInput(PlayerController, EdgeScrollCurve, Settings()->EdgeScrollMargin).IsNearlyZero()))
 	{
 		bEdgeScrollHeld = false;
 	}
@@ -1365,7 +1367,8 @@ void AHexPlanetCameraPawn::TakeFollow()
 
 void AHexPlanetCameraPawn::OnMove(const FInputActionValue& Value)
 {
-	MoveInput = Value.Get<FVector2D>();
+	const AHexPlanetPlayerController* Modal = Cast<AHexPlanetPlayerController>(GetController());
+	MoveInput = Modal && Modal->IsModalOpen() ? FVector2D::ZeroVector : Value.Get<FVector2D>();
 	if (!MoveInput.IsNearlyZero())
 	{
 		TakeFollow();
@@ -1374,6 +1377,11 @@ void AHexPlanetCameraPawn::OnMove(const FInputActionValue& Value)
 
 void AHexPlanetCameraPawn::OnZoom(const FInputActionValue& Value)
 {
+	// a panel the mouse chooses in holds the planet and the field still, as the developer asked on 2026-11-15
+	if (const AHexPlanetPlayerController* Modal = Cast<AHexPlanetPlayerController>(GetController()); Modal && Modal->IsCursorOnUi() && (Modal->IsModalOpen() || bBattleShown))
+	{
+		return;
+	}
 	// the wheel brings the camera of a battle nearer
 	if (bBattleShown)
 	{
@@ -1657,6 +1665,26 @@ bool AHexPlanetCameraPawn::ShowCell(EHexPlanetLayer Layer, int32 Cell)
 	return TravelTo(Layer, Placement);
 }
 
+bool AHexPlanetCameraPawn::PlaceOver(EHexPlanetLayer Layer, const FVector& Direction, float MaxDistance)
+{
+	if (!Planet || !Planet->IsBuilt() || Direction.IsNearlyZero())
+	{
+		return false;
+	}
+	const FVector Up = Direction.GetSafeNormal();
+	FHexPlanetCameraPlacement Placement = GetPlacement();
+	Placement.Latitude = FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(double(Up.Z), -1.0, 1.0)));
+	Placement.Longitude = FMath::RadiansToDegrees(FMath::Atan2(double(Up.Y), double(Up.X)));
+	Placement.Distance = FMath::Min(double(CurrentDistance), double(MaxDistance >= 0.0f ? MaxDistance : Settings()->PlayStartDistance));
+	HoldEdgeScroll();
+	if (IsTravelling() || Layer != Planet->GetLayer())
+	{
+		return TravelTo(Layer, Placement);
+	}
+	SetPlacement(Placement);
+	return true;
+}
+
 void AHexPlanetCameraPawn::HoldEdgeScroll()
 {
 	float MouseX = 0.0f;
@@ -1775,10 +1803,13 @@ void AHexPlanetCameraPawn::OnFocusCellUnderMouse()
 
 void AHexPlanetCameraPawn::OnBackToWorldMap()
 {
-	// the menu shows over the planet, so no map loads until one is chosen
+	// the menu shows over the planet, so no map loads until one is chosen; a UI that is open closes first, as the developer asked on 2026-11-15
 	if (AHexPlanetPlayerController* PlayerController = Cast<AHexPlanetPlayerController>(GetController()))
 	{
-		PlayerController->OpenMapMenu();
+		if (!PlayerController->CloseOpenUi())
+		{
+			PlayerController->OpenMapMenu();
+		}
 	}
 }
 

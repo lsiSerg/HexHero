@@ -1,6 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "HexBattleArena.h"
+#include "HexHeroAnimInstance.h"
+#include "HexHeroConfig.h"
+#include "NiagaraComponent.h"
+#include "NiagaraFunctionLibrary.h"
+#include "NiagaraSystem.h"
 #include "Async/ParallelFor.h"
 #include "HexBattleConfig.h"
 #include "HexBattles.h"
@@ -731,6 +736,11 @@ double AHexBattleArena::GetGroundHeight(const FVector2D& World) const
 	{
 		return 0.0;
 	}
+	// at sea the deck of the ship, and the sea beside it
+	if (bSea)
+	{
+		return DeckBox.IsInside(World) ? 0.0 : -double(Config->SeaDeckLift);
+	}
 	const auto AwayFrom = [&World](const FBox2D& Box)
 	{
 		const FVector2D Nearest(FMath::Clamp(World.X, Box.Min.X, Box.Max.X), FMath::Clamp(World.Y, Box.Min.Y, Box.Max.Y));
@@ -865,6 +875,9 @@ void AHexBattleArena::Show(UHexBattles* InBattles, const FPostProcessSettings& P
 		Clock = Now;
 		return Took;
 	};
+	// at sea the field is the deck of a ship over the sea
+	bSea = Battle->IsAtSea();
+	DeckBox = bSea ? FBox2D(FieldMin, FieldMax).ExpandBy(double(Config->HexRadius * Config->SeaDeckMargin)) : FBox2D(ForceInit);
 	BuildGround();
 	const double GroundMs = Lap();
 	BuildGrid();
@@ -873,8 +886,13 @@ void AHexBattleArena::Show(UHexBattles* InBattles, const FPostProcessSettings& P
 	BuildCaveLight();
 	const double PropsMs = Lap();
 	BuildSiege();
+	BuildShip();
 	const double SiegeMs = Lap();
 	PlaceFigures();
+	PlaceHeroes();
+	Missiles.Reset();
+	QueueHoverUnit = INDEX_NONE;
+	bSpellBookAsked = false;
 	UE_LOG(LogHexHero, Log, TEXT("Battle field: ground %.1f ms, grid %.1f ms, props %.1f ms, siege %.1f ms, figures %.1f ms"), GroundMs, GridMs, PropsMs, SiegeMs, Lap());
 	Log.Reset();
 	Popups.Reset();
@@ -1146,6 +1164,16 @@ void AHexBattleArena::BuildCaveLight()
 void AHexBattleArena::ClearField()
 {
 	TorchLights.Reset();
+	Missiles.Reset();
+	for (TObjectPtr<USkeletalMeshComponent>& Hero : HeroFigures)
+	{
+		if (Hero)
+		{
+			Hero->DestroyComponent();
+			Hero = nullptr;
+		}
+	}
+	HoverHeroSide = INDEX_NONE;
 	for (const TObjectPtr<USceneComponent>& Prop : Props)
 	{
 		if (Prop)
@@ -1179,6 +1207,13 @@ void AHexBattleArena::ClearField()
 		HoverOutline = nullptr;
 	}
 	OutlinedUnit = INDEX_NONE;
+	OutlinedKey = INDEX_NONE;
+	if (ActiveOutline)
+	{
+		ActiveOutline->DestroyComponent();
+		ActiveOutline = nullptr;
+	}
+	ActiveOutlined = INDEX_NONE;
 	for (const FFigure& Figure : Figures)
 	{
 		if (Figure.Component.IsValid())
@@ -1255,10 +1290,11 @@ void AHexBattleArena::BuildGround()
 		{
 			const FVector2D Flat(FMath::Lerp(-HalfX, HalfX, I / double(Steps)), FMath::Lerp(-HalfY, HalfY, J / double(Steps)));
 			const double Here = HeightAt(I, J);
-			Vertices.Add(FVector(Flat.X, Flat.Y, Here));
+			// at sea the sea, its waves its own; its heights stay those of the deck, which the cursor finds
+			Vertices.Add(FVector(Flat.X, Flat.Y, bSea ? -double(Config->SeaDeckLift) : Here));
 			const FVector AlongX(StepX * 2.0, 0.0, HeightAt(I + 1, J) - HeightAt(I - 1, J));
 			const FVector AlongY(0.0, StepY * 2.0, HeightAt(I, J + 1) - HeightAt(I, J - 1));
-			const FVector Normal = FVector::CrossProduct(AlongX, AlongY).GetSafeNormal();
+			const FVector Normal = bSea ? FVector::UpVector : FVector::CrossProduct(AlongX, AlongY).GetSafeNormal();
 			Normals.Add(Normal);
 			Tangents.Add(FProcMeshTangent(AlongX.GetSafeNormal(), false));
 			UVs.Add(Flat / 300.0);
@@ -1282,7 +1318,13 @@ void AHexBattleArena::BuildGround()
 		}
 	}
 	Ground->CreateMeshSection_LinearColor(0, Vertices, Triangles, Normals, UVs, Colors, Tangents, false);
-	if (UMaterialInterface* Material = Config->GroundMaterial.LoadSynchronous())
+	if (UMaterialInterface* SeaMaterial = bSea ? Config->SeaMaterial.LoadSynchronous() : nullptr)
+	{
+		UMaterialInstanceDynamic* Instance = UMaterialInstanceDynamic::Create(SeaMaterial, this);
+		HexMaterialConfig::Apply(Instance, Config);
+		Ground->SetMaterial(0, Instance);
+	}
+	else if (UMaterialInterface* Material = Config->GroundMaterial.LoadSynchronous())
 	{
 		UMaterialInstanceDynamic* Instance = UMaterialInstanceDynamic::Create(Material, this);
 		const FHexBattleGround* Each = GetGround();
@@ -1418,6 +1460,11 @@ FBox2D AHexBattleArena::GetFieldBox() const
 
 void AHexBattleArena::BuildProps()
 {
+	// at sea nothing grows or lies around the ship
+	if (bSea)
+	{
+		return;
+	}
 	FHexBattle* Battle = GetBattle();
 	const FHexBattleGround* Each = GetGround();
 	const uint32 Seed = Mix(Battle->GetRound(), Battles->GetGroundLetter(), int32(Battle->GetObstacles().Num()));
@@ -1868,6 +1915,169 @@ void AHexBattleArena::PlaceFigures()
 			{
 				HexUnitFigure::Play(Component, Config, Unit.CreatureId, EHexFigureAction::Idle, 0.9f + 0.03f * float(Index % 5));
 			}
+		}
+	}
+}
+
+void AHexBattleArena::PlaceHeroes()
+{
+	for (TObjectPtr<USkeletalMeshComponent>& Figure : HeroFigures)
+	{
+		if (Figure)
+		{
+			Figure->DestroyComponent();
+			Figure = nullptr;
+		}
+	}
+	const FHexBattle* Battle = GetBattle();
+	const UHexHeroConfig* HeroConfig = UHexHeroConfig::Load();
+	USkeletalMesh* Rider = HeroConfig ? HeroConfig->RiderMesh.LoadSynchronous() : nullptr;
+	if (!Battle || !Rider)
+	{
+		return;
+	}
+	const int32 Columns = Battle->GetColumns();
+	const int32 Rows = Battle->GetRows();
+	const bool bSiege = !Battle->GetWalls().IsEmpty();
+	for (int32 Side = 0; Side < 2; ++Side)
+	{
+		const FHexBattleSideSetup& Setup = Battle->GetSide(Side);
+		if (Setup.HeroId == 0)
+		{
+			continue;
+		}
+		// out from its edge of the field, at a row near the top, as the catapults stand near the bottom; in a castle in its yard
+		const int32 Edge = Side == 0 ? 0 : Columns - 1;
+		const double Row = FMath::Clamp(double(Config->HeroFigureRow), 0.0, double(Rows - 1));
+		const int32 Low = FMath::FloorToInt32(Row);
+		const int32 High = FMath::Min(Low + 1, Rows - 1);
+		const FVector OnEdge = FMath::Lerp(GetHexPoint(FHexCoord::FromOffset(Edge, Low), false), GetHexPoint(FHexCoord::FromOffset(Edge, High), false), Row - Low);
+		const FVector Inward = GetHexPoint(FHexCoord::FromOffset(1, Low), false) - GetHexPoint(FHexCoord::FromOffset(0, Low), false);
+		const double Out = Side == 1 && bSiege ? FMath::Min(double(Config->HeroFigureOut), 0.5) : double(Config->HeroFigureOut);
+		FVector Point = OnEdge + Inward * (Side == 0 ? -Out : Out);
+		Point.Z = GetActorLocation().Z + GetShownGroundHeight(FVector2D(Point));
+		HeroPoints[Side] = Point;
+		USkeletalMeshComponent* Figure = NewObject<USkeletalMeshComponent>(this);
+		Figure->SetSkeletalMesh(Rider);
+		Figure->SetAnimationMode(EAnimationMode::AnimationBlueprint);
+		Figure->SetAnimInstanceClass(UHexHeroAnimInstance::StaticClass());
+		Figure->SetupAttachment(Root);
+		Figure->SetMobility(EComponentMobility::Movable);
+		Figure->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Figure->bAffectDynamicIndirectLighting = false;
+		if (UMaterialInterface* Material = HeroConfig->HeroMaterial.LoadSynchronous())
+		{
+			UMaterialInstanceDynamic* Instance = UMaterialInstanceDynamic::Create(Material, this);
+			Instance->SetVectorParameterValue(TEXT("PlayerColor"), Battles->GetSideColor(Side));
+			Instance->SetScalarParameterValue(TEXT("HeroColorShare"), HeroConfig->HeroColorShare);
+			Instance->SetScalarParameterValue(TEXT("HeroGlow"), HeroConfig->HeroGlow);
+			Instance->SetScalarParameterValue(TEXT("HeroFlagWave"), HeroConfig->HeroFlagWave);
+			Instance->SetScalarParameterValue(TEXT("HeroFlagWaveSpeed"), HeroConfig->HeroFlagWaveSpeed);
+			Instance->SetScalarParameterValue(TEXT("HeroFade"), 0.0f);
+			Figure->SetMaterial(0, Instance);
+		}
+		// facing the field, the size of a rider of the battles
+		const FVector Facing = Side == 0 ? FVector(0.0, 1.0, 0.0) : FVector(0.0, -1.0, 0.0);
+		const FRotator Turn = FRotationMatrix::MakeFromX(Facing).Rotator() + FRotator(0.0, HeroConfig->RiderYaw, 0.0);
+		Figure->SetWorldTransform(FTransform(Turn, Point, FVector(Config->UnitScale * HeroConfig->RiderScale * Config->HeroFigureScale)));
+		Figure->RegisterComponent();
+		if (UHexHeroAnimInstance* Anim = Cast<UHexHeroAnimInstance>(Figure->GetAnimInstance()))
+		{
+			Anim->Play(HeroConfig->IdleAnimation.LoadSynchronous(), true, HeroConfig->IdleAnimRate, 0.0f);
+		}
+		HeroFigures[Side] = Figure;
+	}
+}
+
+UNiagaraComponent* AHexBattleArena::SpawnEffect(UNiagaraSystem* System, const FVector& At, const FRotator& Turn, double Size, const FLinearColor& Color)
+{
+	if (!System || !GetWorld())
+	{
+		return nullptr;
+	}
+	UNiagaraComponent* Effect = UNiagaraFunctionLibrary::SpawnSystemAtLocation(GetWorld(), System, At, Turn, FVector(Size), true, false, ENCPoolMethod::None, false);
+	if (Effect)
+	{
+		Effect->SetVariableLinearColor(TEXT("User.Color"), Color);
+		Effect->SetVariableFloat(TEXT("User.Size"), float(Size));
+		Effect->Activate(true);
+	}
+	return Effect;
+}
+
+void AHexBattleArena::PlaySpellEffect(const FHexSpell& Spell, int32 Side, const FVector& At)
+{
+	const auto SystemOf = [this, &Spell](EHexSpellLook Look) -> UNiagaraSystem*
+	{
+		if (!Spell.Effect.IsNull() && Look == Spell.Look)
+		{
+			return Spell.Effect.LoadSynchronous();
+		}
+		return Config->SpellEffects.IsValidIndex(int32(Look)) ? Config->SpellEffects[int32(Look)].LoadSynchronous() : nullptr;
+	};
+	// as large as the hexes it takes, at least one, by its own size
+	const double Size = FMath::Max(1.0, double(Spell.Radius) * 2.0 + 1.0) * Spell.EffectSize * Config->SpellEffectScale;
+	// brighter than the color of its light, as the sprites of the templates take it as their color
+	const FLinearColor Color = Spell.Color * 4.0f;
+	const double Lift = Config->HexRadius;
+	switch (Spell.Look)
+	{
+	case EHexSpellLook::Missile:
+		if (Side >= 0 && Side < 2 && HeroFigures[Side])
+		{
+			FSpellMissile& Missile = Missiles.AddDefaulted_GetRef();
+			Missile.Spell = Config->Spells.IndexOfByPredicate([&Spell](const FHexSpell& Each) { return Each.Id == Spell.Id; });
+			Missile.From = HeroPoints[Side] + FVector(0.0, 0.0, Lift * 2.0);
+			Missile.To = At + FVector(0.0, 0.0, Lift * 0.6);
+			Missile.Length = float(FVector::Dist(Missile.From, Missile.To) / FMath::Max(Config->SpellMissileSpeed, 100.0f));
+			break;
+		}
+		SpawnEffect(SystemOf(EHexSpellLook::Burst), At + FVector(0.0, 0.0, Lift * 0.5), FRotator::ZeroRotator, Size, Color);
+		break;
+	case EHexSpellLook::Strike:
+		// down from the sky, and a burst where it lands
+		SpawnEffect(SystemOf(EHexSpellLook::Strike), At + FVector(0.0, 0.0, Lift * 7.0), FRotator::ZeroRotator, Size, Color);
+		SpawnEffect(SystemOf(EHexSpellLook::Burst), At + FVector(0.0, 0.0, Lift * 0.3), FRotator::ZeroRotator, Size * 0.8, Color);
+		break;
+	case EHexSpellLook::Fall:
+		SpawnEffect(SystemOf(EHexSpellLook::Fall), At + FVector(0.0, 0.0, Lift * 3.0), FRotator::ZeroRotator, Size, Color);
+		break;
+	case EHexSpellLook::Field:
+		SpawnEffect(SystemOf(EHexSpellLook::Field), At + FVector(0.0, 0.0, Lift * 0.4), FRotator::ZeroRotator, Size * 6.0, Color);
+		break;
+	default:
+		SpawnEffect(SystemOf(Spell.Look), At + FVector(0.0, 0.0, Lift * 0.3), FRotator::ZeroRotator, Size, Color);
+		break;
+	}
+}
+
+void AHexBattleArena::UpdateMissiles(float DeltaSeconds)
+{
+	for (int32 Index = Missiles.Num() - 1; Index >= 0; --Index)
+	{
+		FSpellMissile& Missile = Missiles[Index];
+		const FHexSpell* Spell = Config->Spells.IsValidIndex(Missile.Spell) ? &Config->Spells[Missile.Spell] : nullptr;
+		Missile.Time += DeltaSeconds;
+		const float Alpha = FMath::Clamp(Missile.Time / FMath::Max(Missile.Length, 0.01f), 0.0f, 1.0f);
+		// a low arc, puffs of its trail behind it
+		const FVector Point = FMath::Lerp(Missile.From, Missile.To, Alpha) + FVector(0.0, 0.0, FMath::Sin(Alpha * PI) * Config->HexRadius * 1.2);
+		Missile.NextPuff -= DeltaSeconds;
+		if (Spell && Missile.NextPuff <= 0.0f)
+		{
+			Missile.NextPuff = 0.035f;
+			const FRotator Along = FRotationMatrix::MakeFromX(Missile.To - Missile.From).Rotator();
+			SpawnEffect(Config->SpellEffects.IsValidIndex(int32(EHexSpellLook::Missile)) ? Config->SpellEffects[int32(EHexSpellLook::Missile)].LoadSynchronous() : nullptr,
+				Point, Along, 0.6, Spell->Color * 4.0f);
+		}
+		if (Alpha >= 1.0f)
+		{
+			if (Spell)
+			{
+				const double Size = FMath::Max(1.0, double(Spell->Radius) * 2.0 + 1.0) * Spell->EffectSize * Config->SpellEffectScale;
+				SpawnEffect(Config->SpellEffects.IsValidIndex(int32(EHexSpellLook::Burst)) ? Config->SpellEffects[int32(EHexSpellLook::Burst)].LoadSynchronous() : nullptr,
+					Missile.To, FRotator::ZeroRotator, Size, Spell->Color * 4.0f);
+			}
+			Missiles.RemoveAt(Index);
 		}
 	}
 }
@@ -2851,6 +3061,55 @@ void AHexBattleArena::BuildSiege()
 	}
 }
 
+void AHexBattleArena::BuildShip()
+{
+	if (!bSea || !DeckBox.bIsValid)
+	{
+		return;
+	}
+	// in the space of the arena: the deck over the field and around it, the hull under it down into the sea, rails along its edges and a mast at
+	// each end, its sail across the ship
+	const FVector2D Shift(GetActorLocation().X, GetActorLocation().Y);
+	const FVector2D Min = DeckBox.Min - Shift;
+	const FVector2D Max = DeckBox.Max - Shift;
+	const FVector2D Mid = (Min + Max) * 0.5;
+	const FVector2D Half = (Max - Min) * 0.5;
+	const double Lift = Config->SeaDeckLift;
+	const double Hull = Lift + Config->SeaHullDepth;
+	const double Tile = FMath::Max(double(Config->WoodTileSize), 1.0);
+	FPropMesh Deck;
+	Deck.Box(FVector(Mid.X, Mid.Y, -2.5), FVector(Half.X, Half.Y, 2.5), Tile);
+	Deck.Make(this, Root, MakeProp(this, Config, Config->BridgeWoodTexture, Config->BridgeWoodNormal, Config->SeaDeckColor, Config->WoodTileSize, true, false), SiegeProps);
+	FPropMesh Body;
+	Body.Box(FVector(Mid.X, Mid.Y, -5.0 - (Hull - 5.0) * 0.5), FVector(Half.X - 2.0, Half.Y - 2.0, (Hull - 5.0) * 0.5), Tile);
+	Body.Make(this, Root, MakeProp(this, Config, Config->BridgeWoodTexture, Config->BridgeWoodNormal, Config->SeaHullColor, Config->WoodTileSize, true, true), SiegeProps);
+	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+	UStaticMesh* Cylinder = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+	UMaterialInstanceDynamic* Rails = MakeProp(this, Config, Config->BridgeWoodTexture, Config->BridgeWoodNormal, Config->SeaHullColor * 0.9f, Config->WoodTileSize, false, false);
+	const double Rail = Config->SeaRailHeight;
+	const double Thick = 6.0;
+	const FVector Origin = GetActorLocation();
+	// the rails, along the long sides and across the ends
+	for (const double Side : {-1.0, 1.0})
+	{
+		AddBox(this, Root, Cube, Rails, FTransform(FRotator::ZeroRotator, Origin + FVector(Mid.X + Side * (Half.X - Thick * 0.5), Mid.Y, Rail * 0.5), FVector(Thick, Half.Y * 2.0, Rail) / 100.0), SiegeProps);
+		AddBox(this, Root, Cube, Rails, FTransform(FRotator::ZeroRotator, Origin + FVector(Mid.X, Mid.Y + Side * (Half.Y - Thick * 0.5), Rail * 0.5), FVector(Half.X * 2.0, Thick, Rail) / 100.0), SiegeProps);
+	}
+	// a mast at each end of the ship, beyond the hexes of the field, with a yard and a sail across it
+	UMaterialInstanceDynamic* Mast = MakeProp(this, Config, Config->BridgeWoodTexture, Config->BridgeWoodNormal, Config->SeaHullColor * 0.75f, Config->WoodTileSize, false, false);
+	UMaterialInstanceDynamic* Sail = MakeProp(this, Config, Config->GateWoodTexture, Config->GateWoodNormal, FLinearColor(1.6f, 1.55f, 1.4f, 1.0f), Config->WoodTileSize * 4.0f, false, false);
+	const double MastHeight = Config->SeaMastHeight;
+	const double SailWidth = Half.X * 1.3;
+	for (const double End : {-1.0, 1.0})
+	{
+		const FVector Foot = Origin + FVector(Mid.X, Mid.Y + End * (Half.Y - Config->HexRadius * 0.9), 0.0);
+		AddBox(this, Root, Cylinder, Mast, FTransform(FRotator::ZeroRotator, Foot + FVector(0.0, 0.0, MastHeight * 0.5), FVector(0.22, 0.22, MastHeight / 100.0)), SiegeProps);
+		AddBox(this, Root, Cylinder, Mast, FTransform(FRotator(90.0, 0.0, 0.0), Foot + FVector(0.0, 0.0, MastHeight * 0.82),
+			FVector(0.1, 0.1, SailWidth * 1.15 / 100.0)), SiegeProps);
+		AddBox(this, Root, Cube, Sail, FTransform(FRotator::ZeroRotator, Foot + FVector(0.0, End * 6.0, MastHeight * 0.58), FVector(SailWidth, 2.0, MastHeight * 0.48) / 100.0), SiegeProps);
+	}
+}
+
 void AHexBattleArena::UpdateDebugView(bool bReset)
 {
 	const FHexDebugViewSettings Debug = AHexWorldMap::GetDebugViewSettings();
@@ -3028,44 +3287,98 @@ bool AHexBattleArena::FindWallStrikeFrom(const FHexCoord& WallHex, FHexCoord& Ou
 	return bFound;
 }
 
+int32 AHexBattleArena::GetOutlinedUnit() const
+{
+	const FHexBattle* Battle = GetBattle();
+	if (Battle && Battle->GetUnits().IsValidIndex(QueueHoverUnit) && Battle->GetUnits()[QueueHoverUnit].IsAlive())
+	{
+		return QueueHoverUnit;
+	}
+	return GetHoverUnit();
+}
+
 void AHexBattleArena::UpdateOutline()
 {
 	const FHexBattle* Battle = GetBattle();
-	const int32 Unit = bShowing ? GetHoverUnit() : int32(INDEX_NONE);
-	USkeletalMeshComponent* Figure = Figures.IsValidIndex(Unit) ? Cast<USkeletalMeshComponent>(Figures[Unit].Component.Get()) : nullptr;
-	if (Unit == OutlinedUnit && (HoverOutline != nullptr) == (Figure != nullptr))
+	const bool bHero = bShowing && HoverHeroSide != INDEX_NONE && HeroFigures[HoverHeroSide] != nullptr;
+	const int32 Unit = bShowing && !bHero ? GetOutlinedUnit() : int32(INDEX_NONE);
+	USkeletalMeshComponent* Figure = bHero ? HeroFigures[HoverHeroSide].Get() : Figures.IsValidIndex(Unit) ? Cast<USkeletalMeshComponent>(Figures[Unit].Component.Get()) : nullptr;
+	const int32 Key = bHero ? 1000 + HoverHeroSide : Unit;
+	if (Key == OutlinedKey && (HoverOutline != nullptr) == (Figure != nullptr))
 	{
 		return;
 	}
+	OutlinedKey = Key;
 	OutlinedUnit = Unit;
 	if (HoverOutline)
 	{
 		HoverOutline->DestroyComponent();
 		HoverOutline = nullptr;
 	}
-	UMaterialInterface* Material = Config ? Config->OutlineMaterial.LoadSynchronous() : nullptr;
-	if (!Figure || !Material || !Figure->GetSkeletalMeshAsset() || !Battle)
+	if (!Figure || !Battle)
 	{
 		return;
 	}
+	const int32 Person = GetPersonSide();
+	const bool bFriend = (bHero ? HoverHeroSide : Battle->GetUnits()[Unit].Side) == (Person != INDEX_NONE ? Person : 0);
+	HoverOutline = MakeOutline(Figure, bFriend ? Config->OutlineFriendColor : Config->OutlineEnemyColor, 1.0f);
+}
+
+USkeletalMeshComponent* AHexBattleArena::MakeOutline(USkeletalMeshComponent* Figure, const FLinearColor& Color, float WidthShare)
+{
+	UMaterialInterface* Material = Config ? Config->OutlineMaterial.LoadSynchronous() : nullptr;
+	if (!Figure || !Material || !Figure->GetSkeletalMeshAsset())
+	{
+		return nullptr;
+	}
 	// a copy of the figure that follows its pose, drawn a little larger by its material, only where it shows its back faces
-	HoverOutline = NewObject<USkeletalMeshComponent>(this);
-	HoverOutline->SetSkeletalMesh(Figure->GetSkeletalMeshAsset());
-	HoverOutline->SetupAttachment(Figure);
-	HoverOutline->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	HoverOutline->SetCastShadow(false);
+	USkeletalMeshComponent* Outline = NewObject<USkeletalMeshComponent>(this);
+	Outline->SetSkeletalMesh(Figure->GetSkeletalMeshAsset());
+	Outline->SetupAttachment(Figure);
+	Outline->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	Outline->SetCastShadow(false);
 	UMaterialInstanceDynamic* Instance = UMaterialInstanceDynamic::Create(Material, this);
+	Instance->SetVectorParameterValue(TEXT("OutlineColor"), Color);
+	Instance->SetScalarParameterValue(TEXT("OutlineWidth"), Config->OutlineWidth * WidthShare);
+	Instance->SetScalarParameterValue(TEXT("OutlineWidthPerDistance"), Config->OutlineWidthPerDistance * WidthShare);
+	for (int32 Slot = 0; Slot < FMath::Max(Outline->GetNumMaterials(), 1); ++Slot)
+	{
+		Outline->SetMaterial(Slot, Instance);
+	}
+	Outline->RegisterComponent();
+	Outline->SetLeaderPoseComponent(Figure);
+	return Outline;
+}
+
+void AHexBattleArena::UpdateActiveOutline()
+{
+	const FHexBattle* Battle = GetBattle();
+	int32 Unit = bShowing && Battle && !Battle->IsOver() ? Battle->GetActive() : int32(INDEX_NONE);
+	// the shooters of a tower and the dead have none, and the unit under the cursor has its own
+	if (!Battle || !Battle->GetUnits().IsValidIndex(Unit) || Battle->GetUnits()[Unit].bTower || !Battle->GetUnits()[Unit].IsAlive() || Unit == OutlinedUnit
+		|| !Figures.IsValidIndex(Unit) || Figures[Unit].bDead)
+	{
+		Unit = INDEX_NONE;
+	}
+	USkeletalMeshComponent* Figure = Figures.IsValidIndex(Unit) ? Cast<USkeletalMeshComponent>(Figures[Unit].Component.Get()) : nullptr;
+	if (Unit == ActiveOutlined && (ActiveOutline != nullptr) == (Figure != nullptr))
+	{
+		return;
+	}
+	ActiveOutlined = Unit;
+	if (ActiveOutline)
+	{
+		ActiveOutline->DestroyComponent();
+		ActiveOutline = nullptr;
+	}
+	if (!Figure)
+	{
+		return;
+	}
 	const int32 Person = GetPersonSide();
 	const bool bFriend = Battle->GetUnits()[Unit].Side == (Person != INDEX_NONE ? Person : 0);
-	Instance->SetVectorParameterValue(TEXT("OutlineColor"), bFriend ? Config->OutlineFriendColor : Config->OutlineEnemyColor);
-	Instance->SetScalarParameterValue(TEXT("OutlineWidth"), Config->OutlineWidth);
-	Instance->SetScalarParameterValue(TEXT("OutlineWidthPerDistance"), Config->OutlineWidthPerDistance);
-	for (int32 Slot = 0; Slot < FMath::Max(HoverOutline->GetNumMaterials(), 1); ++Slot)
-	{
-		HoverOutline->SetMaterial(Slot, Instance);
-	}
-	HoverOutline->RegisterComponent();
-	HoverOutline->SetLeaderPoseComponent(Figure);
+	const FLinearColor Color = (bFriend ? Config->OutlineFriendColor : Config->OutlineEnemyColor) * FMath::Clamp(Config->ActiveOutlineShade, 0.0f, 1.0f);
+	ActiveOutline = MakeOutline(Figure, FLinearColor(Color.R, Color.G, Color.B, 1.0f), FMath::Clamp(Config->ActiveOutlineWidthShare, 0.05f, 1.0f));
 }
 
 bool AHexBattleArena::GetUnitPoint(int32 Unit, FVector& OutWorld) const
@@ -3087,6 +3400,34 @@ bool AHexBattleArena::GetUnitPoint(int32 Unit, FVector& OutWorld) const
 void AHexBattleArena::SetHover(const FVector& Origin, const FVector& Direction)
 {
 	bHover = false;
+	// a hero beside the field, by an upright cylinder around it
+	HoverHeroSide = INDEX_NONE;
+	if (bShowing && Config)
+	{
+		double Best = TNumericLimits<double>::Max();
+		for (int32 Side = 0; Side < 2; ++Side)
+		{
+			if (!HeroFigures[Side])
+			{
+				continue;
+			}
+			const FVector Base = HeroPoints[Side];
+			const double Radius = Config->HexRadius * Config->HeroPickRadius;
+			const double Height = Config->HexRadius * Config->HeroPickHeight;
+			for (int32 Step = 0; Step <= 8; ++Step)
+			{
+				// along the axis of the cylinder, where the ray passes nearest
+				const FVector OnAxis = Base + FVector(0.0, 0.0, Height * Step / 8.0);
+				const double Along = FVector::DotProduct(OnAxis - Origin, Direction);
+				const FVector OnRay = Origin + Direction * Along;
+				if (Along > 0.0 && FVector::Dist2D(OnRay, OnAxis) <= Radius && FMath::Abs(OnRay.Z - OnAxis.Z) <= Height / 8.0 && Along < Best)
+				{
+					Best = Along;
+					HoverHeroSide = Side;
+				}
+			}
+		}
+	}
 	if (!bShowing || !Config || FMath::IsNearlyZero(Direction.Z))
 	{
 		return;
@@ -3205,6 +3546,12 @@ bool AHexBattleArena::FindStrikeFrom(int32 Target, FHexCoord& OutFrom) const
 void AHexBattleArena::Click()
 {
 	FHexBattle* Battle = GetBattle();
+	// the spell book of the hero by a click on it, while the battle goes on: once it is over nothing but looking about and the tips is left
+	if (Battle && !Battle->IsOver() && HoverHeroSide != INDEX_NONE && HoverHeroSide == GetPersonSide())
+	{
+		bSpellBookAsked = true;
+		return;
+	}
 	if (!CanOrder() || !bHover)
 	{
 		return;
@@ -3284,7 +3631,7 @@ void AHexBattleArena::AimSpell(int32 Spell)
 		return;
 	}
 	const int32 Side = Battle->GetUnits()[Battle->GetActive()].Side;
-	Aimed = Battle->CanCastAny(Side) && Config->Spells.IsValidIndex(Spell) && Config->Spells[Spell].ManaCost <= Battle->GetMana(Side) ? Spell : INDEX_NONE;
+	Aimed = Battle->CanCastAny(Side) && Battle->KnowsSpell(Side, Spell) && Battle->GetManaCost(Side, Spell) <= Battle->GetMana(Side) ? Spell : INDEX_NONE;
 }
 
 void AHexBattleArena::OrderWait()
@@ -3763,7 +4110,73 @@ void AHexBattleArena::BeginEvent(const FHexBattleEvent& Event)
 			SpellLight->SetAttenuationRadius(Config->HexRadius * (3.0f + 2.0f * Spell.Radius));
 			AddPopup(GetHexPoint(Event.Hex), Spell.DisplayName, Spell.Color, 1.4f);
 			AddLog(FString::Printf(TEXT("%s casts %s"), *Battles->GetSideName(Event.Side), *Spell.DisplayName));
-			CurrentLength = 0.8f;
+			// the effect of its look, where it lands; a spell over the whole field shows over its middle, and on each stack it takes after
+			const bool bOnUnit = Event.Target != INDEX_NONE && Figures.IsValidIndex(Event.Target);
+			PlaySpellEffect(Spell, Event.Side, Spell.Look == EHexSpellLook::Field ? FVector(FieldCenter, GetActorLocation().Z + GetShownGroundHeight(FieldCenter))
+				: bOnUnit ? Figures[Event.Target].Position : GetHexPoint(Event.Hex));
+			// the hero turns its head as it casts
+			if (Event.Side >= 0 && Event.Side < 2 && HeroFigures[Event.Side])
+			{
+				if (UHexHeroAnimInstance* Anim = Cast<UHexHeroAnimInstance>(HeroFigures[Event.Side]->GetAnimInstance()))
+				{
+					const UHexHeroConfig* HeroConfig = UHexHeroConfig::Load();
+					if (UAnimSequence* Chosen = HeroConfig->ChosenAnimation.LoadSynchronous())
+					{
+						Anim->Play(Chosen, false, HeroConfig->ChosenAnimRate, HeroConfig->AnimBlendTime, 0.0f, HeroConfig->IdleAnimation.LoadSynchronous(), HeroConfig->IdleAnimRate);
+					}
+				}
+			}
+			const double Flight = Spell.Look == EHexSpellLook::Missile && Event.Side >= 0 && Event.Side < 2 && HeroFigures[Event.Side]
+				? FVector::Dist(HeroPoints[Event.Side], GetHexPoint(Event.Hex)) / FMath::Max(Config->SpellMissileSpeed, 100.0f) : 0.0;
+			CurrentLength = FMath::Max(Config->SpellTime, float(Flight) + 0.35f);
+		}
+		break;
+	case FHexBattleEvent::EType::SpellHit:
+		if (Config->Spells.IsValidIndex(Event.Spell) && Figures.IsValidIndex(Event.Target))
+		{
+			// a chain leaps on, a mass spell and one over the field take each stack in turn
+			FHexSpell Each = Config->Spells[Event.Spell];
+			Each.Look = Each.Look == EHexSpellLook::Field || Each.Look == EHexSpellLook::Missile ? EHexSpellLook::Burst : Each.Look;
+			Each.EffectSize = FMath::Min(Each.EffectSize, 1.0f);
+			Each.Radius = 0;
+			PlaySpellEffect(Each, Event.Side, Figures[Event.Target].Position);
+			CurrentLength = Config->Spells[Event.Spell].Kind == EHexSpellKind::ChainDamage ? 0.22f : 0.08f;
+		}
+		break;
+	case FHexBattleEvent::EType::Raise:
+		if (Figures.IsValidIndex(Event.Target))
+		{
+			// the fallen rise again where they lay
+			FFigure& Raised = Figures[Event.Target];
+			if (Raised.bDead)
+			{
+				Raised.bDead = false;
+				if (const FHexUnitLook* Look = Config->FindLook(Raised.Creature))
+				{
+					Raised.Hover += Look->Hover * Config->UnitScale;
+				}
+				if (Raised.Component.IsValid())
+				{
+					Raised.Component->SetVisibility(true, true);
+					HexUnitFigure::Play(Raised.Component.Get(), Config, Raised.Creature, EHexFigureAction::Idle);
+				}
+				PlaceFigure(Event.Target);
+			}
+			if (ShownCounts.IsValidIndex(Event.Target) && Event.CountAfter >= 0)
+			{
+				ShownCounts[Event.Target] = Event.CountAfter;
+			}
+			AddPopup(Raised.Position, FString::Printf(TEXT("+%d raised"), Event.CountAfter), FLinearColor(0.5f, 1.0f, 0.6f, 1.0f), 1.0f);
+			AddLog(FString::Printf(TEXT("%s rise again: %d"), *GetUnitName(Event.Target), Event.CountAfter));
+			CurrentLength = 0.35f;
+		}
+		break;
+	case FHexBattleEvent::EType::Blind:
+		if (Figures.IsValidIndex(Event.Unit))
+		{
+			AddPopup(Figures[Event.Unit].Position, TEXT("Blind"), FLinearColor(0.85f, 0.85f, 0.8f, 1.0f), 0.8f);
+			AddLog(FString::Printf(TEXT("%s stands blind"), *Who));
+			CurrentLength = 0.3f;
 		}
 		break;
 	case FHexBattleEvent::EType::Heal:
@@ -4609,6 +5022,8 @@ void AHexBattleArena::Tick(float DeltaSeconds)
 	UpdateCrumbles(DeltaSeconds * Speed);
 	UpdateGate(DeltaSeconds);
 	UpdateOutline();
+	UpdateActiveOutline();
+	UpdateMissiles(DeltaSeconds);
 	UpdateMarks();
 }
 
@@ -4629,6 +5044,17 @@ bool AHexBattleArena::OrderAt(const FString& Order, const FHexCoord& Hex, int32 
 	if (Order == TEXT("hover"))
 	{
 		HoverAt(Hex);
+		return true;
+	}
+	// the spell book of the hero of the person, and the stack of the queue the cursor is on, for test runs
+	if (Order == TEXT("book"))
+	{
+		bSpellBookAsked = true;
+		return true;
+	}
+	if (Order == TEXT("queue"))
+	{
+		QueueHoverUnit = Unit;
 		return true;
 	}
 	if (Order == TEXT("camera"))

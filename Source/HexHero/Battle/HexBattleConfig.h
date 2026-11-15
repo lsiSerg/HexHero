@@ -8,6 +8,7 @@
 
 class UAnimSequence;
 class UMaterialInterface;
+class UNiagaraSystem;
 class UTexture2D;
 class USkeletalMesh;
 class UStaticMesh;
@@ -16,14 +17,63 @@ class UStaticMesh;
 UENUM()
 enum class EHexSpellKind : uint8
 {
-	/** Damage to one stack of the enemy */
+	/** Damage to one stack */
 	Damage,
-	/** Damage to every stack in the hex aimed at and around it, friend or foe */
+	/** Damage to every stack in the hex aimed at and around it, Radius hexes, friend or foe */
 	AreaDamage,
-	/** Heals one stack of its own, never above the creatures it has */
+	/** Heals one stack of its own, never above the creatures it has; with bCure it also takes the harmful spells off it */
 	Heal,
 	/** Changes one stack for some rounds: of its own for the better, of the enemy for the worse */
 	Effect,
+	/** Damage to the stack aimed at, then on to the nearest stack after it, ChainTargets in all, each ChainFalloff as hard as the one before */
+	ChainDamage,
+	/** Damage to every stack on the field that its Filter takes, friend or foe */
+	FieldDamage,
+	/** Damage to the stacks around the hex aimed at, out to Radius, but not on it */
+	RingDamage,
+	/** Raises the creatures a stack of its own lost, Power points of health of them, never more than it came onto the field with */
+	Raise,
+	/** Takes every spell off a stack, friend or foe */
+	Dispel,
+	/** Shakes the wall of a castle: WallParts parts of it, chosen at random, take Power damage each */
+	Earthquake,
+	/** Cast on the planet and never in a battle, as the developer asked on 2026-11-15: what it does is its Adventure (EHexAdventureSpell),
+	 *  done by UHexHeroes::CastAdventure */
+	Adventure,
+};
+
+/** What a spell cast on the planet does (EHexSpellKind::Adventure), as the developer asked on 2026-11-15 */
+UENUM()
+enum class EHexAdventureSpell : uint8
+{
+	None,
+	/** A boat on the free sea nearest the hero, within its Reach of cells */
+	SummonBoat,
+	/** The hero steps to a cell it may stand on within its Reach of cells, over whatever lies between, on its layer */
+	DimensionDoor,
+	/** The hero goes into a castle of its player that no hero guards: the nearest, or from Advanced of its school the one chosen */
+	TownPortal,
+	/** Explores the surface within its Reach of cells around the hero, from Expert of its school the whole of it */
+	ViewSurface,
+	/** Explores the passages of the underground within its Reach of cells around the cell of the hero, from Expert the whole of it */
+	ViewUnderground,
+	/** As DimensionDoor, a step to a cell it may stand on within its Reach of cells, as the developer asked on 2026-11-15 (5 cells for 2
+	 *  points of movement) */
+	Teleport,
+};
+
+/** A spell of the planet that steps the hero to a cell it chooses within its reach: Dimension door and Teleport */
+inline bool IsStepSpell(EHexAdventureSpell What) { return What == EHexAdventureSpell::DimensionDoor || What == EHexAdventureSpell::Teleport; }
+
+/** The four schools of magic, as the developer asked on 2026-11-15, each with its skill (Air, Earth, Fire and Water magic) */
+UENUM()
+enum class EHexSpellSchool : uint8
+{
+	Air,
+	Earth,
+	Fire,
+	Water,
+	Num UMETA(Hidden)
 };
 
 /** Which stacks a spell is cast on */
@@ -32,14 +82,51 @@ enum class EHexSpellTarget : uint8
 {
 	Enemy,
 	Friend,
-	/** Any hex of the field, for a spell over an area */
+	/** Any hex of the field, for a spell over an area or the whole field */
 	Hex,
+	/** A stack of either side */
+	Any,
+};
+
+/** Which creatures a spell that strikes many takes */
+UENUM()
+enum class EHexSpellFilter : uint8
+{
+	All,
+	/** The undead alone (Destroy undead, Animate dead) */
+	Undead,
+	/** The living alone (Death ripple, Resurrection) */
+	Living,
+};
+
+/** How a spell shows on the field: the Niagara system of its look (SpellEffects of DA_HexBattle) in its colors, unless it names one of its own */
+UENUM()
+enum class EHexSpellLook : uint8
+{
+	/** Flies from the hero to the stack and bursts there */
+	Missile,
+	/** Comes down from the sky onto the hex: lightning, a meteor */
+	Strike,
+	/** Bursts over the hex and around it */
+	Burst,
+	/** Spreads over the ground around the hex */
+	Ring,
+	/** Rises around the stack: what helps and heals */
+	Rise,
+	/** Falls over the stack: what harms */
+	Fall,
+	/** Over the whole field */
+	Field,
+	Num UMETA(Hidden)
 };
 
 /**
- *  A spell a hero casts in a battle, once a round, for its mana, as the developer chose on 2026-11-12: every hero knows the starter spells of
- *  DA_HexBattle until there is a mage guild. Its power is Power + PowerPerSpellPower times the Spell Power of the hero, and an effect lasts
- *  BaseRounds + RoundsPerSpellPower times it. The eight of MakeDefaultSpells and their numbers are Claude's
+ *  A spell a hero casts in a battle, once a round, for its mana. Since 2026-11-15, as the developer asked for the spells of Heroes III used
+ *  most, up to ten of each school, a hero knows the spells it learned in the mage guilds of castles (UHexCastles) and those its class starts
+ *  with, and the skill of its school takes mana off, makes it stronger and from Expert casts it on every stack of the side (bMassAtExpert).
+ *  Its power is Power + PowerPerSpellPower times the Spell Power of the hero, and an effect lasts BaseRounds + RoundsPerSpellPower times it.
+ *  Its look plays the Niagara system of its kind (EHexSpellLook). The forty of MakeDefaultSpells and their numbers are Claude's, after those
+ *  of Heroes III
  */
 USTRUCT(BlueprintType)
 struct FHexSpell
@@ -56,15 +143,25 @@ struct FHexSpell
 	FString Description;
 
 	UPROPERTY(EditAnywhere, Category="Spell")
+	EHexSpellSchool School = EHexSpellSchool::Air;
+
+	/** Its level, 1 to 5, the level of the mage guild that teaches it */
+	UPROPERTY(EditAnywhere, Category="Spell", meta=(ClampMin=1, ClampMax=5))
+	int32 Level = 1;
+
+	UPROPERTY(EditAnywhere, Category="Spell")
 	EHexSpellKind Kind = EHexSpellKind::Damage;
 
 	UPROPERTY(EditAnywhere, Category="Spell")
 	EHexSpellTarget Target = EHexSpellTarget::Enemy;
 
+	UPROPERTY(EditAnywhere, Category="Spell")
+	EHexSpellFilter Filter = EHexSpellFilter::All;
+
 	UPROPERTY(EditAnywhere, Category="Spell", meta=(ClampMin=0))
 	int32 ManaCost = 5;
 
-	/** The damage or the healing */
+	/** The damage, the healing or the health raised */
 	UPROPERTY(EditAnywhere, Category="Spell", meta=(ClampMin=0))
 	int32 Power = 10;
 
@@ -75,6 +172,25 @@ struct FHexSpell
 	UPROPERTY(EditAnywhere, Category="Spell", meta=(ClampMin=0, ClampMax=3))
 	int32 Radius = 0;
 
+	/** A chain: how many stacks it strikes, and how hard each after the first as a share of the one before */
+	UPROPERTY(EditAnywhere, Category="Spell", meta=(ClampMin=1, ClampMax=8))
+	int32 ChainTargets = 4;
+
+	UPROPERTY(EditAnywhere, Category="Spell", meta=(ClampMin=0, ClampMax=1))
+	float ChainFalloff = 0.5f;
+
+	/** An earthquake: how many parts of the wall it shakes */
+	UPROPERTY(EditAnywhere, Category="Spell", meta=(ClampMin=1, ClampMax=8))
+	int32 WallParts = 2;
+
+	/** From Expert of its school it is cast on every stack of the side it takes */
+	UPROPERTY(EditAnywhere, Category="Spell")
+	bool bMassAtExpert = false;
+
+	/** A heal that also takes the harmful spells off the stack */
+	UPROPERTY(EditAnywhere, Category="Spell")
+	bool bCure = false;
+
 	/** An effect: how long it lasts, in rounds */
 	UPROPERTY(EditAnywhere, Category="Spell|Effect", meta=(ClampMin=0))
 	int32 BaseRounds = 1;
@@ -82,7 +198,12 @@ struct FHexSpell
 	UPROPERTY(EditAnywhere, Category="Spell|Effect", meta=(ClampMin=0))
 	int32 RoundsPerSpellPower = 1;
 
-	/** What it changes: hexes of speed added, or the share of the speed kept (1 keeps it), Attack and Defense added */
+	/** It lasts the whole battle, and casting it again adds to it (Disrupting ray) */
+	UPROPERTY(EditAnywhere, Category="Spell|Effect")
+	bool bPermanent = false;
+
+	/** What it changes: hexes of speed added, or the share of the speed kept (1 keeps it), Attack and Defense added, and Attack only in melee
+	 *  or only for a shot */
 	UPROPERTY(EditAnywhere, Category="Spell|Effect")
 	int32 SpeedAdd = 0;
 
@@ -95,23 +216,133 @@ struct FHexSpell
 	UPROPERTY(EditAnywhere, Category="Spell|Effect")
 	int32 DefenseAdd = 0;
 
-	/** It deals the most damage it can, as a blessing on its weapons */
+	UPROPERTY(EditAnywhere, Category="Spell|Effect")
+	int32 MeleeAttackAdd = 0;
+
+	UPROPERTY(EditAnywhere, Category="Spell|Effect")
+	int32 RangedAttackAdd = 0;
+
+	/** Morale and luck added */
+	UPROPERTY(EditAnywhere, Category="Spell|Effect")
+	int32 MoraleAdd = 0;
+
+	UPROPERTY(EditAnywhere, Category="Spell|Effect")
+	int32 LuckAdd = 0;
+
+	/** It deals the most damage it can, as a blessing on its weapons, or the least, as a curse */
 	UPROPERTY(EditAnywhere, Category="Spell|Effect")
 	bool bMaxDamage = false;
 
-	/** The share of the damage it takes that a ward turns aside */
+	UPROPERTY(EditAnywhere, Category="Spell|Effect")
+	bool bMinDamage = false;
+
+	/** The share of the damage it takes that a ward turns aside: of any, of a strike, of a shot */
 	UPROPERTY(EditAnywhere, Category="Spell|Effect", meta=(ClampMin=0, ClampMax=0.95))
 	float DamageTakenCut = 0.0f;
 
-	/** The color of the light the spell shows on the field */
+	UPROPERTY(EditAnywhere, Category="Spell|Effect", meta=(ClampMin=0, ClampMax=0.95))
+	float MeleeTakenCut = 0.0f;
+
+	UPROPERTY(EditAnywhere, Category="Spell|Effect", meta=(ClampMin=0, ClampMax=0.95))
+	float RangedTakenCut = 0.0f;
+
+	/** It wards off the spells of a school: their damage is cut by WardShare */
+	UPROPERTY(EditAnywhere, Category="Spell|Effect")
+	bool bWardsSchool = false;
+
+	UPROPERTY(EditAnywhere, Category="Spell|Effect")
+	EHexSpellSchool WardSchool = EHexSpellSchool::Air;
+
+	UPROPERTY(EditAnywhere, Category="Spell|Effect", meta=(ClampMin=0, ClampMax=1))
+	float WardShare = 0.5f;
+
+	/** No spell takes it after this one, until it runs out */
+	UPROPERTY(EditAnywhere, Category="Spell|Effect")
+	bool bSpellImmune = false;
+
+	/** It stands blind, losing its turns, until it is struck, and does not strike back (Blind) */
+	UPROPERTY(EditAnywhere, Category="Spell|Effect")
+	bool bBlind = false;
+
+	/** It forgets how to shoot (Forgetfulness) */
+	UPROPERTY(EditAnywhere, Category="Spell|Effect")
+	bool bNoShooting = false;
+
+	/** It strikes back this many more times a round */
+	UPROPERTY(EditAnywhere, Category="Spell|Effect")
+	int32 RetaliationsAdd = 0;
+
+	/** It turns this share of the damage of a strike back on who struck it (Fire shield) */
+	UPROPERTY(EditAnywhere, Category="Spell|Effect", meta=(ClampMin=0, ClampMax=1))
+	float ReflectShare = 0.0f;
+
+	/** This share of its Defense goes into its Attack (Frenzy) */
+	UPROPERTY(EditAnywhere, Category="Spell|Effect", meta=(ClampMin=0, ClampMax=2))
+	float FrenzyShare = 0.0f;
+
+	/** A spell of the planet (Kind Adventure): what it does, how far it reaches in cells, and so many more a level of the skill of its school
+	 *  (Basic 1 to Expert 3), the points of movement it takes, and how often a hero casts it a day, 0 for as often as its mana lets it */
+	UPROPERTY(EditAnywhere, Category="Spell|Adventure")
+	EHexAdventureSpell Adventure = EHexAdventureSpell::None;
+
+	UPROPERTY(EditAnywhere, Category="Spell|Adventure", meta=(ClampMin=0))
+	int32 Reach = 0;
+
+	UPROPERTY(EditAnywhere, Category="Spell|Adventure", meta=(ClampMin=0))
+	int32 ReachPerLevel = 0;
+
+	UPROPERTY(EditAnywhere, Category="Spell|Adventure", meta=(ClampMin=0))
+	float MovementCost = 0.0f;
+
+	UPROPERTY(EditAnywhere, Category="Spell|Adventure", meta=(ClampMin=0))
+	int32 CastsPerDay = 0;
+
+	/** Its picture in the spell book, T_Spell<Id> of generate_ui_icons.py */
+	UPROPERTY(EditAnywhere, Category="Spell|Look")
+	TSoftObjectPtr<UTexture2D> Icon;
+
+	UPROPERTY(EditAnywhere, Category="Spell|Look")
+	EHexSpellLook Look = EHexSpellLook::Missile;
+
+	/** A system of its own in place of that of its look, which takes the user parameters Color and Size too */
+	UPROPERTY(EditAnywhere, Category="Spell|Look")
+	TSoftObjectPtr<UNiagaraSystem> Effect;
+
+	/** The color of the light and the effect of the spell on the field, and how large its effect is */
 	UPROPERTY(EditAnywhere, Category="Spell|Look")
 	FLinearColor Color = FLinearColor(1.0f, 0.6f, 0.2f, 1.0f);
 
+	UPROPERTY(EditAnywhere, Category="Spell|Look", meta=(ClampMin=0.1, ClampMax=10))
+	float EffectSize = 1.0f;
+
+	/** It helps the side that casts it; Cure takes off only what does not */
 	bool IsHelpful() const { return Target == EHexSpellTarget::Friend; }
+
+	/** It is cast on the planet, never in a battle */
+	bool IsAdventure() const { return Kind == EHexSpellKind::Adventure; }
+
+	/** It strikes with damage */
+	bool IsDamage() const
+	{
+		return Kind == EHexSpellKind::Damage || Kind == EHexSpellKind::AreaDamage || Kind == EHexSpellKind::ChainDamage || Kind == EHexSpellKind::FieldDamage
+			|| Kind == EHexSpellKind::RingDamage;
+	}
+
+	/** It needs a stack where it is aimed */
+	bool NeedsUnit() const { return Target != EHexSpellTarget::Hex; }
+
+	/** Whether its filter takes a creature */
+	bool Takes(bool bUndead) const { return Filter == EHexSpellFilter::All || (Filter == EHexSpellFilter::Undead) == bUndead; }
 };
 
-/** Returns the starter spells: a bolt, a blast, mending, haste, slowness, a blessing, weakness and a ward, with numbers of Claude's */
+/** Returns the spells of the four schools, ten of each, with numbers of Claude's after those of Heroes III, and their pictures */
 TArray<FHexSpell> MakeDefaultSpells();
+
+/** Returns the Niagara system of each look of a spell, NS_HexSpell<Look> in /Game/HexPlanet/Battle/Spells */
+TArray<TSoftObjectPtr<UNiagaraSystem>> MakeDefaultSpellEffects();
+
+/** Returns the name of a school of magic */
+const TCHAR* GetSpellSchoolName(EHexSpellSchool School);
 
 /** An animation of a unit on the field and how fast it plays */
 USTRUCT(BlueprintType)
@@ -293,7 +524,26 @@ struct FHexNeutralGeneration
 	/** And on open ground anywhere, OpenPerThousand to a thousand cells a hero walks, as the developer found too few on 2026-11-12; the
 	 *  underground has UndergroundDensity times as many of both, as its passages are few and narrow */
 	UPROPERTY(EditAnywhere, Category="Neutrals", meta=(ClampMin=0))
-	float OpenPerThousand = 10.0f;
+	float OpenPerThousand = 20.0f;
+
+	/** Stacks of the creatures of the sea (FHexFaction::bSea) on the sea of the surface, to a thousand cells of it, as the developer asked
+	 *  on 2026-11-15, of a tier SeaTierMin to MaxTier by chance */
+	UPROPERTY(EditAnywhere, Category="Neutrals", meta=(ClampMin=0))
+	float SeaPerThousand = 8.0f;
+
+	UPROPERTY(EditAnywhere, Category="Neutrals", meta=(ClampMin=0, ClampMax=6))
+	int32 SeaTierMin = 1;
+
+	/** A stack on open ground with nothing worth guarding within IdleReach cells (a site of any kind) is weaker, as the developer asked on
+	 *  2026-11-15: IdleTierDrop tiers lower and IdleWeeksShare of its creatures */
+	UPROPERTY(EditAnywhere, Category="Neutrals", meta=(ClampMin=0))
+	int32 IdleReach = 3;
+
+	UPROPERTY(EditAnywhere, Category="Neutrals", meta=(ClampMin=0, ClampMax=6))
+	int32 IdleTierDrop = 1;
+
+	UPROPERTY(EditAnywhere, Category="Neutrals", meta=(ClampMin=0.05, ClampMax=1))
+	float IdleWeeksShare = 0.5f;
 
 	UPROPERTY(EditAnywhere, Category="Neutrals", meta=(ClampMin=0))
 	float UndergroundDensity = 3.0f;
@@ -1291,6 +1541,55 @@ public:
 	UPROPERTY(EditAnywhere, Category="Look|Siege")
 	TSoftObjectPtr<UMaterialInterface> MoatMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/HexPlanet/Battle/M_HexBattleWater.M_HexBattleWater")));
 
+	/** A battle at sea, as the developer asked on 2026-11-15: when a hero in a boat attacks or is attacked the field is the deck of a ship of planks
+	 *  (BridgeWoodTexture, SeaDeckColor) SeaDeckMargin hexes wider than the field, its hull SeaHullDepth deep in SeaHullColor, with rails
+	 *  SeaRailHeight high and a mast SeaMastHeight high at each end, on a sea SeaDeckLift below the deck (SeaMaterial, M_HexBattleSea of
+	 *  create_battle_assets.py sea, which takes the Sea* values by name), and no obstacles, hills, forest or rocks */
+	UPROPERTY(EditAnywhere, Category="Look|Sea")
+	TSoftObjectPtr<UMaterialInterface> SeaMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/HexPlanet/Battle/M_HexBattleSea.M_HexBattleSea")));
+
+	UPROPERTY(EditAnywhere, Category="Look|Sea")
+	FLinearColor SeaColor = FLinearColor(0.035f, 0.13f, 0.18f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Look|Sea")
+	FLinearColor SeaDeepColor = FLinearColor(0.01f, 0.04f, 0.07f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Look|Sea", meta=(ClampMin=1))
+	float SeaWaveScale = 900.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Sea", meta=(ClampMin=0))
+	float SeaWaveSpeed = 0.025f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Sea", meta=(ClampMin=0))
+	float SeaWaveHeight = 5.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Sea", meta=(ClampMin=0))
+	float SeaNormalStrength = 2.5f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Sea", meta=(ClampMin=0, ClampMax=1))
+	float SeaRoughness = 0.18f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Sea", meta=(ClampMin=0))
+	float SeaDeckLift = 70.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Sea", meta=(ClampMin=0))
+	float SeaDeckMargin = 2.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Sea", meta=(ClampMin=0))
+	float SeaHullDepth = 60.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Sea", meta=(ClampMin=0))
+	float SeaRailHeight = 22.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Sea", meta=(ClampMin=0))
+	float SeaMastHeight = 620.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Sea")
+	FLinearColor SeaDeckColor = FLinearColor(0.85f, 0.72f, 0.55f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Look|Sea")
+	FLinearColor SeaHullColor = FLinearColor(0.42f, 0.27f, 0.15f, 1.0f);
+
 	UPROPERTY(EditAnywhere, Category="Look|Siege", meta=(ClampMin=0.1))
 	float BridgeWidth = 0.8f;
 
@@ -1331,9 +1630,48 @@ public:
 	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=0))
 	float ExperiencePerHealth = 1.0f;
 
-	/** The spells every hero knows (MakeDefaultSpells when empty) */
+	/** The spells of the four schools, which heroes learn in the mage guilds and start with by their class (MakeDefaultSpells when empty) */
 	UPROPERTY(EditAnywhere, Category="Spells")
 	TArray<FHexSpell> Spells;
+
+	/** Which version of MakeDefaultSpells Spells holds; an older one is made again when the asset loads */
+	UPROPERTY()
+	int32 SpellsVersion = 0;
+
+	/** The Niagara system of each look of a spell, in the order of EHexSpellLook (Missile, Strike, Burst, Ring, Rise, Fall, Field), each
+	 *  with the user parameters Color, a linear color, and Size, a float; MakeDefaultSpellEffects names them */
+	UPROPERTY(EditAnywhere, Category="Spells|Look")
+	TArray<TSoftObjectPtr<UNiagaraSystem>> SpellEffects;
+
+	/** A missile of a spell flies this many units a second, and the effect of a spell plays this long before what it does shows */
+	UPROPERTY(EditAnywhere, Category="Spells|Look", meta=(ClampMin=100))
+	float SpellMissileSpeed = 1400.0f;
+
+	UPROPERTY(EditAnywhere, Category="Spells|Look", meta=(ClampMin=0.1, ClampMax=5))
+	float SpellTime = 1.0f;
+
+	/** The Size of an effect is this many units a hex radius of the spell, at least one hex */
+	UPROPERTY(EditAnywhere, Category="Spells|Look", meta=(ClampMin=0.01))
+	float SpellEffectScale = 1.0f;
+
+	/** A hero that leads a side stands beside the field, as the developer asked on 2026-11-15: the rider of the heroes, this many times its
+	 *  size on the map, this many hexes out from the first column (the attacker) or the last (the defender), at this row from the top, on the
+	 *  other side of the field from the catapults; a click on it opens its spell book */
+	UPROPERTY(EditAnywhere, Category="Look|Hero", meta=(ClampMin=0.1))
+	float HeroFigureScale = 1.15f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Hero")
+	float HeroFigureOut = 1.2f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Hero")
+	float HeroFigureRow = 1.5f;
+
+	/** How near a ray of the cursor comes to the middle of the hero, in hex radii, and up to how high it, to pick it */
+	UPROPERTY(EditAnywhere, Category="Look|Hero", meta=(ClampMin=0.1))
+	float HeroPickRadius = 0.9f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Hero", meta=(ClampMin=0.1))
+	float HeroPickHeight = 2.4f;
 
 	/** The game fights for a side: it casts a spell when it is worth this much more than its mana of the power of the stacks, and a stack that
 	 *  can reach no enemy waits for them while it is a shooter or the enemy has shooters fewer than AiAdvanceShooters */
@@ -1511,6 +1849,14 @@ public:
 	UPROPERTY(EditAnywhere, Category="Look|Units")
 	FLinearColor OutlineEnemyColor = FLinearColor(1.0f, 0.45f, 0.3f, 1.0f);
 
+	/** The unit whose turn it is has an outline too, lighter than that of the unit under the cursor, as the developer asked on 2026-11-15:
+	 *  ActiveOutlineWidthShare of its width, its color ActiveOutlineShade as bright */
+	UPROPERTY(EditAnywhere, Category="Look|Units", meta=(ClampMin=0.05, ClampMax=1))
+	float ActiveOutlineWidthShare = 0.7f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Units", meta=(ClampMin=0, ClampMax=1))
+	float ActiveOutlineShade = 0.8f;
+
 	/** The material of the units, which takes their tint and the color of their side */
 	UPROPERTY(EditAnywhere, Category="Look|Units")
 	TSoftObjectPtr<UMaterialInterface> UnitMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/HexPlanet/Battle/M_HexBattleUnit.M_HexBattleUnit")));
@@ -1643,6 +1989,17 @@ public:
 
 	UPROPERTY(EditAnywhere, Category="Look|Neutrals", meta=(ClampMin=1, ClampMax=5))
 	int32 NeutralMaxFigures = 3;
+
+	/** A stack on the sea rises and falls on the waves NeutralSeaBob units, NeutralSeaBobSpeed times a second, and rolls NeutralSeaRoll degrees,
+	 *  each figure at its own pace, as the developer asked on 2026-11-15 */
+	UPROPERTY(EditAnywhere, Category="Look|Neutrals", meta=(ClampMin=0))
+	float NeutralSeaBob = 2.5f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Neutrals", meta=(ClampMin=0))
+	float NeutralSeaBobSpeed = 0.45f;
+
+	UPROPERTY(EditAnywhere, Category="Look|Neutrals", meta=(ClampMin=0))
+	float NeutralSeaRoll = 6.0f;
 
 	/** Returns the look of a creature, or null */
 	const FHexUnitLook* FindLook(FName Creature) const;

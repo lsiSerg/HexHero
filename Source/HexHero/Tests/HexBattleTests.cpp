@@ -197,11 +197,11 @@ bool FHexBattleSpellTest::RunTest(const FString& Parameters)
 	Setup.Sides[0].Mana = 20;
 	FHexBattle Battle;
 	Battle.Start(Setup, Rules.Castles, Rules.Battle);
-	const int32 Bolt = Rules.Battle->FindSpell(TEXT("Bolt"));
+	const int32 Bolt = Rules.Battle->FindSpell(TEXT("MagicArrow"));
 	const int32 Haste = Rules.Battle->FindSpell(TEXT("Haste"));
 	const int32 Enemy = 1 - Battle.GetActive();
 	TestTrue(TEXT("the bolt is cast"), Battle.Cast(0, Bolt, Battle.GetUnits()[Enemy].Hex));
-	// 15 + 12 at Spell Power 1 into 10 of 10: two killed and the top one wounded
+	// 10 + 10 at Spell Power 1 into 10 of 10: two killed
 	TestEqual(TEXT("27 damage kills two"), Battle.GetUnits()[Enemy].Count, 8);
 	TestEqual(TEXT("mana spent"), Battle.GetMana(0), 20 - Rules.Battle->Spells[Bolt].ManaCost);
 	TestFalse(TEXT("one spell a round"), Battle.CanCast(0, Haste, Battle.GetUnits()[Battle.GetActive()].Hex));
@@ -546,6 +546,82 @@ bool FHexBattleCatapultTest::RunTest(const FString& Parameters)
 		const TArray<FHexCoord> Path = Flight.FindPath(Mover, Goal);
 		TestEqual(TEXT("over the ground, a step a hex"), Path.Num(), Start.DistanceTo(Goal) + 1);
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHexBattleMagicTest, "HexHero.Battle.Magic",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FHexBattleMagicTest::RunTest(const FString& Parameters)
+{
+	// the spells of the four schools of 2026-11-15: what a hero knows, what its skills take off the mana, a chain that grows weaker, a spell
+	// on every stack at Expert, and blindness
+	FTestRules Rules;
+	Rules.Stats(0, 0).Speed = 20;
+	Rules.Stats(0, 0).Health = 10;
+	Rules.Stats(0, 1).Health = 10;
+	FHexBattleSetup Setup;
+	Setup.bObstacles = false;
+	Setup.Sides[0].Stacks = {FHexStack{0, 0, false, 10}, FHexStack{0, 1, false, 10}};
+	Setup.Sides[1].Stacks = {FHexStack{0, 1, false, 20}, FHexStack{0, 1, false, 20}, FHexStack{0, 1, false, 20}};
+	Setup.Sides[0].HeroId = 1;
+	Setup.Sides[0].SpellPower = 1;
+	Setup.Sides[0].Mana = 100;
+	Setup.Sides[0].bAllSpells = false;
+	const int32 Chain = Rules.Battle->FindSpell(TEXT("ChainLightning"));
+	const int32 Haste = Rules.Battle->FindSpell(TEXT("Haste"));
+	const int32 IceBolt = Rules.Battle->FindSpell(TEXT("IceBolt"));
+	const int32 Blind = Rules.Battle->FindSpell(TEXT("Blind"));
+	TestTrue(TEXT("the spells are there"), Chain != INDEX_NONE && Haste != INDEX_NONE && IceBolt != INDEX_NONE && Blind != INDEX_NONE);
+	Setup.Sides[0].KnownSpells = {Chain, Haste, IceBolt, Blind};
+	Setup.Sides[0].SchoolManaCut[int32(EHexSpellSchool::Water)] = 0.25f;
+	Setup.Sides[0].bSchoolMass[int32(EHexSpellSchool::Air)] = true;
+
+	FHexBattle Battle;
+	Battle.Start(Setup, Rules.Castles, Rules.Battle);
+	TestEqual(TEXT("Water magic takes a quarter of the mana of the ice bolt off"), Battle.GetManaCost(0, IceBolt), 6);
+	TestFalse(TEXT("a spell it does not know"), Battle.KnowsSpell(0, Rules.Battle->FindSpell(TEXT("Fireball"))));
+	// the chain: the first enemy takes 65, the next half of it, the third a quarter
+	int32 First = INDEX_NONE;
+	for (int32 Index = 0; Index < Battle.GetUnits().Num(); ++Index)
+	{
+		if (Battle.GetUnits()[Index].Side == 1)
+		{
+			First = Index;
+			break;
+		}
+	}
+	TestTrue(TEXT("the chain is cast"), Battle.Cast(0, Chain, Battle.GetUnits()[First].Hex));
+	TArray<int32> Lost;
+	for (const FHexBattleUnit& Unit : Battle.GetUnits())
+	{
+		if (Unit.Side == 1)
+		{
+			Lost.Add(Unit.StartCount * Unit.Stats.Health - Unit.GetTotalHealth());
+		}
+	}
+	Lost.Sort([](int32 A, int32 B) { return A > B; });
+	TestEqual(TEXT("the first struck takes the whole power"), Lost[0], 65);
+	TestEqual(TEXT("the second half of it"), Lost[1], 33);
+	TestEqual(TEXT("the third a quarter"), Lost[2], 16);
+
+	// the next round: Haste at Expert of air on every stack of the side
+	FHexBattle Second;
+	Second.Start(Setup, Rules.Castles, Rules.Battle);
+	TestTrue(TEXT("haste is cast"), Second.Cast(0, Haste, Second.GetUnits()[Second.GetActive()].Hex));
+	int32 Hasted = 0;
+	for (const FHexBattleUnit& Unit : Second.GetUnits())
+	{
+		Hasted += Unit.Side == 0 && Second.GetSpeed(Unit) == Unit.Stats.Speed + 3 ? 1 : 0;
+	}
+	TestEqual(TEXT("every stack of its own is hasted"), Hasted, 2);
+
+	// a blind stack strikes back no more
+	FHexBattle Third;
+	Third.Start(Setup, Rules.Castles, Rules.Battle);
+	TestTrue(TEXT("blindness is cast"), Third.Cast(0, Blind, Third.GetUnits()[First].Hex));
+	TestEqual(TEXT("the blind strike back no more"), Third.GetUnits()[First].RetaliationsLeft, 0);
+	TestTrue(TEXT("it is blind"), Third.HasEffect(Third.GetUnits()[First], [](const FHexSpell& Spell) { return Spell.bBlind; }));
 	return true;
 }
 

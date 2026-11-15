@@ -43,7 +43,43 @@ namespace HexCheats
 	/** Logs them and shows that they are in the log */
 	void LogHelp(const UHexHeroes* Heroes = nullptr);
 
+	/** The kinds of things marked on the map with a line up and a label, under the fog of war too (hex.Cheat enemies and hex.Cheat show, as the
+	 *  developer asked on 2026-11-15 for the artifacts, resources, mines, heroes and castles), a bit each, drawn by SHexEdgeMarkers */
+	enum EMarkKind : uint32
+	{
+		/** The neutral stacks and the heroes of other players */
+		MarkEnemies = 1 << 0,
+		/** The artifacts lying on the map */
+		MarkArtifacts = 1 << 1,
+		/** The piles of resources and the chests */
+		MarkResources = 1 << 2,
+		/** The mines and mills */
+		MarkMines = 1 << 3,
+		/** Every hero, the person's too */
+		MarkHeroes = 1 << 4,
+		/** Every castle */
+		MarkCastles = 1 << 5,
+		/** The boats nobody sails and the shipyards */
+		MarkBoats = 1 << 6,
+		/** The neutral stacks alone */
+		MarkNeutrals = 1 << 7,
+	};
+	inline constexpr uint32 AllMarks = (1 << 8) - 1;
+
+	uint32 GetShownMarks();
+	void SetShownMarks(uint32 Kinds);
+
+	/** How far in cells from the point the camera looks at the marks of hex.Cheat show reach, as the developer asked on 2026-11-15; 0, the
+	 *  default, the whole layer shown */
+	int32 GetShownMarksReach();
+	void SetShownMarksReach(int32 Cells);
+
+	/** The bit of a kind by its name (enemies, artifacts, resources, mines, heroes, castles, boats, neutrals, or the singular), 0 for none */
+	uint32 FindMarkKind(const FString& Name);
+
+	/** The names of the kinds of a set of bits, joined */
+	FString GetMarkKindNames(uint32 Kinds, const TCHAR* Separator);
+
 	/** Whether the stacks and heroes of the other players are marked, even under the fog of war (hex.Cheat enemies) */
 	bool AreEnemiesMarked();
-	void SetEnemiesMarked(bool bMarked);
 }

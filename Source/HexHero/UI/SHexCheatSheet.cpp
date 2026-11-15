@@ -28,8 +28,25 @@ namespace
 	constexpr float ColumnGap = 48.0f;
 }
 
+FReply SHexCheatSheet::OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)
+{
+	// Escape, or Ctrl+H, which shows it, closes it; no other key reaches the game meanwhile
+	if (InKeyEvent.GetKey() == EKeys::Escape || (InKeyEvent.GetKey() == EKeys::H && InKeyEvent.IsControlDown()))
+	{
+		OnClose.ExecuteIfBound();
+	}
+	return FReply::Handled();
+}
+
+FReply SHexCheatSheet::OnMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
+{
+	OnClose.ExecuteIfBound();
+	return FReply::Handled();
+}
+
 void SHexCheatSheet::Construct(const FArguments& InArgs)
 {
+	OnClose = InArgs._OnClose;
 	const FSlateBrush* White = FCoreStyle::Get().GetBrush(TEXT("GenericWhiteBox"));
 	SAssignNew(List, SVerticalBox);
 	Refresh(nullptr);

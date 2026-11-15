@@ -1382,7 +1382,7 @@ bool UHexPlanetPainter::GenerateSites(bool bClear)
 	}
 	else
 	{
-		Sites->Generate(Report);
+		Sites->Generate(Report, nullptr, SiteAmount, nullptr, false, -1, SiteClusterShare);
 	}
 	Step.NewSites = Sites->MakeLines();
 	if (GEngine)
@@ -1396,6 +1396,24 @@ bool UHexPlanetPainter::GenerateSites(bool bClear)
 	AddStep(MoveTemp(Step));
 	UpdateSavedState();
 	return true;
+}
+
+bool UHexPlanetPainter::MakeVaults(int32 Count)
+{
+	UHexHeroes* Heroes = Planet ? Planet->GetHeroes() : nullptr;
+	UHexSites* Sites = Heroes ? Heroes->GetSites() : nullptr;
+	if (bPainting || !Sites || Heroes->IsPlaying())
+	{
+		return false;
+	}
+	FString Report;
+	const int32 Made = Sites->MakeVaults(Count, int32(FPlatformTime::Cycles() & 0xffff), Report);
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(INDEX_NONE, 6.0f, FColor::White, FString::Printf(TEXT("Sites: %s (no step of Undo)"), *Report));
+	}
+	UpdateSavedState();
+	return Made > 0;
 }
 
 void UHexPlanetPainter::PaintEntrance(int32 Cell)

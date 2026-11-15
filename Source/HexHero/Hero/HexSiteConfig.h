@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
+#include "HexArtifactConfig.h"
 #include "HexSiteConfig.generated.h"
 
 class UTexture2D;
@@ -52,6 +53,16 @@ enum class EHexSiteType : uint8
 	Pile,
 	/** Gives MillDays of the daily income of the mine of a resource of its own, once a week, to whoever visits it */
 	Mill,
+	/** A chest, taken as a pile by the hero whose way ends on it, which chooses AmountMin to AmountMax gold, in steps of 500, or that much
+	 *  less ChestExperienceLess experience, as the developer asked on 2026-11-15 */
+	Chest,
+	/** An artifact that lies on the map, as the developer asked on 2026-11-15, of a rank between ArtifactRankMin and ArtifactRankMax, taken
+	 *  as a pile, often guarded (Guards) */
+	Artifact,
+	/** A shipyard on a coast, a building visited from beside, which builds a boat for BoatCost onto the sea beside it */
+	Shipyard,
+	/** A boat that lies on the sea at a coast, which a hero a person plays goes aboard (UHexHeroes::GetSeaStep) */
+	Boat,
 };
 
 /**
@@ -95,10 +106,32 @@ struct FHexSiteKind
 	UPROPERTY(EditAnywhere, Category="Site", meta=(ClampMin=0))
 	int32 AmountMax = 0;
 
+	/** The ranks of the artifact of a kind of Artifact */
+	UPROPERTY(EditAnywhere, Category="Site")
+	EHexArtifactRank ArtifactRankMin = EHexArtifactRank::Treasure;
+
+	UPROPERTY(EditAnywhere, Category="Site")
+	EHexArtifactRank ArtifactRankMax = EHexArtifactRank::Minor;
+
+	/** A chest that lies on the sea, a wreck, as the developer asked on 2026-11-15 for artifacts, resources or experience on the water: a
+	 *  hero in a boat whose way ends on it takes it */
+	UPROPERTY(EditAnywhere, Category="Site")
+	bool bAtSea = false;
+
+	/** The share of such chests that hold an artifact in place of their gold, by a hash of each; below 0 ChestArtifactShare of the config */
+	UPROPERTY(EditAnywhere, Category="Site", meta=(ClampMax=1))
+	float ArtifactShare = -1.0f;
+
 	bool IsMine() const { return Type == EHexSiteType::Mine; }
 
-	/** A building fills its cell, so no hero enters it; a pile does not */
-	bool FillsCell() const { return Type != EHexSiteType::Pile; }
+	/** A building fills its cell, so no hero enters it; a pile, a chest, an artifact or a boat does not */
+	bool FillsCell() const { return Type == EHexSiteType::Mine || Type == EHexSiteType::Mill || Type == EHexSiteType::Shipyard; }
+
+	/** It lies on its cell and is taken once, by the hero whose way ends there */
+	bool IsPickup() const { return Type == EHexSiteType::Pile || Type == EHexSiteType::Chest || Type == EHexSiteType::Artifact; }
+
+	/** It stands on the sea, not on ground */
+	bool IsAtSea() const { return Type == EHexSiteType::Boat || bAtSea; }
 
 	/** Its mesh, or none for the mesh of its type in the config; import_planet_sites.py gives a kind without one the mesh named after it,
 	 *  SM_Planet<Id>, as each pile has */
@@ -131,6 +164,10 @@ struct FHexSiteGuardRule
 	/** How many weeks of the growth of its dwelling the guard counts, a fifth more or less */
 	UPROPERTY(EditAnywhere, Category="Guard", meta=(ClampMin=0))
 	float Weeks = 1.0f;
+
+	/** The faction of the guard by its Id, as the creatures of the sea that guard a wreck; none for any faction of the land */
+	UPROPERTY(EditAnywhere, Category="Guard")
+	FName Faction;
 };
 
 /** Returns the guards of the sites a config has when it holds none: every rare mine and gold mine, a third of the sawmills and quarries,
@@ -213,6 +250,15 @@ struct FHexSiteGeneration
 	/** A cell that holds a cover, a decor or an object placed by hand takes no site, so none stands in a meadow in flower or on bones */
 	UPROPERTY(EditAnywhere, Category="Generation")
 	bool bAvoidObjects = true;
+
+	/** Piles together, as the developer asked on 2026-11-15: this share of the piles scattered has 1 to PileClusterMax more piles of any
+	 *  resource on the cells around it, which stand side by side though Spacing keeps them from the other sites; the Mines tab of the palette
+	 *  sets the share for a press of Generate */
+	UPROPERTY(EditAnywhere, Category="Generation", meta=(ClampMin=0, ClampMax=1))
+	float PileClusterChance = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category="Generation", meta=(ClampMin=1, ClampMax=6))
+	int32 PileClusterMax = 3;
 };
 
 /** Returns the resources and the kinds of sites a config has when it holds none, as the developer's document of 2026-11-11 gives them */
@@ -322,6 +368,57 @@ public:
 	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=0))
 	int32 MillDays = 3;
 
+	/** A chest gives its gold, or that much less this much experience, as in Heroes III */
+	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=0))
+	int32 ChestExperienceLess = 500;
+
+	/** The share of chests that hold an artifact of the lowest two ranks in place of gold, by a hash of the chest */
+	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=0, ClampMax=1))
+	float ChestArtifactShare = 0.25f;
+
+	/** What a shipyard asks for a boat, by the Ids of the resources */
+	UPROPERTY(EditAnywhere, Category="Rules")
+	TMap<FName, int32> BoatCost;
+
+	/** Shipyards and boats the generation puts on the coasts, to a thousand cells of the surface beside the sea a hero can stand on */
+	UPROPERTY(EditAnywhere, Category="Generation", meta=(ClampMin=0))
+	float ShipyardsPerThousandCoast = 6.0f;
+
+	UPROPERTY(EditAnywhere, Category="Generation", meta=(ClampMin=0))
+	float BoatsPerThousandCoast = 8.0f;
+
+	/** Wrecks (FHexSiteKind::bAtSea) the generation puts on the sea of the surface, to a thousand cells of it, each WreckSpacing cells from
+	 *  any other site */
+	UPROPERTY(EditAnywhere, Category="Generation", meta=(ClampMin=0))
+	float WrecksPerThousandSea = 12.0f;
+
+	/** Piles that float (FHexSiteKind::bAtSea of a pile), timber and cargo, to a thousand cells of the sea of the surface, FlotsamSpacing
+	 *  cells from any other site, as the developer found too little on the water on 2026-11-15 */
+	UPROPERTY(EditAnywhere, Category="Generation", meta=(ClampMin=0))
+	float FlotsamPerThousandSea = 28.0f;
+
+	UPROPERTY(EditAnywhere, Category="Generation", meta=(ClampMin=1, ClampMax=20))
+	int32 FlotsamSpacing = 2;
+
+	UPROPERTY(EditAnywhere, Category="Generation", meta=(ClampMin=1, ClampMax=20))
+	int32 WreckSpacing = 3;
+
+	/** A pentagon of land, of the twelve, holds a gold mine where closing it cuts no way, else a great artifact, guarded by PentagonGuard, as
+	 *  the developer asked on 2026-11-15 ("в пентагони якщо там суша - поставити потужний ресурс та потужну охорону") */
+	UPROPERTY(EditAnywhere, Category="Generation")
+	FName PentagonKind = TEXT("RichGoldMine");
+
+	UPROPERTY(EditAnywhere, Category="Generation")
+	FName PentagonFallbackKind = TEXT("GreatArtifact");
+
+	UPROPERTY(EditAnywhere, Category="Rules")
+	FHexSiteGuardRule PentagonGuard;
+
+	/** Which version of MakeDefaultSiteShares and of the kinds the config holds; PostLoad brings an older one up to date, so the chests and
+	 *  the richer generation of 2026-11-15 come in */
+	UPROPERTY()
+	int32 SitesVersion = 0;
+
 	/** Scale of the meshes */
 	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=0.1))
 	float MineScale = 1.3f;
@@ -331,6 +428,16 @@ public:
 
 	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=0.1))
 	float MillScale = 1.5f;
+
+	/** Scale of a boat that lies on the sea, and the glow of an artifact on the map and of a great one */
+	UPROPERTY(EditAnywhere, Category="Look", meta=(ClampMin=0.1))
+	float BoatScale = 3.0f;
+
+	UPROPERTY(EditAnywhere, Category="Look")
+	FLinearColor ArtifactColor = FLinearColor(1.0f, 0.72f, 0.2f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Look")
+	FLinearColor GreatArtifactColor = FLinearColor(0.7f, 0.3f, 1.0f, 1.0f);
 
 	/** Color of the flag of a mine nobody owns */
 	UPROPERTY(EditAnywhere, Category="Look")

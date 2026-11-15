@@ -11,6 +11,7 @@ while it still holds their old values, so tuning by hand stays.
 
 import json
 import os
+import sys
 
 import unreal
 
@@ -85,6 +86,14 @@ SETS = [
      'counts': [1], 'scale': (1.3, 1.8), 'giant': (0.0, 1.0), 'spacing': 10.0, 'reach': 0.5, 'min_up': 0.6, 'align': 0.5, 'tilt': 3.0,
      'sink': 0.5, 'shadow': False, 'cull': 3000.0,
      'variants': [('GTM', ['Stump_0'], 0.0, 1.0, 1.0, 0.005), ('N', ['Stump_0'], 0.8, 1.0, 1.0, 0.004)]},
+    # a single tree standing in the open, as the developer asked on 2026-11-15 for lone trees on a map too empty; last of the surface, so the
+    # indices of the kinds in objects.json stay
+    {'id': 'LoneTree', 'name': 'Lone tree', 'order': 110, 'color': (0.15, 0.4, 0.12), 'layer': 'decor', 'blocks': False, 'levels': [0, 1],
+     'counts': [1], 'scale': (1.2, 1.7), 'giant': (0.08, 1.4), 'spacing': 10.0, 'reach': 0.45, 'min_up': 0.7, 'align': 0.05, 'tilt': 2.0,
+     'sink': 1.0, 'shadow': True, 'cull': 6000.0,
+     'variants': [('G', ['Broadleaf_0', 'Broadleaf_1', 'Broadleaf_2', 'Oak_0', 'Birch_0'], 0.0, 1.0, 1.0, 0.04), ('N', TREES['N'], 0.85, 0.95, 1.0, 0.03),
+                  ('T', TREES['T'], 0.0, 0.85, 1.0, 0.035), ('M', ['Willow_0', 'Snag_0', 'Birch_1'], 0.0, 0.9, 1.0, 0.03), ('P', TREES['P'], 0.0, 0.95, 1.0, 0.035),
+                  ('D', TREES['D'], 0.0, 0.9, 1.0, 0.02)]},
 ]
 
 # values of sets that are there, as (set, property, old value, new value): a set takes the new one only while it still holds the old one. The
@@ -102,7 +111,12 @@ MIGRATIONS = [
     ('Boulder', 'blocks_movement', True, False),
 ]
 # the shares the variants of sets that are there generate, as (set, biomes of the variant, old share, new share)
-SHARE_MIGRATIONS = [('Flowers', 'G', 0.08, 0.14), ('Flowers', 'P', 0.06, 0.08), ('Flowers', 'T', 0.05, 0.06)]
+SHARE_MIGRATIONS = [('Flowers', 'G', 0.08, 0.14), ('Flowers', 'P', 0.06, 0.08), ('Flowers', 'T', 0.05, 0.06),
+                    # more decor, as the developer found the map too empty on 2026-11-15
+                    ('FallenTree', 'GTMP', 0.01, 0.025), ('FallenTree', 'N', 0.01, 0.02), ('Boulder', '', 0.008, 0.02), ('DeadTree', 'GTMPDN', 0.006, 0.015),
+                    ('Stump', 'GTM', 0.005, 0.015), ('Stump', 'N', 0.004, 0.01), ('Stones', '', 0.03, 0.045), ('Rocks', '', 0.015, 0.025),
+                    ('GiantTree', 'G', 0.006, 0.012), ('GiantTree', 'N', 0.006, 0.012), ('GiantTree', 'T', 0.006, 0.012), ('GiantTree', 'M', 0.006, 0.012),
+                    ('GiantTree', 'PD', 0.006, 0.012)]
 
 
 def find_imported(folder, name):
@@ -251,9 +265,11 @@ def migrate_sets():
 
 
 def main():
-    with open(os.path.join(SOURCE_FOLDER, 'objects.json'), encoding='utf-8') as file:
-        manifest = json.load(file)
-    import_meshes(manifest)
+    # the word sets after the file name makes and migrates the kinds alone, the meshes left as they are
+    if not any(arg == 'sets' or arg.endswith(' sets') for arg in sys.argv):
+        with open(os.path.join(SOURCE_FOLDER, 'objects.json'), encoding='utf-8') as file:
+            manifest = json.load(file)
+        import_meshes(manifest)
     for entry in SETS:
         make_set(entry)
     migrate_sets()

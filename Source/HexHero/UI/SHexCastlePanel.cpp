@@ -1,6 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SHexCastlePanel.h"
+#include "SHexSpellBook.h"
+#include "SHexMapTip.h"
+#include "HexHeroConfig.h"
 #include "HexCastles.h"
 #include "HexHeroConfig.h"
 #include "HexHeroes.h"
@@ -39,21 +42,32 @@ namespace
 
 	// for test runs, which have no mouse: the tab of the panel open, 0 to 2, taken once and set back to -1
 	TAutoConsoleVariable<int32> CVarCastlePanelTab(TEXT("hex.CastlePanelTab"), -1,
-		TEXT("Shows a tab of the panel of the castle open: 0 Buildings, 1 Recruit, 2 Armies; set back to -1 once taken"));
+		TEXT("Shows a tab of the panel of the castle open: 0 Buildings, 1 Recruit, 2 Armies, 3 Artifacts; set back to -1 once taken"));
 }
 
 void SHexCastlePanel::Construct(const FArguments& InArgs)
 {
 	OnMessage = InArgs._OnMessage;
+	OnSpellBook = InArgs._OnSpellBook;
 	const FSlateBrush* White = FCoreStyle::Get().GetBrush(TEXT("GenericWhiteBox"));
 	const float Width = UHexCastleConfig::Load()->PanelWidth;
 	const float Top = UHexCastleConfig::Load()->PanelTop;
 	SetVisibility(EVisibility::Collapsed);
 	ChildSlot
-	.HAlign(HAlign_Left)
-	.VAlign(VAlign_Top)
-	.Padding(TAttribute<FMargin>::CreateLambda([this, Top]() { return FMargin(PanelLeft, Top, 0.0f, CastlePanelBottom); }))
 	[
+		SNew(SOverlay)
+		// a see-through shade over the planet takes the clicks outside the panel, which close it, so the map does not move or pick under
+		// it, as the developer asked on 2026-11-15 for every panel the mouse chooses in
+		+ SOverlay::Slot()
+		[
+			SNew(SBorder).BorderImage(White).BorderBackgroundColor(FLinearColor(0.0f, 0.0f, 0.0f, 0.35f))
+			.OnMouseButtonDown_Lambda([this](const FGeometry&, const FPointerEvent&) { Close(); return FReply::Handled(); })
+		]
+		+ SOverlay::Slot()
+		.HAlign(HAlign_Left)
+		.VAlign(VAlign_Top)
+		.Padding(TAttribute<FMargin>::CreateLambda([this, Top]() { return FMargin(PanelLeft, Top, 0.0f, CastlePanelBottom); }))
+		[
 		SAssignNew(Frame, SBox)
 		.WidthOverride(Width)
 		.MaxDesiredHeight_Lambda([this]() { return FOptionalSize(MaxHeight); })
@@ -70,7 +84,269 @@ void SHexCastlePanel::Construct(const FArguments& InArgs)
 				]
 			]
 		]
+		]
 	];
+}
+
+FReply SHexCastlePanel::OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)
+{
+	if (InKeyEvent.GetKey() == EKeys::Escape)
+	{
+		Close();
+	}
+	return FReply::Handled();
+}
+
+FString SHexCastlePanel::DescribeArtifact(int32 Artifact) const
+{
+	const FHexArtifact* Each = Heroes.IsValid() ? Heroes->GetArtifact(Artifact) : nullptr;
+	return Each ? FString::Printf(TEXT("%s\n%s, worn on the %s\n%s\n\n%s"), *Each->DisplayName, *GetArtifactRankName(Each->Rank), *GetArtifactSlotName(Each->Slot).ToLower(),
+		*Each->DescribeEffect(), *Each->Lore) : FString();
+}
+
+TSharedRef<SWidget> SHexCastlePanel::MakeArtifactIcon(int32 Artifact, float Size)
+{
+	const FHexArtifact* Each = Heroes.IsValid() ? Heroes->GetArtifact(Artifact) : nullptr;
+	const FSlateBrush* Icon = Each ? GetBrush(Each->Icon.LoadSynchronous(), Size) : nullptr;
+	// the rank in the color of its frame
+	const FLinearColor RankColors[4] = {FLinearColor(0.35f, 0.32f, 0.28f, 1.0f), FLinearColor(0.2f, 0.4f, 0.75f, 1.0f), FLinearColor(0.6f, 0.25f, 0.8f, 1.0f),
+		FLinearColor(0.95f, 0.7f, 0.15f, 1.0f)};
+	const FLinearColor RankFrame = Each ? RankColors[FMath::Clamp(int32(Each->Rank), 0, 3)] : FLinearColor(0.12f, 0.12f, 0.14f, 1.0f);
+	const FSlateBrush* White = FCoreStyle::Get().GetBrush(TEXT("GenericWhiteBox"));
+	return SNew(SBox).WidthOverride(Size).HeightOverride(Size)
+		[
+			SNew(SBorder).BorderImage(White).BorderBackgroundColor(RankFrame).Padding(2.0f)
+			[
+				SNew(SBorder).BorderImage(White).BorderBackgroundColor(FLinearColor(0.05f, 0.05f, 0.06f, 1.0f)).Padding(0.0f)
+				[
+					Icon ? StaticCastSharedRef<SWidget>(SNew(SImage).Image(Icon)) : StaticCastSharedRef<SWidget>(SNew(SBox))
+				]
+			]
+		];
+}
+
+TSharedRef<SWidget> SHexCastlePanel::MakeArtifacts(const FHexHero& Hero, int32 OtherId)
+{
+	const UHexHeroConfig* Config = Heroes.IsValid() ? Heroes->GetConfig() : nullptr;
+	const TSharedRef<SVerticalBox> Box = SNew(SVerticalBox);
+	if (!Config)
+	{
+		return Box;
+	}
+	const FSlateFontInfo Tiny = FCoreStyle::GetDefaultFontStyle("Regular", 7);
+	const FSlateFontInfo Small = FCoreStyle::GetDefaultFontStyle("Regular", 8);
+	const FSlateBrush* White = FCoreStyle::Get().GetBrush(TEXT("GenericWhiteBox"));
+	TWeakObjectPtr<UHexHeroes> WeakHeroes = Heroes;
+	const TFunction<void(const FString&)> Tell = OnMessage;
+	const int32 HeroId = Hero.Id;
+	// a click: with Ctrl to the other hero, else on or off
+	const auto Click = [WeakHeroes, Tell, HeroId, OtherId](bool bWorn, int32 Index)
+	{
+		FString Message;
+		if (!WeakHeroes.IsValid())
+		{
+			return FReply::Handled();
+		}
+		const bool bPass = OtherId != 0 && FSlateApplication::Get().GetModifierKeys().IsControlDown();
+		const bool bDone = bPass ? WeakHeroes->PassArtifact(HeroId, bWorn, Index, OtherId, Message)
+			: bWorn ? WeakHeroes->TakeOffArtifact(HeroId, Index, Message) : WeakHeroes->WearArtifact(HeroId, Index, Message);
+		if (!bDone && Tell && !Message.IsEmpty())
+		{
+			Tell(Message);
+		}
+		return FReply::Handled();
+	};
+	const float Size = 38.0f;
+	const TSharedRef<SWrapBox> Worn = SNew(SWrapBox).UseAllottedSize(true).InnerSlotPadding(FVector2D(3.0f, 3.0f));
+	for (int32 Slot = 0; Slot < NumWornSlots; ++Slot)
+	{
+		const int32 Artifact = Hero.Worn.IsValidIndex(Slot) ? Hero.Worn[Slot] : INDEX_NONE;
+		const FString Kind = GetArtifactSlotName(GetWornSlotKind(Slot));
+		const FString Tip = Artifact != INDEX_NONE ? DescribeArtifact(Artifact) + TEXT("\n\nClick to take it off") + (OtherId != 0 ? TEXT(", Ctrl+click to give it to the other hero") : TEXT(""))
+			: FString::Printf(TEXT("%s: nothing worn"), *Kind);
+		Worn->AddSlot()
+		[
+			SNew(SButton).IsFocusable(false).ContentPadding(0.0f).ButtonColorAndOpacity(FLinearColor(0.08f, 0.08f, 0.1f, 1.0f)).ToolTipText(FText::FromString(Tip))
+			.IsEnabled(Artifact != INDEX_NONE)
+			.OnClicked_Lambda([Click, Slot]() { return Click(true, Slot); })
+			[
+				Artifact != INDEX_NONE ? MakeArtifactIcon(Artifact, Size)
+				: StaticCastSharedRef<SWidget>(SNew(SBox).WidthOverride(Size).HeightOverride(Size).HAlign(HAlign_Center).VAlign(VAlign_Center)
+					[
+						SNew(STextBlock).Font(Tiny).ColorAndOpacity(FLinearColor(0.45f, 0.45f, 0.48f, 1.0f)).Text(FText::FromString(Kind))
+					])
+			]
+		];
+	}
+	Box->AddSlot().AutoHeight()[Worn];
+	Box->AddSlot().AutoHeight().Padding(0.0f, 4.0f, 0.0f, 2.0f)
+	[
+		SNew(STextBlock).Font(Small).ColorAndOpacity(CastleDimColor).Text(FText::FromString(FString::Printf(TEXT("Backpack, %d of %d%s"), Hero.Backpack.Num(), Config->BackpackSize,
+			Hero.Backpack.IsEmpty() ? TEXT("") : TEXT(": click one to put it on"))))
+	];
+	if (!Hero.Backpack.IsEmpty())
+	{
+		const TSharedRef<SWrapBox> Pack = SNew(SWrapBox).UseAllottedSize(true).InnerSlotPadding(FVector2D(3.0f, 3.0f));
+		for (int32 Index = 0; Index < Hero.Backpack.Num(); ++Index)
+		{
+			const FString Tip = DescribeArtifact(Hero.Backpack[Index]) + TEXT("\n\nClick to put it on") + (OtherId != 0 ? TEXT(", Ctrl+click to give it to the other hero") : TEXT(""));
+			Pack->AddSlot()
+			[
+				SNew(SButton).IsFocusable(false).ContentPadding(0.0f).ButtonColorAndOpacity(FLinearColor(0.08f, 0.08f, 0.1f, 1.0f)).ToolTipText(FText::FromString(Tip))
+				.OnClicked_Lambda([Click, Index]() { return Click(false, Index); })
+				[
+					MakeArtifactIcon(Hero.Backpack[Index], 32.0f)
+				]
+			];
+		}
+		Box->AddSlot().AutoHeight()[Pack];
+	}
+	return Box;
+}
+
+TSharedRef<SWidget> SHexCastlePanel::MakeHeroSheet(const FHexHero& Hero, int32 OtherId)
+{
+	const UHexHeroConfig* Config = Heroes.IsValid() ? Heroes->GetConfig() : nullptr;
+	const TSharedRef<SVerticalBox> Sheet = SNew(SVerticalBox);
+	if (!Config)
+	{
+		return Sheet;
+	}
+	const FSlateBrush* White = FCoreStyle::Get().GetBrush(TEXT("GenericWhiteBox"));
+	const FSlateFontInfo Small = FCoreStyle::GetDefaultFontStyle("Regular", 9);
+	const FSlateFontInfo Tiny = FCoreStyle::GetDefaultFontStyle("Regular", 7);
+	// its level and experience, and its spell book
+	const int32 Next = Config->GetLevelExperience(Hero.Level + 1);
+	const int32 Mana = Hero.Mana;
+	const int32 MaxMana = Heroes->GetMaxMana(Hero);
+	const int32 HeroId = Hero.Id;
+	Sheet->AddSlot().AutoHeight()
+	[
+		SNew(SHorizontalBox)
+		// its portrait, as the developer asked on 2026-11-15
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.0f, 0.0f, 8.0f, 0.0f)
+		[
+			HexUiBrushes::MakeFramed(Heroes->GetHeroPortrait(Hero), 48.0f, Config->GetPlayer(Hero.Player).Color)
+		]
+		+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Center)
+		[
+			SNew(STextBlock).Font(Small).ColorAndOpacity(CastleTextColor)
+			.Text(FText::FromString(FString::Printf(TEXT("Level %d, %s. %d spells"), Hero.Level, *Config->GetClass(Hero.Class).DisplayName, Hero.Spells.Num())))
+		]
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+		[
+			SNew(SButton).IsFocusable(false).ContentPadding(FMargin(8.0f, 2.0f)).ButtonColorAndOpacity(CastleButtonColor)
+			.ToolTipText(LOCTEXT("BookTip", "The spells the hero knows"))
+			.OnClicked_Lambda([this, HeroId]() { if (OnSpellBook) { OnSpellBook(HeroId); } return FReply::Handled(); })
+			[
+				SNew(STextBlock).Font(Small).ColorAndOpacity(CastleTextColor).Text(LOCTEXT("SpellBook", "Spell book"))
+			]
+		]
+	];
+	// its attributes with their icons, as the developer asked on 2026-11-15, each saying in its tooltip what it gives and how much of it its
+	// artifacts give
+	const UHexBattleConfig* Battle = UHexBattleConfig::Load();
+	const FHexArtifactBonus Bonus = Heroes->GetArtifactBonus(Hero);
+	const auto Parts = [](int32 Total, int32 FromArtifacts)
+	{
+		return FromArtifacts == 0 ? FString() : FString::Printf(TEXT(" (%d of its own, %+d from artifacts)"), Total - FromArtifacts, FromArtifacts);
+	};
+	const auto Percent = [](float Share) { return FMath::RoundToInt32(Share * 100.0f); };
+	const int32 Back = Config->ManaPerDay + FMath::RoundToInt32(Heroes->GetSkillValue(Hero, EHexSkill::Mysticism)) + Bonus.ManaPerDay;
+	const float MaxMove = Heroes->GetMaxMovePoints(Hero);
+	struct FStatChip
+	{
+		EHexStatIcon Icon;
+		FString Value;
+		FString Tip;
+		bool bRaised = false;
+	};
+	TArray<FStatChip> Chips;
+	Chips.Add({EHexStatIcon::Attack, FString::FromInt(Hero.Attack), FString::Printf(TEXT("Attack %d%s.\nAdded to the Attack of every creature of its army in a battle: each point of Attack above the Defense of the creature struck adds %d%% to the damage, up to %d%% more."),
+		Hero.Attack, *Parts(Hero.Attack, Bonus.Attack), Percent(Battle ? Battle->AttackBonusPerPoint : 0.05f), Percent(Battle ? Battle->MaxAttackBonus : 3.0f)), Bonus.Attack != 0});
+	Chips.Add({EHexStatIcon::Defense, FString::FromInt(Hero.Defense), FString::Printf(TEXT("Defense %d%s.\nAdded to the Defense of every creature of its army in a battle: each point of Defense above the Attack of the one that strikes takes %d%% off the damage, down to %d%% less."),
+		Hero.Defense, *Parts(Hero.Defense, Bonus.Defense), Percent(Battle ? Battle->DefenseCutPerPoint : 0.025f), Percent(Battle ? Battle->MaxDefenseCut : 0.7f)), Bonus.Defense != 0});
+	Chips.Add({EHexStatIcon::SpellPower, FString::FromInt(Hero.SpellPower), FString::Printf(TEXT("Spell power %d%s.\nThe strength of its spells: each point raises the damage or healing of a spell and keeps its effects longer, by as much as the spell says in the spell book."),
+		Hero.SpellPower, *Parts(Hero.SpellPower, Bonus.SpellPower)), Bonus.SpellPower != 0});
+	Chips.Add({EHexStatIcon::Knowledge, FString::FromInt(Hero.Knowledge), FString::Printf(TEXT("Knowledge %d%s.\nIts mana: %d a point, so at most %d."),
+		Hero.Knowledge, *Parts(Hero.Knowledge, Bonus.Knowledge), Config->ManaPerKnowledge, MaxMana), Bonus.Knowledge != 0});
+	Chips.Add({EHexStatIcon::Mana, FString::Printf(TEXT("%d/%d"), Mana, MaxMana), FString::Printf(TEXT("Mana %d of %d.\nSpells cost it in a battle. %d comes back a day%s, and all of it in a castle of its own with a mage guild."),
+		Mana, MaxMana, Back, Bonus.ManaPerDay != 0 ? *FString::Printf(TEXT(" (%+d from artifacts)"), Bonus.ManaPerDay) : TEXT("")), Bonus.ManaPerDay != 0});
+	Chips.Add({EHexStatIcon::Movement, FString::Printf(TEXT("%.0f/%.0f"), Hero.MovePoints, MaxMove), FString::Printf(TEXT("Movement %.1f of %.1f today.\nA step costs by the ground it goes onto, a road the least and swamp and snow the most; what is left of a day is lost with it.%s"),
+		Hero.MovePoints, MaxMove, Bonus.Movement != 0.0f ? *FString::Printf(TEXT(" Artifacts give %+.1f a day, from the next day."), Bonus.Movement) : TEXT("")), Bonus.Movement != 0.0f});
+	Chips.Add({EHexStatIcon::Experience, FString::Printf(TEXT("%d/%d"), Hero.Experience, Next), FString::Printf(TEXT("Experience %d.\nLevel %d at %d: a new level raises one of its attributes and offers a skill. It comes from battles won and from chests."),
+		Hero.Experience, Hero.Level + 1, Next)});
+	Chips.Add({EHexStatIcon::Morale, FString::Printf(TEXT("%+d"), Bonus.Morale), FString::Printf(TEXT("Morale %+d from artifacts.\nAdded to the morale of every creature of its army in a battle: each point above 0 gives a stack %d%% of another turn after its turn (the undead have none)."),
+		Bonus.Morale, Percent(Battle ? Battle->MoraleChancePerPoint : 1.0f / 24.0f)), Bonus.Morale != 0});
+	Chips.Add({EHexStatIcon::Luck, FString::Printf(TEXT("%+d"), Bonus.Luck), FString::Printf(TEXT("Luck %+d from artifacts.\nAdded to the luck of every creature of its army in a battle: each point above 0 gives a strike %d%% of dealing double damage."),
+		Bonus.Luck, Percent(Battle ? Battle->LuckChancePerPoint : 1.0f / 24.0f)), Bonus.Luck != 0});
+	const TSharedRef<SWrapBox> Stats = SNew(SWrapBox).UseAllottedSize(true).InnerSlotPadding(FVector2D(4.0f, 4.0f));
+	for (const FStatChip& Chip : Chips)
+	{
+		const FSlateBrush* Icon = HexUnitTooltip::GetIcon(Chip.Icon);
+		Stats->AddSlot()
+		[
+			SNew(SBorder).BorderImage(White).BorderBackgroundColor(FLinearColor(0.08f, 0.08f, 0.1f, 1.0f)).Padding(FMargin(4.0f, 2.0f, 6.0f, 2.0f))
+			.ToolTipText(FText::FromString(Chip.Tip))
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.0f, 0.0f, 4.0f, 0.0f)
+				[
+					SNew(SBox).WidthOverride(18.0f).HeightOverride(18.0f)
+					[
+						Icon ? StaticCastSharedRef<SWidget>(SNew(SImage).Image(Icon)) : StaticCastSharedRef<SWidget>(SNew(SBox))
+					]
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[
+					// what artifacts raise in green
+					SNew(STextBlock).Font(FCoreStyle::GetDefaultFontStyle("Bold", 10))
+					.ColorAndOpacity(Chip.bRaised ? FLinearColor(0.45f, 1.0f, 0.45f, 1.0f) : CastleTextColor).Text(FText::FromString(Chip.Value))
+				]
+			]
+		];
+	}
+	Sheet->AddSlot().AutoHeight().Padding(0.0f, 4.0f, 0.0f, 0.0f)[Stats];
+	// its skills, MaxSkills slots
+	const TSharedRef<SHorizontalBox> Slots = SNew(SHorizontalBox);
+	for (int32 Slot = 0; Slot < Config->MaxSkills; ++Slot)
+	{
+		const FHexHeroSkill* Skill = Hero.Skills.IsValidIndex(Slot) ? &Hero.Skills[Slot] : nullptr;
+		const FHexSkillInfo* Info = Skill ? Config->FindSkill(Skill->Skill) : nullptr;
+		const FSlateBrush* Icon = Info ? HexUiBrushes::Get(Info->Icon.LoadSynchronous(), 40.0f) : nullptr;
+		FString Tip = TEXT("An empty slot: a new level may offer a skill");
+		if (Info)
+		{
+			const FString Value = FString::FromInt(FMath::RoundToInt32(Info->GetValue(Skill->Level) * (Info->Skill == EHexSkill::Mysticism ? 1.0f : 100.0f)));
+			const FString Second = FString::FromInt(FMath::RoundToInt32(Info->GetValue(Skill->Level, true) * 100.0f));
+			Tip = FString::Printf(TEXT("%s %s: %s"), GetSkillLevelName(Skill->Level), *Info->DisplayName, *Info->Description.Replace(TEXT("{0}"), *Value).Replace(TEXT("{1}"), *Second));
+		}
+		Slots->AddSlot().AutoWidth().Padding(0.0f, 0.0f, 4.0f, 0.0f)
+		[
+			SNew(SBox).WidthOverride(52.0f).ToolTipText(FText::FromString(Tip))
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+				[
+					SNew(SBox).WidthOverride(40.0f).HeightOverride(40.0f)
+					[
+						SNew(SBorder).BorderImage(White).BorderBackgroundColor(FLinearColor(0.08f, 0.08f, 0.1f, 1.0f)).Padding(0.0f)
+						[
+							Icon ? StaticCastSharedRef<SWidget>(SNew(SImage).Image(Icon)) : StaticCastSharedRef<SWidget>(SNew(SBox))
+						]
+					]
+				]
+				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+				[
+					SNew(STextBlock).Font(Tiny).ColorAndOpacity(CastleDimColor).Text(FText::FromString(Skill ? GetSkillLevelName(Skill->Level) : TEXT("")))
+				]
+			]
+		];
+	}
+	Sheet->AddSlot().AutoHeight().Padding(0.0f, 4.0f, 0.0f, 0.0f)[Slots];
+	// and its artifacts
+	Sheet->AddSlot().AutoHeight().Padding(0.0f, 6.0f, 0.0f, 0.0f)[MakeArtifacts(Hero, OtherId)];
+	return Sheet;
 }
 
 void SHexCastlePanel::SetHeroes(UHexHeroes* InHeroes)
@@ -162,7 +438,7 @@ void SHexCastlePanel::Tick(const FGeometry& AllottedGeometry, const double InCur
 	}
 	if (CVarCastlePanelTab.GetValueOnGameThread() >= 0)
 	{
-		Tab = ETab(FMath::Clamp(CVarCastlePanelTab.GetValueOnGameThread(), 0, 2));
+		Tab = ETab(FMath::Clamp(CVarCastlePanelTab.GetValueOnGameThread(), 0, 3));
 		CVarCastlePanelTab->Set(-1, ECVF_SetByConsole);
 		ShownRevision = -1;
 	}
@@ -343,6 +619,18 @@ TSharedRef<SWidget> SHexCastlePanel::MakeSlotRow(TConstArrayView<FHexStack> Army
 			Data.Subtitle = Config->Factions[Stack->Faction].DisplayName;
 			Data.TitleColor = CastleHeadColor;
 			Data.bFlies = Config->Factions[Stack->Faction].Creatures[Stack->Creature].bFlies;
+			// a stack of a hero: what the hero adds in a battle, its Attack and Defense with those its artifacts give, in green, and the morale
+			// and luck of its artifacts, as the developer saw none of it on 2026-11-15
+			if (const FHexHero* Leader = Key > 0 && Heroes.IsValid() ? Heroes->FindHero(Key) : nullptr)
+			{
+				const FHexArtifactBonus Bonus = Heroes->GetArtifactBonus(*Leader);
+				Data.AttackBonus = Leader->Attack;
+				Data.DefenseBonus = Leader->Defense;
+				Data.Morale += Stats->HasAbility(EHexAbility::Undead) ? 0 : Bonus.Morale;
+				Data.Luck += Bonus.Luck;
+				Data.Extra = FString::Printf(TEXT("In a battle %s adds %+d Attack and %+d Defense%s"), *Leader->Name, Leader->Attack, Leader->Defense,
+					Bonus.Morale != 0 || Bonus.Luck != 0 ? *FString::Printf(TEXT(", and its artifacts %+d morale and %+d luck"), Bonus.Morale, Bonus.Luck) : TEXT(""));
+			}
 			Button->SetToolTip(SNew(SToolTip).BorderImage(NoBorder)
 				[
 					SNew(SBorder).BorderImage(White).BorderBackgroundColor(FLinearColor(0.02f, 0.02f, 0.03f, 0.92f)).Padding(FMargin(10.0f, 7.0f))[HexUnitTooltip::Make(Data)]
@@ -473,6 +761,7 @@ void SHexCastlePanel::RebuildArmy()
 			[
 				MakeText(FString::Printf(TEXT("%s (%.0f)"), *Of->Name, Castles ? Castles->GetAttack(*Of) : 0.0f), Section, CastleHeadColor)
 			];
+			Body->AddSlot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 4.0f)[MakeHeroSheet(*Of, Of == Hero ? OtherHero : ArmyHero)];
 			Body->AddSlot().AutoHeight()[MakeSlotRow(Of->Army, Of->Id, Arrange, GetArmy)];
 		}
 	}
@@ -486,6 +775,61 @@ void SHexCastlePanel::RebuildArmy()
 				Section, CastleHeadColor)
 		];
 		Body->AddSlot().AutoHeight()[MakeSlotRow(Mine->Guard, -Mine->Id, Arrange, GetArmy)];
+		// buttons that leave the stack chosen to guard it and take one of the guard back, as the developer asked on 2026-11-15, so it shows
+		// that a hero there can leave creatures
+		const int32 HeroKey = Hero->Id;
+		const int32 GuardKey = -Mine->Id;
+		const bool bHeroStack = ChosenStackHero == HeroKey && Hero->Army.IsValidIndex(ChosenStackSlot) && Hero->Army[ChosenStackSlot].Count > 0;
+		const bool bGuardStack = ChosenStackHero == GuardKey && Mine->Guard.IsValidIndex(ChosenStackSlot) && Mine->Guard[ChosenStackSlot].Count > 0;
+		const auto MakeGuardButton = [&](const FString& Label, const FString& Tip, bool bEnabled, int32 FromKey, int32 ToKey)
+		{
+			return SNew(SButton)
+				.IsFocusable(false)
+				.IsEnabled(bEnabled)
+				.ContentPadding(FMargin(7.0f, 2.0f))
+				.ButtonColorAndOpacity(CastleButtonColor)
+				.ToolTipText(FText::FromString(Tip))
+				.OnClicked_Lambda([this, Arrange, GetArmy, FromKey, ToKey]()
+				{
+					const TArray<FHexStack>* To = GetArmy(ToKey);
+					const TArray<FHexStack>* From = GetArmy(FromKey);
+					if (To && From && From->IsValidIndex(ChosenStackSlot))
+					{
+						// onto a stack of its kind there, else into the first free slot
+						const FHexStack& Moved = (*From)[ChosenStackSlot];
+						int32 Slot = To->IndexOfByPredicate([&Moved](const FHexStack& Each)
+						{
+							return Each.Count > 0 && Each.Faction == Moved.Faction && Each.Creature == Moved.Creature && Each.bUpgraded == Moved.bUpgraded;
+						});
+						Slot = Slot != INDEX_NONE ? Slot : UHexCastles::FindFreeSlot(*To);
+						Arrange(FromKey, ChosenStackSlot, ToKey, Slot, 0);
+					}
+					ChosenStackHero = 0;
+					ChosenStackSlot = INDEX_NONE;
+					ShownRevision = -1;
+					return FReply::Handled();
+				})
+				[
+					SNew(STextBlock).Text(FText::FromString(Label)).Font(Small).ColorAndOpacity(CastleTextColor)
+				];
+		};
+		Body->AddSlot().AutoHeight().Padding(0.0f, 5.0f, 0.0f, 0.0f)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0.0f, 0.0f, 4.0f, 0.0f)
+			[
+				MakeGuardButton(TEXT("Leave to guard"), TEXT("The stack chosen of the hero stays here and guards the mine: a hero of another player fights it before it takes the mine"),
+					bHeroStack, HeroKey, GuardKey)
+			]
+			+ SHorizontalBox::Slot().AutoWidth()
+			[
+				MakeGuardButton(TEXT("Take back"), TEXT("The stack chosen of the guard goes back into the army of the hero"), bGuardStack, GuardKey, HeroKey)
+			]
+			+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Center).Padding(8.0f, 0.0f, 0.0f, 0.0f)
+			[
+				MakeText(bHeroStack || bGuardStack ? FString() : FString(TEXT("Choose a stack first")), Tiny, CastleDimColor)
+			]
+		];
 	}
 	Body->AddSlot().AutoHeight().Padding(0.0f, 8.0f, 0.0f, 0.0f)[MakeSplitButtons(Arrange, GetArmy)];
 	Body->AddSlot().AutoHeight().Padding(0.0f, 6.0f, 0.0f, 0.0f)
@@ -557,7 +901,7 @@ void SHexCastlePanel::RebuildBody()
 			];
 	};
 	// a chip of a row of choices, lit while it is the one chosen, with a mark of a color when Mark is not transparent
-	const auto MakeChip = [&](const FString& Label, bool bLit, const FLinearColor& Mark, TFunction<void()> Choose)
+	const auto MakeChip = [&](const FString& Label, bool bLit, const FLinearColor& Mark, TFunction<void()> Choose, UTexture2D* Picture = nullptr)
 	{
 		const bool bMark = Mark.A > 0.0f;
 		return SNew(SButton)
@@ -567,12 +911,13 @@ void SHexCastlePanel::RebuildBody()
 			.OnClicked_Lambda([this, Choose]() { Choose(); ShownRevision = -1; return FReply::Handled(); })
 			[
 				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.0f, 0.0f, bMark ? 5.0f : 0.0f, 0.0f)
+				// the portrait of a hero in the color of its player, as the developer asked on 2026-11-15, else a mark of that color
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.0f, 0.0f, bMark || Picture ? 5.0f : 0.0f, 0.0f)
 				[
-					SNew(SBox).WidthOverride(bMark ? 8.0f : 0.0f).HeightOverride(8.0f)
+					Picture ? HexUiBrushes::MakeFramed(Picture, 24.0f, Mark) : StaticCastSharedRef<SWidget>(SNew(SBox).WidthOverride(bMark ? 8.0f : 0.0f).HeightOverride(8.0f)
 					[
 						SNew(SBorder).BorderImage(White).BorderBackgroundColor(Mark)
-					]
+					])
 				]
 				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 				[
@@ -611,7 +956,12 @@ void SHexCastlePanel::RebuildBody()
 	Body->AddSlot().AutoHeight()
 	[
 		SNew(SHorizontalBox)
-		+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Center)[MakeText(FString::Printf(TEXT("%s, of %s"), *Faction.DisplayName, *Owner), Head, CastleHeadColor)]
+		// its picture by its fort and faction, as the developer asked on 2026-11-15, and its name
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.0f, 0.0f, 8.0f, 0.0f)
+		[
+			HexUiBrushes::MakeFramed(Castles->GetCastlePicture(*Castle), 40.0f, HeroConfig->Players.IsValidIndex(Castle->Owner) ? HeroConfig->Players[Castle->Owner].Color : FLinearColor(0.6f, 0.6f, 0.6f), Castles->GetCastleTint(*Castle))
+		]
+		+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Center)[MakeText(FString::Printf(TEXT("%s, %s, of %s"), *Castles->GetCastleName(*Castle), *Faction.DisplayName, *Owner), Head, CastleHeadColor)]
 		+ SHorizontalBox::Slot().AutoWidth()
 		[
 			SNew(SButton).IsFocusable(false).ContentPadding(FMargin(7.0f, 1.0f)).ButtonColorAndOpacity(CastleButtonColor)
@@ -634,7 +984,7 @@ void SHexCastlePanel::RebuildBody()
 	// the tabs
 	{
 		const TSharedRef<SHorizontalBox> Tabs = SNew(SHorizontalBox);
-		const TPair<ETab, const TCHAR*> AllTabs[] = {{ETab::Buildings, TEXT("Buildings")}, {ETab::Recruit, TEXT("Recruit")}, {ETab::Armies, TEXT("Armies")}};
+		const TPair<ETab, const TCHAR*> AllTabs[] = {{ETab::Buildings, TEXT("Buildings")}, {ETab::Recruit, TEXT("Recruit")}, {ETab::Armies, TEXT("Armies")}, {ETab::Market, TEXT("Artifacts")}};
 		for (const TPair<ETab, const TCHAR*>& One : AllTabs)
 		{
 			const ETab Which = One.Key;
@@ -669,7 +1019,7 @@ void SHexCastlePanel::RebuildBody()
 			Row->AddSlot()
 			[
 				MakeChip(Label, Id == ChosenId && !(bWithGarrison && bHireToGarrison), HeroConfig->GetPlayer(Visitor->Player).Color,
-					[this, Id]() { ChosenHero = Id; bHireToGarrison = false; })
+					[this, Id]() { ChosenHero = Id; bHireToGarrison = false; }, Heroes->GetHeroPortrait(*Visitor))
 			];
 		}
 		if (bWithGarrison)
@@ -679,15 +1029,89 @@ void SHexCastlePanel::RebuildBody()
 		Body->AddSlot().AutoHeight().Padding(0.0f, 6.0f, 0.0f, 4.0f)[Row];
 	};
 
-	if (Tab == ETab::Buildings)
+	if (Tab == ETab::Market)
+	{
+		// the artifact merchant, as the developer asked on 2026-11-15: its stock of the week, bought for the hero chosen
+		AddHeroChips(false);
+		if (!Castles->HasMerchant(*Castle))
+		{
+			AddSection(TEXT("No artifact merchant"));
+			Body->AddSlot().AutoHeight()[MakeText(TEXT("Build the artifact merchant (Buildings) to buy artifacts here. It has another stock every week."), Small, CastleDimColor)];
+		}
+		else
+		{
+			AddSection(TEXT("Artifact merchant: the stock of this week"));
+			const TSharedRef<SWrapBox> Stock = SNew(SWrapBox).UseAllottedSize(true).InnerSlotPadding(FVector2D(6.0f, 6.0f));
+			for (int32 Index = 0; Index < Castle->MerchantStock.Num(); ++Index)
+			{
+				const int32 Artifact = Castle->MerchantStock[Index];
+				const FHexArtifact* Each = Heroes->GetArtifact(Artifact);
+				TMap<FName, int32> Price;
+				Price.Add(TEXT("Gold"), Castles->GetArtifactPrice(Artifact));
+				const bool bCan = Each && Chosen && Sites->CanPay(Castle->Owner, Price);
+				const TSharedRef<SVerticalBox> Card = SNew(SVerticalBox);
+				Card->AddSlot().AutoHeight().HAlign(HAlign_Center)
+				[
+					Each ? MakeArtifactIcon(Artifact, 56.0f) : StaticCastSharedRef<SWidget>(SNew(SBox).WidthOverride(56.0f).HeightOverride(56.0f))
+				];
+				Card->AddSlot().AutoHeight().HAlign(HAlign_Center).Padding(0.0f, 3.0f, 0.0f, 0.0f)
+				[
+					SNew(STextBlock).Font(Tiny).ColorAndOpacity(Each ? CastleTextColor : CastleDimColor).Text(FText::FromString(Each ? Each->DisplayName : TEXT("Sold")))
+					.WrapTextAt(110.0f).Justification(ETextJustify::Center)
+				];
+				// what it is and gives, as the panel at the cursor on the map shows it, on its card and its button, as the developer asked on
+				// 2026-11-15
+				FHexMapTip ArtifactTip;
+				if (Each)
+				{
+					ArtifactTip.Title = Each->DisplayName;
+					ArtifactTip.TitleColor = FLinearColor(1.0f, 0.82f, 0.4f, 1.0f);
+					ArtifactTip.Picture = Each->Icon.LoadSynchronous();
+					DescribeArtifact(Artifact).ParseIntoArrayLines(ArtifactTip.Lines);
+					ArtifactTip.Lines.Add(Chosen ? FString::Printf(TEXT("Buy it for %s, %d gold"), *Chosen->Name, Castles->GetArtifactPrice(Artifact))
+						: FString(TEXT("A hero in the castle or beside it buys it")));
+					Card->AddSlot().AutoHeight().HAlign(HAlign_Center).Padding(0.0f, 2.0f, 0.0f, 0.0f)[MakeCostRow(Price, Castle->Owner, Tiny)];
+					const TSharedRef<SButton> Buy = MakeButton(TEXT("Buy"), bCan, FString(),
+						[CastleId, Index, ChosenId](UHexCastles& Seller, FString& Message) { Seller.BuyArtifact(CastleId, Index, ChosenId, Message); });
+					Buy->SetToolTip(SHexMapTip::MakeToolTip(ArtifactTip));
+					Card->AddSlot().AutoHeight().HAlign(HAlign_Center).Padding(0.0f, 3.0f, 0.0f, 0.0f)[Buy];
+				}
+				const TSharedRef<SBox> CardBox = SNew(SBox).WidthOverride(118.0f)
+					[
+						SNew(SBorder).BorderImage(White).BorderBackgroundColor(FLinearColor(0.06f, 0.06f, 0.07f, 1.0f)).Padding(FMargin(4.0f, 5.0f))[Card]
+					];
+				if (Each)
+				{
+					CardBox->SetToolTip(SHexMapTip::MakeToolTip(ArtifactTip));
+				}
+				Stock->AddSlot()
+				[
+					CardBox
+				];
+			}
+			Body->AddSlot().AutoHeight().Padding(0.0f, 4.0f, 0.0f, 0.0f)[Stock];
+			if (!Chosen)
+			{
+				Body->AddSlot().AutoHeight().Padding(0.0f, 6.0f, 0.0f, 0.0f)[MakeText(TEXT("A hero in the castle or beside it buys what the merchant has."), Small, CastleDimColor)];
+			}
+		}
+		if (Chosen)
+		{
+			AddSection(FString::Printf(TEXT("What %s wears and carries"), *Chosen->Name));
+			Body->AddSlot().AutoHeight()[MakeArtifacts(*Chosen, 0)];
+		}
+	}
+	else if (Tab == ETab::Buildings)
 	{
 		// the tree of the buildings: a row for each, its levels as pictures one after the other, the next one a button that builds it
-		constexpr float Picture = 56.0f;
 		for (int32 Building = 0; Building < Faction.Buildings.Num() && Building < Castle->Levels.Num(); ++Building)
 		{
 			const FHexBuilding& Each = Faction.Buildings[Building];
 			const int32 Level = Castle->Levels[Building];
+			// a building of more than four levels, the mage guild, in smaller pictures, so its row fits the panel
+			const float Picture = Each.Levels.Num() > 4 ? 40.0f : 56.0f;
 			const FString Label = Each.Type == EHexBuildingType::Hall ? FString(TEXT("Hall")) : Each.Type == EHexBuildingType::Fort ? FString(TEXT("Fort"))
+				: Each.Type == EHexBuildingType::MageGuild ? FString(TEXT("Guild")) : Each.Type == EHexBuildingType::Merchant ? FString(TEXT("Market"))
 				: FString::Printf(TEXT("Level %d"), Each.Creature + 1);
 			const TSharedRef<SHorizontalBox> Row = SNew(SHorizontalBox)
 				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.0f, 0.0f, 4.0f, 0.0f)
@@ -716,6 +1140,19 @@ void SHexCastlePanel::RebuildBody()
 				else if (Each.Type == EHexBuildingType::Fort)
 				{
 					Tip += FString::Printf(TEXT(": dwellings x%.1f, walls x%.1f"), Of.GrowthFactor, Of.DefenseFactor);
+				}
+				else if (Each.Type == EHexBuildingType::MageGuild)
+				{
+					// the spells of this level the guild of this castle teaches, its heroes learning them as they go in
+					const UHexBattleConfig* Battle = UHexBattleConfig::Load();
+					TArray<FString> Names;
+					for (const FName& Id : Castle->GuildSpells.IsValidIndex(Step) ? Castle->GuildSpells[Step] : TArray<FName>())
+					{
+						const int32 Spell = Battle ? Battle->FindSpell(Id.ToString()) : INDEX_NONE;
+						Names.Add(Spell != INDEX_NONE ? Battle->Spells[Spell].DisplayName : Id.ToString());
+					}
+					Tip += FString::Printf(TEXT(": spells of level %d, %s; a hero who goes in learns them and gets all its mana back"), Step + 1,
+						Names.IsEmpty() ? TEXT("none") : *FString::Join(Names, TEXT(", ")));
 				}
 				// what it gives, then what it costs as icons, green where there is enough and red where not, and why not
 				const FSlateFontInfo TipFont = FCoreStyle::GetDefaultFontStyle("Regular", 11);
@@ -900,11 +1337,14 @@ void SHexCastlePanel::RebuildBody()
 		const TSharedRef<SHorizontalBox> Hire = SNew(SHorizontalBox);
 		for (int32 Class = 0; Class < HeroConfig->Classes.Num(); ++Class)
 		{
-			Hire->AddSlot().AutoWidth().Padding(0.0f, 0.0f, 4.0f, 0.0f)
-			[
-				MakeButton(HeroConfig->Classes[Class].DisplayName, HeroWhy.IsEmpty(), HeroWhy.IsEmpty() ? Sites->DescribeCost(Config->HeroCost) : HeroWhy,
-					[CastleId, Class](UHexCastles& Do, FString& Message) { Do.HireHero(CastleId, Class, Message); })
-			];
+			// the panel at the cursor on the map of the hero it would be, as the developer asked on 2026-11-15
+			FHexMapTip ClassTip;
+			Heroes->GetClassTip(Class, Castle->Owner, ClassTip);
+			ClassTip.Lines.Add(HeroWhy.IsEmpty() ? FString::Printf(TEXT("Hire for %s"), *Sites->DescribeCost(Config->HeroCost)) : HeroWhy);
+			const TSharedRef<SButton> HireButton = MakeButton(HeroConfig->Classes[Class].DisplayName, HeroWhy.IsEmpty(), FString(),
+				[CastleId, Class](UHexCastles& Do, FString& Message) { Do.HireHero(CastleId, Class, Message); });
+			HireButton->SetToolTip(SHexMapTip::MakeToolTip(ClassTip));
+			Hire->AddSlot().AutoWidth().Padding(0.0f, 0.0f, 4.0f, 0.0f)[HireButton];
 		}
 		Body->AddSlot().AutoHeight()[Hire];
 		Body->AddSlot().AutoHeight().Padding(0.0f, 3.0f, 0.0f, 0.0f)[MakeText(FString::Printf(TEXT("%s, one a day, with the army a new hero starts with."), *Sites->DescribeCost(Config->HeroCost)), Tiny, CastleDimColor)];

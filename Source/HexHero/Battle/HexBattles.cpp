@@ -55,6 +55,8 @@ bool UHexBattles::MakeSetup(const FHexBattleRequest& InRequest, FHexBattleSetup&
 		Side.Mana = Hero.Mana;
 		Side.Stacks = Hero.Army;
 		Side.bAi = !Heroes->IsPlaying() || Heroes->IsPlayerAi(Hero.Player);
+		// the spells it knows and what its skills of magic give them
+		Heroes->FillBattleMagic(Hero, Side, Config);
 		return Side;
 	};
 	if (Attacker)
@@ -188,6 +190,13 @@ bool UHexBattles::MakeSetup(const FHexBattleRequest& InRequest, FHexBattleSetup&
 	// the catapult of the attacker, at the walls of a castle and on an open field alike, as the developer asked on 2026-11-14
 	Setup.Siege.bCatapult = Attacker && Attacker->bCatapult;
 	Setup.Siege.bMoat = Setup.Siege.bWalls && Config->bSiegeMoat;
+	// on the deck of a ship when a hero of it is in a boat, as the developer asked on 2026-11-15: without obstacles, never at the walls of a castle
+	const FHexHero* SeaDefender = InRequest.DefenderHero != 0 ? Heroes->FindHero(InRequest.DefenderHero) : nullptr;
+	Setup.bAtSea = !Setup.Siege.bWalls && (bForceSea || (Attacker && Attacker->BoatId != 0) || (SeaDefender && SeaDefender->BoatId != 0));
+	if (Setup.bAtSea)
+	{
+		Setup.bObstacles = false;
+	}
 	if (OutGuardSlots)
 	{
 		*OutGuardSlots = GuardSlotsMade;
@@ -315,6 +324,24 @@ void UHexBattles::PlayQuick()
 	}
 }
 
+void UHexBattles::RefreshMagic(int32 HeroId, int32 MoreMana)
+{
+	if (!bShown || HeroId == 0 || !Heroes)
+	{
+		return;
+	}
+	const FHexHero* Hero = Heroes->FindHero(HeroId);
+	for (int32 Side = 0; Side < 2 && Hero; ++Side)
+	{
+		if (Battle.GetSide(Side).HeroId == HeroId)
+		{
+			FHexBattleSideSetup Fresh;
+			Heroes->FillBattleMagic(*Hero, Fresh, Config);
+			Battle.RefreshMagic(Side, Fresh, MoreMana);
+		}
+	}
+}
+
 void UHexBattles::Close()
 {
 	if (!bShown || !Battle.IsOver())
@@ -403,7 +430,7 @@ void UHexBattles::Apply()
 	{
 		Hero.Army = Survivors(Side, 0, Battle.GetSide(Side).Stacks.Num());
 		Hero.Mana = Battle.GetMana(Side);
-		Hero.Experience += FMath::RoundToInt32(Battle.GetKilledHealth(Side) * Config->ExperiencePerHealth);
+		Heroes->AddExperience(Hero, FMath::RoundToInt32(Battle.GetKilledHealth(Side) * Config->ExperiencePerHealth));
 	};
 	FHexHero* Attacker = Heroes->FindHeroMutable(Request.Attacker);
 	if (Attacker && Winner == 0)
@@ -513,7 +540,7 @@ void UHexBattles::Apply()
 					{
 						Kept->Army = Survivors(1, 0, GuardSlots);
 						Kept->Mana = Battle.GetMana(1);
-						Kept->Experience += FMath::RoundToInt32(Battle.GetKilledHealth(1) * Config->ExperiencePerHealth);
+						Heroes->AddExperience(*Kept, FMath::RoundToInt32(Battle.GetKilledHealth(1) * Config->ExperiencePerHealth));
 					}
 				}
 				if (!bGuardAlone)
@@ -530,9 +557,14 @@ void UHexBattles::Apply()
 		{
 			if (Winner == 0)
 			{
-				// its guard beaten, the hero takes the mine, for the points it paid for the battle
+				// its guard beaten, the hero takes the mine, for the points it paid for the battle, or the artifact it stands on
 				Site->Guard.Reset();
-				if (Attacker)
+				const UHexSiteConfig* SiteConfig = Heroes->GetSites()->GetConfig();
+				if (Attacker && SiteConfig->Kinds.IsValidIndex(Site->Kind) && SiteConfig->Kinds[Site->Kind].IsPickup())
+				{
+					Heroes->TakePile(*Attacker);
+				}
+				else if (Attacker)
 				{
 					Attacker->VisitCell = Request.Cell;
 					Heroes->bNextVisitFree = true;
@@ -562,12 +594,21 @@ void UHexBattles::Apply()
 		}
 		break;
 	}
-	// who lost or retreated leaves the map with its army
+	// who lost or retreated leaves the map with its army, and what it wore and carried goes to the hero that beat it
+	const int32 WinnerHero = Winner == 0 || Winner == 1 ? Battle.GetSide(Winner).HeroId : 0;
 	for (const int32 Id : Leaving)
 	{
 		if (FHexHero* Beaten = Heroes->FindHeroMutable(Id))
 		{
 			Beaten->Army.Reset();
+			if (WinnerHero != 0 && WinnerHero != Id)
+			{
+				const int32 Taken = Heroes->TakeArtifacts(WinnerHero, Id);
+				if (Taken > 0 && bTold)
+				{
+					Heroes->OnMessage.Broadcast(FString::Printf(TEXT("%s takes %d artifacts from %s"), *Heroes->FindHero(WinnerHero)->Name, Taken, *Beaten->Name));
+				}
+			}
 		}
 		Heroes->RemoveHero(Id);
 	}

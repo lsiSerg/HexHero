@@ -84,6 +84,11 @@ public:
 	UPROPERTY(EditAnywhere, Category="Camera", meta=(ClampMin=100))
 	float MinDistance = 600.0f;
 
+	/** When the game starts (P) the camera stands over the hero or castle chosen at once, as the developer asked on 2026-11-15, and comes
+	 *  down to this distance when it was further */
+	UPROPERTY(EditAnywhere, Category="Camera", meta=(ClampMin=100))
+	float PlayStartDistance = 1100.0f;
+
 	/** How far, in pixels, the mouse may move while the middle button is down for its release to count as a click, which centers the cell
 	 *  under the mouse; further it drags the planet, as the left button does when the brush is off */
 	UPROPERTY(EditAnywhere, Category="Camera", meta=(ClampMin=0))

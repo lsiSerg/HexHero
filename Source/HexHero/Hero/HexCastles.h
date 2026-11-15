@@ -116,6 +116,13 @@ struct FHexCastle
 	/** How many creatures of each level its dwellings offer to hire now */
 	TArray<int32> Available;
 
+	/** The spells its mage guild teaches at each of its levels, by their Ids, chosen when a game starts (UHexCastles::RollGuildSpells) */
+	TArray<TArray<FName>> GuildSpells;
+
+	/** What its artifact merchant has for sale, by the indices of the artifacts of DA_HexHeroes, INDEX_NONE for what was sold; another stock
+	 *  each week (UHexCastles::RollMerchantStock) */
+	TArray<int32> MerchantStock;
+
 	/** The creatures that guard it */
 	TArray<FHexStack> Garrison;
 
@@ -204,8 +211,36 @@ public:
 	/** Returns the level of the hall, the fort or a dwelling of a castle, 0 for not built */
 	int32 GetLevel(const FHexCastle& Castle, EHexBuildingType Type, int32 Creature = 0) const;
 
+	/** The level of the mage guild of a castle, 0 for none, and the spells it teaches up to that level, by their Ids */
+	int32 GetGuildLevel(const FHexCastle& Castle) const { return GetLevel(Castle, EHexBuildingType::MageGuild); }
+	TArray<FName> GetGuildSpells(const FHexCastle& Castle) const;
+
+	/** Chooses the spells each level of the mage guild of a castle teaches, GuildSpellsPerLevel of the spells of that level, by its Id */
+	void RollGuildSpells(FHexCastle& Castle) const;
+
+	/** A hero of its owner in a castle learns the spells of its mage guild and gets all its mana back there; returns how many it learned */
+	int32 TeachSpells(FHexHero& Hero, const FHexCastle& Castle, bool bShown) const;
+
+	/** The artifact merchant of a castle, as the developer asked on 2026-11-15: whether it is built, a stock for a week of the game, and a hero of
+	 *  the owner in the castle or beside it buys what lies at a place of it for its price (HexHeroArtifacts.cpp) */
+	bool HasMerchant(const FHexCastle& Castle) const { return GetLevel(Castle, EHexBuildingType::Merchant) > 0; }
+	void RollMerchantStock(FHexCastle& Castle, int32 Week) const;
+	int32 GetArtifactPrice(int32 Artifact) const;
+	bool BuyArtifact(int32 CastleId, int32 StockIndex, int32 HeroId, FString& OutMessage);
+
+	/** The name of a castle, of the names of its faction by its place among the castles of that faction */
+	FString GetCastleName(const FHexCastle& Castle) const;
+
+	/** The picture of a castle in the list, the tips and its panel, as the developer asked on 2026-11-15: that of the level of its fort built,
+	 *  else of its hall, in the tint of its faction, the masonry of the undead darker and greener */
+	UTexture2D* GetCastlePicture(const FHexCastle& Castle) const;
+	FLinearColor GetCastleTint(const FHexCastle& Castle) const;
+
 	/** Whether the owner of a castle can build the next level of a building now, and why not */
 	bool CanBuild(const FHexCastle& Castle, int32 Building, FString* OutWhy = nullptr) const;
+
+	/** Whether the owner of a castle can build anything in it now: it has not built today and has what one of them costs */
+	bool CanBuildAny(const FHexCastle& Castle) const;
 	bool Build(int32 CastleId, int32 Building, FString& OutMessage);
 
 	/** The hero that guards a castle or stands beside it buys a catapult there for CatapultCost, which shoots at the walls of a castle it

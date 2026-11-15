@@ -4,10 +4,12 @@ Run with UnrealEditor-Cmd.exe <uproject> -run=pythonscript -script=<this file> -
 argument heroes) made M_HexPlanetSite. The meshes go to /Game/HexPlanet/Sites, replaced each run, with that material. DA_HexSites
 (UHexSiteConfig) holds the resources and the kinds of sites and belongs to whoever tunes it, so it is only created, with the defaults of its
 class; of what it holds only a kind that names no mesh is changed here: it gets the mesh named after it, as the piles are, SM_Planet<Id>.
+Words after the file name (-script="<file> Boat Shipyard") import only the meshes whose names hold one.
 """
 
 import json
 import os
+import sys
 
 import unreal
 
@@ -32,6 +34,9 @@ def main():
         pipeline.get_editor_property('common_meshes_properties').set_editor_property('vertex_color_import_option', unreal.InterchangeVertexColorImportOption.IVCIO_REPLACE)
     except Exception as error:
         unreal.log_warning('SITES could not set the import of vertex colors: %s' % error)
+    # words after the file name import only the meshes whose names hold one, so those imported before stay as they are
+    only = [word for word in sys.argv[1:] if not word.startswith('-')]
+    manifest['meshes'] = [entry for entry in manifest['meshes'] if not only or any(word.lower() in entry['name'].lower() for word in only)]
     tasks = []
     for entry in manifest['meshes']:
         task = unreal.AssetImportTask()

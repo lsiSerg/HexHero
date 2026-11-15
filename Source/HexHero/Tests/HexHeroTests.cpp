@@ -372,8 +372,10 @@ bool FHexHeroSitesTest::RunTest(const FString& Parameters)
 		int32 Piles = 0;
 		for (const FHexSiteKind& Kind : Config->Kinds)
 		{
-			Mines += Kind.Type == EHexSiteType::Mine && Kind.Resource == Info.Id ? 1 : 0;
-			Piles += Kind.Type == EHexSiteType::Pile && Kind.Resource == Info.Id && Kind.AmountMin > 0 && Kind.AmountMax >= Kind.AmountMin ? 1 : 0;
+			// the rich gold mine of the pentagons aside
+			Mines += Kind.Type == EHexSiteType::Mine && Kind.Resource == Info.Id && Kind.Id != Config->PentagonKind ? 1 : 0;
+			// the piles that float on the sea aside
+			Piles += Kind.Type == EHexSiteType::Pile && !Kind.bAtSea && Kind.Resource == Info.Id && Kind.AmountMin > 0 && Kind.AmountMax >= Kind.AmountMin ? 1 : 0;
 		}
 		TestEqual(*FString::Printf(TEXT("One mine of %s"), *Info.DisplayName), Mines, 1);
 		TestEqual(*FString::Printf(TEXT("One pile of %s"), *Info.DisplayName), Piles, 1);
@@ -542,11 +544,15 @@ bool FHexHeroSiteGeneratorTest::RunTest(const FString& Parameters)
 		bool bMinesApart = true;
 		for (const TPair<int32, int32>& Each : KindAt)
 		{
+			// piles may lie in heaps, side by side (PileClusterChance), and a hero walks onto a pickup, so one beside a site is a cell to visit
+			// it from
 			bool bBeside = false;
+			const bool bPickup = Config->Kinds[Each.Value].IsPickup();
 			for (const int32 Neighbor : Cells[Each.Key].Neighbors)
 			{
-				bApart &= !KindAt.Contains(Neighbor);
-				bBeside |= Open[Neighbor];
+				const int32* Near = KindAt.Find(Neighbor);
+				bApart &= !Near || (bPickup && Config->Kinds[*Near].IsPickup());
+				bBeside |= Open[Neighbor] || (Near && Config->Kinds[*Near].IsPickup());
 			}
 			bVisited &= bBeside;
 			if (Config->Kinds[Each.Value].IsMine())
@@ -559,7 +565,7 @@ bool FHexHeroSiteGeneratorTest::RunTest(const FString& Parameters)
 				}
 			}
 		}
-		TestTrue(*FString::Printf(TEXT("Layer %d: no two sites stand side by side"), Layer), bApart);
+		TestTrue(*FString::Printf(TEXT("Layer %d: no two sites stand side by side but piles in a heap"), Layer), bApart);
 		TestTrue(*FString::Printf(TEXT("Layer %d: every site has a cell beside it to be visited from"), Layer), bVisited);
 		TestTrue(*FString::Printf(TEXT("Layer %d: mines keep apart"), Layer), bMinesApart);
 	}
@@ -613,7 +619,8 @@ bool FHexHeroCastlesTest::RunTest(const FString& Parameters)
 	// two factions, each with a hall, a fort, and seven levels of creatures with a dwelling each
 	const UHexCastleConfig* Config = GetDefault<UHexCastleConfig>();
 	const UHexSiteConfig* Sites = GetDefault<UHexSiteConfig>();
-	TestEqual(TEXT("Two factions"), Config->Factions.Num(), 2);
+	TestEqual(TEXT("Two factions of the land and the sea"), Config->Factions.Num(), 3);
+	TestEqual(TEXT("The sea is the last, the creatures of the map alone"), Config->Factions.FilterByPredicate([](const FHexFaction& Each) { return Each.bSea; }).Num(), 1);
 	for (const FHexFaction& Faction : Config->Factions)
 	{
 		TestEqual(*FString::Printf(TEXT("%s has seven levels of creatures"), *Faction.DisplayName), Faction.Creatures.Num(), NumCreatureLevels);
@@ -801,6 +808,70 @@ bool FHexHeroZoneMapTest::RunTest(const FString& Parameters)
 		HexZoneMap::Generate(Grid, Base, Settings, Case.Zones, Case.Ai, Seed, Again);
 		TestTrue(*(Name + TEXT(": the same again")), Again.Levels == Result.Levels && Again.Guards.Num() == Result.Guards.Num());
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHexHeroArtifactsTest, "HexHero.Hero.Artifacts",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FHexHeroArtifactsTest::RunTest(const FString& Parameters)
+{
+	// the artifacts of 2026-11-15: about thirty, of Ids of their own, each giving something, every kind of slot and rank among them
+	const TArray<FHexArtifact> Artifacts = MakeDefaultArtifacts();
+	TestTrue(TEXT("about thirty artifacts"), Artifacts.Num() >= 30);
+	TSet<FName> Ids;
+	bool Slots[int32(EHexArtifactSlot::Num)] = {};
+	bool Ranks[int32(EHexArtifactRank::Num)] = {};
+	for (const FHexArtifact& Each : Artifacts)
+	{
+		TestFalse(FString::Printf(TEXT("%s has an Id of its own"), *Each.Id.ToString()), Ids.Contains(Each.Id));
+		Ids.Add(Each.Id);
+		TestFalse(FString::Printf(TEXT("%s gives something"), *Each.Id.ToString()), Each.DescribeEffect().IsEmpty());
+		TestFalse(FString::Printf(TEXT("%s has a picture"), *Each.Id.ToString()), Each.Icon.IsNull());
+		Slots[int32(Each.Slot)] = true;
+		Ranks[int32(Each.Rank)] = true;
+	}
+	for (int32 Slot = 0; Slot < int32(EHexArtifactSlot::Num); ++Slot)
+	{
+		TestTrue(FString::Printf(TEXT("an artifact for the %s"), *GetArtifactSlotName(EHexArtifactSlot(Slot))), Slots[Slot]);
+	}
+	for (int32 Rank = 0; Rank < int32(EHexArtifactRank::Num); ++Rank)
+	{
+		TestTrue(FString::Printf(TEXT("an artifact of the rank %s"), *GetArtifactRankName(EHexArtifactRank(Rank))), Ranks[Rank]);
+	}
+	// a hero wears twelve: a slot of each kind, two rings and three things besides
+	int32 Rings = 0;
+	int32 Misc = 0;
+	for (int32 Slot = 0; Slot < NumWornSlots; ++Slot)
+	{
+		Rings += GetWornSlotKind(Slot) == EHexArtifactSlot::Ring ? 1 : 0;
+		Misc += GetWornSlotKind(Slot) == EHexArtifactSlot::Misc ? 1 : 0;
+	}
+	TestEqual(TEXT("two rings"), Rings, 2);
+	TestEqual(TEXT("three things besides"), Misc, 3);
+	// what they give adds up
+	FHexArtifactBonus Bonus;
+	FHexArtifact Sword;
+	Sword.Attack = 2;
+	Sword.School = 2;
+	Sword.SchoolPower = 0.25f;
+	FHexArtifact Boots;
+	Boots.Movement = 2.0f;
+	Boots.Luck = 1;
+	Bonus.Add(Sword);
+	Bonus.Add(Boots);
+	TestEqual(TEXT("attack"), Bonus.Attack, 2);
+	TestEqual(TEXT("movement"), Bonus.Movement, 2.0f);
+	TestEqual(TEXT("luck"), Bonus.Luck, 1);
+	TestEqual(TEXT("fire"), Bonus.SchoolPower[2], 0.25f);
+	// the kinds of sites that lie on the map, the shipyard and the boat
+	const TArray<FHexSiteKind> Kinds = MakeDefaultSiteKinds();
+	const FHexSiteKind* Artifact = Kinds.FindByPredicate([](const FHexSiteKind& Each) { return Each.Type == EHexSiteType::Artifact; });
+	const FHexSiteKind* Shipyard = Kinds.FindByPredicate([](const FHexSiteKind& Each) { return Each.Type == EHexSiteType::Shipyard; });
+	const FHexSiteKind* Boat = Kinds.FindByPredicate([](const FHexSiteKind& Each) { return Each.Type == EHexSiteType::Boat; });
+	TestTrue(TEXT("an artifact is taken as a pile"), Artifact && Artifact->IsPickup() && !Artifact->FillsCell());
+	TestTrue(TEXT("a shipyard fills its cell"), Shipyard && Shipyard->FillsCell() && !Shipyard->IsPickup());
+	TestTrue(TEXT("a boat lies on the sea"), Boat && Boat->IsAtSea() && !Boat->FillsCell() && !Boat->IsPickup());
 	return true;
 }
 

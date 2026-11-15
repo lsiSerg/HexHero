@@ -38,6 +38,21 @@ struct FHexBattleSideSetup
 
 	/** What the side is called when it has no hero */
 	FString Name;
+
+	/** The spells its hero knows, by their index in DA_HexBattle, or every spell while bAllSpells, for a battle of the console or a test */
+	TArray<int32> KnownSpells;
+	bool bAllSpells = true;
+
+	/** What the skills of magic of its hero give each school (EHexSpellSchool): the share of the mana taken off, the factor on the power,
+	 *  and whether its spells that may take every stack of a side do so (Expert); and the share Sorcery adds to the damage of its spells */
+	float SchoolManaCut[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+	float SchoolPower[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+	bool bSchoolMass[4] = {false, false, false, false};
+	float SpellDamageBonus = 0.0f;
+
+	/** Morale and luck the artifacts of its hero give every stack of it */
+	int32 Morale = 0;
+	int32 Luck = 0;
 };
 
 /**
@@ -72,6 +87,8 @@ struct FHexBattleSetup
 	/** Obstacles are put on the field */
 	bool bObstacles = true;
 	FHexBattleSiege Siege;
+	/** On the deck of a ship, as a hero in a boat fights, as the developer asked on 2026-11-15: no obstacles, and the field draws a ship */
+	bool bAtSea = false;
 };
 
 /** A part of the wall of a castle on the field: a section of it, its gate or a tower, standing while it has health; one that fell is rubble,
@@ -99,6 +116,8 @@ struct FHexBattleEffect
 {
 	int32 Spell = INDEX_NONE;
 	int32 RoundsLeft = 0;
+	/** How much stronger the skill of its school made it, a factor on what it adds */
+	float Factor = 1.0f;
 };
 
 /** A stack on the field */
@@ -171,6 +190,12 @@ struct FHexBattleEvent
 		WallHit,
 		/** The catapult shoots at a part of the wall (Hex), Amount 0 when it misses */
 		CatapultShot,
+		/** A spell takes one more stack (Target) after the one it was cast at: a chain, a mass spell or the whole field */
+		SpellHit,
+		/** The fallen of a stack (Target) rise again: Amount health, CountAfter how many it has then */
+		Raise,
+		/** A blind stack (Unit) loses its turn */
+		Blind,
 	};
 
 	EType Type = EType::TurnBegins;
@@ -214,6 +239,8 @@ struct FHexSpellPreview
 	int32 Heal = 0;
 	int32 Kills = 0;
 	int32 Units = 0;
+	/** The creatures a raise brings back */
+	int32 Raised = 0;
 };
 
 /**
@@ -262,7 +289,15 @@ public:
 
 	const TArray<FHexBattleUnit>& GetUnits() const { return Units; }
 	const FHexBattleSideSetup& GetSide(int32 Side) const { return Setup.Sides[Side]; }
+
+	/** Whether it is fought on the deck of a ship (FHexBattleSetup::bAtSea) */
+	bool IsAtSea() const { return Setup.bAtSea; }
 	int32 GetMana(int32 Side) const { return Mana[Side]; }
+
+	/** Gives a side again the spells its hero knows and what its skills of magic give them, and MoreMana more of its mana (less when below
+	 *  0), as a cheat given in the battle teaches spells, skills or mana (hex.Cheat spells, skill, mana), as the developer found on 2026-11-15
+	 *  that spells taught in a battle did not come into its book */
+	void RefreshMagic(int32 Side, const FHexBattleSideSetup& From, int32 MoreMana);
 	bool HasCast(int32 Side) const { return bCast[Side]; }
 
 	int32 GetRound() const { return Round; }
@@ -279,10 +314,32 @@ public:
 	int32 GetWinner() const { return Winner; }
 	int32 GetRetreated() const { return Retreated; }
 
-	/** The speed, Attack and Defense of a unit now, with its spells and its hero */
+	/** The speed, Attack and Defense of a unit now, with its spells and its hero; Attack for a strike (Mode 0), a shot (1) or either (-1) */
 	int32 GetSpeed(const FHexBattleUnit& Unit) const;
-	int32 GetAttack(const FHexBattleUnit& Unit) const;
+	int32 GetAttack(const FHexBattleUnit& Unit, int32 Mode = -1) const;
 	int32 GetDefense(const FHexBattleUnit& Unit) const;
+
+	/** The morale and luck of a unit now, with its spells */
+	int32 GetMorale(const FHexBattleUnit& Unit) const;
+	int32 GetLuck(const FHexBattleUnit& Unit) const;
+
+	/** Whether the hero of a side knows a spell, what it costs it in mana with the skill of its school, and the power it casts it at */
+	bool KnowsSpell(int32 Side, int32 Spell) const;
+	int32 GetManaCost(int32 Side, int32 Spell) const;
+	int32 GetSpellPower(int32 Side, int32 Spell) const;
+
+	/** Whether a spell of a side takes every stack of the side it takes, from Expert of its school */
+	bool IsMassCast(int32 Side, const FHexSpell& Spell) const;
+
+	/** Whether a spell on a unit passes a test */
+	bool HasEffect(const FHexBattleUnit& Unit, TFunctionRef<bool(const FHexSpell&)> Test) const;
+	bool IsSpellImmune(const FHexBattleUnit& Unit) const;
+
+	/** The unit on a hex, alive, else one of a side that lies dead there (INDEX_NONE for any), for a spell that raises the fallen */
+	int32 FindAnyUnitAt(const FHexCoord& Hex, int32 Side) const;
+
+	/** The stacks a spell of a side cast at a hex takes, each with the share of its power it takes them with (a chain grows weaker) */
+	void GatherSpellTargets(int32 Side, int32 Spell, const FHexCoord& Hex, TArray<TPair<int32, float>>& OutTargets) const;
 
 	/** The hexes a unit can walk or fly to this turn, each with how many hexes it runs to get there, and the way there for one that walks */
 	void FindReach(int32 UnitIndex, TMap<FHexCoord, int32>& OutSteps, TMap<FHexCoord, FHexCoord>* OutFrom = nullptr, bool bOnGround = false) const;
@@ -424,6 +481,26 @@ private:
 	int32 Retreated = INDEX_NONE;
 
 	const FHexSpell* GetSpell(int32 Spell) const;
+
+	/** The factor of the skill of its school on the spells of a side */
+	float GetSchoolPower(int32 Side, const FHexSpell& Spell) const;
+
+	/** Whether a spell of a side may take a unit: of the side it takes, alive or, for a raise, fallen of its own, no machine, not immune */
+	bool CanTakeSpell(int32 Side, const FHexSpell& Spell, int32 Unit) const;
+
+	/** The damage of a spell to a unit, less what a ward against its school turns aside */
+	int32 GetSpellDamageTo(const FHexSpell& Spell, int32 Power, const FHexBattleUnit& Unit) const;
+
+	/** Brings back the fallen of a stack, Health points of them, never more than it came onto the field with */
+	void RaiseUnit(int32 Unit, int32 Health);
+
+	/** A unit that is struck sees again */
+	void WakeUp(int32 Unit);
+
+	/** What the spells on a unit add up to, each by the factor it was cast with */
+	int32 SumEffects(const FHexBattleUnit& Unit, int32 FHexSpell::* Field) const;
+	bool HasFlag(const FHexBattleUnit& Unit, bool FHexSpell::* Flag) const;
+	float CombineCuts(const FHexBattleUnit& Unit, float FHexSpell::* Field) const;
 
 	/** Puts the obstacles on the field, keeping a way from the first column to the last */
 	void PlaceObstacles();

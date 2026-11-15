@@ -85,6 +85,17 @@ public:
 	bool HasHover() const { return bHover; }
 	int32 GetHoverUnit() const;
 
+	/** The unit the panel of the turns has under the cursor, which the field outlines too, as the developer asked on 2026-11-15; INDEX_NONE
+	 *  for none. And the unit the field outlines: that one, else the one under the cursor */
+	void SetQueueHover(int32 Unit) { QueueHoverUnit = Unit; }
+	int32 GetQueueHover() const { return QueueHoverUnit; }
+	int32 GetOutlinedUnit() const;
+
+	/** The side whose hero stands under the cursor beside the field, or INDEX_NONE; a click on the hero of the person asks for its spell book,
+	 *  which the panel takes once (TakeSpellBookRequest) */
+	int32 GetHoverHero() const { return HoverHeroSide; }
+	bool TakeSpellBookRequest() { const bool bAsked = bSpellBookAsked; bSpellBookAsked = false; return bAsked; }
+
 	/** The person's orders: a left click where the cursor is, the right one, and the buttons */
 	void Click();
 	void Cancel();
@@ -401,6 +412,12 @@ private:
 
 	void BuildSiege();
 
+	/** A battle at sea (FHexBattle::IsAtSea): the deck of a ship of planks over the field and around it (DeckBox, in the world), its hull,
+	 *  rails and masts, the sea drawn by the ground, as the developer asked on 2026-11-15 */
+	bool bSea = false;
+	FBox2D DeckBox = FBox2D(ForceInit);
+	void BuildShip();
+
 	/** The debug views of the maps on the field, as the developer asked on 2026-11-13: hex.Wireframe (F) 1 draws the edges of the meshes over
 	 *  the render and 2 the triangles alone, by the view modes of the engine, hex.Water (V) hides the water of the moat and G the lines of the
 	 *  hexes; applied when they change (DebugKey) and undone when the field closes */
@@ -419,7 +436,46 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<USkeletalMeshComponent> HoverOutline;
 	int32 OutlinedUnit = INDEX_NONE;
+	/** What the outline was made for: a unit, or a hero as 1000 + its side */
+	int32 OutlinedKey = INDEX_NONE;
 	void UpdateOutline();
+
+	/** The unit whose turn it is is outlined lighter (ActiveOutlineWidthShare, ActiveOutlineShade), while the cursor is not on it */
+	UPROPERTY(Transient)
+	TObjectPtr<USkeletalMeshComponent> ActiveOutline;
+	int32 ActiveOutlined = INDEX_NONE;
+	void UpdateActiveOutline();
+
+	/** A copy of a figure that follows its pose, drawn a little larger by OutlineMaterial where it shows its back faces, in a color and a share
+	 *  of OutlineWidth */
+	USkeletalMeshComponent* MakeOutline(USkeletalMeshComponent* Figure, const FLinearColor& Color, float WidthShare);
+
+	/** The heroes that lead the sides, beside the field on the other side of it from the catapults, as the developer asked on 2026-11-15:
+	 *  the rider of the map, whose spell book a click opens; where each stands, and the side under the cursor */
+	UPROPERTY(Transient)
+	TObjectPtr<USkeletalMeshComponent> HeroFigures[2] = {nullptr, nullptr};
+	FVector HeroPoints[2] = {FVector::ZeroVector, FVector::ZeroVector};
+	int32 HoverHeroSide = INDEX_NONE;
+	int32 QueueHoverUnit = INDEX_NONE;
+	bool bSpellBookAsked = false;
+	void PlaceHeroes();
+
+	/** The Niagara effect of a spell where it lands (EHexSpellLook): from the hero of its side for a missile */
+	void PlaySpellEffect(const struct FHexSpell& Spell, int32 Side, const FVector& At);
+	class UNiagaraComponent* SpawnEffect(class UNiagaraSystem* System, const FVector& At, const FRotator& Turn, double Size, const FLinearColor& Color);
+
+	/** A missile of a spell on its way: what it is, from where to where, how long it flies, and puffs of its trail */
+	struct FSpellMissile
+	{
+		int32 Spell = INDEX_NONE;
+		FVector From = FVector::ZeroVector;
+		FVector To = FVector::ZeroVector;
+		float Time = 0.0f;
+		float Length = 0.5f;
+		float NextPuff = 0.0f;
+	};
+	TArray<FSpellMissile> Missiles;
+	void UpdateMissiles(float DeltaSeconds);
 
 	/** The hexes the unit whose turn it is reaches, for its turn */
 	TMap<FHexCoord, int32> Reach;

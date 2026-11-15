@@ -1053,7 +1053,8 @@ bool FHexPlanetUndergroundObjectSetsTest::RunTest(const FString& Parameters)
 		CheckMeshes(Set);
 	}
 
-	TestEqual(TEXT("The surface has its twelve kinds"), Surface.Num(), 12);
+	// twelve, and the lone trees of 2026-11-15
+	TestEqual(TEXT("The surface has its thirteen kinds"), Surface.Num(), 13);
 	// the covers that came with the meadows, which a hero walks through
 	for (const TCHAR* Id : {TEXT("TallGrass"), TEXT("Wheat")})
 	{

@@ -6,9 +6,13 @@
 #include "HexHeroConfig.h"
 #include "HexCastles.h"
 #include "HexHeroes.h"
+#include "HexNeutrals.h"
+#include "HexPlanetSurface.h"
+#include "HexCastleConfig.h"
 #include "HexMaterialConfig.h"
 #include "HexPlanet.h"
 #include "HexPlanetObjects.h"
+#include "HexPlanetObjectSet.h"
 #include "HexShroud.h"
 #include "HexSiteConfig.h"
 #include "HexSiteGenerator.h"
@@ -81,11 +85,16 @@ TArray<FHexSiteLine> UHexSites::MakeLines() const
 	TArray<FHexSiteLine> Lines;
 	for (const FHexSite& Site : Sites)
 	{
+		// a boat a shipyard built in the game is not the map's
+		if (Site.bBuilt)
+		{
+			continue;
+		}
 		FHexSiteLine& Line = Lines.AddDefaulted_GetRef();
 		Line.Id = Site.Id;
 		Line.Kind = Config->Kinds[Site.Kind].Id.ToString();
 		Line.Layer = GetPlanetLayerName(Site.Layer);
-		Line.Cell = Site.Cell;
+		Line.Cell = Site.StartCell != INDEX_NONE ? Site.StartCell : Site.Cell;
 		Line.Yaw = Site.Yaw;
 	}
 	return Lines;
@@ -100,15 +109,17 @@ void UHexSites::SetLines(const TArray<FHexSiteLine>& Lines)
 	{
 		// a site whose line is the same stays as it is, with its owner
 		const int32 Same = Before.IndexOfByKey(Line);
-		if (Same != INDEX_NONE)
+		const FHexSite* Was = Same != INDEX_NONE ? Sites.FindByPredicate([&Line](const FHexSite& Each) { return Each.Id == Line.Id && !Each.bBuilt; }) : nullptr;
+		if (Was)
 		{
-			Kept.Add(Sites[Same]);
+			Kept.Add(*Was);
 			continue;
 		}
 		FHexSite Site;
 		Site.Id = Line.Id;
 		Site.Kind = Config->FindKind(Line.Kind);
 		Site.Cell = Line.Cell;
+		Site.StartCell = Line.Cell;
 		Site.Yaw = Line.Yaw;
 		if (Site.Id <= 0 || Site.Kind == INDEX_NONE || Line.Cell < 0 || Line.Cell >= NumCells || !ParsePlanetLayer(Line.Layer, Site.Layer)
 			|| Kept.ContainsByPredicate([&Site](const FHexSite& Each) { return Each.Id == Site.Id || (Each.Layer == Site.Layer && Each.Cell == Site.Cell); }))
@@ -142,7 +153,81 @@ bool UHexSites::Save(const FString& PlanetFolder, FString& OutError)
 
 const FHexSite* UHexSites::FindSiteAt(EHexPlanetLayer Layer, int32 Cell) const
 {
-	return Sites.FindByPredicate([Layer, Cell](const FHexSite& Each) { return Each.Layer == Layer && Each.Cell == Cell && !Each.bTaken; });
+	// a boat a hero sails lies nowhere
+	return Sites.FindByPredicate([Layer, Cell](const FHexSite& Each) { return Each.Layer == Layer && Each.Cell == Cell && !Each.bTaken && Each.Captain == 0; });
+}
+
+const FHexSite* UHexSites::FindBoatAt(EHexPlanetLayer Layer, int32 Cell) const
+{
+	const FHexSite* Site = FindSiteAt(Layer, Cell);
+	return Site && Config->Kinds[Site->Kind].Type == EHexSiteType::Boat ? Site : nullptr;
+}
+
+void UHexSites::SetCaptain(int32 BoatId, int32 HeroId)
+{
+	if (FHexSite* Boat = FindSiteMutable(BoatId))
+	{
+		Boat->Captain = HeroId;
+		bDirty[int32(Boat->Layer)] = true;
+		UHexHeroes::NoteMapChanged();
+	}
+}
+
+void UHexSites::LeaveBoat(int32 BoatId, int32 Cell)
+{
+	if (FHexSite* Boat = FindSiteMutable(BoatId))
+	{
+		Boat->Captain = 0;
+		Boat->Cell = Cell;
+		Boat->bSeated = false;
+		bDirty[int32(Boat->Layer)] = true;
+		UHexHeroes::NoteMapChanged();
+	}
+}
+
+int32 UHexSites::AddBuiltBoat(EHexPlanetLayer Layer, int32 Cell)
+{
+	const int32 Kind = Config->Kinds.IndexOfByPredicate([](const FHexSiteKind& Each) { return Each.Type == EHexSiteType::Boat; });
+	if (Kind == INDEX_NONE || FindSiteAt(Layer, Cell))
+	{
+		return 0;
+	}
+	FHexSite Site;
+	Site.Id = NextId++;
+	Site.Kind = Kind;
+	Site.Layer = Layer;
+	Site.Cell = Cell;
+	Site.StartCell = Cell;
+	Site.bBuilt = true;
+	Site.Yaw = (Cell * 47) % 360;
+	Sites.Add(Site);
+	bDirty[int32(Layer)] = true;
+	UHexHeroes::NoteMapChanged();
+	return Site.Id;
+}
+
+bool UHexSites::TakePickup(EHexPlanetLayer Layer, int32 Cell, const FString& Text, const FLinearColor& Color, bool bShown)
+{
+	FHexSite* Site = Sites.FindByPredicate([Layer, Cell](const FHexSite& Each) { return Each.Layer == Layer && Each.Cell == Cell && !Each.bTaken && Each.Captain == 0; });
+	if (!Site || !Config->Kinds[Site->Kind].IsPickup())
+	{
+		return false;
+	}
+	Site->bTaken = true;
+	Site->EventTime = GetWorldTime();
+	Site->bFading = Site->bSeated && Config->PickupFadeTime > 0.0f;
+	bDirty[int32(Layer)] = true;
+	if (bShown)
+	{
+		AddPopup(*Site, Text, Color);
+	}
+	UHexHeroes::NoteMapChanged();
+	return true;
+}
+
+uint32 UHexSites::GetSiteHash(const FHexSite& Site) const
+{
+	return HashCombine(HashCombine(GetTypeHash(Site.Id), GetTypeHash(GameNumber * 7919 + 3)), GetTypeHash(Site.StartCell));
 }
 
 const FHexSite* UHexSites::FindSite(int32 Id) const
@@ -165,6 +250,12 @@ TArray<FHexStack> UHexSites::MakeStartGuard(const FHexSite& Site) const
 	}
 	const FName KindId = Config->Kinds[Site.Kind].Id;
 	const FHexSiteGuardRule* Rule = Config->Guards.FindByPredicate([KindId](const FHexSiteGuardRule& Each) { return Each.Kind == KindId; });
+	// a site on a pentagon of the surface is guarded strongly, as the developer asked on 2026-11-15
+	const AHexPlanet* Planet = GetPlanet(Site.Layer);
+	if (Site.Layer == EHexPlanetLayer::Surface && Planet && Planet->GetGrid().GetCells().IsValidIndex(Site.Cell) && Planet->GetGrid().GetCells()[Site.Cell].IsPentagon())
+	{
+		Rule = &Config->PentagonGuard;
+	}
 	if (!Rule || Rule->Share <= 0.0f || Rule->Weeks <= 0.0f)
 	{
 		return Guard;
@@ -176,7 +267,17 @@ TArray<FHexStack> UHexSites::MakeStartGuard(const FHexSite& Site) const
 		return Guard;
 	}
 	FHexStack& Stack = Guard.AddDefaulted_GetRef();
-	Stack.Faction = Random.RandHelper(Castles->Factions.Num());
+	// the faction the rule names, else any of the land
+	TArray<int32> Land;
+	for (int32 Faction = 0; Faction < Castles->Factions.Num(); ++Faction)
+	{
+		if (!Castles->Factions[Faction].bSea)
+		{
+			Land.Add(Faction);
+		}
+	}
+	const int32 Named = Rule->Faction.IsNone() ? INDEX_NONE : Castles->FindFaction(Rule->Faction.ToString());
+	Stack.Faction = Named != INDEX_NONE ? Named : Land.IsEmpty() ? 0 : Land[Random.RandHelper(Land.Num())];
 	const TArray<FHexCreature>& Creatures = Castles->Factions[Stack.Faction].Creatures;
 	if (Creatures.IsEmpty())
 	{
@@ -239,7 +340,8 @@ void UHexSites::UpdateGuards(const UHexHeroes& Heroes)
 			const FVector3d Forward = FVector3d(Site.Seat.GetUnitAxis(EAxis::X));
 			const FVector3d Left = FVector3d(Site.Seat.GetUnitAxis(EAxis::Y));
 			const FVector3d Direction = (Center + (Forward * (Place.X * 0.75) + Left * 0.55) * CellRadius).GetSafeNormal();
-			const FVector3d Point = Direction * (Planet->FindGroundRadius(Site.Cell, Direction) + Hover);
+			// on the water beside a wreck
+			const FVector3d Point = Direction * ((Config->Kinds[Site.Kind].IsAtSea() ? Planet->GetRadius() : Planet->FindGroundRadius(Site.Cell, Direction)) + Hover);
 			const FVector3d Facing = (Forward - Direction * FVector3d::DotProduct(Forward, Direction)).GetSafeNormal();
 			const FQuat Turn = FRotator(0.0, Yaw, 0.0).Quaternion();
 			Figure->SetWorldTransform(FTransform(FRotationMatrix::MakeFromZX(FVector(Direction), FVector(Facing)).ToQuat() * Turn, FVector(Point), FVector(Scale)));
@@ -283,7 +385,7 @@ const FHexSite* UHexSites::FindBlockerAt(EHexPlanetLayer Layer, int32 Cell) cons
 const FHexSite* UHexSites::FindPileAt(EHexPlanetLayer Layer, int32 Cell) const
 {
 	const FHexSite* Site = FindSiteAt(Layer, Cell);
-	return Site && !Config->Kinds[Site->Kind].FillsCell() ? Site : nullptr;
+	return Site && Config->Kinds[Site->Kind].IsPickup() ? Site : nullptr;
 }
 
 int32 UHexSites::AddSite(EHexPlanetLayer Layer, int32 Cell, int32 Kind, FString& OutProblem)
@@ -295,9 +397,31 @@ int32 UHexSites::AddSite(EHexPlanetLayer Layer, int32 Cell, int32 Kind, FString&
 		OutProblem = TEXT("there is no such kind or cell");
 		return 0;
 	}
-	// where a hero could stand, and none does, as a site fills its cell
-	if (Heroes && !Heroes->CanStand(Layer, Cell, 0, &OutProblem))
+	const FHexSiteKind& KindInfo = Config->Kinds[Kind];
+	const auto IsSeaCell = [Planet, Layer](int32 Each) { return Layer == EHexPlanetLayer::Surface && Planet->GetCellLevel(Each) < 0; };
+	if (KindInfo.IsAtSea())
 	{
+		// a boat lies on the sea, where no hero stands
+		if (!IsSeaCell(Cell))
+		{
+			OutProblem = TEXT("a boat lies on the sea");
+			return 0;
+		}
+		if (Heroes && Heroes->FindHeroAt(Layer, Cell))
+		{
+			OutProblem = TEXT("a hero is there");
+			return 0;
+		}
+	}
+	// where a hero could stand, and none does, as a site fills its cell
+	else if (Heroes && !Heroes->CanStand(Layer, Cell, 0, &OutProblem))
+	{
+		return 0;
+	}
+	// a shipyard on a coast
+	if (KindInfo.Type == EHexSiteType::Shipyard && !Planet->GetGrid().GetCells()[Cell].Neighbors.ContainsByPredicate(IsSeaCell))
+	{
+		OutProblem = TEXT("a shipyard stands beside the sea");
 		return 0;
 	}
 	if (Planet->FindEntrance(Cell) != INDEX_NONE)
@@ -315,6 +439,7 @@ int32 UHexSites::AddSite(EHexPlanetLayer Layer, int32 Cell, int32 Kind, FString&
 	Site.Kind = Kind;
 	Site.Layer = Layer;
 	Site.Cell = Cell;
+	Site.StartCell = Cell;
 	Site.Guard = MakeStartGuard(Site);
 	Sites.Add(Site);
 	bEdited = SortSiteLines(MakeLines()) != SavedLines;
@@ -348,7 +473,7 @@ bool UHexSites::Clear()
 	return true;
 }
 
-int32 UHexSites::Generate(FString& OutReport, const int32* Seed, float DensityScale, const TBitArray<>* SurfaceAvoid)
+int32 UHexSites::Generate(FString& OutReport, const int32* Seed, float DensityScale, const TBitArray<>* SurfaceAvoid, bool bAddPickups, int32 OnlyType, float ClusterShare)
 {
 	const UHexHeroes* Heroes = Surface ? Surface->GetHeroes() : nullptr;
 	if (!Config || !Heroes || !Surface->IsBuilt())
@@ -365,6 +490,11 @@ int32 UHexSites::Generate(FString& OutReport, const int32* Seed, float DensitySc
 	Input.Settings = Settings;
 	// a map of zones asks for more of them (SiteDensity of its settings)
 	Input.Settings.Density *= FMath::Max(DensityScale, 0.0f);
+	// the share of the piles that lie beside another, as the palette asks for it
+	if (ClusterShare >= 0.0f)
+	{
+		Input.Settings.PileClusterChance = FMath::Clamp(ClusterShare, 0.0f, 1.0f);
+	}
 	Input.Seed = Seed ? *Seed : Surface->GetManifest().Seed * 7919 + GenerateCount++ * 104729;
 	for (const FHexSiteShare& Share : Settings.Shares)
 	{
@@ -372,6 +502,11 @@ int32 UHexSites::Generate(FString& OutReport, const int32* Seed, float DensitySc
 		if (Kind == INDEX_NONE)
 		{
 			UE_LOG(LogHexHero, Warning, TEXT("Sites: the generation names the kind %s, which DA_HexSites does not have"), *Share.Kind.ToString());
+			continue;
+		}
+		// adding to what a planet has, as hex.Site scatter does, takes piles and chests alone
+		if ((bAddPickups && !Config->Kinds[Kind].IsPickup()) || (OnlyType >= 0 && int32(Config->Kinds[Kind].Type) != OnlyType))
+		{
 			continue;
 		}
 		HexSiteGenerator::FKind& Each = Input.Kinds.AddDefaulted_GetRef();
@@ -382,6 +517,22 @@ int32 UHexSites::Generate(FString& OutReport, const int32* Seed, float DensitySc
 		Each.bNearStart = Share.bNearStart;
 	}
 
+	// what the pentagons of land hold, a kind of its own that nothing else scatters, as the rich gold mine, taken in with no share
+	const auto FindInput = [&](FName Id)
+	{
+		int32 Found = Input.Kinds.IndexOfByPredicate([this, Id](const HexSiteGenerator::FKind& Each) { return Config->Kinds[Each.Kind].Id == Id; });
+		const int32 Kind = Config->FindKind(Id.ToString());
+		if (Found == INDEX_NONE && Kind != INDEX_NONE && !bAddPickups && OnlyType < 0)
+		{
+			HexSiteGenerator::FKind& Each = Input.Kinds.AddDefaulted_GetRef();
+			Each.Kind = Kind;
+			Each.Type = Config->Kinds[Kind].Type;
+			Found = Input.Kinds.Num() - 1;
+		}
+		return Found;
+	};
+	Input.PentagonKind = FindInput(Config->PentagonKind);
+	Input.PentagonFallbackKind = FindInput(Config->PentagonFallbackKind);
 	TArray<int32> Ring;
 	const auto Avoid = [&](int32 Layer, int32 Cell, int32 Rings)
 	{
@@ -431,6 +582,19 @@ int32 UHexSites::Generate(FString& OutReport, const int32* Seed, float DensitySc
 			}
 		}
 	}
+	// adding to what there is, the sites there are keep their cells and their spacing, and nothing more comes near where a player starts
+	if (bAddPickups)
+	{
+		Input.Settings.StartPiles = 0;
+		for (const FHexSite& Site : Sites)
+		{
+			Avoid(int32(Site.Layer), Site.Cell, FMath::Max(FMath::CeilToInt32(Settings.Spacing) - 1, 0));
+			if (Input.Walkable[int32(Site.Layer)].IsValidIndex(Site.Cell))
+			{
+				Input.Walkable[int32(Site.Layer)][Site.Cell] = false;
+			}
+		}
+	}
 	// and the cells the caller keeps free, as the passes of a map of zones
 	if (SurfaceAvoid && SurfaceAvoid->Num() == NumCells && Input.Avoid[0].Num() == NumCells)
 	{
@@ -452,17 +616,49 @@ int32 UHexSites::Generate(FString& OutReport, const int32* Seed, float DensitySc
 	{
 		Input.Starts.Add({int32(Each.Value->StartLayer), Each.Value->StartCell});
 	}
+	// and every castle, from a cell before it, gets the mines every player needs beside it
+	if (const UHexCastles* Castles = !bAddPickups ? Heroes->GetCastles() : nullptr)
+	{
+		for (const FHexCastle& Castle : Castles->GetCastles())
+		{
+			const TBitArray<>& Open = Input.Walkable[int32(Castle.Layer)];
+			int32 Before = INDEX_NONE;
+			for (int32 Index = 0; Index < 3 && Before == INDEX_NONE; ++Index)
+			{
+				for (const int32 Neighbor : Grid.GetCells()[Castle.Cells[Index]].Neighbors)
+				{
+					if (!Castle.HasCell(Neighbor) && Open.IsValidIndex(Neighbor) && Open[Neighbor])
+					{
+						Before = Neighbor;
+						break;
+					}
+				}
+			}
+			if (Before != INDEX_NONE)
+			{
+				HexSiteGenerator::FStart& Start = Input.Starts.AddDefaulted_GetRef();
+				Start.Layer = int32(Castle.Layer);
+				Start.Cell = Before;
+				Start.bMinesOnly = true;
+			}
+		}
+	}
 
 	TArray<HexSiteGenerator::FSite> Found;
 	HexSiteGenerator::FReport Report;
 	HexSiteGenerator::Generate(Grid, Input, Found, &Report);
 
-	TArray<FHexSiteLine> Lines;
-	int32 Counts[NumPlanetLayers][3] = {};
+	TArray<FHexSiteLine> Lines = bAddPickups ? MakeLines() : TArray<FHexSiteLine>();
+	int32 NextLineId = 1;
+	for (const FHexSiteLine& Line : Lines)
+	{
+		NextLineId = FMath::Max(NextLineId, Line.Id + 1);
+	}
+	int32 Counts[NumPlanetLayers][8] = {};
 	for (const HexSiteGenerator::FSite& Each : Found)
 	{
 		FHexSiteLine& Line = Lines.AddDefaulted_GetRef();
-		Line.Id = Lines.Num();
+		Line.Id = NextLineId++;
 		Line.Kind = Config->Kinds[Each.Kind].Id.ToString();
 		Line.Layer = GetPlanetLayerName(EHexPlanetLayer(Each.Layer));
 		Line.Cell = Each.Cell;
@@ -472,6 +668,9 @@ int32 UHexSites::Generate(FString& OutReport, const int32* Seed, float DensitySc
 	Sites.Reset();
 	NextId = 1;
 	SetLines(Lines);
+	// shipyards on the coasts and boats beside them, besides
+	const FIntPoint Coast = OnlyType >= 0 ? FIntPoint::ZeroValue : !bAddPickups || !Sites.ContainsByPredicate([this](const FHexSite& Each) { return Config->Kinds[Each.Kind].Type == EHexSiteType::Shipyard; })
+		? ScatterCoast(Input.Seed, Input.Settings.Density) : FIntPoint::ZeroValue;
 	Restart();
 
 	const int32 Mine = int32(EHexSiteType::Mine);
@@ -480,8 +679,419 @@ int32 UHexSites::Generate(FString& OutReport, const int32* Seed, float DensitySc
 	OutReport = FString::Printf(TEXT("%d sites: on the surface %d mines, %d piles and %d mills on %d cells, underground %d mines and %d piles on %d cells; %d near where %d players start%s"),
 		Sites.Num(), Counts[0][Mine], Counts[0][Pile], Counts[0][Mill], Report.Cells[0], Counts[1][Mine], Counts[1][Pile] + Counts[1][Mill], Report.Cells[1],
 		Report.NearStarts, Input.Starts.Num(), Report.NoRoom > 0 ? *FString::Printf(TEXT("; %d found no room"), Report.NoRoom) : TEXT(""));
+	OutReport += FString::Printf(TEXT("; %d piles beside another, %d on pentagons"), Report.Clustered, Report.Pentagons);
+	OutReport += FString::Printf(TEXT("; %d artifacts, %d shipyards and %d boats"), Counts[0][int32(EHexSiteType::Artifact)] + Counts[1][int32(EHexSiteType::Artifact)], Coast.X, Coast.Y);
 	UE_LOG(LogHexHero, Log, TEXT("Sites: generated with the seed %d in %.1f ms, %s"), Input.Seed, (FPlatformTime::Seconds() - StartTime) * 1000.0, *OutReport);
 	return Sites.Num();
+}
+
+FIntPoint UHexSites::ScatterCoast(int32 Seed, float DensityScale)
+{
+	const UHexHeroes* Heroes = Surface ? Surface->GetHeroes() : nullptr;
+	const int32 Shipyard = Config->Kinds.IndexOfByPredicate([](const FHexSiteKind& Each) { return Each.Type == EHexSiteType::Shipyard; });
+	const int32 Boat = Config->Kinds.IndexOfByPredicate([](const FHexSiteKind& Each) { return Each.Type == EHexSiteType::Boat; });
+	if (!Heroes || !Surface->IsBuilt() || Shipyard == INDEX_NONE || Boat == INDEX_NONE)
+	{
+		return FIntPoint::ZeroValue;
+	}
+	const TArray<FHexSphereCell>& Cells = Surface->GetGrid().GetCells();
+	const int32 NumCells = Cells.Num();
+	const auto IsSeaCell = [this](int32 Cell) { return Surface->GetCellLevel(Cell) < 0; };
+	// the cells that take nothing: what stands there and around it, the castles and where the heroes start
+	TBitArray<> Taken(false, NumCells);
+	TArray<int32> Ring;
+	const auto Close = [&](int32 Cell, int32 Rings)
+	{
+		if (Cells.IsValidIndex(Cell))
+		{
+			HexShroud::FindWithin(Surface->GetGrid(), Cell, Rings, Ring);
+			for (const int32 Each : Ring)
+			{
+				Taken[Each] = true;
+			}
+		}
+	};
+	for (const FHexSite& Site : Sites)
+	{
+		if (Site.Layer == EHexPlanetLayer::Surface)
+		{
+			Close(Site.Cell, 2);
+		}
+	}
+	if (const UHexCastles* Castles = Heroes->GetCastles())
+	{
+		for (const FHexCastle& Castle : Castles->GetCastles())
+		{
+			for (const int32 Cell : Castle.Cells)
+			{
+				if (Castle.Layer == EHexPlanetLayer::Surface)
+				{
+					Close(Cell, 2);
+				}
+			}
+		}
+	}
+	for (const FHexHero& Hero : Heroes->GetHeroes())
+	{
+		if (Hero.StartLayer == EHexPlanetLayer::Surface)
+		{
+			Close(Hero.StartCell, 2);
+		}
+	}
+	for (const FHexEntrance& Entrance : Surface->GetEntrances())
+	{
+		Close(Entrance.Cell, 1);
+	}
+	// the open ground beside the sea, and the sea beside it, in a random order of the seed
+	TBitArray<> Open(false, NumCells);
+	TArray<int32> Coast;
+	TArray<int32> Shore;
+	for (int32 Cell = 0; Cell < NumCells; ++Cell)
+	{
+		Open[Cell] = Heroes->IsOpenGround(EHexPlanetLayer::Surface, Cell);
+	}
+	for (int32 Cell = 0; Cell < NumCells; ++Cell)
+	{
+		if (Open[Cell] && Cells[Cell].Neighbors.ContainsByPredicate(IsSeaCell))
+		{
+			Coast.Add(Cell);
+		}
+		else if (IsSeaCell(Cell) && Cells[Cell].Neighbors.ContainsByPredicate([&Open](int32 Each) { return Open[Each]; }))
+		{
+			Shore.Add(Cell);
+		}
+	}
+	FRandomStream Stream(Seed * 31 + 977);
+	for (TArray<int32>* List : {&Coast, &Shore})
+	{
+		for (int32 Index = List->Num() - 1; Index > 0; --Index)
+		{
+			List->Swap(Index, Stream.RandRange(0, Index));
+		}
+	}
+	const auto Wanted = [&](float PerThousand)
+	{
+		const float Number = FMath::Max(PerThousand, 0.0f) * FMath::Max(DensityScale, 0.0f) * float(Coast.Num()) / 1000.0f;
+		return FMath::FloorToInt32(Number) + (Stream.FRand() < Number - FMath::FloorToInt32(Number) ? 1 : 0);
+	};
+	FIntPoint Placed = FIntPoint::ZeroValue;
+	FString Problem;
+	// a shipyard where closing its cell cuts no way, with the sea beside it free for the boats it builds
+	const int32 Yards = Wanted(Config->ShipyardsPerThousandCoast);
+	for (int32 Index = 0; Index < Coast.Num() && Placed.X < Yards; ++Index)
+	{
+		const int32 Cell = Coast[Index];
+		if (Taken[Cell] || !HexSiteGenerator::KeepsWays(Surface->GetGrid(), Open, Cell) || AddSite(EHexPlanetLayer::Surface, Cell, Shipyard, Problem) == 0)
+		{
+			continue;
+		}
+		Open[Cell] = false;
+		Close(Cell, 4);
+		++Placed.X;
+	}
+	// a boat on the sea beside open ground, away from the others
+	const int32 Boats = Wanted(Config->BoatsPerThousandCoast);
+	for (int32 Index = 0; Index < Shore.Num() && Placed.Y < Boats; ++Index)
+	{
+		const int32 Cell = Shore[Index];
+		if (Taken[Cell] || AddSite(EHexPlanetLayer::Surface, Cell, Boat, Problem) == 0)
+		{
+			continue;
+		}
+		Close(Cell, 5);
+		++Placed.Y;
+	}
+	// wrecks out on the sea, away from everything, as the developer asked on 2026-11-15
+	const int32 Wreck = Config->Kinds.IndexOfByPredicate([](const FHexSiteKind& Each) { return Each.bAtSea && Each.Type == EHexSiteType::Chest; });
+	TArray<int32> Flotsam;
+	for (int32 Kind = 0; Kind < Config->Kinds.Num(); ++Kind)
+	{
+		if (Config->Kinds[Kind].bAtSea && Config->Kinds[Kind].Type == EHexSiteType::Pile)
+		{
+			Flotsam.Add(Kind);
+		}
+	}
+	int32 Floating = 0;
+	int32 Wrecks = 0;
+	if (Wreck != INDEX_NONE)
+	{
+		TArray<int32> Sea;
+		for (int32 Cell = 0; Cell < NumCells; ++Cell)
+		{
+			if (IsSeaCell(Cell) && !Cells[Cell].IsPentagon())
+			{
+				Sea.Add(Cell);
+			}
+		}
+		for (int32 Index = Sea.Num() - 1; Index > 0; --Index)
+		{
+			Sea.Swap(Index, Stream.RandRange(0, Index));
+		}
+		const float Number = FMath::Max(Config->WrecksPerThousandSea, 0.0f) * FMath::Max(DensityScale, 0.0f) * float(Sea.Num()) / 1000.0f;
+		const int32 WantedWrecks = FMath::FloorToInt32(Number) + (Stream.FRand() < Number - FMath::FloorToInt32(Number) ? 1 : 0);
+		for (int32 Index = 0; Index < Sea.Num() && Wrecks < WantedWrecks; ++Index)
+		{
+			const int32 Cell = Sea[Index];
+			if (Taken[Cell] || AddSite(EHexPlanetLayer::Surface, Cell, Wreck, Problem) == 0)
+			{
+				continue;
+			}
+			Close(Cell, FMath::Max(Config->WreckSpacing, 1));
+			++Wrecks;
+		}
+		// and what floats, of its kinds by chance
+		const float FloatNumber = FMath::Max(Config->FlotsamPerThousandSea, 0.0f) * FMath::Max(DensityScale, 0.0f) * float(Sea.Num()) / 1000.0f;
+		const int32 WantedFloating = Flotsam.IsEmpty() ? 0 : FMath::FloorToInt32(FloatNumber);
+		for (int32 Index = Sea.Num() - 1; Index >= 0 && Floating < WantedFloating; --Index)
+		{
+			const int32 Cell = Sea[Index];
+			if (Taken[Cell] || AddSite(EHexPlanetLayer::Surface, Cell, Flotsam[Stream.RandRange(0, Flotsam.Num() - 1)], Problem) == 0)
+			{
+				continue;
+			}
+			Close(Cell, FMath::Max(Config->FlotsamSpacing, 1));
+			++Floating;
+		}
+	}
+	UE_LOG(LogHexHero, Log, TEXT("Sites: %d shipyards and %d boats on %d cells of the coast, %d wrecks and %d floating piles at sea"), Placed.X, Placed.Y, Coast.Num(), Wrecks, Floating);
+	return Placed;
+}
+
+int32 UHexSites::MakeVaults(int32 Count, int32 Seed, FString& OutReport)
+{
+	UHexHeroes* Heroes = Surface ? Surface->GetHeroes() : nullptr;
+	UHexNeutrals* Neutrals = Heroes ? Heroes->GetNeutrals() : nullptr;
+	UHexPlanetObjects* Objects = Surface ? Surface->GetObjects() : nullptr;
+	const UHexCastleConfig* CastleConfig = UHexCastleConfig::Load();
+	if (!Heroes || !Neutrals || !Objects || !Surface->IsBuilt() || !CastleConfig || Count <= 0)
+	{
+		OutReport = TEXT("no planet to make vaults on");
+		return 0;
+	}
+	const FHexSphereGrid& Grid = Surface->GetGrid();
+	const TArray<FHexSphereCell>& Cells = Grid.GetCells();
+	const int32 NumCells = Cells.Num();
+	const EHexPlanetLayer Layer = EHexPlanetLayer::Surface;
+	const int32 Forest = Objects->GetSets().IndexOfByPredicate([](const UHexPlanetObjectSet* Each) { return Each && Each->Id == TEXT("Forest"); });
+	FRandomStream Random(Seed * 7919 + 4111);
+
+	// what a vault keeps away from: the castles, where heroes start, the entrances, and the vaults made
+	TBitArray<> Busy(false, NumCells);
+	TArray<int32> Ring;
+	const auto Keep = [&](int32 Cell, int32 Rings)
+	{
+		HexShroud::FindWithin(Grid, Cell, Rings, Ring);
+		for (const int32 Each : Ring)
+		{
+			Busy[Each] = true;
+		}
+	};
+	if (const UHexCastles* Castles = Heroes->GetCastles())
+	{
+		for (const FHexCastle& Castle : Castles->GetCastles())
+		{
+			for (const int32 Cell : Castle.Cells)
+			{
+				if (Castle.Layer == Layer)
+				{
+					Keep(Cell, 5);
+				}
+			}
+		}
+	}
+	for (const FHexHero& Hero : Heroes->GetHeroes())
+	{
+		if (Hero.StartLayer == Layer)
+		{
+			Keep(Hero.StartCell, 6);
+		}
+	}
+	for (const FHexEntrance& Entrance : Surface->GetEntrances())
+	{
+		Keep(Entrance.Cell, 3);
+	}
+	// the ground a hero walks; a cell free of everything for the inside and the gate
+	TBitArray<> Walk(false, NumCells);
+	for (int32 Cell = 0; Cell < NumCells; ++Cell)
+	{
+		Walk[Cell] = Heroes->IsOpenGround(Layer, Cell);
+	}
+	const auto IsFree = [&](int32 Cell)
+	{
+		return Walk[Cell] && !Busy[Cell] && !Cells[Cell].IsPentagon() && !FindSiteAt(Layer, Cell) && !Neutrals->FindAt(Layer, Cell) && !Heroes->FindHeroAt(Layer, Cell);
+	};
+	TArray<int32> Order;
+	for (int32 Cell = 0; Cell < NumCells; ++Cell)
+	{
+		Order.Add(Cell);
+	}
+	for (int32 Index = Order.Num() - 1; Index > 0; --Index)
+	{
+		Order.Swap(Index, Random.RandRange(0, Index));
+	}
+	TMap<int32, int32> Levels;
+	TMap<int32, FHexCellObjects> Changes;
+	TArray<int32> Inside;
+	TArray<int32> Wall;
+	TArray<int32> Queue;
+	TBitArray<> Seen;
+	int32 Made = 0;
+	FString Problem;
+	for (const int32 Middle : Order)
+	{
+		if (Made >= Count)
+		{
+			break;
+		}
+		// the inside: a cell and its six, all free ground
+		HexShroud::FindWithin(Grid, Middle, 1, Inside);
+		if (Inside.Num() != 7 || Inside.ContainsByPredicate([&](int32 Cell) { return !IsFree(Cell); }))
+		{
+			continue;
+		}
+		// the ring around it, land that no site, stack or hero stands on and that is not kept free
+		HexShroud::FindWithin(Grid, Middle, 2, Wall);
+		Wall.RemoveAll([&Inside](int32 Cell) { return Inside.Contains(Cell); });
+		if (Wall.ContainsByPredicate([&](int32 Cell) { return Busy[Cell] || Surface->GetCellLevel(Cell) < 0 || FindSiteAt(Layer, Cell) || Neutrals->FindAt(Layer, Cell)
+			|| Heroes->FindHeroAt(Layer, Cell); }))
+		{
+			continue;
+		}
+		// the gate: a cell of the ring a hero walks with ground it walks outside it
+		int32 Gate = INDEX_NONE;
+		int32 Outside = INDEX_NONE;
+		for (int32 Try = 0; Try < Wall.Num() && Gate == INDEX_NONE; ++Try)
+		{
+			const int32 Cell = Wall[(Try + Middle) % Wall.Num()];
+			if (!IsFree(Cell))
+			{
+				continue;
+			}
+			for (const int32 Neighbor : Cells[Cell].Neighbors)
+			{
+				if (!Inside.Contains(Neighbor) && !Wall.Contains(Neighbor) && Walk[Neighbor])
+				{
+					Gate = Cell;
+					Outside = Neighbor;
+					break;
+				}
+			}
+		}
+		if (Gate == INDEX_NONE)
+		{
+			continue;
+		}
+		// the wall cuts no way of the land around it: every open cell beside it outside is still reached from the gate, around the vault
+		TBitArray<> After = Walk;
+		for (const int32 Cell : Wall)
+		{
+			if (Cell != Gate)
+			{
+				After[Cell] = false;
+			}
+		}
+		for (const int32 Cell : Inside)
+		{
+			After[Cell] = false;
+		}
+		After[Gate] = false;
+		Seen.Init(false, NumCells);
+		Queue.Reset();
+		Queue.Add(Outside);
+		Seen[Outside] = true;
+		for (int32 Index = 0; Index < Queue.Num(); ++Index)
+		{
+			for (const int32 Neighbor : Cells[Queue[Index]].Neighbors)
+			{
+				if (After[Neighbor] && !Seen[Neighbor])
+				{
+					Seen[Neighbor] = true;
+					Queue.Add(Neighbor);
+				}
+			}
+		}
+		bool bKeeps = Queue.Num() > 60;
+		for (int32 Index = 0; bKeeps && Index < Wall.Num(); ++Index)
+		{
+			for (const int32 Neighbor : Cells[Wall[Index]].Neighbors)
+			{
+				bKeeps &= !After[Neighbor] || Seen[Neighbor];
+			}
+		}
+		if (!bKeeps)
+		{
+			continue;
+		}
+		// the wall: forest or mountains a cell wide, by chance; a pentagon or a cell beside the sea takes forest
+		for (const int32 Cell : Wall)
+		{
+			if (Cell == Gate)
+			{
+				continue;
+			}
+			const bool bMountain = Forest == INDEX_NONE || (!Cells[Cell].IsPentagon() && Surface->GetCellLevel(Cell) >= 0 && Random.FRand() < 0.5f);
+			if (bMountain)
+			{
+				Levels.Add(Cell, HexPlanetSurface::MountainLevel);
+				Changes.Add(Cell, FHexCellObjects());
+			}
+			else
+			{
+				FHexCellObjects Trees;
+				Trees.Cover = uint8(Forest + 1);
+				Trees.Density = 3;
+				Changes.Add(Cell, Trees);
+			}
+			Walk[Cell] = false;
+		}
+		// the inside cleared of what grows there, the gate too
+		for (const int32 Cell : Inside)
+		{
+			Changes.Add(Cell, FHexCellObjects());
+		}
+		Changes.Add(Gate, FHexCellObjects());
+		// what it holds: an artifact in the middle, great now and then, a chest, gold and the rare resources
+		const TCHAR* Around[6] = {TEXT("Chest"), TEXT("GoldPile"), TEXT("GemPile"), TEXT("CrystalPile"), TEXT("GoldPile"), TEXT("MercuryPile")};
+		AddSite(Layer, Middle, Config->FindKind(Random.FRand() < 0.35f ? TEXT("GreatArtifact") : TEXT("Artifact")), Problem);
+		int32 Slot = Random.RandRange(0, 5);
+		for (const int32 Cell : Inside)
+		{
+			if (Cell != Middle)
+			{
+				AddSite(Layer, Cell, Config->FindKind(Around[Slot++ % 6]), Problem);
+			}
+		}
+		// a strong stack of the land in the gate
+		TArray<int32> Land;
+		for (int32 Faction = 0; Faction < CastleConfig->Factions.Num(); ++Faction)
+		{
+			if (!CastleConfig->Factions[Faction].bSea)
+			{
+				Land.Add(Faction);
+			}
+		}
+		if (!Land.IsEmpty())
+		{
+			const int32 Faction = Land[Random.RandRange(0, Land.Num() - 1)];
+			const int32 Level = FMath::Clamp(Random.RandRange(3, 5), 0, CastleConfig->Factions[Faction].Creatures.Num() - 1);
+			const FHexStack Stack{Faction, Level, Random.FRand() < 0.5f, FMath::Max(FMath::RoundToInt32(CastleConfig->Factions[Faction].Creatures[Level].Growth * 2.0f), 1)};
+			Neutrals->Add(Layer, Gate, Stack, Problem);
+		}
+		Keep(Middle, 8);
+		++Made;
+		UE_LOG(LogHexHero, Log, TEXT("Sites: a vault around cell %d, its gate on cell %d"), Middle, Gate);
+	}
+	if (!Levels.IsEmpty())
+	{
+		Surface->SetCellLevels(Levels);
+	}
+	if (!Changes.IsEmpty())
+	{
+		Objects->SetCells(Changes);
+	}
+	OutReport = FString::Printf(TEXT("%d vaults of %d wanted, %d cells of mountains in their walls"), Made, Count, Levels.Num());
+	UE_LOG(LogHexHero, Log, TEXT("Sites: %s"), *OutReport);
+	return Made;
 }
 
 EHexSiteGoal UHexSites::GetGoal(const FHexSite& Site, int32 Player, int32 Week) const
@@ -497,6 +1107,9 @@ EHexSiteGoal UHexSites::GetGoal(const FHexSite& Site, int32 Player, int32 Week) 
 			: Player >= 0 && Player < 32 && (Site.FormerOwners & (1u << Player)) != 0 ? EHexSiteGoal::LostMine : EHexSiteGoal::Mine;
 	case EHexSiteType::Mill:
 		return Site.VisitedWeek == Week ? EHexSiteGoal::None : EHexSiteGoal::Gather;
+	case EHexSiteType::Shipyard:
+	case EHexSiteType::Boat:
+		return EHexSiteGoal::None;
 	default:
 		return EHexSiteGoal::Gather;
 	}
@@ -507,7 +1120,41 @@ int32 UHexSites::GetPileAmount(const FHexSite& Site) const
 	const FHexSiteKind& Kind = Config->Kinds[Site.Kind];
 	// by the site and the game, so a pile holds the same until a new game
 	FRandomStream Stream(Site.Id * 7919 + GameNumber * 104729);
-	return Stream.RandRange(FMath::Min(Kind.AmountMin, Kind.AmountMax), FMath::Max(Kind.AmountMin, Kind.AmountMax));
+	const int32 Amount = Stream.RandRange(FMath::Min(Kind.AmountMin, Kind.AmountMax), FMath::Max(Kind.AmountMin, Kind.AmountMax));
+	// a chest in steps of 500
+	return Kind.Type == EHexSiteType::Chest ? FMath::Max(FMath::RoundToInt32(Amount / 500.0f), 1) * 500 : Amount;
+}
+
+int32 UHexSites::GetChestExperience(const FHexSite& Site) const
+{
+	return FMath::Max(GetPileAmount(Site) - Config->ChestExperienceLess, 0);
+}
+
+FString UHexSites::TakeChest(int32 Player, const FString& HeroName, EHexPlanetLayer Layer, int32 Cell, bool bGold, bool bShown)
+{
+	FHexSite* Site = Sites.FindByPredicate([Layer, Cell](const FHexSite& Each) { return Each.Layer == Layer && Each.Cell == Cell && !Each.bTaken; });
+	if (!Site || !Amounts.IsValidIndex(Player) || Config->Kinds[Site->Kind].Type != EHexSiteType::Chest)
+	{
+		return FString();
+	}
+	const int32 Gold = GetPileAmount(*Site);
+	const int32 Experience = GetChestExperience(*Site);
+	Site->bTaken = true;
+	Site->EventTime = GetWorldTime();
+	Site->bFading = Site->bSeated && Config->PickupFadeTime > 0.0f;
+	bDirty[int32(Layer)] = true;
+	const int32 GoldIndex = Config->FindResource(TEXT("Gold"));
+	if (bGold && Config->Resources.IsValidIndex(GoldIndex))
+	{
+		Amounts[Player][GoldIndex] += Gold;
+	}
+	if (bShown)
+	{
+		AddPopup(*Site, bGold ? FString::Printf(TEXT("+%d Gold"), Gold) : FString::Printf(TEXT("+%d Experience"), Experience),
+			bGold ? Config->Resources[FMath::Max(GoldIndex, 0)].Color : FLinearColor(0.6f, 0.85f, 1.0f, 1.0f));
+	}
+	UHexHeroes::NoteMapChanged();
+	return bGold ? FString::Printf(TEXT("%s opens a chest and takes %d gold"), *HeroName, Gold) : FString::Printf(TEXT("%s opens a chest and gains %d experience"), *HeroName, Experience);
 }
 
 int32 UHexSites::GetSiteResource(const FHexSite& Site) const
@@ -644,7 +1291,8 @@ FString UHexSites::Visit(int32 Player, const FString& HeroName, EHexPlanetLayer 
 	}
 	const FHexSiteKind& Kind = Config->Kinds[Site->Kind];
 	const int32 Resource = GetSiteResource(*Site);
-	if (!Config->Resources.IsValidIndex(Resource))
+	// an artifact, a shipyard and a boat are the heroes' to handle (UHexHeroes::TakePile, VisitSite)
+	if (!Config->Resources.IsValidIndex(Resource) || Kind.Type == EHexSiteType::Artifact || Kind.Type == EHexSiteType::Shipyard || Kind.Type == EHexSiteType::Boat)
 	{
 		return FString();
 	}
@@ -742,8 +1390,16 @@ void UHexSites::EndDay()
 void UHexSites::Restart()
 {
 	++GameNumber;
+	// the boats built in the last game are gone, and the others lie where the map has them
+	Sites.RemoveAll([](const FHexSite& Each) { return Each.bBuilt; });
 	for (FHexSite& Site : Sites)
 	{
+		if (Site.Cell != Site.StartCell && Site.StartCell != INDEX_NONE)
+		{
+			Site.Cell = Site.StartCell;
+			Site.bSeated = false;
+		}
+		Site.Captain = 0;
 		Site.Owner = INDEX_NONE;
 		Site.Guard = MakeStartGuard(Site);
 		Site.bTaken = false;
@@ -787,6 +1443,10 @@ FString UHexSites::GetCellText(EHexPlanetLayer Layer, int32 Cell) const
 		return FString();
 	}
 	const FHexSiteKind& Kind = Config->Kinds[Site->Kind];
+	if (Kind.Type == EHexSiteType::Artifact || Kind.Type == EHexSiteType::Shipyard || Kind.Type == EHexSiteType::Boat)
+	{
+		return FString::Printf(TEXT("Site: %s"), *Kind.DisplayName);
+	}
 	const int32 Resource = GetSiteResource(*Site);
 	const FString ResourceName = Config->Resources.IsValidIndex(Resource) ? Config->Resources[Resource].DisplayName.ToLower() : FString(TEXT("nothing"));
 	return Kind.IsMine() ? FString::Printf(TEXT("Site: %s, %d %s a day, of %s"), *Kind.DisplayName, Kind.PerDay, *ResourceName, *GetPlayerName(Site->Owner))
@@ -932,8 +1592,8 @@ void UHexSites::Rebuild(EHexPlanetLayer Layer)
 		return Slot.Get();
 	};
 	// by EHexSiteType: a kind without a mesh of its own takes that of its type
-	const TSoftObjectPtr<UStaticMesh> Meshes[3] = {Config->MineMesh, Config->PileMesh, Config->MillMesh};
-	const float Scales[3] = {Config->MineScale, Config->PileScale, Config->MillScale};
+	const TSoftObjectPtr<UStaticMesh> Meshes[7] = {Config->MineMesh, Config->PileMesh, Config->MillMesh, Config->PileMesh, Config->PileMesh, Config->MillMesh, Config->PileMesh};
+	const float Scales[7] = {Config->MineScale, Config->PileScale, Config->MillScale, Config->PileScale, Config->PileScale, Config->MillScale, Config->BoatScale};
 	for (const TPair<FString, TWeakObjectPtr<UInstancedStaticMeshComponent>>& Each : Components)
 	{
 		if (Each.Value.IsValid() && Each.Value->GetInstanceCount() > 0)
@@ -947,7 +1607,8 @@ void UHexSites::Rebuild(EHexPlanetLayer Layer)
 	{
 		// a pile that was taken is drawn while it dissolves
 		const bool bFade = Site.bTaken && Site.bFading && FadeMaterial;
-		if (Site.Layer != Layer || (Site.bTaken && !bFade) || !Cells.IsValidIndex(Site.Cell))
+		// a boat a hero sails is drawn under it (UHexHeroes::UpdateBoatBody)
+		if (Site.Layer != Layer || (Site.bTaken && !bFade) || Site.Captain != 0 || !Cells.IsValidIndex(Site.Cell))
 		{
 			continue;
 		}
@@ -955,7 +1616,7 @@ void UHexSites::Rebuild(EHexPlanetLayer Layer)
 		UInstancedStaticMeshComponent* Component = Kind.Mesh.IsNull() ? nullptr : GetComponent(Kind.Mesh, bFade);
 		if (!Component)
 		{
-			Component = GetComponent(Meshes[int32(Kind.Type)], bFade);
+			Component = GetComponent(Meshes[FMath::Min(int32(Kind.Type), 6)], bFade);
 		}
 		if (!Component)
 		{
@@ -963,16 +1624,47 @@ void UHexSites::Rebuild(EHexPlanetLayer Layer)
 		}
 		// on the ground of its cell, a mine or a mill facing the south and a pile turned by its Id; found once until the ground changes,
 		// as taking a pile or a mine places all of them again
+		if (!Site.bSeated && Kind.IsAtSea())
+		{
+			// a boat floats on the water, turned by its Id
+			const FVector3d Up = Cells[Site.Cell].Center;
+			FVector3d East = FVector3d::CrossProduct(FVector3d::UnitZ(), Up);
+			East = East.Normalize() ? East : FVector3d::UnitX();
+			const FVector3d North = FVector3d::CrossProduct(Up, East);
+			const double Angle = FMath::DegreesToRadians(double((Site.Id * 73) % 360) + double(Site.Yaw));
+			const FVector3d Forward = -North * FMath::Cos(Angle) + East * FMath::Sin(Angle);
+			Site.Seat = FTransform(FRotationMatrix::MakeFromZX(FVector(Up), FVector(Forward)).ToQuat(), FVector(Up * Planet->GetRadius()), FVector(Config->BoatScale));
+			Site.bSeated = true;
+		}
 		if (!Site.bSeated)
 		{
-			const bool bPile = Kind.Type == EHexSiteType::Pile;
-			const double Angle = FMath::DegreesToRadians((bPile ? double((Site.Id * 73) % 360) : 0.0) + double(Site.Yaw));
-			Site.Seat = FindSeat(*Planet, Site.Cell, Angle, bPile ? Config->PileMaxTilt : Config->BuildingMaxTilt, Scales[int32(Kind.Type)]);
+			const bool bPile = Kind.IsPickup();
+			double Angle = FMath::DegreesToRadians((bPile ? double((Site.Id * 73) % 360) : 0.0) + double(Site.Yaw));
+			// a shipyard turns its slipway to the sea beside it
+			if (Kind.Type == EHexSiteType::Shipyard)
+			{
+				const FVector3d Up = Cells[Site.Cell].Center;
+				FVector3d East = FVector3d::CrossProduct(FVector3d::UnitZ(), Up);
+				East = East.Normalize() ? East : FVector3d::UnitX();
+				const FVector3d North = FVector3d::CrossProduct(Up, East);
+				for (const int32 Neighbor : Cells[Site.Cell].Neighbors)
+				{
+					if (Layer == EHexPlanetLayer::Surface && Planet->GetCellLevel(Neighbor) < 0)
+					{
+						const FVector3d Towards = Cells[Neighbor].Center - Up;
+						Angle = FMath::Atan2(FVector3d::DotProduct(Towards, East), -FVector3d::DotProduct(Towards, North)) + FMath::DegreesToRadians(double(Site.Yaw));
+						break;
+					}
+				}
+			}
+			Site.Seat = FindSeat(*Planet, Site.Cell, Angle, bPile ? Config->PileMaxTilt : Config->BuildingMaxTilt, Scales[FMath::Min(int32(Kind.Type), 6)]);
 			Site.bSeated = true;
 		}
 		const int32 Instance = Component->AddInstance(Site.Seat, true);
 		const int32 Resource = GetSiteResource(Site);
-		const FLinearColor ResourceColor = Config->Resources.IsValidIndex(Resource) ? Config->Resources[Resource].Color : FLinearColor::White;
+		// an artifact glows in gold, a great one in a royal violet
+		const FLinearColor ResourceColor = Kind.Type == EHexSiteType::Artifact ? (Kind.ArtifactRankMin >= EHexArtifactRank::Major ? Config->GreatArtifactColor : Config->ArtifactColor)
+			: Config->Resources.IsValidIndex(Resource) ? Config->Resources[Resource].Color : FLinearColor::White;
 		const FLinearColor OwnerColor = GetPlayerColor(Site.Owner);
 		const float Data[7] = {ResourceColor.R, ResourceColor.G, ResourceColor.B, OwnerColor.R, OwnerColor.G, OwnerColor.B, float(Site.EventTime)};
 		Component->SetCustomData(Instance, MakeArrayView(Data), true);
@@ -1086,6 +1778,41 @@ namespace
 			const int32 Seed = Args.Num() >= 2 ? FCString::Atoi(*Args[1]) : 0;
 			Sites->Generate(Report, Args.Num() >= 2 ? &Seed : nullptr);
 		}
+		else if (Args[0].Equals(TEXT("scatter"), ESearchCase::IgnoreCase))
+		{
+			// more piles and chests besides the sites there are, as the developer found the map too empty on 2026-11-15: a share of the
+			// numbers of the generation, half by default
+			FString Report;
+			const int32 Seed = Args.Num() >= 2 ? FCString::Atoi(*Args[1]) : 0;
+			const float Density = Args.Num() >= 3 ? FCString::Atof(*Args[2]) : 0.5f;
+			const int32 Before = Sites->GetSites().Num();
+			Sites->Generate(Report, Args.Num() >= 2 ? &Seed : nullptr, Density, nullptr, true);
+			UE_LOG(LogHexHero, Log, TEXT("Sites: scattered %d piles and chests more, %d in all"), Sites->GetSites().Num() - Before, Sites->GetSites().Num());
+		}
+		else if (Args[0].Equals(TEXT("artifacts"), ESearchCase::IgnoreCase))
+		{
+			// artifacts besides the sites there are, as many as the generation gives them by default
+			FString Report;
+			const int32 Seed = Args.Num() >= 2 ? FCString::Atoi(*Args[1]) : 0;
+			const float Density = Args.Num() >= 3 ? FCString::Atof(*Args[2]) : 1.0f;
+			const int32 Before = Sites->GetSites().Num();
+			Sites->Generate(Report, Args.Num() >= 2 ? &Seed : nullptr, Density, nullptr, true, int32(EHexSiteType::Artifact));
+			UE_LOG(LogHexHero, Log, TEXT("Sites: %d artifacts more, %d sites in all"), Sites->GetSites().Num() - Before, Sites->GetSites().Num());
+		}
+		else if (Args[0].Equals(TEXT("vaults"), ESearchCase::IgnoreCase))
+		{
+			// closed places with one guarded way in and much in them, as the developer asked on 2026-11-15
+			FString Report;
+			Sites->MakeVaults(Args.Num() >= 2 ? FCString::Atoi(*Args[1]) : 4, Args.Num() >= 3 ? FCString::Atoi(*Args[2]) : int32(FPlatformTime::Cycles() & 0xffff), Report);
+		}
+		else if (Args[0].Equals(TEXT("coast"), ESearchCase::IgnoreCase))
+		{
+			// shipyards and boats on the coasts besides what there is, for a map made before them
+			const int32 Seed = Args.Num() >= 2 ? FCString::Atoi(*Args[1]) : 0;
+			const float Density = Args.Num() >= 3 ? FCString::Atof(*Args[2]) : 1.0f;
+			const FIntPoint Placed = Sites->ScatterCoast(Seed, Density);
+			UE_LOG(LogHexHero, Log, TEXT("Sites: %d shipyards and %d boats more, %d sites in all"), Placed.X, Placed.Y, Sites->GetSites().Num());
+		}
 		else if (Args[0].Equals(TEXT("clear"), ESearchCase::IgnoreCase))
 		{
 			UE_LOG(LogHexHero, Log, TEXT("Sites: %s"), Sites->Clear() ? TEXT("every site is taken off the planet") : TEXT("there is no site to take off"));
@@ -1104,6 +1831,6 @@ namespace
 	}
 
 	FAutoConsoleCommandWithWorldAndArgs SiteCommand(TEXT("hex.Site"),
-		TEXT("The mines and piles of the planet: list (with what each player has and gets a day), add <Cell> <Kind> on the layer shown, remove <Cell>, generate [Seed] (scatters them over both layers in place of all there are, by Generation of DA_HexSites), clear. A cell is its number, or near:<Steps>[:<Side>] for one that many steps from the hero chosen; a kind is its Id in DA_HexSites, such as GoldMine, Sawmill or OrePile."),
+		TEXT("The mines and piles of the planet: list (with what each player has and gets a day), add <Cell> <Kind> on the layer shown, remove <Cell>, generate [Seed] (scatters them over both layers in place of all there are, by Generation of DA_HexSites), scatter [Seed] [Density] (more piles, chests and artifacts besides those there are, half the generation by default), artifacts [Seed] [Density] (artifacts besides), coast [Seed] [Density] (shipyards and boats on the coasts besides), clear. A cell is its number, or near:<Steps>[:<Side>] for one that many steps from the hero chosen; a kind is its Id in DA_HexSites, such as GoldMine, Sawmill or OrePile."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&RunSiteCommand));
 }

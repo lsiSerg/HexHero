@@ -31,12 +31,21 @@ public:
 	/** Shows a tip, or hides the panel for an empty one; made again only when it changed */
 	void SetTip(const FHexMapTip& Tip);
 
+	/** Where the panel stands instead of at the cursor: its right edge at a point of the screen, its top level with it, as beside the row of a
+	 *  hero in the list, as the developer asked on 2026-11-15; unset gives it back to the cursor */
+	void SetAnchor(const TOptional<FVector2D>& InAnchor) { Anchor = InAnchor; }
+
+	/** What the panel shows of a tip, and a tooltip of a widget that shows the same, for the buttons that hire a hero or buy an artifact */
+	static TSharedRef<SVerticalBox> MakeContent(const FHexMapTip& Tip);
+	static TSharedRef<class SToolTip> MakeToolTip(const FHexMapTip& Tip);
+
 private:
 
 	TSharedPtr<SBorder> Panel;
 	TSharedPtr<SVerticalBox> Body;
 	FHexMapTip Shown;
 	bool bShown = false;
+	TOptional<FVector2D> Anchor;
 
 	TMap<UTexture2D*, TSharedPtr<FSlateBrush>> Brushes;
 	TArray<TStrongObjectPtr<UTexture2D>> Textures;

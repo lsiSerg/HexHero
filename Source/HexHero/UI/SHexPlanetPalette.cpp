@@ -590,6 +590,35 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 		Body->AddSlot().AutoHeight()[MakeHelp(LOCTEXT("SiteHelp", "Click a cell a hero can stand on to put a mine or a pile of the chosen kind there; Ctrl+click takes one away, and Undo takes either back. A mine or a mill fills its cell: in the game a hero beside it that is sent onto it takes it. A pile lies on its cell, and the hero that steps onto it takes it."))];
 
 		Body->AddSlot().AutoHeight()[MakeHeading(LOCTEXT("SiteGenerate", "Scatter over the planet"), 8.0f)];
+		// how many and how close, as the developer asked on 2026-11-15: a row of a minus, the value and a plus for each
+		const auto MakeStepper = [&](const FText& Name, const FText& Tip, TFunction<FText(const UHexPlanetPainter&)> Value, TFunction<void(UHexPlanetPainter&, int32)> Step)
+		{
+			const TSharedRef<SHorizontalBox> Row = SNew(SHorizontalBox).ToolTipText(Tip);
+			Row->AddSlot().FillWidth(1.0f).VAlign(VAlign_Center)[SNew(STextBlock).Text(Name).Font(Small)];
+			Row->AddSlot().AutoWidth()[MakeButton(MakeLabel(FText::FromString(TEXT("-"))), [Step](UHexPlanetPainter& Each) { Step(Each, -1); }, nullptr)];
+			Row->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(6.0f, 0.0f)
+			[
+				SNew(SBox).WidthOverride(36.0f)
+				[
+					SNew(STextBlock).Font(Small).Justification(ETextJustify::Center)
+					.Text_Lambda([WeakPainter, Value]() { return WeakPainter.IsValid() ? Value(*WeakPainter) : FText::GetEmpty(); })
+				]
+			];
+			Row->AddSlot().AutoWidth()[MakeButton(MakeLabel(FText::FromString(TEXT("+"))), [Step](UHexPlanetPainter& Each) { Step(Each, 1); }, nullptr)];
+			return Row;
+		};
+		Body->AddSlot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 3.0f)
+		[
+			MakeStepper(LOCTEXT("SiteAmount", "How many"), LOCTEXT("SiteAmountTip", "How many mines, piles and mills Generate scatters: a factor on Density of DA_HexSites"),
+				[](const UHexPlanetPainter& Each) { return FText::FromString(FString::Printf(TEXT("x%.2g"), Each.GetSiteAmount())); },
+				[](UHexPlanetPainter& Each, int32 Steps) { Each.StepSiteAmount(Steps); })
+		];
+		Body->AddSlot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 3.0f)
+		[
+			MakeStepper(LOCTEXT("SiteCluster", "Piles together"), LOCTEXT("SiteClusterTip", "The share of the piles that have one to a few more piles of any resource on the cells around them"),
+				[](const UHexPlanetPainter& Each) { return FText::FromString(FString::Printf(TEXT("%d%%"), FMath::RoundToInt32(Each.GetSiteClusterShare() * 100.0f))); },
+				[](UHexPlanetPainter& Each, int32 Steps) { Each.StepSiteClusterShare(Steps); })
+		];
 		const TSharedRef<SButton> Generate = MakeButton(
 			MakeLabel(LOCTEXT("GenerateSites", "Generate")),
 			[](UHexPlanetPainter& Each) { Each.GenerateSites(); },
@@ -604,6 +633,13 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 			[](const UHexPlanetPainter& Each) { return !Each.IsPainting(); });
 		Clear->SetToolTipText(LOCTEXT("ClearSitesTip", "Takes every mine, pile and mill off both layers; one step of Undo"));
 		Body->AddSlot().AutoHeight().Padding(0.0f, 3.0f, 0.0f, 0.0f)[Clear];
+		const TSharedRef<SButton> Vaults = MakeButton(
+			MakeLabel(LOCTEXT("Vaults", "Vaults")),
+			[](UHexPlanetPainter& Each) { Each.MakeVaults(); },
+			nullptr,
+			[](const UHexPlanetPainter& Each) { return !Each.IsPainting(); });
+		Vaults->SetToolTipText(LOCTEXT("VaultsTip", "Makes four vaults on the surface: seven cells walled by forest or mountains a cell wide, with one way in that a strong neutral stack guards, and an artifact, a chest and piles inside. Not a step of Undo"));
+		Body->AddSlot().AutoHeight().Padding(0.0f, 3.0f, 0.0f, 0.0f)[Vaults];
 		return Body;
 	};
 	TSharedRef<SVerticalBox> SiteBody = MakeSiteBody();
@@ -693,6 +729,11 @@ void SHexPlanetPalette::Construct(const FArguments& InArgs)
 		TSharedRef<SUniformGridPanel> Factions = SNew(SUniformGridPanel).SlotPadding(FMargin(0.0f, 0.0f, 3.0f, 3.0f));
 		for (int32 Faction = 0; Faction < CastleConfig->Factions.Num(); ++Faction)
 		{
+			// no castle is of the sea
+			if (CastleConfig->Factions[Faction].bSea)
+			{
+				continue;
+			}
 			Factions->AddSlot(Faction % 2, Faction / 2)
 			[
 				MakeButton(

@@ -26,6 +26,7 @@ SKY = FOLDER + '/M_HexBattleSky'
 OUTLINE = FOLDER + '/M_HexBattleOutline'
 WATER = FOLDER + '/M_HexBattleWater'
 PROP = FOLDER + '/M_HexBattleProp'
+SEA = FOLDER + '/M_HexBattleSea'
 FOG = FOLDER + '/M_HexBattleFog'
 CONFIG = FOLDER + '/DA_HexBattle'
 
@@ -596,6 +597,59 @@ return keep;
 """
 
 
+# The sea around a battle on the deck of a ship, as the developer asked on 2026-11-15: lit and opaque, dark water whose normal two layers of
+# T_HexNoise drifting bend, SeaWaveScale across, lighter where its waves rise, its waves moving its vertices by SeaWaveHeight
+SEA_NORMAL_CODE = r"""
+float2 p = WorldPos.xy / max(SeaWaveScale, 1.0);
+float t = Time * SeaWaveSpeed;
+float2 a = p + float2(t, t * 0.6);
+float2 b = p * 1.9 + float2(-t * 0.7, t * 0.4) + 0.37;
+float e = 0.004;
+float ha = HexNoise.SampleLevel(HexNoiseSampler, a, 0).r + 0.6 * HexNoise.SampleLevel(HexNoiseSampler, b, 0).r;
+float hx = HexNoise.SampleLevel(HexNoiseSampler, a + float2(e, 0.0), 0).r + 0.6 * HexNoise.SampleLevel(HexNoiseSampler, b + float2(e * 1.9, 0.0), 0).r;
+float hy = HexNoise.SampleLevel(HexNoiseSampler, a + float2(0.0, e), 0).r + 0.6 * HexNoise.SampleLevel(HexNoiseSampler, b + float2(0.0, e * 1.9), 0).r;
+float3 n = normalize(float3((ha - hx) / e * SeaNormalStrength * 0.01, (ha - hy) / e * SeaNormalStrength * 0.01, 1.0));
+return n;
+"""
+SEA_COLOR_CODE = r"""
+float2 p = WorldPos.xy / max(SeaWaveScale, 1.0);
+float t = Time * SeaWaveSpeed;
+float h = HexNoise.SampleLevel(HexNoiseSampler, p * 0.5 + float2(t * 0.5, -t * 0.3), 0).r;
+return lerp(SeaDeepColor, SeaColor, saturate(h * 1.4 - 0.2));
+"""
+SEA_OFFSET_CODE = r"""
+float t = Time * SeaWaveSpeed * 60.0;
+float wave = sin(WorldPos.x * 0.011 + WorldPos.y * 0.004 + t * 0.9) * 0.6 + sin(WorldPos.x * -0.006 + WorldPos.y * 0.009 + t * 0.7) * 0.4;
+return float3(0.0, 0.0, SeaWaveHeight * wave);
+"""
+
+
+def build_sea(defaults):
+    material = open_material(SEA)
+    material.set_editor_property('tangent_space_normal', True)
+    position = library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1000, 0)
+    time = library.create_material_expression(material, unreal.MaterialExpressionTime, -1000, 50)
+    noise = noise_texture(material, 100)
+    common = [('WorldPos', position, ''), ('Time', time, ''), ('HexNoise', noise, ''),
+              ('SeaWaveScale', scalar(material, 'SeaWaveScale', defaults.get_editor_property('sea_wave_scale'), 150), ''),
+              ('SeaWaveSpeed', scalar(material, 'SeaWaveSpeed', defaults.get_editor_property('sea_wave_speed'), 200), '')]
+    normal = custom(material, SEA_NORMAL_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, common + [
+        ('SeaNormalStrength', scalar(material, 'SeaNormalStrength', defaults.get_editor_property('sea_normal_strength'), 250), '')], 0)
+    library.connect_material_property(normal, '', unreal.MaterialProperty.MP_NORMAL)
+    color = custom(material, SEA_COLOR_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, common + [
+        ('SeaColor', vector(material, 'SeaColor', defaults.get_editor_property('sea_color'), 300), ''),
+        ('SeaDeepColor', vector(material, 'SeaDeepColor', defaults.get_editor_property('sea_deep_color'), 350), '')], 200)
+    library.connect_material_property(color, '', unreal.MaterialProperty.MP_BASE_COLOR)
+    library.connect_material_property(scalar(material, 'SeaRoughness', defaults.get_editor_property('sea_roughness'), 400), '', unreal.MaterialProperty.MP_ROUGHNESS)
+    library.connect_material_property(scalar(material, 'SeaSpecular', 0.7, 450), '', unreal.MaterialProperty.MP_SPECULAR)
+    offset = custom(material, SEA_OFFSET_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, [('WorldPos', position, ''), ('Time', time, ''),
+        ('SeaWaveSpeed', scalar(material, 'SeaWaveSpeed', defaults.get_editor_property('sea_wave_speed'), 200), ''),
+        ('SeaWaveHeight', scalar(material, 'SeaWaveHeight', defaults.get_editor_property('sea_wave_height'), 500), '')], 400)
+    library.connect_material_property(offset, '', unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
+    library.recompile_material(material)
+    assets.save_asset(SEA)
+
+
 def build_prop():
     material = open_material(PROP)
     material.set_editor_property('blend_mode', unreal.BlendMode.BLEND_MASKED)
@@ -901,7 +955,7 @@ def build_config():
 if not assets.does_directory_exist(FOLDER):
     assets.make_directory(FOLDER)
 # with the argument water only the water of the moat is built, so the other materials are not saved again with the same graphs
-ONLY = [Each for Each in sys.argv[1:] if Each in ('water', 'ground', 'textures', 'prop', 'fog', 'unit', 'shroud')]
+ONLY = [Each for Each in sys.argv[1:] if Each in ('water', 'ground', 'textures', 'prop', 'fog', 'unit', 'shroud', 'sea')]
 if ONLY:
     if 'textures' in ONLY:
         import_textures()
@@ -917,6 +971,8 @@ if ONLY:
         build_unit()
     if 'shroud' in ONLY:
         build_shroud()
+    if 'sea' in ONLY:
+        build_sea(unreal.get_default_object(unreal.HexBattleConfig))
     unreal.log('BATTLE %s done' % ' '.join(ONLY))
 else:
     build_ground()
@@ -929,5 +985,6 @@ else:
     build_prop()
     build_fog()
     build_shroud()
+    build_sea(unreal.get_default_object(unreal.HexBattleConfig))
     build_config()
     unreal.log('BATTLE assets done')

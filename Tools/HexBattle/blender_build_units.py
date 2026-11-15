@@ -71,6 +71,14 @@ UNITS = {
             {'kind': 'eyes', 'bone': 'Head', 'grip': 0.0, 'shift': (0.0, -0.1, 0.08), 'y': FORWARD, 'z': UP, 'size': 1.0}]},
     'Glowwing': {'source': ('units', 'LlwD0QNUPj'), 'side': ['Dragon_Secondary'], 'recolor': {'Eye_White': (0.85, 0.55, 0.08), 'Eye_Black': (0.02, 0.01, 0.0)},
         'actions': {'Idle': 'Flying_Idle', 'Move': 'Fast_Flying', 'Attack': 'Headbutt', 'Hit': 'HitReact', 'Death': 'Death'}, 'props': []},
+    # a mermaid of the sea, the adventurer with a tail of scales over its legs and a spear for a trident, swimming in its idle (2026-11-15)
+    'Mermaid': {'source': ('units', 'y9KWOVG21R'), 'side': ['Brown2'], 'recolor': {'Brown': (0.1, 0.42, 0.4), 'LightBrown': (0.2, 0.6, 0.55),
+        'DarkBrown': (0.05, 0.22, 0.24), 'Black': (0.05, 0.12, 0.14), 'Gold': (0.85, 0.75, 0.55)},
+        'actions': dict(ADVENTURER_ACTIONS, Move='Idle_Neutral', Fly='Idle_Neutral'),
+        'hide': ['LowerLeg', 'Foot', 'Toe'],
+        # the arm that holds the spear bent more at the elbow and drawn in, as the developer found it held oddly (2026-11-15)
+        'bend': {'LowerArm.R': ((1.0, 0.0, 0.0), 70.0), 'UpperArm.R': ((1.0, 0.0, 0.0), 15.0)},
+        'props': [{'kind': 'tail', 'bone': 'Hips', 'grip': 0.0, 'y': FORWARD, 'z': UP, 'size': 1.0}, dict(SPEAR, size=0.9)]},
     'BoneSerpent': {'source': ('units', 'VBvzjFIYws'), 'side': [], 'recolor': {'Main': (0.82, 0.78, 0.68), 'Belly': (0.6, 0.56, 0.48), 'Wings': (0.45, 0.42, 0.38)},
         'bone_look': {'Main': 'bone', 'Belly': 'bone', 'Claws': 'horn', 'Wings': 'membrane'},
         'actions': {'Idle': 'Dragon_Flying', 'Move': 'Dragon_Flying', 'Attack': 'Dragon_Attack', 'Hit': 'Dragon_Hit', 'Death': 'Dragon_Death'}, 'props': []},
@@ -326,6 +334,45 @@ def make_prop(kind, color=(0.18, 0.17, 0.17)):
                 face = bm.faces.new((verts[ring][step], verts[ring][nxt], verts[ring + 1][nxt], verts[ring + 1][step]))
                 for loop in face.loops:
                     loop[colors] = tuple(color) + (0.0,)
+    elif kind == 'tail':
+        # the tail of a mermaid from the hips down, as the developer asked on 2026-11-15 for creatures of the sea: rings of scales along a
+        # curve that bends back at the ground, over the legs, and a fluke of two fins at its end
+        # +Y of the prop is forward, so the tail bends back along -Y
+        path = [(0.0, 0.14), (0.0, -0.18), (-0.02, -0.48), (-0.08, -0.74), (-0.22, -0.9), (-0.42, -0.96)]
+        radii = [0.2, 0.19, 0.155, 0.105, 0.065, 0.035]
+        segments = 14
+        scales = (0.08, 0.5, 0.45)
+        rings = []
+        for index, ((y, z), radius) in enumerate(zip(path, radii)):
+            ahead = path[min(index + 1, len(path) - 1)]
+            behind = path[max(index - 1, 0)]
+            ty, tz = ahead[0] - behind[0], ahead[1] - behind[1]
+            length = math.hypot(ty, tz) or 1.0
+            ny, nz = tz / length, -ty / length
+            row = []
+            for step in range(segments):
+                angle = 2.0 * math.pi * step / segments
+                row.append(bm.verts.new((math.cos(angle) * radius, y + math.sin(angle) * radius * 0.85 * ny, z + math.sin(angle) * radius * 0.85 * nz)))
+            rings.append(row)
+        for index in range(len(rings) - 1):
+            for step in range(segments):
+                nxt = (step + 1) % segments
+                face = bm.faces.new((rings[index][step], rings[index][nxt], rings[index + 1][nxt], rings[index + 1][step]))
+                tone = 0.75 + 0.3 * ((index + step) % 2) - 0.1 * index / len(rings)
+                for loop in face.loops:
+                    loop[colors] = (scales[0] * tone, scales[1] * tone, scales[2] * tone, 0.0)
+        end = Vector(rings[-1][0].co)
+        tip = Vector((0.0, path[-1][0], path[-1][1]))
+        fin = (0.25, 0.7, 0.65)
+        # each fin twice, a face to each side, as a face of the same corners cannot be made again
+        for side in (-1.0, 1.0):
+            for flip in (False, True):
+                a0 = bm.verts.new(tuple(tip))
+                a1 = bm.verts.new((side * 0.3, tip.y - 0.22, tip.z + 0.06))
+                a2 = bm.verts.new((side * 0.12, tip.y - 0.12, tip.z - 0.01))
+                face = bm.faces.new((a0, a2, a1) if flip else (a0, a1, a2))
+                for loop in face.loops:
+                    loop[colors] = fin + (0.0,)
     elif kind == 'hood':
         # open in front, so the skull shows in it (a front closed flat read as the back of the head, the mage turned round, 2026-11-13)
         made = bmesh.ops.create_uvsphere(bm, u_segments=16, v_segments=10, radius=1.0)
@@ -403,6 +450,30 @@ def aim_bone(armature, name, direction):
     """Points a bone towards a direction of the world, what hangs on it with it"""
     along = to_armature(armature, hand_direction(armature, name))
     turn_bone(armature, name, along.rotation_difference(to_armature(armature, direction)))
+
+
+def bend_bones(armature, unit):
+    """Turns bones further in every animation the unit plays, by an angle about an axis of each bone, as the arm of the mermaid that holds its
+    spear more bent (2026-11-15): each frame is read first and keyed again turned, so the keys written do not change what is read"""
+    bends = unit.get('bend', {})
+    if not bends:
+        return
+    names = set(unit['actions'].values())
+    actions = [action for action in bpy.data.actions if any(action.name.split('|')[-1] == name or action.name.endswith(name) for name in names)]
+    for action in actions:
+        start, end = (int(round(value)) for value in action.frame_range)
+        read = {}
+        for frame in range(start, end + 1):
+            set_action(armature, action, frame)
+            read[frame] = {name: armature.pose.bones[name].rotation_quaternion.copy() for name in bends}
+        for frame in range(start, end + 1):
+            set_action(armature, action, frame)
+            for name, (axis, degrees) in bends.items():
+                bone = armature.pose.bones[name]
+                bone.rotation_quaternion = read[frame][name] @ Quaternion(Vector(axis), math.radians(degrees))
+                bone.keyframe_insert('rotation_quaternion', frame=frame)
+    if armature.animation_data:
+        armature.animation_data.action = None
 
 
 def set_action(armature, action, frame):
@@ -628,6 +699,24 @@ def import_source(where, name):
     return [obj for obj in bpy.data.objects if obj not in before]
 
 
+def hide_bones(obj, prefixes):
+    """Takes away the faces of a mesh whose vertices are bound most to bones whose names start with one of prefixes, as the legs of a
+    mermaid inside its tail"""
+    names = {group.index: group.name for group in obj.vertex_groups}
+    hidden = set()
+    for vert in obj.data.vertices:
+        best = max(vert.groups, key=lambda each: each.weight, default=None)
+        if best and any(names.get(best.group, '').startswith(prefix) for prefix in prefixes):
+            hidden.add(vert.index)
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.verts.ensure_lookup_table()
+    gone = [face for face in bm.faces if all(vert.index in hidden for vert in face.verts)]
+    bmesh.ops.delete(bm, geom=gone, context='FACES')
+    bm.to_mesh(obj.data)
+    bm.free()
+
+
 def build(name, unit, preview):
     bpy.ops.wm.read_factory_settings(use_empty=True)
     added = import_source(*unit['source'])
@@ -645,10 +734,13 @@ def build(name, unit, preview):
             if unit.get('bone_look') and len(obj.data.polygons) > 400:
                 smooth_for_look(obj, BONE_SUBDIVISIONS)
             corner_colors(obj, unit.get('side', []), unit.get('recolor', {}))
+            if unit.get('hide'):
+                hide_bones(obj, unit['hide'])
             if unit.get('bone_look'):
                 paint_bone_look(obj, unit['bone_look'])
     for bone in armature.pose.bones:
         bone.rotation_mode = 'QUATERNION'
+    bend_bones(armature, unit)
     idle_name = unit['actions'].get('Idle')
     idle = next((action for action in bpy.data.actions if action.name.split('|')[-1] == idle_name or action.name.endswith(idle_name)), None)
     # what it carries, at the rest pose of its bone, bound to that bone alone

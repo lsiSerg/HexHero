@@ -142,6 +142,11 @@ enum class EHexBuildingType : uint8
 	Fort,
 	/** Offers creatures of one level to hire, more every week; its second level offers their upgraded version */
 	Dwelling,
+	/** Teaches the heroes of its owner that go in the spells of its levels, GuildSpellsPerLevel of each level chosen at random for each
+	 *  castle, and gives them all their mana back, as the developer asked on 2026-11-15 */
+	MageGuild,
+	/** Sells artifacts, MerchantStockSize of them, another stock every week, as the developer asked on 2026-11-15 */
+	Merchant,
 };
 
 /** A level of a building: what it is called, what it costs to build and what it gives */
@@ -258,9 +263,20 @@ struct FHexFaction
 	UPROPERTY(EditAnywhere, Category="Faction")
 	TArray<FHexBuilding> Buildings;
 
+	/** Creatures of the sea, as the developer asked on 2026-11-15 for neutrals on the water that guard what lies there: no player builds or
+	 *  hires them and no castle is of them; their stacks stand on the sea (UHexNeutrals) and guard the wrecks (Guards of DA_HexSites) */
+	UPROPERTY(EditAnywhere, Category="Faction")
+	bool bSea = false;
+
 	/** Returns the index of the building of a type, for a dwelling that of a creature level, or INDEX_NONE */
 	int32 FindBuilding(EHexBuildingType Type, int32 Creature = 0) const;
 };
+
+/** Returns the mage guild of a castle, of five levels, with numbers of Claude's after Heroes III */
+FHexBuilding MakeMageGuild();
+
+/** The artifact merchant of a castle, as the developer asked on 2026-11-15: one level, a stall beside the yard */
+FHexBuilding MakeArtifactMerchant();
 
 /** A stack of creatures of one kind in an army or a garrison */
 struct FHexStack
@@ -275,6 +291,9 @@ struct FHexStack
 
 /** Returns the factions a config has when it holds none: the Order of Dawn and the Realm of Decay, with numbers of Claude's */
 TArray<FHexFaction> MakeDefaultFactions();
+
+/** The creatures of the sea, a faction no player plays (FHexFaction::bSea) */
+FHexFaction MakeSeaFaction();
 
 /**
  *  Every value of the castles of the hex planet (UHexCastles). DA_HexCastles in Content/HexPlanet/Castles, which import_planet_castles.py
@@ -363,6 +382,19 @@ public:
 
 	UPROPERTY(EditAnywhere, Category="AI", meta=(ClampMin=1, ClampMax=10))
 	int32 AiBuildLookahead = 3;
+
+	/** How many artifacts the merchant of a castle has for sale at once, all of them another stock each week, and the share of their Cost it
+	 *  asks */
+	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=1, ClampMax=12))
+	int32 MerchantStockSize = 6;
+
+	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=0.1))
+	float MerchantPriceFactor = 1.0f;
+
+	/** How many spells each level of a mage guild teaches, of the spells of that level, chosen at random for each castle (Claude's, after
+	 *  Heroes III) */
+	UPROPERTY(EditAnywhere, Category="Rules|Magic")
+	TArray<int32> GuildSpellsPerLevel = {5, 4, 4, 3, 2};
 
 	/** A castle is nearly round and has no ground of its own, as the developer asked on 2026-11-11: it stands on the ground of its cells
 	 *  and follows it. Its wall is WallSegments stretches of a mesh along a circle of WallRadius radii of a cell around the corner its

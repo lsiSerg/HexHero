@@ -2,6 +2,7 @@
 
 #include "HexCastles.h"
 #include "HexBattles.h"
+#include "HexBattleConfig.h"
 #include "HexCheats.h"
 #include "HexHero.h"
 #include "HexHeroConfig.h"
@@ -24,6 +25,7 @@
 #include "Serialization/JsonSerializer.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Misc/FileHelper.h"
+#include "GameFramework/PlayerController.h"
 
 namespace
 {
@@ -581,6 +583,8 @@ void UHexCastles::ResetCastle(FHexCastle& Castle) const
 		Castle.Garrison = Castle.StartGarrison;
 	}
 	Castle.bCatapult = Castle.bStartCatapult;
+	RollGuildSpells(Castle);
+	RollMerchantStock(Castle, 1);
 }
 
 void UHexCastles::Restart()
@@ -618,9 +622,27 @@ void UHexCastles::BeginDay(int32 Day, int32 DaysPerWeek)
 			{
 				Castle.Available[Creature] += GetGrowth(Castle, Creature);
 			}
+			// the merchant has a stock anew
+			RollMerchantStock(Castle, (Day - 1) / FMath::Max(DaysPerWeek, 1) + 1);
 		}
 	}
 	++Revision;
+}
+
+bool UHexCastles::CanBuildAny(const FHexCastle& Castle) const
+{
+	if (!Config || !Config->Factions.IsValidIndex(Castle.Faction))
+	{
+		return false;
+	}
+	for (int32 Building = 0; Building < Config->Factions[Castle.Faction].Buildings.Num(); ++Building)
+	{
+		if (CanBuild(Castle, Building))
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 bool UHexCastles::CanBuild(const FHexCastle& Castle, int32 Building, FString* OutWhy) const
@@ -690,6 +712,17 @@ bool UHexCastles::Build(int32 CastleId, int32 Building, FString& OutMessage)
 	if (Each.Type == EHexBuildingType::Dwelling && Castle->Levels[Building] == 1)
 	{
 		Castle->Available[Each.Creature] += GetGrowth(*Castle, Each.Creature);
+	}
+	// a mage guild teaches the hero in the castle at once
+	if (Each.Type == EHexBuildingType::MageGuild)
+	{
+		if (const FHexHero* Guard = FindGuard(*Castle))
+		{
+			if (FHexHero* Taught = Heroes->FindHeroMutable(Guard->Id))
+			{
+				TeachSpells(*Taught, *Castle, !Heroes->IsPlayerAi(Taught->Player));
+			}
+		}
 	}
 	Touch(*Castle);
 	OutMessage = FString::Printf(TEXT("%s builds the %s"), *GetPlayerName(Castle->Owner), *Next.DisplayName.ToLower());
@@ -1475,6 +1508,7 @@ FString UHexCastles::Visit(FHexHero& Hero, int32 CastleId, int32 Cell, bool bSho
 			}
 		}
 		++Revision;
+		TeachSpells(Hero, *Castle, bShown && !Heroes->IsPlayerAi(Hero.Player));
 		if (!Heroes->IsPlayerAi(Hero.Player))
 		{
 			OnCastleOpened.Broadcast(CastleId);
@@ -1540,6 +1574,14 @@ FString UHexCastles::Visit(FHexHero& Hero, int32 CastleId, int32 Cell, bool bSho
 	Touch(*Castle);
 	UHexHeroes::NoteMapChanged();
 	const FString Losses = CountBefore > CountAfter ? FString::Printf(TEXT(", losing %d of %d creatures"), CountBefore - CountAfter, CountBefore) : FString();
+	// a castle a hero of a person takes opens for it, as its own does when it goes in, as the developer asked on 2026-11-15, and its mage guild
+	// teaches it
+	++Revision;
+	TeachSpells(Hero, *Castle, bShown && !Heroes->IsPlayerAi(Hero.Player));
+	if (!Heroes->IsPlayerAi(Hero.Player))
+	{
+		OnCastleOpened.Broadcast(CastleId);
+	}
 	if (bShown && Castle->bSeated && Heroes->GetSites())
 	{
 		const FVector3d Foot(Castle->Seat.GetLocation());
@@ -1565,7 +1607,9 @@ int32 UHexCastles::GetPlayerFaction(int32 Player) const
 			First = &Castle;
 		}
 	}
-	return First ? First->Faction : Config->Factions.IsEmpty() ? 0 : FMath::Max(Player, 0) % Config->Factions.Num();
+	// of the land, which come before the creatures of the sea
+	const int32 Land = FMath::Max(Config->Factions.FilterByPredicate([](const FHexFaction& Each) { return !Each.bSea; }).Num(), 1);
+	return First ? First->Faction : FMath::Max(Player, 0) % Land;
 }
 
 TArray<FHexStack> UHexCastles::MakeStartArmy(int32 Player) const
@@ -2257,6 +2301,16 @@ namespace
 		}
 		const FString Action = Args[0].ToLower();
 		FString Message;
+		// what a cheat teaches or gives the heroes of a battle shown reaches the battle too: their spells, skills and mana
+		UHexBattles* CheatBattles = Heroes->GetBattles();
+		TMap<int32, int32> BattleMana;
+		for (int32 Side = 0; Side < 2 && CheatBattles && CheatBattles->IsShown(); ++Side)
+		{
+			if (const FHexHero* Fighter = Heroes->FindHero(CheatBattles->GetBattle().GetSide(Side).HeroId))
+			{
+				BattleMana.Add(Fighter->Id, Fighter->Mana);
+			}
+		}
 		if (Action == TEXT("reveal"))
 		{
 			// the whole of both layers explored for the person who plays, or the player named
@@ -2267,7 +2321,7 @@ namespace
 		else if (Action == TEXT("enemies"))
 		{
 			const bool bOn = Args.IsValidIndex(1) ? Args[1].Equals(TEXT("on"), ESearchCase::IgnoreCase) || Args[1] == TEXT("1") : !HexCheats::AreEnemiesMarked();
-			HexCheats::SetEnemiesMarked(bOn);
+			HexCheats::SetShownMarks(bOn ? HexCheats::GetShownMarks() | HexCheats::MarkEnemies : HexCheats::GetShownMarks() & ~HexCheats::MarkEnemies);
 			Message = bOn ? TEXT("Cheat: the enemies are marked") : TEXT("Cheat off: the enemies are not marked");
 		}
 		else if (Action == TEXT("resources"))
@@ -2356,6 +2410,18 @@ namespace
 			}
 			Message = FString::Printf(TEXT("Cheat: the game runs %g times as fast"), Speed);
 		}
+		else if (Action == TEXT("seabattle"))
+		{
+			// every battle on the deck of a ship until it is turned off, to try them on any map, as the developer asked on 2026-11-15
+			UHexBattles* SeaBattles = Heroes->GetBattles();
+			if (!SeaBattles)
+			{
+				return;
+			}
+			const bool bOn = Args.IsValidIndex(1) ? Args[1].Equals(TEXT("on"), ESearchCase::IgnoreCase) || Args[1] == TEXT("1") : !SeaBattles->IsForceSea();
+			SeaBattles->SetForceSea(bOn);
+			Message = bOn ? TEXT("Cheat: every battle is fought on the deck of a ship; attack any stack") : TEXT("Cheat off: battles at sea only from a boat");
+		}
 		else if (Action == TEXT("passive"))
 		{
 			// in the battle the person fights now, the side of the game attacks nobody and defends on every turn, for that battle alone
@@ -2372,6 +2438,294 @@ namespace
 			Battle.SetPassiveSide(bOn ? Enemy : int32(INDEX_NONE));
 			Message = bOn ? FString::Printf(TEXT("Cheat: %s attacks nobody and defends in this battle"), *Battles->GetSideName(Enemy))
 				: FString::Printf(TEXT("Cheat: %s fights again"), *Battles->GetSideName(Enemy));
+		}
+		else if (Action == TEXT("exp") && Args.Num() >= 2)
+		{
+			// experience for the hero chosen or named, which may raise it in level
+			const FHexHero* Hero = Args.IsValidIndex(2) ? Heroes->FindHeroByText(Args[2]) : Heroes->GetSelected();
+			if (!Hero)
+			{
+				UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat exp <Amount> [Hero]: no such hero, and none is chosen"));
+				return;
+			}
+			Heroes->AddExperience(Hero->Id, FCString::Atoi(*Args[1]));
+			Message = FString::Printf(TEXT("Cheat: %s has %d experience, level %d"), *Hero->Name, Hero->Experience, Hero->Level);
+		}
+		else if (Action == TEXT("spells"))
+		{
+			// every spell, and full mana, for the hero chosen or named, or with all for every hero of the person who plays
+			const bool bEveryHero = Args.IsValidIndex(1) && Args[1].Equals(TEXT("all"), ESearchCase::IgnoreCase);
+			TArray<int32> Ids;
+			if (bEveryHero)
+			{
+				for (const FHexHero& Each : Heroes->GetHeroes())
+				{
+					if (Each.Player == Heroes->GetShroudPlayer())
+					{
+						Ids.Add(Each.Id);
+					}
+				}
+			}
+			else if (const FHexHero* One = Args.IsValidIndex(1) ? Heroes->FindHeroByText(Args[1]) : Heroes->GetSelected())
+			{
+				Ids.Add(One->Id);
+			}
+			const UHexBattleConfig* Battle = UHexBattleConfig::Load();
+			if (Ids.IsEmpty() || !Battle)
+			{
+				Message = TEXT("Cheat spells [Hero|all]: no such hero, and none is chosen");
+				UE_LOG(LogHexHero, Warning, TEXT("hex.%s"), *Message);
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(INDEX_NONE, 4.0f, FColor::Yellow, Message);
+				}
+				return;
+			}
+			TArray<FName> All;
+			for (const FHexSpell& Spell : Battle->Spells)
+			{
+				All.Add(Spell.Id);
+			}
+			TArray<FString> Names;
+			for (const int32 Id : Ids)
+			{
+				FHexHero* Hero = const_cast<FHexHero*>(Heroes->FindHero(Id));
+				Heroes->LearnSpells(*Hero, All);
+				Hero->Mana = FMath::Max(Hero->Mana, Heroes->GetMaxMana(*Hero));
+				Names.Add(Hero->Name);
+			}
+			Heroes->NoteListChanged();
+			Message = FString::Printf(TEXT("Cheat: %s %s every spell"), *FString::Join(Names, TEXT(", ")), Names.Num() == 1 ? TEXT("knows") : TEXT("know"));
+		}
+		else if (Action == TEXT("skill") && Args.Num() >= 2)
+		{
+			// a skill, or all of them, at a level for the hero chosen or named; without a level one higher than it has, Basic for a new one
+			const bool bLevel = Args.IsValidIndex(2) && Args[2].IsNumeric() && FCString::Atoi(*Args[2]) >= 1 && FCString::Atoi(*Args[2]) <= 3;
+			const int32 HeroArg = bLevel ? 3 : 2;
+			FHexHero* Hero = const_cast<FHexHero*>(Args.IsValidIndex(HeroArg) ? Heroes->FindHeroByText(Args[HeroArg]) : Heroes->GetSelected());
+			const bool bAll = Args[1].Equals(TEXT("all"), ESearchCase::IgnoreCase);
+			const int64 Skill = bAll ? 0 : StaticEnum<EHexSkill>()->GetValueByNameString(Args[1]);
+			if (!Hero || Skill == INDEX_NONE || Skill >= int64(EHexSkill::Num))
+			{
+				UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat skill <Sorcery|Diplomacy|Logistics|AirMagic|EarthMagic|FireMagic|WaterMagic|Mysticism|Pathfinding|all> [1-3] [Hero]: no such skill or hero"));
+				return;
+			}
+			const auto Learn = [Hero, bLevel, &Args](EHexSkill Each) -> int32
+			{
+				FHexHeroSkill* Found = Hero->Skills.FindByPredicate([Each](const FHexHeroSkill& Known) { return Known.Skill == Each; });
+				const int32 Level = bLevel ? FCString::Atoi(*Args[2]) : FMath::Min((Found ? Found->Level : 0) + 1, 3);
+				if (Found)
+				{
+					Found->Level = Level;
+				}
+				else
+				{
+					Hero->Skills.Add({Each, Level});
+				}
+				return Level;
+			};
+			if (bAll)
+			{
+				for (int32 Each = 0; Each < int32(EHexSkill::Num); ++Each)
+				{
+					Learn(EHexSkill(Each));
+				}
+				Message = FString::Printf(TEXT("Cheat: %s has every skill"), *Hero->Name);
+			}
+			else
+			{
+				const int32 Level = Learn(EHexSkill(Skill));
+				Message = FString::Printf(TEXT("Cheat: %s has %s at %s"), *Hero->Name, *StaticEnum<EHexSkill>()->GetNameStringByValue(Skill),
+					Level == 1 ? TEXT("Basic") : Level == 2 ? TEXT("Advanced") : TEXT("Expert"));
+			}
+			Heroes->NoteListChanged();
+		}
+		else if (Action == TEXT("spell") && Args.Num() >= 2)
+		{
+			// a spell by its Id or name, all of a school, all of a level 1-5, or every one, for the hero chosen or named
+			FHexHero* Hero = const_cast<FHexHero*>(Args.IsValidIndex(2) ? Heroes->FindHeroByText(Args[2]) : Heroes->GetSelected());
+			const UHexBattleConfig* Battle = UHexBattleConfig::Load();
+			if (!Hero || !Battle)
+			{
+				UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat spell <Spell|Air|Earth|Fire|Water|1-5|all> [Hero]: no such hero, and none is chosen"));
+				return;
+			}
+			const FString& What = Args[1];
+			const int64 School = StaticEnum<EHexSpellSchool>()->GetValueByNameString(What);
+			const int32 Level = What.IsNumeric() ? FCString::Atoi(*What) : 0;
+			const bool bAll = What.Equals(TEXT("all"), ESearchCase::IgnoreCase);
+			TArray<FName> Chosen;
+			for (const FHexSpell& Spell : Battle->Spells)
+			{
+				const FString Bare = Spell.DisplayName.Replace(TEXT(" "), TEXT(""));
+				if (bAll || (School != INDEX_NONE && School < int64(EHexSpellSchool::Num) && Spell.School == EHexSpellSchool(School)) || (Level > 0 && Spell.Level == Level)
+					|| Spell.Id.ToString().Equals(What, ESearchCase::IgnoreCase) || Bare.Equals(What, ESearchCase::IgnoreCase))
+				{
+					Chosen.Add(Spell.Id);
+				}
+			}
+			if (Chosen.IsEmpty())
+			{
+				TArray<FString> Ids;
+				for (const FHexSpell& Spell : Battle->Spells)
+				{
+					Ids.Add(Spell.Id.ToString());
+				}
+				UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat spell: no spell %s; the spells are %s"), *What, *FString::Join(Ids, TEXT(", ")));
+				return;
+			}
+			const int32 Learned = Heroes->LearnSpells(*Hero, Chosen);
+			Heroes->NoteListChanged();
+			Message = Chosen.Num() == 1 ? FString::Printf(TEXT("Cheat: %s knows %s"), *Hero->Name, *Battle->Spells[Battle->Spells.IndexOfByPredicate([&Chosen](const FHexSpell& Each) { return Each.Id == Chosen[0]; })].DisplayName)
+				: FString::Printf(TEXT("Cheat: %s learns %d spells of %d"), *Hero->Name, Learned, Chosen.Num());
+		}
+		else if (Action == TEXT("mana"))
+		{
+			// mana for the hero chosen or named: so much, or without an amount up to its most, and another most when it is full
+			const bool bAmount = Args.IsValidIndex(1) && (Args[1].IsNumeric() || Args[1].StartsWith(TEXT("-")));
+			const int32 HeroArg = bAmount ? 2 : 1;
+			FHexHero* Hero = const_cast<FHexHero*>(Args.IsValidIndex(HeroArg) ? Heroes->FindHeroByText(Args[HeroArg]) : Heroes->GetSelected());
+			if (!Hero)
+			{
+				UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat mana [Amount] [Hero]: no such hero, and none is chosen"));
+				return;
+			}
+			const int32 Most = Heroes->GetMaxMana(*Hero);
+			Hero->Mana = bAmount ? FMath::Max(0, Hero->Mana + FCString::Atoi(*Args[1])) : Hero->Mana >= Most ? Hero->Mana + Most : Most;
+			Heroes->NoteListChanged();
+			Message = FString::Printf(TEXT("Cheat: %s has %d mana of %d"), *Hero->Name, Hero->Mana, Most);
+		}
+		else if (Action == TEXT("artifact") && Args.Num() >= 2)
+		{
+			// an artifact by its Id, name or index, a random one, or every one, for the hero chosen or named
+			FHexHero* Hero = const_cast<FHexHero*>(Args.IsValidIndex(2) ? Heroes->FindHeroByText(Args[2]) : Heroes->GetSelected());
+			const UHexHeroConfig* HeroConfig = Heroes->GetConfig();
+			if (!Hero || !HeroConfig || HeroConfig->Artifacts.IsEmpty())
+			{
+				UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat artifact <Artifact|random|all> [Hero]: no such hero, and none is chosen"));
+				return;
+			}
+			const FString& What = Args[1];
+			if (What.Equals(TEXT("all"), ESearchCase::IgnoreCase))
+			{
+				int32 Given = 0;
+				for (int32 Index = 0; Index < HeroConfig->Artifacts.Num(); ++Index)
+				{
+					Given += Heroes->GiveArtifact(*Hero, Index) ? 1 : 0;
+				}
+				Message = FString::Printf(TEXT("Cheat: %s takes %d artifacts"), *Hero->Name, Given);
+			}
+			else
+			{
+				int32 Artifact = What.Equals(TEXT("random"), ESearchCase::IgnoreCase) ? FMath::RandRange(0, HeroConfig->Artifacts.Num() - 1)
+					: What.IsNumeric() ? FCString::Atoi(*What) : HeroConfig->FindArtifact(What);
+				if (Artifact == INDEX_NONE)
+				{
+					Artifact = HeroConfig->Artifacts.IndexOfByPredicate([&What](const FHexArtifact& Each) { return Each.DisplayName.Replace(TEXT(" "), TEXT("")).Equals(What, ESearchCase::IgnoreCase); });
+				}
+				if (!HeroConfig->Artifacts.IsValidIndex(Artifact))
+				{
+					TArray<FString> Ids;
+					for (const FHexArtifact& Each : HeroConfig->Artifacts)
+					{
+						Ids.Add(Each.Id.ToString());
+					}
+					UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat artifact: no artifact %s; the artifacts are %s"), *What, *FString::Join(Ids, TEXT(", ")));
+					return;
+				}
+				Message = Heroes->GiveArtifact(*Hero, Artifact) ? FString::Printf(TEXT("Cheat: %s takes the %s"), *Hero->Name, *HeroConfig->Artifacts[Artifact].DisplayName)
+					: FString::Printf(TEXT("Cheat: the backpack of %s is full"), *Hero->Name);
+			}
+		}
+		else if (Action == TEXT("teleport") && Args.Num() >= 2)
+		{
+			// the hero chosen or named on a cell at once: its number on the layer shown, focus for the one the camera looks at, coast for the
+			// ground nearest it beside free sea, as the developer asked on 2026-11-15 to try the boats
+			const FHexHero* Hero = Args.IsValidIndex(2) ? Heroes->FindHeroByText(Args[2]) : Heroes->GetSelected();
+			if (!Hero)
+			{
+				UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat teleport <Cell|focus|coast> [Hero]: no such hero, and none is chosen"));
+				return;
+			}
+			EHexPlanetLayer Layer = Planet->GetLayer();
+			int32 Cell = INDEX_NONE;
+			if (Args[1].Equals(TEXT("coast"), ESearchCase::IgnoreCase))
+			{
+				Layer = Hero->Layer;
+				Cell = Heroes->FindCoastCell(*Hero);
+			}
+			else if (Args[1].Equals(TEXT("focus"), ESearchCase::IgnoreCase))
+			{
+				const APlayerController* PlayerController = World ? World->GetFirstPlayerController() : nullptr;
+				const AActor* ViewTarget = PlayerController ? PlayerController->GetViewTarget() : nullptr;
+				Cell = ViewTarget ? Planet->GetGrid().FindCell(Planet->FindViewFocus(ViewTarget->GetActorLocation(), ViewTarget->GetActorForwardVector()).GetSafeNormal()) : int32(INDEX_NONE);
+			}
+			else if (Args[1].IsNumeric())
+			{
+				Cell = FCString::Atoi(*Args[1]);
+			}
+			FString Problem = TEXT("no such cell");
+			if (Cell == INDEX_NONE || !Heroes->CheatTeleport(Hero->Id, Layer, Cell, Problem))
+			{
+				UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat teleport: %s"), *Problem);
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(INDEX_NONE, 4.0f, FColor::Yellow, Problem);
+				}
+				return;
+			}
+			Message = FString::Printf(TEXT("Cheat: %s"), *Problem);
+		}
+		else if (Action == TEXT("boat"))
+		{
+			// a boat on the free sea nearest the hero chosen or named
+			const FHexHero* Hero = Args.IsValidIndex(1) ? Heroes->FindHeroByText(Args[1]) : Heroes->GetSelected();
+			FString Problem;
+			if (!Heroes->SummonBoat(Hero ? Hero->Id : 0, Problem))
+			{
+				UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat boat [Hero]: %s"), *Problem);
+				if (GEngine)
+				{
+					GEngine->AddOnScreenDebugMessage(INDEX_NONE, 4.0f, FColor::Yellow, Problem);
+				}
+				return;
+			}
+			Message = FString::Printf(TEXT("Cheat: %s"), *Problem);
+		}
+		else if (Action == TEXT("show"))
+		{
+			// marks over what is chosen, under the fog of war too: show <Kind...> switches each, all every one, off none, nothing lists them
+			uint32 Shown = HexCheats::GetShownMarks();
+			for (int32 Index = 1; Index < Args.Num(); ++Index)
+			{
+				const FString& Word = Args[Index];
+				if (Word.Equals(TEXT("all"), ESearchCase::IgnoreCase))
+				{
+					Shown = HexCheats::AllMarks;
+				}
+				else if (Word.Equals(TEXT("off"), ESearchCase::IgnoreCase))
+				{
+					Shown = 0;
+				}
+				// a number: only within that many cells of where the camera looks, 0 the whole layer
+				else if (Word.IsNumeric())
+				{
+					HexCheats::SetShownMarksReach(FCString::Atoi(*Word));
+				}
+				else if (const uint32 Kind = HexCheats::FindMarkKind(Word))
+				{
+					Shown ^= Kind;
+				}
+				else
+				{
+					UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat show <%s|all|off>...: no kind %s"), *HexCheats::GetMarkKindNames(HexCheats::AllMarks, TEXT("|")), *Word);
+					return;
+				}
+			}
+			HexCheats::SetShownMarks(Shown);
+			const int32 Reach = HexCheats::GetShownMarksReach();
+			Message = Shown ? FString::Printf(TEXT("Cheat: marked %s%s"), *HexCheats::GetMarkKindNames(Shown, TEXT(", ")),
+				Reach > 0 ? *FString::Printf(TEXT(" within %d cells of where the camera looks"), Reach) : TEXT(" on the whole layer")) : FString(TEXT("Cheat off: nothing is marked"));
 		}
 		else if (Action == TEXT("catapult"))
 		{
@@ -2410,6 +2764,13 @@ namespace
 		{
 			UE_LOG(LogHexHero, Warning, TEXT("hex.Cheat: unknown action %s; hex.Cheat help lists the cheats"), *Args[0]);
 			return;
+		}
+		for (const TPair<int32, int32>& Fighter : BattleMana)
+		{
+			if (const FHexHero* Hero = Heroes->FindHero(Fighter.Key))
+			{
+				CheatBattles->RefreshMagic(Fighter.Key, Hero->Mana - Fighter.Value);
+			}
 		}
 		UE_LOG(LogHexHero, Log, TEXT("hex.Cheat: %s"), *Message);
 		if (GEngine)

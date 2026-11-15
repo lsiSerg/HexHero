@@ -14,6 +14,10 @@
 #include "HexPlanetFile.h"
 #include "HexPlanetObjectSet.h"
 #include "HexPlanetUnderground.h"
+#include "HexPlanetLayers.h"
+#include "HexSites.h"
+#include "HexCastles.h"
+#include "HAL/IConsoleManager.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "StaticMeshResources.h"
@@ -1091,6 +1095,84 @@ void UHexPlanetObjects::SetCells(const TMap<int32, FHexCellObjects>& Changes)
 		}
 	}
 	RebuildCells(Changed);
+}
+
+int32 UHexPlanetObjects::ScatterDecor(float Share, int32 Seed)
+{
+	if (!Planet || Planet->GetLayer() != EHexPlanetLayer::Surface)
+	{
+		return 0;
+	}
+	const TArray<FHexSphereCell>& Cells = Planet->GetGrid().GetCells();
+	const UHexHeroes* Heroes = Planet->GetHeroes();
+	const UHexSites* Sites = Heroes ? Heroes->GetSites() : nullptr;
+	const UHexCastles* Castles = Heroes ? Heroes->GetCastles() : nullptr;
+	TSet<int32> Entrances;
+	for (const FHexEntrance& Entrance : Planet->GetEntrances())
+	{
+		Entrances.Add(Entrance.Cell);
+	}
+	FRandomStream Random(Seed * 7919 + 4111);
+	TMap<int32, FHexCellObjects> Changes;
+	for (int32 SetIndex = 0; SetIndex < NumOwnSets; ++SetIndex)
+	{
+		const UHexPlanetObjectSet& Set = *Sets[SetIndex];
+		if (Set.Layer != EHexObjectLayer::Decor)
+		{
+			continue;
+		}
+		for (const FHexObjectVariant& Variant : Set.Variants)
+		{
+			if (Variant.GenerateShare <= 0.0f)
+			{
+				continue;
+			}
+			TArray<int32> Candidates;
+			for (int32 Cell = 0; Cell < Cells.Num(); ++Cell)
+			{
+				const FHexCellObjects& Objects = Changes.Contains(Cell) ? Changes[Cell] : CellObjects[Cell];
+				if (Cells[Cell].IsPentagon() || !Objects.IsEmpty() || !Set.AllowedLevels.Contains(Planet->GetCellLevel(Cell))
+					|| Set.FindVariant(Planet->GetCellBiomeLetter(Cell)) != &Variant || Entrances.Contains(Cell)
+					|| (Sites && Sites->FindSiteAt(EHexPlanetLayer::Surface, Cell)) || (Castles && Castles->FindCastleAt(EHexPlanetLayer::Surface, Cell)))
+				{
+					continue;
+				}
+				Candidates.Add(Cell);
+			}
+			const int32 Count = FMath::RoundToInt32(Variant.GenerateShare * FMath::Max(Share, 0.0f) * Candidates.Num());
+			for (int32 Each = 0; Each < Count && !Candidates.IsEmpty(); ++Each)
+			{
+				const int32 Pick = Random.RandRange(0, Candidates.Num() - 1);
+				FHexCellObjects Objects = CellObjects[Candidates[Pick]];
+				Objects.Decor = uint8(SetIndex + 1);
+				Changes.Add(Candidates[Pick], Objects);
+				Candidates.RemoveAtSwap(Pick);
+			}
+		}
+	}
+	SetCells(Changes);
+	Planet->MarkLevelsEdited();
+	UE_LOG(LogHexHero, Log, TEXT("Planet: scattered decor on %d empty cells"), Changes.Num());
+	return Changes.Num();
+}
+
+namespace
+{
+	void RunScatterDecor(const TArray<FString>& Args, UWorld* World)
+	{
+		const UHexPlanetLayers* Layers = UHexPlanetLayers::Get(World);
+		AHexPlanet* Surface = Layers ? Layers->GetSurface() : nullptr;
+		if (!Surface || !Surface->IsBuilt() || !Surface->GetObjects())
+		{
+			UE_LOG(LogHexHero, Warning, TEXT("hex.PlanetScatterDecor: the surface is not built yet"));
+			return;
+		}
+		Surface->GetObjects()->ScatterDecor(Args.Num() >= 1 ? FCString::Atof(*Args[0]) : 1.0f, Args.Num() >= 2 ? FCString::Atoi(*Args[1]) : 1);
+	}
+
+	FAutoConsoleCommandWithWorldAndArgs ScatterDecorCommand(TEXT("hex.PlanetScatterDecor"),
+		TEXT("Puts decor of the generation (lone trees, fallen trees, boulders, stumps) on land of the surface that holds nothing: [Share] of the share each kind generates, 1 by default, [Seed]. Save with the levels."),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&RunScatterDecor));
 }
 
 void UHexPlanetObjects::RebuildCells(TConstArrayView<int32> Cells)

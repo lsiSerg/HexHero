@@ -218,6 +218,61 @@ int32 FHexFaction::FindBuilding(EHexBuildingType Type, int32 Creature) const
 	return Buildings.IndexOfByPredicate([Type, Creature](const FHexBuilding& Each) { return Each.Type == Type && (Type != EHexBuildingType::Dwelling || Each.Creature == Creature); });
 }
 
+FHexBuilding MakeMageGuild()
+{
+	FHexBuilding Guild;
+	Guild.Id = TEXT("MageGuild");
+	Guild.Type = EHexBuildingType::MageGuild;
+	// a slim tower inside the stretch of the wall that holds the flag, before it, so the yard stays open
+	Guild.Place = FVector2D(-0.42, -0.62);
+	Guild.Yaw = 56.0f;
+	Guild.Scale = 1.0f;
+	const TCHAR* Names[5] = {TEXT("Mage guild"), TEXT("Mage guild, second level"), TEXT("Mage guild, third level"), TEXT("Mage guild, fourth level"),
+		TEXT("Mage guild, fifth level")};
+	const int32 Gold[5] = {2000, 1000, 1000, 1000, 1000};
+	const int32 Rare[5] = {0, 4, 6, 8, 10};
+	const int32 Hall[5] = {0, 0, 2, 2, 3};
+	for (int32 Level = 0; Level < 5; ++Level)
+	{
+		FHexBuildingLevel& Each = Guild.Levels.AddDefaulted_GetRef();
+		Each.DisplayName = Names[Level];
+		Each.NeedsHall = Hall[Level];
+		Each.Mesh = MeshOf(FString::Printf(TEXT("Guild%d"), Level + 1));
+		Each.Picture = PictureOf(FString::Printf(TEXT("Guild%d"), Level + 1));
+		Each.Cost.Add(TEXT("Gold"), Gold[Level]);
+		Each.Cost.Add(TEXT("Wood"), 5);
+		Each.Cost.Add(TEXT("Ore"), 5);
+		if (Rare[Level] > 0)
+		{
+			for (const TCHAR* Resource : {TEXT("Mercury"), TEXT("Sulfur"), TEXT("Crystal"), TEXT("Gems")})
+			{
+				Each.Cost.Add(Resource, Rare[Level]);
+			}
+		}
+	}
+	return Guild;
+}
+
+FHexBuilding MakeArtifactMerchant()
+{
+	FHexBuilding Merchant;
+	Merchant.Id = TEXT("Merchant");
+	Merchant.Type = EHexBuildingType::Merchant;
+	// a stall inside the stretch of the wall across the yard from the mage guild, so the yard stays open
+	Merchant.Place = FVector2D(-0.42, 0.62);
+	Merchant.Yaw = 304.0f;
+	Merchant.Scale = 1.0f;
+	FHexBuildingLevel& Each = Merchant.Levels.AddDefaulted_GetRef();
+	Each.DisplayName = TEXT("Artifact merchant");
+	Each.NeedsHall = 2;
+	Each.Mesh = MeshOf(TEXT("Merchant"));
+	Each.Picture = PictureOf(TEXT("Merchant"));
+	Each.Cost.Add(TEXT("Gold"), 3000);
+	Each.Cost.Add(TEXT("Wood"), 5);
+	Each.Cost.Add(TEXT("Ore"), 5);
+	return Merchant;
+}
+
 TArray<FHexFaction> MakeDefaultFactions()
 {
 	TArray<FHexFaction> Factions;
@@ -249,7 +304,7 @@ TArray<FHexFaction> MakeDefaultFactions()
 			MakeDwelling(Make, TEXT("Oath hall"), TEXT("Hall of blades"), 3),
 			MakeDwelling(Make, TEXT("Cloister"), TEXT("Seers' cloister"), 4),
 			MakeDwelling(Make, TEXT("Dawn stables"), TEXT("Heralds' stables"), 5),
-			MakeDwelling(Make, TEXT("Sky gate"), TEXT("Eternal gate"), 6)};
+			MakeDwelling(Make, TEXT("Sky gate"), TEXT("Eternal gate"), 6), MakeMageGuild(), MakeArtifactMerchant()};
 	}
 	{
 		// the Realm of Decay: more, weaker and cheaper creatures
@@ -282,9 +337,45 @@ TArray<FHexFaction> MakeDefaultFactions()
 			MakeDwelling(Make, TEXT("Blood manor"), TEXT("Eternal manor"), 3),
 			MakeDwelling(Make, TEXT("Ash tower"), TEXT("Lords' tower"), 4),
 			MakeDwelling(Make, TEXT("Decay stables"), TEXT("Abyss stables"), 5),
-			MakeDwelling(Make, TEXT("Serpent nest"), TEXT("Dusk nest"), 6)};
+			MakeDwelling(Make, TEXT("Serpent nest"), TEXT("Dusk nest"), 6), MakeMageGuild(), MakeArtifactMerchant()};
 	}
+	Factions.Add(MakeSeaFaction());
 	return Factions;
+}
+
+FHexFaction MakeSeaFaction()
+{
+	// the Deep, creatures of the sea that only the map holds, as the developer asked on 2026-11-15 ("водні нейтрали - русалки, може ще
+	// щось?"): the drowned, mermaids, wraiths of the tide, sea witches, drakes, drowned knights and the leviathan; numbers of Claude's
+	FFactionMake Make;
+	Make.Quality = 1.0f;
+	Make.Price = 1.0f;
+	Make.Rare = TEXT("Mercury");
+	Make.Rarest = TEXT("Gems");
+	FHexFaction Deep;
+	Deep.Id = TEXT("Deep");
+	Deep.DisplayName = TEXT("The Deep");
+	Deep.Color = FLinearColor(0.05f, 0.5f, 0.55f, 1.0f);
+	Deep.bSea = true;
+	const int32 Undead = Bits({EHexAbility::Undead});
+	Deep.Creatures = {
+		With(MakeCreature(Make, TEXT("Drowned"), TEXT("Drowned sailor"), TEXT("Drowned captain"), 0, 1.2f, 0.9f, 4), Undead, 0),
+		With(MakeCreature(Make, TEXT("Mermaid"), TEXT("Mermaid"), TEXT("Siren"), 1, 0.9f, 1.05f, 6, false, true), 0, Bits({EHexAbility::NoRetaliation})),
+		With(MakeCreature(Make, TEXT("TideWraith"), TEXT("Tide wraith"), TEXT("Storm wraith"), 2, 0.95f, 1.0f, 7, false, true), Undead | Bits({EHexAbility::Regenerate}), 0),
+		With(MakeCreature(Make, TEXT("SeaWitch"), TEXT("Sea witch"), TEXT("Storm witch"), 3, 0.8f, 1.15f, 5, true), Bits({EHexAbility::NoMeleePenalty}), Bits({EHexAbility::AreaShot}), 12),
+		With(MakeCreature(Make, TEXT("SeaDrake"), TEXT("Sea drake"), TEXT("Storm drake"), 4, 1.05f, 1.1f, 8, false, true), 0, Bits({EHexAbility::Breath})),
+		With(MakeCreature(Make, TEXT("DrownedKnight"), TEXT("Drowned knight"), TEXT("Abyss knight"), 5, 1.15f, 1.05f, 6), Undead, Bits({EHexAbility::DoubleStrike})),
+		With(MakeCreature(Make, TEXT("Leviathan"), TEXT("Leviathan"), TEXT("Elder leviathan"), 6, 1.1f, 1.05f, 9, false, true), Bits({EHexAbility::Breath}), 0)};
+	// its buildings are never built, as no castle is of the sea, but every faction has them
+	Deep.Buildings = {MakeHall(), MakeFort(),
+		MakeDwelling(Make, TEXT("Wreck"), TEXT("Captain's wreck"), 0),
+		MakeDwelling(Make, TEXT("Kelp bed"), TEXT("Siren rock"), 1),
+		MakeDwelling(Make, TEXT("Tide pool"), TEXT("Storm pool"), 2),
+		MakeDwelling(Make, TEXT("Witch grotto"), TEXT("Storm grotto"), 3),
+		MakeDwelling(Make, TEXT("Drake reef"), TEXT("Storm reef"), 4),
+		MakeDwelling(Make, TEXT("Sunken hall"), TEXT("Abyss hall"), 5),
+		MakeDwelling(Make, TEXT("Trench"), TEXT("Elder trench"), 6), MakeMageGuild(), MakeArtifactMerchant()};
+	return Deep;
 }
 
 UHexCastleConfig::UHexCastleConfig()
@@ -308,9 +399,37 @@ void UHexCastleConfig::PostLoad()
 		Factions = MakeDefaultFactions();
 		return;
 	}
+	// the creatures of the sea of 2026-11-15
+	if (FindFaction(TEXT("Deep")) == INDEX_NONE)
+	{
+		Factions.Add(MakeSeaFaction());
+	}
 	// a config saved before the battles has its creatures without what they do in one: they take it from the defaults of the class by the Ids
 	// of their faction and creature while they still hold none of it, so what was tuned by hand stays
 	const TArray<FHexFaction> Defaults = MakeDefaultFactions();
+	// a faction saved before the mage guilds of 2026-11-15 takes one, and the game builds it too
+	for (FHexFaction& Faction : Factions)
+	{
+		if (!Faction.Buildings.ContainsByPredicate([](const FHexBuilding& Each) { return Each.Type == EHexBuildingType::MageGuild; }))
+		{
+			Faction.Buildings.Add(MakeMageGuild());
+		}
+		// and the artifact merchant of 2026-11-15
+		if (!Faction.Buildings.ContainsByPredicate([](const FHexBuilding& Each) { return Each.Type == EHexBuildingType::Merchant; }))
+		{
+			Faction.Buildings.Add(MakeArtifactMerchant());
+		}
+	}
+	if (!AiBuildOrder.ContainsByPredicate([](const FString& Each) { return Each.StartsWith(TEXT("MageGuild")); }))
+	{
+		const struct { const TCHAR* After; const TCHAR* Step; } Inserts[] = {{TEXT("Dwelling3:1"), TEXT("MageGuild:1")}, {TEXT("Dwelling4:1"), TEXT("MageGuild:2")},
+			{TEXT("Dwelling5:1"), TEXT("MageGuild:3")}, {TEXT("Dwelling6:1"), TEXT("MageGuild:4")}, {TEXT("Dwelling7:1"), TEXT("MageGuild:5")}};
+		for (const auto& Insert : Inserts)
+		{
+			const int32 At = AiBuildOrder.IndexOfByKey(FString(Insert.After));
+			AiBuildOrder.Insert(Insert.Step, At == INDEX_NONE ? AiBuildOrder.Num() : At + 1);
+		}
+	}
 	const auto IsBare = [](const FHexCreatureStats& Stats) { return Stats.Abilities == 0 && Stats.Shots == 0 && Stats.Morale == 0 && Stats.Luck == 0; };
 	for (FHexFaction& Faction : Factions)
 	{

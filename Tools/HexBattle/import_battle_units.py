@@ -36,6 +36,14 @@ LOOKS = {
     'AshMage': ('AshMage', 64, 0, (0.8, 0.78, 0.75), (0.7, 0.72, 0.85)),
     'DecayRider': ('rider', 90, 0, (0.32, 0.3, 0.36), (0.22, 0.2, 0.28)),
     'BoneSerpent': ('BoneSerpent', 80, 34, (1.0, 1.0, 1.0), (0.82, 0.76, 0.9)),
+    # the creatures of the sea of 2026-11-15 (the Deep), the mermaid of its own and the others the figures of the land in the tints of the sea
+    'Drowned': ('Decayed', 56, 0, (0.45, 0.75, 0.7), (0.35, 0.6, 0.65)),
+    'Mermaid': ('Mermaid', 58, 6, (1.0, 1.0, 1.0), (1.05, 0.85, 1.1)),
+    'TideWraith': ('Shade', 62, 9, (0.5, 0.95, 1.0), (0.4, 0.7, 1.15)),
+    'SeaWitch': ('Pilgrim', 60, 0, (0.45, 0.85, 0.8), (0.55, 0.6, 1.0)),
+    'SeaDrake': ('Glowwing', 72, 26, (0.4, 0.95, 0.85), (0.35, 0.7, 1.05)),
+    'DrownedKnight': ('Oathsworn', 62, 0, (0.55, 0.8, 0.75), (0.4, 0.55, 0.6)),
+    'Leviathan': ('BoneSerpent', 88, 30, (0.35, 0.65, 0.7), (0.25, 0.45, 0.6)),
 }
 # the surface of each, as the developer found them like plasticine: how large its grain is, how much it changes the tone and the relief, and
 # its roughness (DetailScale, DetailTone, DetailBump, Roughness of FHexUnitLook); the rest take the defaults of the class
@@ -46,6 +54,8 @@ DETAILS = {
     # the rider, whose mesh is about 13 times smaller in its own units than the figures of the models (581 high against 7577), so its noise
     # is 13 times finer to match theirs; at 10 the texels of the noise showed as blocks on the horse, which the developer saw on 2026-11-14
     'DawnRider': (0.8, 0.06, 0.1, 0.55), 'DecayRider': (0.8, 0.06, 0.1, 0.55),
+    'Drowned': (9.0, 0.2, 0.6, 0.8), 'TideWraith': (12.0, 0.15, 0.3, 0.9), 'SeaDrake': (9.0, 0.16, 0.6, 0.45), 'Leviathan': (10.0, 0.08, 0.15, 0.7),
+    'DrownedKnight': (10.0, 0.1, 0.3, 0.45), 'Mermaid': (10.0, 0.1, 0.3, 0.5),
 }
 # the foot of a unit whose measure in units.json does not hold in the engine: the skeleton stands with its foot at its origin there, though
 # Blender measured it 163 below, and floated so until 2026-11-12
@@ -99,6 +109,24 @@ def import_unit(name, material):
                 if asset.get_name().endswith(action):
                     animations[action] = asset
     unreal.log('BATTLE UNITS %s: mesh %s, animations %s' % (name, mesh.get_path_name() if mesh else None, sorted(animations)))
+    return mesh, animations
+
+
+def existing_unit(name):
+    """The mesh and animations of a unit imported before, for a creature that wears the figure of another (a creature of the sea)"""
+    folder = '%s/SK_Unit%s' % (FOLDER, name)
+    mesh = None
+    animations = {}
+    if not assets.does_directory_exist(folder):
+        return None, {}
+    for data in unreal.AssetRegistryHelpers.get_asset_registry().get_assets_by_path(folder, recursive=True):
+        asset = data.get_asset()
+        if isinstance(asset, unreal.SkeletalMesh):
+            mesh = asset
+        elif isinstance(asset, unreal.AnimSequence):
+            for action in ACTIONS:
+                if asset.get_name().endswith(action):
+                    animations[action] = asset
     return mesh, animations
 
 
@@ -204,6 +232,8 @@ def main():
             built[unit] = rider_parts(material, 'rider' in only)
         elif not only or unit in only:
             built[unit] = import_unit(unit, material)
+        else:
+            built[unit] = existing_unit(unit)
     measures = {}
     if os.path.exists(os.path.join(SOURCE, 'units.json')):
         import json
@@ -214,7 +244,8 @@ def main():
         if spec[0] not in built or not built[spec[0]][0]:
             continue
         index = next((i for i, each in enumerate(looks) if str(each.get_editor_property('creature')) == creature), -1)
-        if index >= 0 and not reset and not only:
+        # a look there is made again with reset, or when its unit was imported anew by name
+        if index >= 0 and not reset and not (only and spec[0] in only):
             continue
         look = make_look(creature, built[spec[0]][0], built[spec[0]][1], spec, measures.get(spec[0]))
         if index >= 0:

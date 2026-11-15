@@ -602,6 +602,52 @@ def dwelling(level):
     return stretched(mesh)
 
 
+def guild(level):
+    """The mage guild of a castle, as the developer asked on 2026-11-15: a slim round tower of as many tiers as its level, each narrower than
+    the one under it with a ring of trim and lit windows, under a pointed roof with a glowing orb on a spire, so its level shows from outside"""
+    mesh = Mesh()
+    radius = 9.0
+    height = 0.0
+    for tier in range(level):
+        tall = 14.0 if tier == 0 else 8.5
+        add_tower(mesh, (0.0, 0.0, height), radius, tall, seed=130 + tier * 7, sides=10, slits=3 + tier % 2)
+        height += tall
+        stone_cylinder(mesh, (0.0, 0.0, height - 1.0), radius + 1.2, 2.2, 10, tone=TRIM_TONE, seed=131 + tier * 7)
+        radius *= 0.86
+    add_cone(mesh, (0.0, 0.0, height + 1.2), radius * 1.35, 12.0 + level, seed=150 + level, sides=10)
+    tip = height + 13.2 + level
+    add_cylinder(mesh, (0.0, 0.0, tip - 2.0), (0.0, 0.0, tip + 6.0), 0.5, 5, TIMBER, 0.0, TIMBER, 151)
+    add_blob(mesh, (0.0, 0.0, tip + 8.0), (2.6, 2.6, 2.6), (0.35, 0.5, 1.0), GLOW, 152 + level, 1, bumps=0.0, flatten=1.0, shade=0.2)
+    return stretched(mesh, 1.35)
+
+
+def merchant():
+    """The artifact merchant of a castle, as the developer asked on 2026-11-15: a small shop of stone under a gabled roof with a striped awning
+    of cloth on posts before its front (+X), a counter under it with wares that glow, gilded and of gems, and chests and a barrel beside it"""
+    mesh = Mesh()
+    add_house(mesh, (-6.0, 0.0, 0.0), (20.0, 18.0, 14.0), roof=10.0, seed=160)
+    # the awning on four posts, in stripes of two colors
+    for side in (-1.0, 1.0):
+        add_cylinder(mesh, (12.0, side * 9.0, -SKIRT * 0.3), (12.0, side * 9.0, 12.0), 0.6, 5, TIMBER, 0.0, TIMBER, 161)
+    for stripe in range(6):
+        y = -9.0 + 18.0 * (stripe + 0.5) / 6
+        color = (0.62, 0.12, 0.1) if stripe % 2 == 0 else (0.85, 0.78, 0.6)
+        add_box(mesh, (8.0, y, 13.0), (9.0, 3.0, 0.5), color, pitch=-0.25, seed=162 + stripe)
+    # the counter and its wares
+    add_box(mesh, (9.0, 0.0, 3.0 - SKIRT * 0.15), (4.0, 15.0, 6.0 + SKIRT * 0.3), TIMBER, seed=170)
+    for index in range(5):
+        y = -5.6 + index * 2.8
+        if index % 2 == 0:
+            add_blob(mesh, (9.0, y, 7.0), (1.2, 1.2, 1.2), (0.3, 0.6, 1.0) if index == 2 else (0.85, 0.2, 0.3), GLOW, 171 + index, 1, bumps=0.0, flatten=1.0, shade=0.2)
+        else:
+            add_box(mesh, (9.0, y, 6.8), (1.8, 1.4, 1.2), GOLD, GLOW, yaw=0.3 * index, seed=171 + index)
+    # chests and a barrel beside it
+    add_box(mesh, (6.0, 13.0, 2.5), (6.0, 4.0, 5.0), TIMBER, yaw=0.3, seed=180)
+    add_box(mesh, (6.0, 13.0, 5.2), (6.4, 4.4, 0.8), GOLD, GLOW, yaw=0.3, seed=181)
+    add_cylinder(mesh, (2.0, -13.0, -1.0), (2.0, -13.0, 7.0), 3.0, 8, TIMBER, 0.0, TIMBER, 182)
+    return stretched(mesh, 1.2)
+
+
 def upgrade():
     """The mark beside a building that was built further than its mesh shows: a tall pole with a pennant of the owner and a gilded top"""
     mesh = Mesh()
@@ -621,7 +667,8 @@ def torch():
 
 MESHES = [('Flag', flag), ('Yard', yard), ('Upgrade', upgrade), ('Torch', torch)] + [('Wall%d' % level, lambda level=level: wall(level)) for level in range(4)] + [
     ('Tower%d' % level, lambda level=level: tower(level)) for level in (2, 3)] + [('Gate%d' % level, lambda level=level: gate(level)) for level in range(4)] + [
-    ('Hall%d' % level, lambda level=level: hall(level)) for level in (1, 2, 3)] + [('Dwelling%d' % level, lambda level=level: dwelling(level)) for level in range(1, 8)]
+    ('Hall%d' % level, lambda level=level: hall(level)) for level in (1, 2, 3)] + [('Dwelling%d' % level, lambda level=level: dwelling(level)) for level in range(1, 8)] + [
+    ('Guild%d' % level, lambda level=level: guild(level)) for level in range(1, 6)] + [('Merchant', merchant)]
 # the meshes of the castle of one piece that came before, which the import deletes
 OLD_MESHES = ['Base', 'Fort1', 'Fort2', 'Fort3']
 

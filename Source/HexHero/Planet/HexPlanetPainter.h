@@ -426,6 +426,18 @@ public:
 	 *  all away, as one step of Undo; false if nothing changed */
 	bool GenerateSites(bool bClear = false);
 
+	/** Makes vaults on the surface, closed places with one guarded way in and much in them (UHexSites::MakeVaults), no step of Undo */
+	bool MakeVaults(int32 Count = 4);
+
+	/** How many sites a press of Generate scatters, a factor on Density of DA_HexSites, and the share of its piles that lie beside another, as
+	 *  the developer asked on 2026-11-15 to set them in the Mines tab; each step of the buttons there, within their bounds */
+	float GetSiteAmount() const { return SiteAmount; }
+	float GetSiteClusterShare() const { return SiteClusterShare; }
+	void StepSiteAmount(int32 Steps) { SiteAmount = FMath::Clamp(SiteAmount + 0.25f * float(Steps), 0.25f, 4.0f); }
+	void StepSiteClusterShare(int32 Steps) { SiteClusterShare = FMath::Clamp(SiteClusterShare + 0.1f * float(Steps), 0.0f, 1.0f); }
+	float SiteAmount = 1.5f;
+	float SiteClusterShare = 0.35f;
+
 	/** Returns true while the brush places castles, of the faction and for the player chosen, -1 for a castle of nobody */
 	bool IsPlacingCastles() const { return Tool == EHexPaintTool::Castle; }
 	void SetCastleTool() { SetTool(EHexPaintTool::Castle, Target == EHexPlanetLayer::Underground ? EHexPaintTab::CaveCastles : EHexPaintTab::Castles); PieceAction = EHexPieceAction::Place; }

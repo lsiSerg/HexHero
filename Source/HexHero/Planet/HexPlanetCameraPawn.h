@@ -116,6 +116,10 @@ public:
 	 *  from its panel or goes through an entrance. Returns false during a trip or without such a cell */
 	bool ShowCell(EHexPlanetLayer Layer, int32 Cell);
 
+	/** Puts the camera over a direction from the center of a layer at once, as a cut, no further than a distance, keeping its heading; on
+	 *  the other layer it travels there; a distance below 0 is PlayStartDistance of the config. Returns false before the planet is built */
+	bool PlaceOver(EHexPlanetLayer Layer, const FVector& Direction, float MaxDistance = -1.0f);
+
 	/** Glides after a direction from the center of the planet, as after a hero that walks, unless the player moves the camera */
 	void Follow(const FVector& Direction);
 
@@ -263,8 +267,9 @@ private:
 	bool IsFollowing() const;
 	void TakeFollow();
 
-	/** The edge of the screen does not scroll until the mouse has moved EdgeScrollHoldDistance from EdgeHoldMouse, where it was when a glide
-	 *  was asked for (HoldEdgeScroll), so the cursor left at the edge does not stop that glide */
+	/** The edge of the screen does not scroll after a glide was asked for or the keys moved the camera (HoldEdgeScroll) until the cursor has
+	 *  left the zone of the edge and come back to it, so the cursor left at the edge, or moved away through that zone, does not stop that
+	 *  glide (since 2026-11-15; until then a move of EdgeScrollHoldDistance from EdgeHoldMouse let it scroll again) */
 	bool bEdgeScrollHeld = false;
 	FVector2D EdgeHoldMouse = FVector2D::ZeroVector;
 	void HoldEdgeScroll();

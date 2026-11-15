@@ -4,12 +4,78 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
+#include "HexArtifactConfig.h"
 #include "HexHeroConfig.generated.h"
 
 class UAnimSequence;
 class UMaterialInterface;
 class USkeletalMesh;
 class UStaticMesh;
+class UTexture2D;
+
+/** The secondary skills of a hero, as the developer listed them on 2026-11-15: a hero has up to MaxSkills of them, each Basic, Advanced or
+ *  Expert, and gains them as it rises in level */
+UENUM()
+enum class EHexSkill : uint8
+{
+	/** The damage of the spells that deal damage, Values more */
+	Sorcery,
+	/** A chance (Values) that neutral creatures join without a fight, and what they ask to join for less by SecondValues */
+	Diplomacy,
+	/** Points of movement on the map, Values more */
+	Logistics,
+	/** The spells of a school: Values of their mana less, SecondValues stronger, at Expert on every stack of a side where they may be */
+	AirMagic,
+	EarthMagic,
+	FireMagic,
+	WaterMagic,
+	/** Mana back a day, Values more */
+	Mysticism,
+	/** The cost of rough ground over that of plains, Values of it less */
+	Pathfinding,
+	Num UMETA(Hidden)
+};
+
+/** A skill of the game: what it is called, what each of its levels gives and its picture */
+USTRUCT(BlueprintType)
+struct FHexSkillInfo
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, Category="Skill")
+	EHexSkill Skill = EHexSkill::Sorcery;
+
+	UPROPERTY(EditAnywhere, Category="Skill")
+	FString DisplayName;
+
+	/** What it gives at Basic, Advanced and Expert, with {0} for its value and {1} for its second one, as shares in percents */
+	UPROPERTY(EditAnywhere, Category="Skill")
+	FString Description;
+
+	/** Its values at Basic, Advanced and Expert */
+	UPROPERTY(EditAnywhere, Category="Skill")
+	TArray<float> Values;
+
+	UPROPERTY(EditAnywhere, Category="Skill")
+	TArray<float> SecondValues;
+
+	/** Its picture, T_Skill<Name> of generate_ui_icons.py */
+	UPROPERTY(EditAnywhere, Category="Skill")
+	TSoftObjectPtr<UTexture2D> Icon;
+
+	/** The value of a level, 1 to 3, 0 below Basic */
+	float GetValue(int32 Level, bool bSecond = false) const
+	{
+		const TArray<float>& Each = bSecond ? SecondValues : Values;
+		return Level > 0 && Each.Num() > 0 ? Each[FMath::Min(Level, Each.Num()) - 1] : 0.0f;
+	}
+};
+
+/** Returns the nine skills, with numbers of Claude's after those of Heroes III */
+TArray<FHexSkillInfo> MakeDefaultSkills();
+
+/** Returns the name of a level of a skill: Basic, Advanced, Expert */
+const TCHAR* GetSkillLevelName(int32 Level);
 
 /**
  *  A class of heroes: the attributes its heroes start with and how they tend to grow. Attack and Defense are added to those of every unit of
@@ -57,6 +123,24 @@ struct FHexHeroClass
 	/** Names that new heroes of the class take, the first that no hero of the planet has */
 	UPROPERTY(EditAnywhere, Category="Class")
 	TArray<FString> Names;
+
+	/** The portrait of its heroes in the list, the tips and the panels, as the developer asked on 2026-11-15 (PostLoad gives a class of the
+	 *  default ones without one a render of the figures of the battles: the rider for the knight, the pilgrim for the wizard) */
+	UPROPERTY(EditAnywhere, Category="Class")
+	TSoftObjectPtr<UTexture2D> Portrait;
+
+	/** The spells its heroes know when they start, by their Ids in DA_HexBattle, as the developer asked on 2026-11-15 that heroes learn the rest
+	 *  in the mage guilds; MakeDefaultHeroClasses gives them to a class of that name that names none */
+	UPROPERTY(EditAnywhere, Category="Class")
+	TArray<FName> StartSpells;
+
+	/** How likely a level offers each skill (EHexSkill), as weights in its order; missing ones weigh 1 */
+	UPROPERTY(EditAnywhere, Category="Class")
+	TArray<float> SkillWeights;
+
+	/** The skill its heroes start with, at Basic, or Num for none */
+	UPROPERTY(EditAnywhere, Category="Class")
+	EHexSkill StartSkill = EHexSkill::Num;
 
 	/** Mesh of its heroes on the map, or none for HeroMesh of the config */
 	UPROPERTY(EditAnywhere, Category="Class")
@@ -490,6 +574,42 @@ public:
 	UPROPERTY(EditAnywhere, Category="Rules", meta=(ClampMin=0))
 	int32 ManaPerKnowledge = 10;
 
+	/** Mana a hero gets back every day, before Mysticism; in a castle of its own with a mage guild it gets all of it back */
+	UPROPERTY(EditAnywhere, Category="Rules|Magic", meta=(ClampMin=0))
+	int32 ManaPerDay = 1;
+
+	/** The skills, as the developer listed them on 2026-11-15 (MakeDefaultSkills when empty), and how many a hero has at most */
+	UPROPERTY(EditAnywhere, Category="Rules|Skills")
+	TArray<FHexSkillInfo> Skills;
+
+	UPROPERTY(EditAnywhere, Category="Rules|Skills", meta=(ClampMin=1, ClampMax=12))
+	int32 MaxSkills = 6;
+
+	/** The experience a hero needs for its second level, and how much more each level after needs than the one before it, a factor */
+	UPROPERTY(EditAnywhere, Category="Rules|Levels", meta=(ClampMin=1))
+	int32 LevelExperience = 600;
+
+	UPROPERTY(EditAnywhere, Category="Rules|Levels", meta=(ClampMin=1, ClampMax=3))
+	float LevelExperienceGrowth = 1.2f;
+
+	UPROPERTY(EditAnywhere, Category="Rules|Levels", meta=(ClampMin=2, ClampMax=99))
+	int32 MaxLevel = 40;
+
+	/** Neutral creatures may offer to join a hero whose army counts this many times theirs (FHexCreatureStats::GetPower): for nothing by the
+	 *  chance of Diplomacy, else for their price less what Diplomacy takes off, if the hero has the gold and a slot for them */
+	UPROPERTY(EditAnywhere, Category="Rules|Diplomacy", meta=(ClampMin=1))
+	float JoinPowerRatio = 2.0f;
+
+	/** A hero without Diplomacy is offered to buy them only with this chance */
+	UPROPERTY(EditAnywhere, Category="Rules|Diplomacy", meta=(ClampMin=0, ClampMax=1))
+	float JoinBuyChance = 0.0f;
+
+	/** Returns a skill, or null */
+	const FHexSkillInfo* FindSkill(EHexSkill Skill) const;
+
+	/** The experience a hero needs for a level, 0 for the first */
+	int32 GetLevelExperience(int32 Level) const;
+
 	/** The classes of heroes; MakeDefaultHeroClasses when empty */
 	UPROPERTY(EditAnywhere, Category="Rules")
 	TArray<FHexHeroClass> Classes;
@@ -778,6 +898,115 @@ TSoftObjectPtr<UAnimSequence> ChosenAnimation = TSoftObjectPtr<UAnimSequence>(FS
 
 	UPROPERTY(EditAnywhere, Category="Look|Marks", meta=(ClampMin=0))
 	float RingPulseSpeed = 0.6f;
+
+	/** The artifacts of the game, as the developer asked on 2026-11-15 (FHexArtifact); MakeDefaultArtifacts when empty */
+	UPROPERTY(EditAnywhere, Category="Artifacts")
+	TArray<FHexArtifact> Artifacts;
+
+	/** Which version of MakeDefaultArtifacts the config holds; PostLoad brings an older one up to date */
+	UPROPERTY()
+	int32 ArtifactsVersion = 0;
+
+	/** How many artifacts a hero carries in its backpack besides those it wears */
+	UPROPERTY(EditAnywhere, Category="Artifacts", meta=(ClampMin=0, ClampMax=64))
+	int32 BackpackSize = 24;
+
+	/** What a beaten hero wore and carried goes to the hero that beat it, as far as its backpack holds */
+	UPROPERTY(EditAnywhere, Category="Artifacts")
+	bool bWinnerTakesArtifacts = true;
+
+	/** Boats, as the developer asked on 2026-11-15 ("додай човники"): a hero boards one that lies at a coast, or one a shipyard builds, and
+	 *  sails the sea; a step at sea costs SeaStepCost, as one over plains, and going aboard or ashore takes all the points left that day, as
+	 *  in Heroes III ("All points left"). A hero a person plays alone sails, as the game moves its heroes on land */
+	UPROPERTY(EditAnywhere, Category="Boats", meta=(ClampMin=0.01))
+	float SeaStepCost = 1.0f;
+
+	/** The mesh of a boat a hero sails in, and of one that lies at a coast (the site kind Boat), standing on its origin at the water with its bow along +X */
+	UPROPERTY(EditAnywhere, Category="Boats")
+	TSoftObjectPtr<UStaticMesh> BoatMesh = TSoftObjectPtr<UStaticMesh>(FSoftObjectPath(TEXT("/Game/HexPlanet/Sites/SM_PlanetBoat.SM_PlanetBoat")));
+
+	UPROPERTY(EditAnywhere, Category="Boats", meta=(ClampMin=0.1))
+	float BoatScale = 3.0f;
+
+	/** How high above the water a hero stands in its boat, in units of the mesh of the boat, and how far down the hero is scaled meanwhile */
+	UPROPERTY(EditAnywhere, Category="Boats", meta=(ClampMin=0))
+	float BoatDeckLift = 4.0f;
+
+	UPROPERTY(EditAnywhere, Category="Boats", meta=(ClampMin=0.1, ClampMax=1.5))
+	float BoatHeroScale = 0.75f;
+
+	/** How far towards the bow from the middle of its boat a hero stands, in units of the mesh of the boat, clear of the mast and its sail, as
+	 *  the developer found the two through each other on 2026-11-15: right behind the mast, which stands towards the bow since the developer
+	 *  asked the same day for the sail at the front and the hero behind it */
+	UPROPERTY(EditAnywhere, Category="Boats")
+	float BoatHeroForward = -7.0f;
+
+	/** How far a boat rises and falls on the water and how often, and how far it rolls in degrees */
+	UPROPERTY(EditAnywhere, Category="Boats", meta=(ClampMin=0))
+	float BoatBob = 1.2f;
+
+	UPROPERTY(EditAnywhere, Category="Boats", meta=(ClampMin=0))
+	float BoatBobSpeed = 0.7f;
+
+	UPROPERTY(EditAnywhere, Category="Boats", meta=(ClampMin=0))
+	float BoatRoll = 3.0f;
+
+	/** The wake of a boat that sails, as the developer asked on 2026-11-15: every WakeInterval seconds three patches of foam WakeSize units
+	 *  of the mesh of the boat across are laid on the water WakeStern units of that mesh behind its middle, one churning in the track of the
+	 *  boat and fading in the first WakeCoreLife of WakeLife, and one to each side that drifts WakeDrift world units out over WakeLife, so
+	 *  the sides draw the arms of a V behind it (until the developer found the rings of the first build odd the same day); each spreads
+	 *  WakeSpread times as wide and fades over WakeLife seconds (M_HexPlanetWake, WakeMaterial), WakePool patches at most on a layer, given
+	 *  out in turn */
+	UPROPERTY(EditAnywhere, Category="Boats|Wake")
+	TSoftObjectPtr<UMaterialInterface> WakeMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/HexPlanet/M_HexPlanetWake.M_HexPlanetWake")));
+
+	UPROPERTY(EditAnywhere, Category="Boats|Wake", meta=(ClampMin=0.02))
+	float WakeInterval = 0.04f;
+
+	UPROPERTY(EditAnywhere, Category="Boats|Wake", meta=(ClampMin=0.1))
+	float WakeLife = 2.2f;
+
+	UPROPERTY(EditAnywhere, Category="Boats|Wake", meta=(ClampMin=0.1))
+	float WakeSize = 4.0f;
+
+	UPROPERTY(EditAnywhere, Category="Boats|Wake", meta=(ClampMin=1))
+	float WakeSpread = 1.8f;
+
+	UPROPERTY(EditAnywhere, Category="Boats|Wake", meta=(ClampMin=0))
+	float WakeDrift = 34.0f;
+
+	UPROPERTY(EditAnywhere, Category="Boats|Wake", meta=(ClampMin=0.05, ClampMax=1))
+	float WakeCoreLife = 0.45f;
+
+	UPROPERTY(EditAnywhere, Category="Boats|Wake")
+	float WakeStern = 17.0f;
+
+	/** How far above the sea the foam lies, in world units */
+	UPROPERTY(EditAnywhere, Category="Boats|Wake", meta=(ClampMin=0))
+	float WakeLift = 0.8f;
+
+	UPROPERTY(EditAnywhere, Category="Boats|Wake", meta=(ClampMin=4, ClampMax=1024))
+	int32 WakePool = 192;
+
+	/** How the foam looks: how soft the edge of a patch is (0 to 1 of its radius), the size of the noise that breaks it in world units, how
+	 *  see-through it is at most, its color and its brightness */
+	UPROPERTY(EditAnywhere, Category="Boats|Wake", meta=(ClampMin=0, ClampMax=0.95))
+	float WakeSoftness = 0.6f;
+
+	UPROPERTY(EditAnywhere, Category="Boats|Wake", meta=(ClampMin=0.1))
+	float WakeNoiseSize = 5.0f;
+
+	UPROPERTY(EditAnywhere, Category="Boats|Wake", meta=(ClampMin=0, ClampMax=1))
+	float WakeOpacity = 0.8f;
+
+	UPROPERTY(EditAnywhere, Category="Boats|Wake")
+	FLinearColor WakeColor = FLinearColor(0.85f, 0.93f, 1.0f, 1.0f);
+
+	UPROPERTY(EditAnywhere, Category="Boats|Wake", meta=(ClampMin=0))
+	float WakeBrightness = 1.1f;
+
+	/** Returns the index of the artifact of an Id, any case, or INDEX_NONE */
+	int32 FindArtifact(const FString& Id) const;
 
 	/** Returns the class of an index, the first for one that is none */
 	const FHexHeroClass& GetClass(int32 Index) const { return Classes.IsValidIndex(Index) ? Classes[Index] : Classes[0]; }

@@ -509,6 +509,84 @@ def draw_exchange(c):
     c.fill(bottom, (1.0, 0.85, 0.4))
 
 
+def cursor_boat(c, cx, cy, lift):
+    """A hull with a sail, for the cursors of the boats"""
+    hull = polygon(c, [(cx - 18, cy + lift), (cx + 18, cy + lift), (cx + 12, cy + 9 + lift), (cx - 12, cy + 9 + lift)])
+    sail = polygon(c, [(cx - 1, cy - 22 + lift), (cx - 1, cy - 3 + lift), (cx - 15, cy - 3 + lift)])
+    mast = capsule(c, cx + 1, cy - 23 + lift, cx + 1, cy + lift, 1.4)
+    return hull, union(sail, mast)
+
+
+def waves(c, y, phase):
+    return union(*[capsule(c, x, y + 2.0 * np.sin(phase + x * 0.35), x + 7, y + 2.0 * np.sin(phase + (x + 7) * 0.35), 1.6) for x in range(6, 52, 7)])
+
+
+def draw_board(c):
+    # a boat that rises and falls on the waves and an arrow down onto it, as the hero chosen goes aboard, as the developer asked on 2026-11-15
+    lift = 2.0 * np.sin(2.0 * np.pi * c.t)
+    hull, sail = cursor_boat(c, 34, 40, lift)
+    sea = waves(c, 56, 2.0 * np.pi * c.t)
+    arrow = straight_arrow(c, 12, 6, 12, 28 + lift)
+    c.outline(union(hull, sail, sea, arrow))
+    c.fill(sea, (0.35, 0.65, 1.0))
+    c.fill(hull, (0.6, 0.38, 0.18))
+    c.fill(sail, (0.95, 0.94, 0.88))
+    c.fill(arrow, (1.0, 0.85, 0.4))
+
+
+def draw_teleport(c):
+    # two hexes and a star that leaps from one to the other in an arc of sparks, for a spell of the planet that steps (2026-11-15)
+    t = c.t
+    def hexagon(cx, cy, r):
+        return polygon(c, [(cx + r * np.cos(np.pi / 6 + k * np.pi / 3), cy + r * np.sin(np.pi / 6 + k * np.pi / 3)) for k in range(6)])
+    near = cut(hexagon(16, 46, 13), hexagon(16, 46, 9))
+    far = cut(hexagon(48, 46, 13), hexagon(48, 46, 9))
+    x = 16 + 32 * t
+    y = 40 - 30 * np.sin(np.pi * t)
+    leap = star(c, x, y, 9, 4, 4, 2.0 * np.pi * t)
+    trail = union(*[circle(c, 16 + 32 * max(t - d, 0.0), 40 - 30 * np.sin(np.pi * max(t - d, 0.0)), 2.6 - 10.0 * d) for d in (0.06, 0.12, 0.18)])
+    c.outline(union(near, far, leap, trail))
+    c.fill(near, (0.55, 0.85, 1.0))
+    c.fill(far, (0.75, 0.6, 1.0))
+    c.fill(trail, (0.85, 0.95, 1.0))
+    c.fill(leap, (1.0, 0.95, 0.6))
+
+
+def draw_land(c):
+    # a boat on the waves and an arrow from it onto the shore, as the hero chosen goes ashore
+    lift = 1.5 * np.sin(2.0 * np.pi * c.t)
+    push = 3.0 * np.sin(2.0 * np.pi * c.t)
+    hull, sail = cursor_boat(c, 20, 40, lift)
+    sea = waves(c, 56, 2.0 * np.pi * c.t)
+    shore = polygon(c, [(40, 60), (40, 44), (48, 36), (60, 34), (60, 60)])
+    arrow = straight_arrow(c, 24 + push, 18, 50 + push, 18)
+    c.outline(union(hull, sail, sea, shore, arrow))
+    c.fill(sea, (0.35, 0.65, 1.0))
+    c.fill(shore, (0.45, 0.7, 0.3))
+    c.fill(hull, (0.6, 0.38, 0.18))
+    c.fill(sail, (0.95, 0.94, 0.88))
+    c.fill(arrow, (1.0, 0.85, 0.4))
+
+
+def draw_land_attack(c):
+    # a boat on the waves and a sword that strikes from it onto the shore, as the hero chosen goes ashore to fight
+    lift = 1.5 * np.sin(2.0 * np.pi * c.t)
+    swing = 0.15 * np.sin(2.0 * np.pi * c.t)
+    hull, sail = cursor_boat(c, 18, 42, lift)
+    sea = waves(c, 57, 2.0 * np.pi * c.t)
+    shore = polygon(c, [(40, 60), (40, 46), (48, 38), (60, 36), (60, 60)])
+    c.pose(angle=swing)
+    blade, hilt = sword(c, 26, 32, 56, 6)
+    c.pose()
+    c.outline(union(hull, sail, sea, shore, blade, hilt))
+    c.fill(sea, (0.35, 0.65, 1.0))
+    c.fill(shore, (0.45, 0.7, 0.3))
+    c.fill(hull, (0.6, 0.38, 0.18))
+    c.fill(sail, (0.95, 0.94, 0.88))
+    c.fill(blade, (0.85, 0.88, 0.92))
+    c.fill(hilt, (0.75, 0.2, 0.12))
+
+
 def draw_icon_level_up(c):
     # an arrow up that rises and falls a little, on a gold disc, for the button that upgrades a stack
     lift = 2.0 * np.sin(2.0 * np.pi * c.t)
@@ -606,6 +684,10 @@ ICONS = [
     ('Portal', draw_portal, 64, (0.5, 0.5), True),
     ('Swap', draw_swap, 64, (0.5, 0.5), True),
     ('Exchange', draw_exchange, 64, (0.5, 0.5), True),
+    ('Board', draw_board, 64, (0.5, 0.5), True),
+    ('Teleport', draw_teleport, 64, (0.5, 0.5), True),
+    ('Land', draw_land, 64, (0.5, 0.5), True),
+    ('LandAttack', draw_land_attack, 64, (0.5, 0.5), True),
     ('Fly', draw_fly, 64, (0.5, 0.5), True),
     ('Shoot', draw_shoot, 64, (0.5, 0.5), True),
     ('ShootFar', draw_shoot_far, 64, (0.5, 0.5), True),
@@ -646,19 +728,28 @@ def main():
     listed = os.path.join(OUT, 'ui_icons.json')
     if only and os.path.exists(listed):
         with open(listed) as file:
-            manifest = [entry for entry in json.load(file) if entry['name'] not in only]
-    for name, draw, size, hot, is_cursor in ICONS:
-        if only and name not in only:
+            manifest = [entry for entry in json.load(file) if not any(word in entry['name'] for word in only)]
+    # the spells, the skills and the attributes of a hero of spell_icons.py, one frame each
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import spell_icons
+    kinds = {}
+    entries = [(name, draw, size, hot, is_cursor) for name, draw, size, hot, is_cursor in ICONS]
+    import artifact_icons
+    for name, draw, size, kind in spell_icons.ICONS + artifact_icons.ICONS:
+        entries.append((name, draw, size, (0.5, 0.5), False))
+        kinds[name] = kind
+    for name, draw, size, hot, is_cursor in entries:
+        if only and not any(word in name for word in only):
             continue
         frames = []
-        for frame in range(FRAMES):
+        for frame in range(1 if name in kinds else FRAMES):
             canvas = Canvas(size, frame / FRAMES)
             draw(canvas)
             frames.append(canvas.image())
         file = ('T_Cursor_' if is_cursor else 'T_') + name + '.png'
         write_png(os.path.join(OUT, file), np.concatenate(frames, axis=1))
-        manifest.append({'name': name, 'file': file, 'size': size, 'hotspot': hot, 'cursor': is_cursor, 'frames': FRAMES,
-                         'rate': RATES.get(name, DEFAULT_RATE)})
+        manifest.append({'name': name, 'file': file, 'size': size, 'hotspot': hot, 'cursor': is_cursor, 'frames': len(frames),
+                         'rate': RATES.get(name, DEFAULT_RATE), 'kind': kinds.get(name, 'cursor' if is_cursor else 'icon')})
         print('wrote', file)
     with open(os.path.join(OUT, 'ui_icons.json'), 'w') as file:
         json.dump(manifest, file, indent=1)

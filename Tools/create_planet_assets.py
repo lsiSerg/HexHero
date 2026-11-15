@@ -2822,6 +2822,100 @@ def build_hero_materials():
         assets.save_asset(path)
 
 
+# The wake of a boat (UHexHeroes::DropWake): a ring of foam laid behind its stern, whose only custom value, Birth, is when, in the seconds of
+# the world, as the material counts its Time; it spreads WakeSpread times as wide and fades over WakeLife, with a churn in its middle at
+# first, broken by a value noise of the place WakeNoiseSize across, and hidden behind the curve of the planet as the marks of a way are
+WAKE_OFFSET_CODE = r"""
+float share = saturate((Time - Birth) / max(WakeLife, 0.05));
+float eased = 1.0 - (1.0 - share) * (1.0 - share);
+float grow = lerp(1.0, WakeSpread, eased);
+// an arm of the V drifts out to its side, the churn stays in the track
+return (WorldPos - ObjectPos) * (grow - 1.0) + normalize(AxisY) * (Arm * WakeDrift * eased);
+"""
+WAKE_OPACITY_CODE = r"""
+float share = (Time - Birth) / max(WakeLife, 0.05);
+if (share < 0.0 || share >= 1.0)
+{
+    return 0.0;
+}
+float r = length(LocalPos.xy);
+// a soft patch of foam; the churn in the track goes sooner than the arms
+float patch = 1.0 - smoothstep(1.0 - WakeSoftness, 1.0, r);
+float life = abs(Arm) < 0.5 ? 1.0 - smoothstep(0.0, max(WakeCoreLife, 0.05), share) : 1.0;
+float3 p = WorldPos / max(WakeNoiseSize, 0.1) + float3(0.0, 0.0, Time * 0.4);
+float3 i = floor(p);
+float3 f = frac(p);
+f = f * f * (3.0 - 2.0 * f);
+float3 k = float3(127.1, 311.7, 74.7);
+float a = frac(sin(dot(i, k)) * 43758.5453);
+float b = frac(sin(dot(i + float3(1, 0, 0), k)) * 43758.5453);
+float c = frac(sin(dot(i + float3(0, 1, 0), k)) * 43758.5453);
+float d = frac(sin(dot(i + float3(1, 1, 0), k)) * 43758.5453);
+float e = frac(sin(dot(i + float3(0, 0, 1), k)) * 43758.5453);
+float g = frac(sin(dot(i + float3(1, 0, 1), k)) * 43758.5453);
+float h = frac(sin(dot(i + float3(0, 1, 1), k)) * 43758.5453);
+float j = frac(sin(dot(i + float3(1, 1, 1), k)) * 43758.5453);
+float n = lerp(lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y), lerp(lerp(e, g, f.x), lerp(h, j, f.x), f.y), f.z);
+float foam = saturate(patch * life * (0.2 + 1.5 * n) - 0.2);
+float3 toPoint = WorldPos - CameraPos;
+float along = saturate(dot(-CameraPos, toPoint) / max(dot(toPoint, toPoint), 1.0));
+float clear = PlanetRadius > 0.0 ? smoothstep(PlanetRadius - 3.0, PlanetRadius + 1.0, length(CameraPos + toPoint * along)) : 1.0;
+return foam * pow(1.0 - share, 1.6) * WakeOpacity * clear;
+"""
+WAKE_MATERIAL = FOLDER + '/M_HexPlanetWake'
+
+
+def build_wake_material():
+    library = unreal.MaterialEditingLibrary
+    assets = unreal.EditorAssetLibrary
+    material = unreal.load_asset(WAKE_MATERIAL) if assets.does_asset_exist(WAKE_MATERIAL) else unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+        'M_HexPlanetWake', FOLDER, unreal.Material, unreal.MaterialFactoryNew())
+    clear_expressions(material)
+    material.set_editor_property('blend_mode', unreal.BlendMode.BLEND_TRANSLUCENT)
+    material.set_editor_property('shading_model', unreal.MaterialShadingModel.MSM_UNLIT)
+    material.set_editor_property('two_sided', True)
+    material.set_editor_property('used_with_instanced_static_meshes', True)
+    birth = library.create_material_expression(material, unreal.MaterialExpressionPerInstanceCustomData, -1000, 300)
+    birth.set_editor_property('data_index', 0)
+    birth.set_editor_property('const_default_value', -1000.0)
+    params = add_config_parameters(library, material, unreal.HexHeroConfig, ['WakeLife', 'WakeSpread', 'WakeSoftness', 'WakeNoiseSize', 'WakeOpacity',
+        'WakeColor', 'WakeBrightness', 'WakeDrift', 'WakeCoreLife'], 1200)
+    arm = library.create_material_expression(material, unreal.MaterialExpressionPerInstanceCustomData, -1000, 350)
+    arm.set_editor_property('data_index', 1)
+    arm.set_editor_property('const_default_value', 0.0)
+    axis = library.create_material_expression(material, unreal.MaterialExpressionConstant3Vector, -1300, 1150)
+    axis.set_editor_property('constant', unreal.LinearColor(0.0, 1.0, 0.0, 0.0))
+    axis_y = library.create_material_expression(material, unreal.MaterialExpressionTransform, -1100, 1150)
+    axis_y.set_editor_property('transform_source_type', unreal.MaterialVectorCoordTransformSource.TRANSFORMSOURCE_LOCAL)
+    axis_y.set_editor_property('transform_type', unreal.MaterialVectorCoordTransform.TRANSFORM_WORLD)
+    library.connect_material_expressions(axis, '', axis_y, '')
+    named = {name: (name, node, pin) for name, node, pin in params}
+    # where a pixel lies in the mesh, the dot of the marks of radius 1, which only the vertices know
+    local = library.create_material_expression(material, unreal.MaterialExpressionVertexInterpolator, -1100, 100)
+    library.connect_material_expressions(library.create_material_expression(material, unreal.MaterialExpressionPreSkinnedPosition, -1300, 100), '', local, '')
+    radius = library.create_material_expression(material, unreal.MaterialExpressionCollectionParameter, -1000, 800)
+    radius.set_editor_property('collection', unreal.load_asset(PARAMETER_COLLECTION))
+    radius.set_editor_property('parameter_name', 'PlanetRadius')
+    time_node = library.create_material_expression(material, unreal.MaterialExpressionTime, -1000, 600)
+    opacity = add_custom(library, material, WAKE_OPACITY_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT1, [('Birth', birth, ''), ('Time', time_node, ''),
+        ('LocalPos', local, ''), ('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1000, 650), ''),
+        ('CameraPos', library.create_material_expression(material, unreal.MaterialExpressionCameraPositionWS, -1000, 700), ''), ('PlanetRadius', radius, ''),
+        ('Arm', arm, ''), named['WakeLife'], named['WakeSoftness'], named['WakeNoiseSize'], named['WakeOpacity'], named['WakeCoreLife']], 400)
+    library.connect_material_property(opacity, '', unreal.MaterialProperty.MP_OPACITY)
+    color = library.create_material_expression(material, unreal.MaterialExpressionMultiply, -300, 0)
+    library.connect_material_expressions(named['WakeColor'][1], '', color, 'A')
+    library.connect_material_expressions(named['WakeBrightness'][1], '', color, 'B')
+    library.connect_material_property(color, '', unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    offset = add_custom(library, material, WAKE_OFFSET_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, [('Birth', birth, ''),
+        ('Time', library.create_material_expression(material, unreal.MaterialExpressionTime, -1000, 1000), ''),
+        ('WorldPos', library.create_material_expression(material, unreal.MaterialExpressionWorldPosition, -1000, 1050), ''),
+        ('ObjectPos', library.create_material_expression(material, unreal.MaterialExpressionObjectPositionWS, -1000, 1100), ''),
+        ('Arm', arm, ''), ('AxisY', axis_y, ''), named['WakeLife'], named['WakeSpread'], named['WakeDrift']], 1000)
+    library.connect_material_property(offset, '', unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
+    library.recompile_material(material)
+    assets.save_asset(WAKE_MATERIAL)
+
+
 # A mine, a pile or a mill of the map (UHexSites): the color of its vertices, and by their alpha (generate_planet_sites.py) what a pile holds
 # (about 0.3) glowing a little in its own color (PileGlow), the heap of a mine and the sacks of a mill (about 0.5) in the color of their
 # resource and the flag of a mine (1) in the color of its owner, both from the custom data of the instance and glowing a little (SiteGlow of
@@ -5448,8 +5542,14 @@ def main():
         build_underground_material()
         unreal.log('PLANET mark materials created')
         return
+    # with wake only the foam behind a boat
+    if 'wake' in sys.argv[1:]:
+        build_wake_material()
+        unreal.log('PLANET wake material created')
+        return
     if 'heroes' in sys.argv[1:]:
         build_hero_materials()
+        build_wake_material()
         build_site_material()
         unreal.log('PLANET hero assets created')
         return
@@ -5486,6 +5586,7 @@ def main():
     build_foliage_material(build_parameter_collection())
     build_flock_material()
     build_hero_materials()
+    build_wake_material()
     build_site_material()
     build_underground()
     wire_material = build_wireframe()

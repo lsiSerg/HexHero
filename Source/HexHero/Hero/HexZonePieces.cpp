@@ -88,6 +88,11 @@ int32 HexZonePieces::FindGuardCount(const UHexCastleConfig& Castles, const UHexB
 	int32 Most = TNumericLimits<int32>::Max();
 	for (int32 Army = 0; Army < Castles.Factions.Num(); ++Army)
 	{
+		// no hero leads the creatures of the sea
+		if (Castles.Factions[Army].bSea)
+		{
+			continue;
+		}
 		int32 Low = 1;
 		int32 High = 4096;
 		if (!Wins(Army, Low))
@@ -129,7 +134,8 @@ bool HexZonePieces::Place(AHexPlanet& Surface, const FHexZonesFile& File, FStrin
 	// the castles: a player's of its faction, the game's taking the factions by turns from AiFaction, nobody's by turns and empty
 	const int32 PersonFaction = FMath::Max(CastleConfig->FindFaction(Settings.PersonFaction), 0);
 	const int32 AiFaction = FMath::Max(CastleConfig->FindFaction(Settings.AiFaction), 0);
-	const int32 NumFactions = FMath::Max(CastleConfig->Factions.Num(), 1);
+	// the factions of the land, which come before the creatures of the sea
+	const int32 NumFactions = FMath::Max(CastleConfig->Factions.FilterByPredicate([](const FHexFaction& Each) { return !Each.bSea; }).Num(), 1);
 	TArray<FHexCastleLine> CastleLines;
 	int32 AiIndex = 0;
 	int32 NobodyIndex = 0;
@@ -462,6 +468,9 @@ bool HexZonePieces::Place(AHexPlanet& Surface, const FHexZonesFile& File, FStrin
 	{
 		Neutrals->Remove(Id);
 	}
+	// vaults, closed places with much in them and one guarded way in, as the developer asked on 2026-11-15
+	FString VaultReport;
+	Sites->MakeVaults(4, File.Seed * 29 + 7, VaultReport);
 	TMap<int32, int32> Counts;
 	int32 Guards = 0;
 	for (const FHexZoneGuardLine& Guard : File.Guards)
@@ -507,7 +516,8 @@ bool HexZonePieces::Place(AHexPlanet& Surface, const FHexZonesFile& File, FStrin
 		FString Error;
 		const FString Folder = Surface.GetPlanetFolder();
 		FString Json;
-		if (!Heroes->Save(Folder, Error) || !Objects->Save(Folder, {}, Error)
+		// the levels too, as the walls of the vaults raised mountains after they were written
+		if (!Heroes->Save(Folder, Error) || !Objects->Save(Folder, {}, Error) || !Surface.SaveLevels(Error)
 			|| !FJsonObjectConverter::UStructToJsonObjectString(File, Json)
 			|| !FFileHelper::SaveStringToFile(Json, *HexPlanetFile::GetFilePath(Folder, HexZoneMap::ZonesFile), FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
 		{

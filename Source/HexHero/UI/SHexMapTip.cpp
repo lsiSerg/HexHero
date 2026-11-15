@@ -4,6 +4,10 @@
 #include "HexBattleConfig.h"
 #include "HexCastleConfig.h"
 #include "HexUnitTooltip.h"
+#include "HexHeroConfig.h"
+#include "HexHeroes.h"
+#include "SHexSpellBook.h"
+#include "Widgets/Layout/SWrapBox.h"
 #include "Engine/Texture2D.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Styling/CoreStyle.h"
@@ -13,6 +17,7 @@
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SOverlay.h"
 #include "Widgets/Text/STextBlock.h"
+#include "Widgets/SToolTip.h"
 
 namespace
 {
@@ -45,6 +50,14 @@ void SHexMapTip::Tick(const FGeometry& AllottedGeometry, const double InCurrentT
 	const FVector2D Cursor = AllottedGeometry.AbsoluteToLocal(FSlateApplication::Get().GetCursorPos());
 	const FVector2D Size = Panel->GetDesiredSize();
 	const FVector2D Available = AllottedGeometry.GetLocalSize();
+	// beside a row of the list of heroes: its right edge at the place given, its top level with it, kept on the screen
+	if (Anchor.IsSet())
+	{
+		const FVector2D Place = AllottedGeometry.AbsoluteToLocal(Anchor.GetValue());
+		Panel->SetRenderTransform(FSlateRenderTransform(FVector2D(FMath::Clamp(Place.X - Size.X, 0.0, FMath::Max(Available.X - Size.X, 0.0)),
+			FMath::Clamp(Place.Y, 0.0, FMath::Max(Available.Y - Size.Y, 0.0)))));
+		return;
+	}
 	// near the right or bottom edge it goes to the other side of the cursor
 	const FVector2D Position(
 		Cursor.X + TipCursorOffset.X + Size.X > Available.X ? Cursor.X - TipCursorOffset.X - Size.X : Cursor.X + TipCursorOffset.X,
@@ -85,14 +98,92 @@ void SHexMapTip::SetTip(const FHexMapTip& Tip)
 		return;
 	}
 	Panel->SetVisibility(EVisibility::HitTestInvisible);
+	Body->AddSlot().AutoHeight()[MakeContent(Tip)];
+}
+
+TSharedRef<SVerticalBox> SHexMapTip::MakeContent(const FHexMapTip& Tip)
+{
+	const TSharedRef<SVerticalBox> Content = SNew(SVerticalBox);
 	const FSlateFontInfo Title = FCoreStyle::GetDefaultFontStyle("Bold", 11);
 	const FSlateFontInfo Font = FCoreStyle::GetDefaultFontStyle("Regular", 9);
 	const FLinearColor Text(0.88f, 0.88f, 0.9f, 1.0f);
 	const FLinearColor Dim(0.62f, 0.63f, 0.68f, 1.0f);
-	Body->AddSlot().AutoHeight()[SNew(STextBlock).Font(Title).ColorAndOpacity(Tip.TitleColor).Text(FText::FromString(Tip.Title)).WrapTextAt(TipWrap)];
+	// the portrait of a hero or the picture of a castle beside its name, as the developer asked on 2026-11-15
+	if (Tip.Picture)
+	{
+		Content->AddSlot().AutoHeight()
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.0f, 0.0f, 8.0f, 0.0f)
+			[
+				HexUiBrushes::MakeFramed(Tip.Picture, 48.0f, Tip.TitleColor, Tip.PictureTint)
+			]
+			+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Center)
+			[
+				SNew(STextBlock).Font(Title).ColorAndOpacity(Tip.TitleColor).Text(FText::FromString(Tip.Title)).WrapTextAt(TipWrap - 56.0f)
+			]
+		];
+	}
+	else
+	{
+		Content->AddSlot().AutoHeight()[SNew(STextBlock).Font(Title).ColorAndOpacity(Tip.TitleColor).Text(FText::FromString(Tip.Title)).WrapTextAt(TipWrap)];
+	}
 	for (const FString& Line : Tip.Lines)
 	{
-		Body->AddSlot().AutoHeight().Padding(0.0f, 2.0f, 0.0f, 0.0f)[SNew(STextBlock).Font(Font).ColorAndOpacity(Text).Text(FText::FromString(Line)).WrapTextAt(TipWrap)];
+		Content->AddSlot().AutoHeight().Padding(0.0f, 2.0f, 0.0f, 0.0f)[SNew(STextBlock).Font(Font).ColorAndOpacity(Text).Text(FText::FromString(Line)).WrapTextAt(TipWrap)];
+	}
+	// the attributes of a hero, each beside its icon
+	if (!Tip.Stats.IsEmpty())
+	{
+		const TSharedRef<SWrapBox> Stats = SNew(SWrapBox).PreferredSize(TipWrap).InnerSlotPadding(FVector2D(8.0, 3.0));
+		for (const FHexMapTipStat& Stat : Tip.Stats)
+		{
+			const FSlateBrush* Icon = HexUnitTooltip::GetIcon(Stat.Icon);
+			Stats->AddSlot()
+			[
+				SNew(SHorizontalBox).ToolTipText(FText::FromString(Stat.Name))
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.0f, 0.0f, 3.0f, 0.0f)
+				[
+					SNew(SBox).WidthOverride(20.0f).HeightOverride(20.0f)
+					[
+						Icon ? StaticCastSharedRef<SWidget>(SNew(SImage).Image(Icon)) : StaticCastSharedRef<SWidget>(SNew(STextBlock).Font(Font).ColorAndOpacity(Dim).Text(FText::FromString(Stat.Name.Left(2))))
+					]
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[
+					SNew(STextBlock).Font(FCoreStyle::GetDefaultFontStyle("Bold", 10)).ColorAndOpacity(Text).Text(FText::FromString(Stat.Value))
+				]
+			];
+		}
+		Content->AddSlot().AutoHeight().Padding(0.0f, 5.0f, 0.0f, 0.0f)[Stats];
+	}
+	// its skills as their pictures with their levels
+	if (!Tip.Skills.IsEmpty())
+	{
+		const UHexHeroConfig* HeroConfig = UHexHeroConfig::Load();
+		const TSharedRef<SHorizontalBox> Skills = SNew(SHorizontalBox);
+		for (const FHexHeroSkill& Skill : Tip.Skills)
+		{
+			const FHexSkillInfo* Info = HeroConfig->FindSkill(Skill.Skill);
+			const FSlateBrush* Icon = Info ? HexUiBrushes::Get(Info->Icon.LoadSynchronous(), 28.0f) : nullptr;
+			Skills->AddSlot().AutoWidth().Padding(0.0f, 0.0f, 3.0f, 0.0f)
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+				[
+					SNew(SBox).WidthOverride(28.0f).HeightOverride(28.0f)
+					[
+						Icon ? StaticCastSharedRef<SWidget>(SNew(SImage).Image(Icon)) : StaticCastSharedRef<SWidget>(SNew(STextBlock).Font(Font).ColorAndOpacity(Dim)
+							.Text(FText::FromString(Info ? Info->DisplayName.Left(3) : FString(TEXT("?")))))
+					]
+				]
+				+ SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Center)
+				[
+					SNew(STextBlock).Font(FCoreStyle::GetDefaultFontStyle("Regular", 7)).ColorAndOpacity(Dim).Text(FText::FromString(FString(GetSkillLevelName(Skill.Level)).Left(3)))
+				]
+			];
+		}
+		Content->AddSlot().AutoHeight().Padding(0.0f, 5.0f, 0.0f, 0.0f)[Skills];
 	}
 	// the army as portraits with their numbers, or with words where the number is not known
 	if (!Tip.Army.IsEmpty())
@@ -106,7 +197,7 @@ void SHexMapTip::SetTip(const FHexMapTip& Tip)
 			const FHexCreature* Creature = Castles->Factions.IsValidIndex(Stack.Faction) && Castles->Factions[Stack.Faction].Creatures.IsValidIndex(Stack.Creature)
 				? &Castles->Factions[Stack.Faction].Creatures[Stack.Creature] : nullptr;
 			const FHexUnitLook* Look = Creature ? Battle->FindLook(Creature->Id) : nullptr;
-			const FSlateBrush* Brush = Look ? GetBrush(Look->Portrait.LoadSynchronous()) : nullptr;
+			const FSlateBrush* Brush = Look ? HexUiBrushes::Get(Look->Portrait.LoadSynchronous(), TipPortrait) : nullptr;
 			const FLinearColor Tint = Look ? (Stack.bUpgraded ? Look->UpgradedTint : Look->Tint) : FLinearColor::White;
 			const FString Count = Tip.ArmyCounts.IsValidIndex(Index) ? Tip.ArmyCounts[Index] : FString::FromInt(Stack.Count);
 			Row->AddSlot().AutoWidth().Padding(0.0f, 0.0f, 3.0f, 0.0f)
@@ -141,13 +232,30 @@ void SHexMapTip::SetTip(const FHexMapTip& Tip)
 				]
 			];
 		}
-		Body->AddSlot().AutoHeight().Padding(0.0f, 5.0f, 0.0f, 0.0f)[Row];
+		Content->AddSlot().AutoHeight().Padding(0.0f, 5.0f, 0.0f, 0.0f)[Row];
 	}
 	if (!Tip.Forecast.IsEmpty())
 	{
-		Body->AddSlot().AutoHeight().Padding(0.0f, 5.0f, 0.0f, 0.0f)
+		Content->AddSlot().AutoHeight().Padding(0.0f, 5.0f, 0.0f, 0.0f)
 		[
 			SNew(STextBlock).Font(FCoreStyle::GetDefaultFontStyle("Bold", 9)).ColorAndOpacity(Tip.ForecastColor).Text(FText::FromString(Tip.Forecast)).WrapTextAt(TipWrap)
 		];
 	}
+	return Content;
+}
+
+TSharedRef<SToolTip> SHexMapTip::MakeToolTip(const FHexMapTip& Tip)
+{
+	// the same panel as at the cursor on the map, for a button that names a hero or what a castle offers, as the developer asked on 2026-11-15
+	return SNew(SToolTip)
+		.BorderImage(FCoreStyle::Get().GetBrush(TEXT("NoBorder")))
+		[
+			SNew(SBorder)
+			.BorderImage(FCoreStyle::Get().GetBrush(TEXT("GenericWhiteBox")))
+			.BorderBackgroundColor(FLinearColor(0.02f, 0.02f, 0.03f, 0.92f))
+			.Padding(FMargin(10.0f, 7.0f))
+			[
+				MakeContent(Tip)
+			]
+		];
 }

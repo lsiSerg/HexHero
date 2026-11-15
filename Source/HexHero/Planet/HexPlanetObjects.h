@@ -70,6 +70,11 @@ public:
 	/** Sets the objects of cells and places them */
 	void SetCells(const TMap<int32, FHexCellObjects>& Changes);
 
+	/** Puts decor of the generation on land that holds nothing, as the developer found the map too empty on 2026-11-15: each kind of decor
+	 *  takes Share of its generated share of those cells, chosen by the seed; off the cells of sites, castles and entrances. Returns how many
+	 *  cells took one (hex.PlanetScatterDecor) */
+	int32 ScatterDecor(float Share, int32 Seed);
+
 	/** Returns the objects of a cell */
 	const FHexCellObjects& GetCell(int32 Cell) const
 	{

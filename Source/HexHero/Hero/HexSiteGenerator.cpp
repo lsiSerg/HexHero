@@ -11,6 +11,7 @@ namespace
 		FVector3d Center = FVector3d::ZeroVector;
 		int32 Kind = 0;
 		bool bMine = false;
+		bool bPile = false;
 	};
 
 	/** A layer while its sites are found */
@@ -144,7 +145,7 @@ void HexSiteGenerator::Generate(const FHexSphereGrid& Grid, const FInput& Input,
 
 	const float Spacing = FMath::Max(Settings.Spacing, 2.0f);
 	// bNearStart for a mine a player gets where it starts, which may stand nearer the same mine of a player that starts beside it
-	const auto TryPlace = [&](int32 Layer, int32 Cell, int32 KindIndex, bool bNearStart)
+	const auto TryPlace = [&](int32 Layer, int32 Cell, int32 KindIndex, bool bNearStart, bool bCluster = false)
 	{
 		FSiteLayer& Each = Layers[Layer];
 		const FKind& Kind = Input.Kinds[KindIndex];
@@ -153,9 +154,12 @@ void HexSiteGenerator::Generate(const FHexSphereGrid& Grid, const FInput& Input,
 			return false;
 		}
 		const bool bMine = Kind.Type == EHexSiteType::Mine;
+		const bool bPile = Kind.Type == EHexSiteType::Pile;
 		for (const FPlaced& Other : Each.Placed)
 		{
-			const float Apart = bMine && Other.bMine ? FMath::Max(Spacing, Other.Kind == Kind.Kind && !bNearStart ? Settings.SameMineSpacing : Settings.MineSpacing) : Spacing;
+			// a pile of a cluster stands beside the other piles, and as far from the rest as any site
+			const float Apart = bCluster && bPile && Other.bPile ? 1.0f
+				: bMine && Other.bMine ? FMath::Max(Spacing, Other.Kind == Kind.Kind && !bNearStart ? Settings.SameMineSpacing : Settings.MineSpacing) : Spacing;
 			// half a cell less, as the cells that many steps away lie a little nearer than that many widths of a cell
 			if (FMath::Acos(FMath::Clamp(FVector3d::DotProduct(Cells[Cell].Center, Other.Center), -1.0, 1.0)) < (double(Apart) - 0.5) * Step)
 			{
@@ -163,11 +167,33 @@ void HexSiteGenerator::Generate(const FHexSphereGrid& Grid, const FInput& Input,
 			}
 		}
 		Each.Open[Cell] = false;
-		Each.Placed.Add({Cells[Cell].Center, Kind.Kind, bMine});
+		Each.Placed.Add({Cells[Cell].Center, Kind.Kind, bMine, bPile});
 		++Each.Counts[KindIndex];
 		OutSites.Add({Kind.Kind, Layer, Cell});
 		return true;
 	};
+
+	// the pentagons of land of the surface first, each a rich site, guarded strongly when a game starts (UHexSites::MakeStartGuard)
+	for (int32 Cell = 0; Cell < FMath::Min(NumCells, 12); ++Cell)
+	{
+		FSiteLayer& Each = Layers[0];
+		if (!Cells[Cell].IsPentagon() || !Each.Open.IsValidIndex(Cell) || !Each.Open[Cell] || (Input.Avoid[0].IsValidIndex(Cell) && Input.Avoid[0][Cell]))
+		{
+			continue;
+		}
+		const bool bMine = Input.Kinds.IsValidIndex(Input.PentagonKind) && KeepsWays(Grid, Each.Open, Cell);
+		const int32 KindIndex = bMine ? Input.PentagonKind : Input.PentagonFallbackKind;
+		if (!Input.Kinds.IsValidIndex(KindIndex))
+		{
+			continue;
+		}
+		const FKind& Kind = Input.Kinds[KindIndex];
+		Each.Open[Cell] = false;
+		Each.Placed.Add({Cells[Cell].Center, Kind.Kind, Kind.Type == EHexSiteType::Mine, Kind.Type == EHexSiteType::Pile});
+		++Each.Counts[KindIndex];
+		OutSites.Add({Kind.Kind, 0, Cell});
+		++Report.Pentagons;
+	}
 
 	// near where each player starts: a mine of each kind that every player needs, and some piles
 	for (const FStart& Start : Input.Starts)
@@ -180,10 +206,11 @@ void HexSiteGenerator::Generate(const FHexSphereGrid& Grid, const FInput& Input,
 		const int32 MaxSteps = FMath::Max(Settings.StartMaxSteps, 1);
 		const int32 MinSteps = FMath::Clamp(Settings.StartMinSteps, 1, MaxSteps);
 		// the cells that many steps of a hero away, in a random order; found again for each site, as a site placed closes its cell
+		TMap<int32, int32> Steps;
 		const auto FindNear = [&](TArray<int32>& OutNear)
 		{
 			OutNear.Reset();
-			TMap<int32, int32> Steps;
+			Steps.Reset();
 			TArray<int32> Queue;
 			Queue.Add(Start.Cell);
 			Steps.Add(Start.Cell, 0);
@@ -235,9 +262,19 @@ void HexSiteGenerator::Generate(const FHexSphereGrid& Grid, const FInput& Input,
 			}
 			if (Kind.bNearStart)
 			{
+				// beside a castle only when no mine of that kind lies as near already, as the one of the player whose castle it is
+				if (Start.bMinesOnly)
+				{
+					TArray<int32> Near;
+					FindNear(Near);
+					if (OutSites.ContainsByPredicate([&](const FSite& Site) { return Site.Kind == Kind.Kind && Site.Layer == Start.Layer && Steps.Contains(Site.Cell); }))
+					{
+						continue;
+					}
+				}
 				PlaceNear(KindIndex);
 			}
-			else if (Kind.Type == EHexSiteType::Pile)
+			else if (Kind.Type == EHexSiteType::Pile && !Start.bMinesOnly)
 			{
 				Piles.Add(KindIndex);
 				PileSum += Kind.PerThousand[Start.Layer];
@@ -283,6 +320,53 @@ void HexSiteGenerator::Generate(const FHexSphereGrid& Grid, const FInput& Input,
 				Wanted[Group].Add(KindIndex);
 			}
 		}
+		// the kinds of piles of the layer, for the piles that lie beside another
+		TArray<int32> PileKinds;
+		for (int32 KindIndex = 0; KindIndex < Input.Kinds.Num(); ++KindIndex)
+		{
+			if (Input.Kinds[KindIndex].Type == EHexSiteType::Pile && Input.Kinds[KindIndex].PerThousand[Layer] > 0.0f)
+			{
+				PileKinds.Add(KindIndex);
+			}
+		}
+		const auto AddCluster = [&](int32 Cell)
+		{
+			if (PileKinds.IsEmpty() || Stream.FRand() >= Settings.PileClusterChance)
+			{
+				return;
+			}
+			// the cells around it, the nearer first, each ring in a random order
+			TArray<int32> Around;
+			for (const int32 Neighbor : Cells[Cell].Neighbors)
+			{
+				Around.AddUnique(Neighbor);
+			}
+			Shuffle(Around, Stream);
+			const int32 Inner = Around.Num();
+			for (int32 Index = 0; Index < Inner; ++Index)
+			{
+				for (const int32 Next : Cells[Around[Index]].Neighbors)
+				{
+					if (Next != Cell && !Around.Contains(Next))
+					{
+						Around.Add(Next);
+					}
+				}
+			}
+			int32 More = Stream.RandRange(1, FMath::Max(Settings.PileClusterMax, 1));
+			for (const int32 Near : Around)
+			{
+				if (More <= 0)
+				{
+					break;
+				}
+				if (TryPlace(Layer, Near, PileKinds[Stream.RandRange(0, PileKinds.Num() - 1)], false, true))
+				{
+					--More;
+					++Report.Clustered;
+				}
+			}
+		};
 		for (TArray<int32>& Group : Wanted)
 		{
 			Shuffle(Group, Stream);
@@ -298,6 +382,10 @@ void HexSiteGenerator::Generate(const FHexSphereGrid& Grid, const FInput& Input,
 					{
 						Each.Cursor = (Index + 1) % Each.Order.Num();
 						bPlaced = true;
+						if (Input.Kinds[KindIndex].Type == EHexSiteType::Pile)
+						{
+							AddCluster(Each.Order[Index]);
+						}
 					}
 				}
 				Report.NoRoom += bPlaced ? 0 : 1;

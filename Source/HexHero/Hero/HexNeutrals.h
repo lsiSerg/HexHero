@@ -162,11 +162,14 @@ private:
 		EHexPlanetLayer Layer = EHexPlanetLayer::Surface;
 		int32 Count = 0;
 		bool bShown = false;
+		/** On the sea, where its figures bob from where they were placed, Rests */
+		bool bAtSea = false;
+		TArray<FTransform> Rests;
 	};
 	TMap<int32, FBody> Bodies;
 
 	static TArray<FHexNeutralLine> SortLines(TArray<FHexNeutralLine> Lines);
 	void RemoveBody(int32 Id);
 	void PlaceBody(const FHexNeutral& Neutral);
-	bool IsFree(EHexPlanetLayer Layer, int32 Cell) const;
+	bool IsFree(EHexPlanetLayer Layer, int32 Cell, bool bSea = false) const;
 };

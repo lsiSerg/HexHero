@@ -8,6 +8,9 @@
 #include "HexUiConfig.h"
 #include "HexHeroes.h"
 #include "HexPlanet.h"
+#include "HexSiteConfig.h"
+#include "HexSites.h"
+#include "HexArtifactConfig.h"
 #include "Fonts/FontMeasure.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Rendering/DrawElements.h"
@@ -52,6 +55,7 @@ namespace
 void SHexEdgeMarkers::Construct(const FArguments& InArgs)
 {
 	OnLocate = InArgs._OnLocate;
+	OnFocus = InArgs._OnFocus;
 	IsBlocked = InArgs._IsBlocked;
 	// hit only while the cursor is on the marks, so what lies under them takes no click there; the click itself it leaves to the game
 	SetVisibility(TAttribute<EVisibility>::CreateSP(this, &SHexEdgeMarkers::GetMarksVisibility));
@@ -311,21 +315,29 @@ int32 SHexEdgeMarkers::OnPaint(const FPaintArgs& Args, const FGeometry& Allotted
 		FSlateDrawElement::MakeBox(OutDrawElements, Layer, AllottedGeometry.ToPaintGeometry(Size, FSlateLayoutTransform(Middle - Size * 0.5)), Brush, ESlateDrawEffect::None, Color);
 	};
 
-	// hex.Cheat enemies: a line up from each neutral stack and hero of another player on the layer shown, with its name over it, under the
-	// fog of war too, as the developer asked on 2026-11-12, but not behind the curve of the planet (OnLocate)
-	if (const UHexHeroes* Source = Heroes.Get(); Source && OnLocate && HexCheats::AreEnemiesMarked() && !(IsBlocked.IsBound() && IsBlocked.Get()))
+	// hex.Cheat enemies and hex.Cheat show: a line up from each thing of the kinds chosen on the layer shown, with what it is over it, under the
+	// fog of war too, as the developer asked on 2026-11-12 for the enemies and on 2026-11-15 for the artifacts, resources, mines, heroes and
+	// castles, but not behind the curve of the planet (OnLocate)
+	const uint32 Shown = HexCheats::GetShownMarks();
+	if (const UHexHeroes* Source = Heroes.Get(); Source && OnLocate && Shown != 0 && !(IsBlocked.IsBound() && IsBlocked.Get()))
 	{
 		const UHexUiConfig* Ui = UHexUiConfig::Load();
 		const float Scale = FMath::Max(AllottedGeometry.Scale, 0.01f);
 		const FSlateFontInfo EnemyFont = FCoreStyle::GetDefaultFontStyle("Bold", 9);
-		const auto MarkAt = [&](EHexPlanetLayer At, int32 Cell, const FString& Text, const FLinearColor& Color)
+		// within so many cells of where the camera looks, when a reach is given (hex.Cheat show <Kind> <Cells>)
+		const int32 Reach = HexCheats::GetShownMarksReach();
+		FVector3d Focus = FVector3d::ZeroVector;
+		const AHexPlanet* Shown0 = Source->GetLayerPlanet(EHexPlanetLayer::Surface);
+		const TArray<FHexSphereCell>* GridCells = Shown0 ? &Shown0->GetGrid().GetCells() : nullptr;
+		const double CellAngle = GridCells && GridCells->Num() > 12 && !(*GridCells)[0].Neighbors.IsEmpty()
+			? FMath::Acos(FMath::Clamp(FVector3d::DotProduct((*GridCells)[0].Center, (*GridCells)[(*GridCells)[0].Neighbors[0]].Center), -1.0, 1.0)) : 0.0;
+		const bool bReach = Reach > 0 && CellAngle > 0.0 && OnFocus && OnFocus(Focus) && Focus.Normalize();
+		const auto MarkAtPoint = [&](EHexPlanetLayer At, const FVector3d& Point, const FString& Text, const FLinearColor& Color)
 		{
-			const AHexPlanet* Planet = Source->GetLayerPlanet(At);
-			if (!Planet || !Planet->GetGrid().GetCells().IsValidIndex(Cell))
+			if (bReach && FMath::Acos(FMath::Clamp(FVector3d::DotProduct(Point.GetSafeNormal(), Focus), -1.0, 1.0)) > (double(Reach) + 0.5) * CellAngle)
 			{
 				return;
 			}
-			const FVector3d Point = Planet->GetGrid().GetCells()[Cell].Center * Planet->GetCellTopRadius(Cell);
 			FVector2D Screen;
 			FVector2D Direction;
 			if (!OnLocate(Point, At, Screen, Direction))
@@ -345,7 +357,31 @@ int32 SHexEdgeMarkers::OnPaint(const FPaintArgs& Args, const FGeometry& Allotted
 			FSlateDrawElement::MakeText(OutDrawElements, LayerId + 3, AllottedGeometry.ToPaintGeometry(TextSize, FSlateLayoutTransform(LabelMiddle - TextSize * 0.5)), Text, EnemyFont,
 				ESlateDrawEffect::None, FLinearColor::White);
 		};
-		if (const UHexNeutrals* Neutrals = Source->GetNeutrals())
+		const auto CellPoint = [Source](EHexPlanetLayer At, int32 Cell, FVector3d& OutPoint)
+		{
+			const AHexPlanet* Planet = Source->GetLayerPlanet(At);
+			if (!Planet || !Planet->GetGrid().GetCells().IsValidIndex(Cell))
+			{
+				return false;
+			}
+			OutPoint = Planet->GetGrid().GetCells()[Cell].Center * Planet->GetCellTopRadius(Cell);
+			return true;
+		};
+		const auto MarkAt = [&](EHexPlanetLayer At, int32 Cell, const FString& Text, const FLinearColor& Color)
+		{
+			FVector3d Point;
+			if (CellPoint(At, Cell, Point))
+			{
+				MarkAtPoint(At, Point, Text, Color);
+			}
+		};
+		const UHexHeroConfig* HeroConfig = Source->GetConfig();
+		const TArray<FHexHeroPlayer>& Players = HeroConfig ? HeroConfig->Players : TArray<FHexHeroPlayer>();
+		const auto PlayerName = [&Players](int32 Player) { return Players.IsValidIndex(Player) ? Players[Player].Name : FString(TEXT("nobody")); };
+		const FLinearColor Nobody(0.75f, 0.75f, 0.75f, 1.0f);
+		const auto PlayerColor = [&Players, &Nobody](int32 Player) { return Players.IsValidIndex(Player) ? Players[Player].Color : Nobody; };
+
+		if (const UHexNeutrals* Neutrals = (Shown & (HexCheats::MarkEnemies | HexCheats::MarkNeutrals)) ? Source->GetNeutrals() : nullptr)
 		{
 			for (const FHexNeutral& Each : Neutrals->GetNeutrals())
 			{
@@ -353,21 +389,113 @@ int32 SHexEdgeMarkers::OnPaint(const FPaintArgs& Args, const FGeometry& Allotted
 				MarkAt(Each.Layer, Each.Cell, FString::Printf(TEXT("%d %s"), Each.Stack.Count, Each.Stack.Count == 1 ? *Name : *UHexNeutrals::Plural(Name)), Ui->NeutralMarkColor);
 			}
 		}
-		const TArray<FHexHeroPlayer>& Players = Source->GetConfig() ? Source->GetConfig()->Players : TArray<FHexHeroPlayer>();
-		for (const FHexHero& Hero : Source->GetHeroes())
+		if (Shown & (HexCheats::MarkEnemies | HexCheats::MarkHeroes))
 		{
-			if (Hero.Player == Source->GetShroudPlayer())
+			for (const FHexHero& Hero : Source->GetHeroes())
 			{
-				continue;
+				if (!(Shown & HexCheats::MarkHeroes) && Hero.Player == Source->GetShroudPlayer())
+				{
+					continue;
+				}
+				int32 Creatures = 0;
+				for (const FHexStack& Stack : Hero.Army)
+				{
+					Creatures += Stack.Count;
+				}
+				MarkAt(Hero.Layer, Hero.Cell, FString::Printf(TEXT("%s (%s), level %d: %d creatures"), *Hero.Name, *PlayerName(Hero.Player), Hero.Level, Creatures),
+					Players.IsValidIndex(Hero.Player) ? Players[Hero.Player].Color : FLinearColor::White);
 			}
-			int32 Creatures = 0;
-			for (const FHexStack& Stack : Hero.Army)
+		}
+		const UHexSites* Sites = Source->GetSites();
+		const UHexSiteConfig* SiteConfig = Sites ? Sites->GetConfig() : nullptr;
+		if (SiteConfig && (Shown & (HexCheats::MarkArtifacts | HexCheats::MarkResources | HexCheats::MarkMines | HexCheats::MarkBoats)))
+		{
+			for (const FHexSite& Site : Sites->GetSites())
 			{
-				Creatures += Stack.Count;
+				if (Site.bTaken || Site.Captain != 0 || !SiteConfig->Kinds.IsValidIndex(Site.Kind))
+				{
+					continue;
+				}
+				const FHexSiteKind& Kind = SiteConfig->Kinds[Site.Kind];
+				const int32 Resource = Sites->GetResourceOf(Site);
+				const FHexResourceInfo* Info = SiteConfig->Resources.IsValidIndex(Resource) ? &SiteConfig->Resources[Resource] : nullptr;
+				const FString Guarded = Site.Guard.IsEmpty() ? FString() : FString(TEXT(", guarded"));
+				switch (Kind.Type)
+				{
+				case EHexSiteType::Artifact:
+					if (Shown & HexCheats::MarkArtifacts)
+					{
+						const int32 Artifact = Source->GetSiteArtifact(Site);
+						const FHexArtifact* Found = Source->GetArtifact(Artifact);
+						const bool bGreat = Found && Found->Rank >= EHexArtifactRank::Major;
+						MarkAt(Site.Layer, Site.Cell, FString::Printf(TEXT("%s (%s%s)"), Found ? *Found->DisplayName : *Kind.DisplayName, Found ? *GetArtifactRankName(Found->Rank) : TEXT("?"), *Guarded),
+							bGreat ? SiteConfig->GreatArtifactColor : SiteConfig->ArtifactColor);
+					}
+					break;
+				case EHexSiteType::Pile:
+					if (Shown & HexCheats::MarkResources)
+					{
+						MarkAt(Site.Layer, Site.Cell, FString::Printf(TEXT("%d %s"), Sites->GetPileAmountOf(Site), Info ? *Info->DisplayName : *Kind.DisplayName),
+							Info ? Info->Color : FLinearColor::White);
+					}
+					break;
+				case EHexSiteType::Chest:
+					if (Shown & HexCheats::MarkResources)
+					{
+						const int32 Artifact = Source->GetSiteArtifact(Site);
+						const FHexArtifact* Found = Source->GetArtifact(Artifact);
+						MarkAt(Site.Layer, Site.Cell, Found ? FString::Printf(TEXT("%s: %s"), *Kind.DisplayName, *Found->DisplayName) : Kind.DisplayName, SiteConfig->ArtifactColor);
+					}
+					break;
+				case EHexSiteType::Mine:
+				case EHexSiteType::Mill:
+					if (Shown & HexCheats::MarkMines)
+					{
+						MarkAt(Site.Layer, Site.Cell, FString::Printf(TEXT("%s%s%s (%s%s)"), *Kind.DisplayName, Kind.Type == EHexSiteType::Mill && Info ? TEXT(": ") : TEXT(""),
+							Kind.Type == EHexSiteType::Mill && Info ? *Info->DisplayName : TEXT(""), *PlayerName(Site.Owner), *Guarded),
+							Site.Owner != INDEX_NONE ? PlayerColor(Site.Owner) : Info ? Info->Color : Nobody);
+					}
+					break;
+				case EHexSiteType::Shipyard:
+				case EHexSiteType::Boat:
+					if (Shown & HexCheats::MarkBoats)
+					{
+						MarkAt(Site.Layer, Site.Cell, Kind.DisplayName, FLinearColor(0.45f, 0.75f, 1.0f, 1.0f));
+					}
+					break;
+				default:
+					break;
+				}
 			}
-			const FHexHeroPlayer* Owner = Players.IsValidIndex(Hero.Player) ? &Players[Hero.Player] : nullptr;
-			MarkAt(Hero.Layer, Hero.Cell, FString::Printf(TEXT("%s (%s): %d creatures"), *Hero.Name, Owner ? *Owner->Name : TEXT("?"), Creatures),
-				Owner ? Owner->Color : FLinearColor::White);
+		}
+		if (const UHexCastles* Castles = (Shown & HexCheats::MarkCastles) ? Source->GetCastles() : nullptr)
+		{
+			for (const FHexCastle& Castle : Castles->GetCastles())
+			{
+				// over the corner its three cells share
+				FVector3d Sum = FVector3d::ZeroVector;
+				int32 Found = 0;
+				for (const int32 Cell : Castle.Cells)
+				{
+					FVector3d Point;
+					if (CellPoint(Castle.Layer, Cell, Point))
+					{
+						Sum += Point;
+						++Found;
+					}
+				}
+				if (Found == 0)
+				{
+					continue;
+				}
+				int32 Creatures = 0;
+				for (const FHexStack& Stack : Castle.Garrison)
+				{
+					Creatures += Stack.Count;
+				}
+				MarkAtPoint(Castle.Layer, Sum / Found, FString::Printf(TEXT("%s (%s): %d in the garrison"), *Castles->GetCastleName(Castle), *PlayerName(Castle.Owner), Creatures),
+					PlayerColor(Castle.Owner));
+			}
 		}
 		LayerId += 4;
 	}

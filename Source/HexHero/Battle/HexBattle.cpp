@@ -78,6 +78,25 @@ void FHexBattle::AddEvent(FHexBattleEvent::EType Type, int32 Unit, int32 Target,
 	}
 }
 
+void FHexBattle::RefreshMagic(int32 Side, const FHexBattleSideSetup& From, int32 MoreMana)
+{
+	if (Side < 0 || Side > 1)
+	{
+		return;
+	}
+	FHexBattleSideSetup& To = Setup.Sides[Side];
+	To.KnownSpells = From.KnownSpells;
+	To.bAllSpells = From.bAllSpells;
+	for (int32 School = 0; School < 4; ++School)
+	{
+		To.SchoolManaCut[School] = From.SchoolManaCut[School];
+		To.SchoolPower[School] = From.SchoolPower[School];
+		To.bSchoolMass[School] = From.bSchoolMass[School];
+	}
+	To.SpellDamageBonus = From.SpellDamageBonus;
+	Mana[Side] = FMath::Max(Mana[Side] + MoreMana, 0);
+}
+
 void FHexBattle::Start(const FHexBattleSetup& InSetup, const UHexCastleConfig* InCastles, const UHexBattleConfig* InConfig)
 {
 	Castles = InCastles;
@@ -149,8 +168,8 @@ void FHexBattle::Start(const FHexBattleSetup& InSetup, const UHexCastleConfig* I
 			Unit.Count = Unit.StartCount = Stack.Count;
 			Unit.TopHealth = Unit.Stats.Health;
 			Unit.ShotsLeft = Unit.bShoots ? FMath::Max(Stats->Shots, 1) : 0;
-			Unit.Morale = Unit.Has(EHexAbility::Undead) ? 0 : FMath::Clamp(ArmyMorale + Stats->Morale, -3, 3);
-			Unit.Luck = FMath::Clamp(Stats->Luck, -3, 3);
+			Unit.Morale = Unit.Has(EHexAbility::Undead) ? 0 : FMath::Clamp(ArmyMorale + Stats->Morale + Each.Morale, -3, 3);
+			Unit.Luck = FMath::Clamp(Stats->Luck + Each.Luck, -3, 3);
 			bool bSecond = Placing >= PerColumn;
 			int32 Row = bSecond ? MoreRows[Placing - PerColumn] : StartRows[Placing];
 			// each slot on its own row, the second seven in the column before
@@ -632,50 +651,109 @@ void FHexBattle::PlaceObstacles()
 	}
 }
 
+int32 FHexBattle::SumEffects(const FHexBattleUnit& Unit, int32 FHexSpell::* Field) const
+{
+	float Sum = 0.0f;
+	for (const FHexBattleEffect& Effect : Unit.Effects)
+	{
+		if (const FHexSpell* Spell = GetSpell(Effect.Spell))
+		{
+			Sum += float(Spell->*Field) * Effect.Factor;
+		}
+	}
+	return FMath::RoundToInt32(Sum);
+}
+
+bool FHexBattle::HasFlag(const FHexBattleUnit& Unit, bool FHexSpell::* Flag) const
+{
+	for (const FHexBattleEffect& Effect : Unit.Effects)
+	{
+		if (const FHexSpell* Spell = GetSpell(Effect.Spell); Spell && Spell->*Flag)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+float FHexBattle::CombineCuts(const FHexBattleUnit& Unit, float FHexSpell::* Field) const
+{
+	float Kept = 1.0f;
+	for (const FHexBattleEffect& Effect : Unit.Effects)
+	{
+		if (const FHexSpell* Spell = GetSpell(Effect.Spell))
+		{
+			Kept *= 1.0f - FMath::Clamp(Spell->*Field * Effect.Factor, 0.0f, 0.95f);
+		}
+	}
+	return Kept;
+}
+
 int32 FHexBattle::GetSpeed(const FHexBattleUnit& Unit) const
 {
-	int32 Add = 0;
 	float Share = 1.0f;
 	for (const FHexBattleEffect& Effect : Unit.Effects)
 	{
 		if (const FHexSpell* Spell = GetSpell(Effect.Spell))
 		{
-			Add += Spell->SpeedAdd;
 			Share *= Spell->SpeedShare;
 		}
 	}
-	return FMath::Max(FMath::RoundToInt32((Unit.Stats.Speed + Add) * Share), 1);
+	return FMath::Max(FMath::RoundToInt32((Unit.Stats.Speed + SumEffects(Unit, &FHexSpell::SpeedAdd)) * Share), 1);
 }
 
-int32 FHexBattle::GetAttack(const FHexBattleUnit& Unit) const
+int32 FHexBattle::GetAttack(const FHexBattleUnit& Unit, int32 Mode) const
 {
-	int32 Add = Setup.Sides[Unit.Side].Attack;
+	int32 Add = Setup.Sides[Unit.Side].Attack + SumEffects(Unit, &FHexSpell::AttackAdd);
+	if (Mode == 0)
+	{
+		Add += SumEffects(Unit, &FHexSpell::MeleeAttackAdd);
+	}
+	else if (Mode == 1)
+	{
+		Add += SumEffects(Unit, &FHexSpell::RangedAttackAdd);
+	}
+	// a frenzy puts its Defense into its Attack
+	float Frenzy = 0.0f;
 	for (const FHexBattleEffect& Effect : Unit.Effects)
 	{
 		if (const FHexSpell* Spell = GetSpell(Effect.Spell))
 		{
-			Add += Spell->AttackAdd;
+			Frenzy = FMath::Max(Frenzy, Spell->FrenzyShare * Effect.Factor);
 		}
+	}
+	if (Frenzy > 0.0f)
+	{
+		const int32 Defense = FMath::Max(Unit.Stats.Defense + Setup.Sides[Unit.Side].Defense + SumEffects(Unit, &FHexSpell::DefenseAdd), 0);
+		Add += FMath::RoundToInt32(Defense * Frenzy);
 	}
 	return FMath::Max(Unit.Stats.Attack + Add, 0);
 }
 
 int32 FHexBattle::GetDefense(const FHexBattleUnit& Unit) const
 {
-	int32 Add = Setup.Sides[Unit.Side].Defense;
-	for (const FHexBattleEffect& Effect : Unit.Effects)
+	if (HasEffect(Unit, [](const FHexSpell& Spell) { return Spell.FrenzyShare > 0.0f; }))
 	{
-		if (const FHexSpell* Spell = GetSpell(Effect.Spell))
-		{
-			Add += Spell->DefenseAdd;
-		}
+		return 0;
 	}
+	const int32 Add = Setup.Sides[Unit.Side].Defense + SumEffects(Unit, &FHexSpell::DefenseAdd);
 	float Defense = float(FMath::Max(Unit.Stats.Defense + Add, 0)) * FMath::Max(Setup.Sides[Unit.Side].DefenseFactor, 0.0f);
 	if (Unit.bDefending)
 	{
 		Defense *= 1.0f + (Config ? Config->DefendShare : 0.3f);
 	}
 	return FMath::RoundToInt32(Defense);
+}
+
+int32 FHexBattle::GetMorale(const FHexBattleUnit& Unit) const
+{
+	// the undead have none, whatever is cast on them
+	return Unit.Has(EHexAbility::Undead) ? 0 : FMath::Clamp(Unit.Morale + SumEffects(Unit, &FHexSpell::MoraleAdd), -3, 3);
+}
+
+int32 FHexBattle::GetLuck(const FHexBattleUnit& Unit) const
+{
+	return FMath::Clamp(Unit.Luck + SumEffects(Unit, &FHexSpell::LuckAdd), -3, 3);
 }
 
 TArray<int32> FHexBattle::GetRoundOrder(bool bNewRound) const
@@ -745,7 +823,6 @@ void FHexBattle::BeginRound()
 		Unit.bWaited = false;
 		Unit.bDone = false;
 		Unit.bMoraleUsed = false;
-		Unit.RetaliationsLeft = Unit.Has(EHexAbility::RetaliateTwice) ? 2 : 1;
 		// the spells of a round run out
 		for (int32 Index = Unit.Effects.Num() - 1; Index >= 0 && Round > 1; --Index)
 		{
@@ -756,6 +833,11 @@ void FHexBattle::BeginRound()
 		}
 	}
 	bCast[0] = bCast[1] = false;
+	// strikes back once a round, more with Counterstrike, and not while blind
+	for (FHexBattleUnit& Unit : Units)
+	{
+		Unit.RetaliationsLeft = HasFlag(Unit, &FHexSpell::bBlind) ? 0 : (Unit.Has(EHexAbility::RetaliateTwice) ? 2 : 1) + FMath::Max(SumEffects(Unit, &FHexSpell::RetaliationsAdd), 0);
+	}
 	FHexBattleEvent& Event = Events.AddDefaulted_GetRef();
 	Event.Type = FHexBattleEvent::EType::RoundBegins;
 	Event.Amount = Round;
@@ -798,8 +880,16 @@ void FHexBattle::BeginTurn(int32 UnitIndex)
 			AddEvent(FHexBattleEvent::EType::ManaDrain, UnitIndex, INDEX_NONE, Drained);
 		}
 	}
+	// blind, it loses its turn
+	if (HasFlag(Unit, &FHexSpell::bBlind))
+	{
+		AddEvent(FHexBattleEvent::EType::Blind, UnitIndex);
+		Unit.bMoraleUsed = true;
+		EndTurn();
+		return;
+	}
 	// bad morale takes the turn
-	if (Unit.Morale < 0 && Config && Random.FRand() < -Unit.Morale * Config->BadMoraleChancePerPoint)
+	if (GetMorale(Unit) < 0 && Config && Random.FRand() < -GetMorale(Unit) * Config->BadMoraleChancePerPoint)
 	{
 		AddEvent(FHexBattleEvent::EType::BadMorale, UnitIndex);
 		Unit.bMoraleUsed = true;
@@ -840,7 +930,7 @@ void FHexBattle::EndTurn()
 	{
 		FHexBattleUnit& Unit = Units[Active];
 		// good morale: another turn, once a round
-		if (Unit.IsAlive() && !Unit.bMoraleUsed && !Unit.bWaited && Unit.Morale > 0 && Config && Random.FRand() < Unit.Morale * Config->MoraleChancePerPoint)
+		if (Unit.IsAlive() && !Unit.bMoraleUsed && !Unit.bWaited && GetMorale(Unit) > 0 && Config && Random.FRand() < GetMorale(Unit) * Config->MoraleChancePerPoint)
 		{
 			Unit.bMoraleUsed = true;
 			AddEvent(FHexBattleEvent::EType::Morale, Active);
@@ -1023,7 +1113,7 @@ bool FHexBattle::CanShoot(int32 UnitIndex, int32 Target) const
 {
 	// the shooters of a tower only a catapult harms, and they shoot whoever stands beside their wall
 	return !IsOver() && UnitIndex == Active && Units.IsValidIndex(Target) && Units[Target].IsAlive() && Units[Target].Side != Units[UnitIndex].Side && !Units[Target].bTower
-		&& Units[UnitIndex].bShoots && Units[UnitIndex].ShotsLeft > 0 && (Units[UnitIndex].bTower || Units[UnitIndex].bCatapult || !HasEnemyBeside(UnitIndex));
+		&& Units[UnitIndex].bShoots && Units[UnitIndex].ShotsLeft > 0 && !HasFlag(Units[UnitIndex], &FHexSpell::bNoShooting) && (Units[UnitIndex].bTower || Units[UnitIndex].bCatapult || !HasEnemyBeside(UnitIndex));
 }
 
 bool FHexBattle::CanStrike(int32 UnitIndex, int32 Target, const FHexCoord& From) const
@@ -1042,7 +1132,7 @@ float FHexBattle::GetDamageFactor(const FHexBattleUnit& Attacker, const FHexBatt
 {
 	const float BonusPerPoint = Config ? Config->AttackBonusPerPoint : 0.05f;
 	const float CutPerPoint = Config ? Config->DefenseCutPerPoint : 0.025f;
-	const int32 Difference = GetAttack(Attacker) - GetDefense(Target);
+	const int32 Difference = GetAttack(Attacker, bShot ? 1 : 0) - GetDefense(Target);
 	float Factor = Difference >= 0 ? 1.0f + FMath::Min(Difference * BonusPerPoint, Config ? Config->MaxAttackBonus : 3.0f)
 		: 1.0f - FMath::Min(-Difference * CutPerPoint, Config ? Config->MaxDefenseCut : 0.7f);
 	if (bShot && Config && Attacker.Hex.DistanceTo(Target.Hex) > Config->ShotFarHexes)
@@ -1057,33 +1147,23 @@ float FHexBattle::GetDamageFactor(const FHexBattleUnit& Attacker, const FHexBatt
 	{
 		Factor *= 1.0f + HexesRun * (Config ? Config->ChargeBonusPerHex : 0.05f);
 	}
-	for (const FHexBattleEffect& Effect : Target.Effects)
-	{
-		if (const FHexSpell* Spell = GetSpell(Effect.Spell))
-		{
-			Factor *= 1.0f - Spell->DamageTakenCut;
-		}
-	}
+	Factor *= CombineCuts(Target, &FHexSpell::DamageTakenCut) * CombineCuts(Target, bShot ? &FHexSpell::RangedTakenCut : &FHexSpell::MeleeTakenCut);
 	return Factor;
 }
 
 int32 FHexBattle::RollDamage(const FHexBattleUnit& Attacker, const FHexBattleUnit& Target, bool bShot, int32 HexesRun, bool bRetaliation, bool& bOutLucky)
 {
-	bool bBlessed = false;
-	for (const FHexBattleEffect& Effect : Attacker.Effects)
-	{
-		const FHexSpell* Spell = GetSpell(Effect.Spell);
-		bBlessed |= Spell && Spell->bMaxDamage;
-	}
+	const bool bBlessed = HasFlag(Attacker, &FHexSpell::bMaxDamage);
+	const bool bCursed = HasFlag(Attacker, &FHexSpell::bMinDamage);
 	// a roll for each creature, ten at most, scaled to their number
 	const int32 Rolls = FMath::Clamp(Attacker.Count, 1, 10);
 	double Sum = 0.0;
 	for (int32 Roll = 0; Roll < Rolls; ++Roll)
 	{
-		Sum += bBlessed ? Attacker.Stats.DamageMax : Random.RandRange(Attacker.Stats.DamageMin, Attacker.Stats.DamageMax);
+		Sum += bBlessed ? Attacker.Stats.DamageMax : bCursed ? Attacker.Stats.DamageMin : Random.RandRange(Attacker.Stats.DamageMin, Attacker.Stats.DamageMax);
 	}
 	double Damage = Sum * Attacker.Count / Rolls * GetDamageFactor(Attacker, Target, bShot, HexesRun);
-	bOutLucky = Attacker.Luck > 0 && Config && Random.FRand() < Attacker.Luck * Config->LuckChancePerPoint;
+	bOutLucky = GetLuck(Attacker) > 0 && Config && Random.FRand() < GetLuck(Attacker) * Config->LuckChancePerPoint;
 	if (bOutLucky)
 	{
 		Damage *= 2.0;
@@ -1133,6 +1213,11 @@ void FHexBattle::DoStrike(int32 Attacker, int32 Target, int32 HexesRun, bool bRe
 	const int32 Direction = GetHexDirection(Units[Attacker].Hex, Units[Target].Hex);
 	const int32 Behind = Units[Attacker].Has(EHexAbility::Breath) && Direction != INDEX_NONE ? FindUnitAt(Units[Target].Hex.GetNeighbor(Direction)) : int32(INDEX_NONE);
 	DealDamage(Attacker, Target, Damage);
+	WakeUp(Target);
+	if (const int32 Reflected = FMath::RoundToInt32(Damage * FMath::Min(1.0f - CombineCuts(Units[Target], &FHexSpell::ReflectShare), 1.0f)); Reflected > 0 && Units[Attacker].IsAlive())
+	{
+		DealDamage(Target, Attacker, Reflected);
+	}
 	if (Behind != INDEX_NONE && Behind != Attacker)
 	{
 		bool bBehindLucky = false;
@@ -1184,6 +1269,7 @@ void FHexBattle::DoShot(int32 Attacker, int32 Target)
 		}
 	}
 	DealDamage(Attacker, Target, Damage);
+	WakeUp(Target);
 	for (const int32 Other : Around)
 	{
 		bool bOtherLucky = false;
@@ -1304,15 +1390,225 @@ bool FHexBattle::Defend()
 	return true;
 }
 
+bool FHexBattle::KnowsSpell(int32 Side, int32 Spell) const
+{
+	if (Side < 0 || Side > 1 || !GetSpell(Spell) || GetSpell(Spell)->IsAdventure())
+	{
+		return false;
+	}
+	const FHexBattleSideSetup& Each = Setup.Sides[Side];
+	return Each.bAllSpells || Each.KnownSpells.Contains(Spell);
+}
+
+int32 FHexBattle::GetManaCost(int32 Side, int32 Spell) const
+{
+	const FHexSpell* Each = GetSpell(Spell);
+	if (!Each || Side < 0 || Side > 1)
+	{
+		return 0;
+	}
+	const float Cut = FMath::Clamp(Setup.Sides[Side].SchoolManaCut[int32(Each->School)], 0.0f, 0.9f);
+	return FMath::Max(FMath::RoundToInt32(Each->ManaCost * (1.0f - Cut)), 1);
+}
+
+float FHexBattle::GetSchoolPower(int32 Side, const FHexSpell& Spell) const
+{
+	return Side >= 0 && Side <= 1 ? FMath::Max(Setup.Sides[Side].SchoolPower[int32(Spell.School)], 0.0f) : 1.0f;
+}
+
+int32 FHexBattle::GetSpellPower(int32 Side, int32 Spell) const
+{
+	const FHexSpell* Each = GetSpell(Spell);
+	if (!Each || Side < 0 || Side > 1)
+	{
+		return 0;
+	}
+	const FHexBattleSideSetup& Caster = Setup.Sides[Side];
+	float Power = float(Each->Power + Each->PowerPerSpellPower * FMath::Max(Caster.SpellPower, 0)) * GetSchoolPower(Side, *Each);
+	// Sorcery makes the spells that deal damage stronger
+	if (Each->IsDamage())
+	{
+		Power *= 1.0f + FMath::Max(Caster.SpellDamageBonus, 0.0f);
+	}
+	return FMath::Max(FMath::RoundToInt32(Power), 0);
+}
+
+bool FHexBattle::IsMassCast(int32 Side, const FHexSpell& Spell) const
+{
+	return Spell.bMassAtExpert && Side >= 0 && Side <= 1 && Setup.Sides[Side].bSchoolMass[int32(Spell.School)];
+}
+
+bool FHexBattle::IsSpellImmune(const FHexBattleUnit& Unit) const
+{
+	return HasEffect(Unit, [](const FHexSpell& Spell) { return Spell.bSpellImmune; });
+}
+
+bool FHexBattle::HasEffect(const FHexBattleUnit& Unit, TFunctionRef<bool(const FHexSpell&)> Test) const
+{
+	for (const FHexBattleEffect& Effect : Unit.Effects)
+	{
+		if (const FHexSpell* Spell = GetSpell(Effect.Spell); Spell && Test(*Spell))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+int32 FHexBattle::FindAnyUnitAt(const FHexCoord& Hex, int32 Side) const
+{
+	const int32 Alive = FindUnitAt(Hex);
+	if (Alive != INDEX_NONE)
+	{
+		return Alive;
+	}
+	// one that lies dead there, of the side asked for, for a spell that raises the fallen
+	for (int32 Index = Units.Num() - 1; Index >= 0; --Index)
+	{
+		const FHexBattleUnit& Unit = Units[Index];
+		if (!Unit.IsAlive() && Unit.Hex == Hex && !Unit.IsMachine() && (Side == INDEX_NONE || Unit.Side == Side))
+		{
+			return Index;
+		}
+	}
+	return INDEX_NONE;
+}
+
+bool FHexBattle::CanTakeSpell(int32 Side, const FHexSpell& Spell, int32 UnitIndex) const
+{
+	if (!Units.IsValidIndex(UnitIndex))
+	{
+		return false;
+	}
+	const FHexBattleUnit& Unit = Units[UnitIndex];
+	if (Unit.IsMachine() || IsSpellImmune(Unit) || !Spell.Takes(Unit.Has(EHexAbility::Undead)))
+	{
+		return false;
+	}
+	if (Spell.Kind == EHexSpellKind::Raise)
+	{
+		return Unit.Side == Side && Unit.Count < Unit.StartCount;
+	}
+	if (!Unit.IsAlive())
+	{
+		return false;
+	}
+	switch (Spell.Target)
+	{
+	case EHexSpellTarget::Enemy: return Unit.Side != Side;
+	case EHexSpellTarget::Friend: return Unit.Side == Side;
+	default: return true;
+	}
+}
+
+void FHexBattle::GatherSpellTargets(int32 Side, int32 SpellIndex, const FHexCoord& Hex, TArray<TPair<int32, float>>& OutTargets) const
+{
+	OutTargets.Reset();
+	const FHexSpell* Spell = GetSpell(SpellIndex);
+	if (!Spell)
+	{
+		return;
+	}
+	const auto TakesHit = [&](int32 Index)
+	{
+		const FHexBattleUnit& Unit = Units[Index];
+		return Unit.IsAlive() && !Unit.bTower && !Unit.bCatapult && !IsSpellImmune(Unit) && Spell->Takes(Unit.Has(EHexAbility::Undead));
+	};
+	switch (Spell->Kind)
+	{
+	case EHexSpellKind::AreaDamage:
+	case EHexSpellKind::RingDamage:
+		for (int32 Index = 0; Index < Units.Num(); ++Index)
+		{
+			const int32 Distance = Units[Index].Hex.DistanceTo(Hex);
+			if (TakesHit(Index) && Distance <= Spell->Radius && (Spell->Kind == EHexSpellKind::AreaDamage || Distance > 0))
+			{
+				OutTargets.Add({Index, 1.0f});
+			}
+		}
+		break;
+	case EHexSpellKind::FieldDamage:
+		for (int32 Index = 0; Index < Units.Num(); ++Index)
+		{
+			if (TakesHit(Index))
+			{
+				OutTargets.Add({Index, 1.0f});
+			}
+		}
+		break;
+	case EHexSpellKind::ChainDamage:
+		{
+			// the first, then the nearest stack to the last struck that was not struck yet, friend or foe
+			int32 Last = FindUnitAt(Hex);
+			float Share = 1.0f;
+			while (Last != INDEX_NONE && OutTargets.Num() < Spell->ChainTargets)
+			{
+				OutTargets.Add({Last, Share});
+				Share *= Spell->ChainFalloff;
+				int32 Next = INDEX_NONE;
+				int32 Nearest = TNumericLimits<int32>::Max();
+				for (int32 Index = 0; Index < Units.Num(); ++Index)
+				{
+					const int32 Distance = Units[Index].Hex.DistanceTo(Units[Last].Hex);
+					if (TakesHit(Index) && Distance < Nearest && !OutTargets.ContainsByPredicate([Index](const TPair<int32, float>& Each) { return Each.Key == Index; }))
+					{
+						Nearest = Distance;
+						Next = Index;
+					}
+				}
+				Last = Next;
+			}
+		}
+		break;
+	case EHexSpellKind::Earthquake:
+		break;
+	default:
+		{
+			// one stack, or every stack of the side it takes from Expert of its school
+			if (IsMassCast(Side, *Spell))
+			{
+				for (int32 Index = 0; Index < Units.Num(); ++Index)
+				{
+					if (CanTakeSpell(Side, *Spell, Index) && Units[Index].IsAlive())
+					{
+						OutTargets.Add({Index, 1.0f});
+					}
+				}
+				break;
+			}
+			const int32 Unit = FindAnyUnitAt(Hex, Spell->Kind == EHexSpellKind::Raise ? Side : int32(INDEX_NONE));
+			if (CanTakeSpell(Side, *Spell, Unit))
+			{
+				OutTargets.Add({Unit, 1.0f});
+			}
+		}
+		break;
+	}
+}
+
+int32 FHexBattle::GetSpellDamageTo(const FHexSpell& Spell, int32 Power, const FHexBattleUnit& Unit) const
+{
+	float Damage = float(Power);
+	// a ward against the school of the spell
+	for (const FHexBattleEffect& Effect : Unit.Effects)
+	{
+		if (const FHexSpell* Ward = GetSpell(Effect.Spell); Ward && Ward->bWardsSchool && Ward->WardSchool == Spell.School)
+		{
+			Damage *= 1.0f - FMath::Clamp(Ward->WardShare * Effect.Factor, 0.0f, 0.95f);
+		}
+	}
+	return FMath::Max(FMath::RoundToInt32(Damage), 1);
+}
+
 bool FHexBattle::CanCastAny(int32 Side) const
 {
 	if (IsOver() || !Units.IsValidIndex(Active) || Units[Active].Side != Side || Setup.Sides[Side].HeroId == 0 || bCast[Side] || !Config)
 	{
 		return false;
 	}
-	for (const FHexSpell& Spell : Config->Spells)
+	for (int32 Spell = 0; Spell < Config->Spells.Num(); ++Spell)
 	{
-		if (Spell.ManaCost <= Mana[Side])
+		if (KnowsSpell(Side, Spell) && GetManaCost(Side, Spell) <= Mana[Side])
 		{
 			return true;
 		}
@@ -1323,16 +1619,43 @@ bool FHexBattle::CanCastAny(int32 Side) const
 bool FHexBattle::CanCast(int32 Side, int32 Spell, const FHexCoord& Hex) const
 {
 	const FHexSpell* Each = GetSpell(Spell);
-	if (!Each || !CanCastAny(Side) || Each->ManaCost > Mana[Side] || !IsOnField(Hex))
+	if (!Each || !CanCastAny(Side) || !KnowsSpell(Side, Spell) || GetManaCost(Side, Spell) > Mana[Side] || !IsOnField(Hex))
 	{
 		return false;
 	}
-	if (Each->Target == EHexSpellTarget::Hex)
+	if (Each->Kind == EHexSpellKind::Earthquake)
+	{
+		return Walls.ContainsByPredicate([](const FHexBattleWall& Wall) { return Wall.IsStanding(); });
+	}
+	if (!Each->NeedsUnit())
 	{
 		return true;
 	}
-	const int32 Unit = FindUnitAt(Hex);
-	return Unit != INDEX_NONE && !Units[Unit].bTower && (Units[Unit].Side == Side) == (Each->Target == EHexSpellTarget::Friend);
+	return CanTakeSpell(Side, *Each, FindAnyUnitAt(Hex, Each->Kind == EHexSpellKind::Raise ? Side : int32(INDEX_NONE)));
+}
+
+void FHexBattle::RaiseUnit(int32 UnitIndex, int32 Health)
+{
+	FHexBattleUnit& Unit = Units[UnitIndex];
+	const int32 Most = Unit.StartCount * Unit.Stats.Health;
+	const int32 Raised = FMath::Min(Health, Most - Unit.GetTotalHealth());
+	if (Raised <= 0)
+	{
+		return;
+	}
+	const bool bWasDead = !Unit.IsAlive();
+	const int32 Total = Unit.GetTotalHealth() + Raised;
+	Unit.Count = (Total + Unit.Stats.Health - 1) / Unit.Stats.Health;
+	Unit.TopHealth = Total - (Unit.Count - 1) * Unit.Stats.Health;
+	// a stack that came back from the dead stands where it fell, unless another stands there now
+	if (bWasDead)
+	{
+		Unit.bDone = true;
+		Unit.Effects.Reset();
+	}
+	AddEvent(FHexBattleEvent::EType::Raise, UnitIndex, UnitIndex, Raised);
+	Events.Last().CountAfter = Unit.Count;
+	Events.Last().Hex = Unit.Hex;
 }
 
 bool FHexBattle::Cast(int32 Side, int32 SpellIndex, const FHexCoord& Hex)
@@ -1342,59 +1665,120 @@ bool FHexBattle::Cast(int32 Side, int32 SpellIndex, const FHexCoord& Hex)
 		return false;
 	}
 	const FHexSpell& Spell = *GetSpell(SpellIndex);
-	Mana[Side] -= Spell.ManaCost;
+	Mana[Side] -= GetManaCost(Side, SpellIndex);
 	bCast[Side] = true;
 	const FHexBattleSideSetup& Caster = Setup.Sides[Side];
-	const int32 Power = Spell.Power + Spell.PowerPerSpellPower * FMath::Max(Caster.SpellPower, 0);
+	const int32 Power = GetSpellPower(Side, SpellIndex);
+	TArray<TPair<int32, float>> Targets;
+	GatherSpellTargets(Side, SpellIndex, Hex, Targets);
 	FHexBattleEvent& Event = Events.AddDefaulted_GetRef();
 	Event.Type = FHexBattleEvent::EType::Spell;
 	Event.Spell = SpellIndex;
 	Event.Side = Side;
 	Event.Hex = Hex;
-	Event.Target = FindUnitAt(Hex);
+	Event.Target = Spell.NeedsUnit() ? FindAnyUnitAt(Hex, Spell.Kind == EHexSpellKind::Raise ? Side : int32(INDEX_NONE)) : int32(INDEX_NONE);
 	Event.Amount = Power;
+	// where else it shows: each stack of a chain, of a mass spell or of the whole field, in order
+	for (const TPair<int32, float>& Each : Targets)
+	{
+		if (Each.Key != Event.Target || Targets.Num() > 1)
+		{
+			FHexBattleEvent& Hit = Events.AddDefaulted_GetRef();
+			Hit.Type = FHexBattleEvent::EType::SpellHit;
+			Hit.Spell = SpellIndex;
+			Hit.Side = Side;
+			Hit.Target = Each.Key;
+			Hit.Hex = Units[Each.Key].Hex;
+		}
+	}
 	switch (Spell.Kind)
 	{
 	case EHexSpellKind::Damage:
-		DealDamage(INDEX_NONE, FindUnitAt(Hex), Power);
-		break;
 	case EHexSpellKind::AreaDamage:
+	case EHexSpellKind::RingDamage:
+	case EHexSpellKind::FieldDamage:
+	case EHexSpellKind::ChainDamage:
+		for (const TPair<int32, float>& Each : Targets)
 		{
-			TArray<int32> Hit;
-			for (int32 Index = 0; Index < Units.Num(); ++Index)
+			if (Units[Each.Key].IsAlive())
 			{
-				if (Units[Index].IsAlive() && !Units[Index].bTower && Units[Index].Hex.DistanceTo(Hex) <= Spell.Radius)
-				{
-					Hit.Add(Index);
-				}
-			}
-			for (const int32 Index : Hit)
-			{
-				DealDamage(INDEX_NONE, Index, Power);
+				DealDamage(INDEX_NONE, Each.Key, GetSpellDamageTo(Spell, FMath::RoundToInt32(Power * Each.Value), Units[Each.Key]));
+				WakeUp(Each.Key);
 			}
 		}
 		break;
 	case EHexSpellKind::Heal:
+		for (const TPair<int32, float>& Each : Targets)
 		{
 			// the wounded of the stack: never above the creatures it has now
-			FHexBattleUnit& Unit = Units[FindUnitAt(Hex)];
-			const int32 Healed = FMath::Min(Power, Unit.Stats.Health - Unit.TopHealth);
-			Unit.TopHealth += FMath::Max(Healed, 0);
-			AddEvent(FHexBattleEvent::EType::Heal, FindUnitAt(Hex), FindUnitAt(Hex), FMath::Max(Healed, 0));
+			FHexBattleUnit& Unit = Units[Each.Key];
+			const int32 Healed = FMath::Max(FMath::Min(Power, Unit.Stats.Health - Unit.TopHealth), 0);
+			Unit.TopHealth += Healed;
+			if (Spell.bCure)
+			{
+				Unit.Effects.RemoveAll([this](const FHexBattleEffect& Effect) { const FHexSpell* Other = GetSpell(Effect.Spell); return Other && !Other->IsHelpful(); });
+			}
+			AddEvent(FHexBattleEvent::EType::Heal, Each.Key, Each.Key, Healed);
+		}
+		break;
+	case EHexSpellKind::Raise:
+		for (const TPair<int32, float>& Each : Targets)
+		{
+			RaiseUnit(Each.Key, Power);
+		}
+		break;
+	case EHexSpellKind::Dispel:
+		for (const TPair<int32, float>& Each : Targets)
+		{
+			Units[Each.Key].Effects.Reset();
+		}
+		break;
+	case EHexSpellKind::Earthquake:
+		{
+			// parts of the wall that stand, at random
+			TArray<int32> Standing;
+			for (int32 Index = 0; Index < Walls.Num(); ++Index)
+			{
+				if (Walls[Index].IsStanding())
+				{
+					Standing.Add(Index);
+				}
+			}
+			for (int32 Shake = 0; Shake < Spell.WallParts && !Standing.IsEmpty(); ++Shake)
+			{
+				const int32 Pick = Random.RandRange(0, Standing.Num() - 1);
+				DamageWall(INDEX_NONE, Standing[Pick], Power);
+				Standing.RemoveAt(Pick);
+			}
 		}
 		break;
 	case EHexSpellKind::Effect:
+		for (const TPair<int32, float>& Each : Targets)
 		{
-			FHexBattleUnit& Unit = Units[FindUnitAt(Hex)];
-			const int32 Rounds = FMath::Max(Spell.BaseRounds + Spell.RoundsPerSpellPower * FMath::Max(Caster.SpellPower, 0), 1);
-			FHexBattleEffect* Found = Unit.Effects.FindByPredicate([SpellIndex](const FHexBattleEffect& Each) { return Each.Spell == SpellIndex; });
+			FHexBattleUnit& Unit = Units[Each.Key];
+			const int32 Rounds = Spell.bPermanent ? 1000 : FMath::Max(Spell.BaseRounds + Spell.RoundsPerSpellPower * FMath::Max(Caster.SpellPower, 0), 1);
+			const float Factor = GetSchoolPower(Side, Spell);
+			FHexBattleEffect* Found = Spell.bPermanent ? nullptr : Unit.Effects.FindByPredicate([SpellIndex](const FHexBattleEffect& Other) { return Other.Spell == SpellIndex; });
 			if (Found)
 			{
 				Found->RoundsLeft = FMath::Max(Found->RoundsLeft, Rounds);
+				Found->Factor = FMath::Max(Found->Factor, Factor);
 			}
 			else
 			{
-				Unit.Effects.Add({SpellIndex, Rounds});
+				Unit.Effects.Add({SpellIndex, Rounds, Factor});
+			}
+			// a curse takes the blessing off and the other way round, as do haste and slowness
+			Unit.Effects.RemoveAll([this, &Spell, SpellIndex](const FHexBattleEffect& Other)
+			{
+				const FHexSpell* Each = GetSpell(Other.Spell);
+				return Each && Other.Spell != SpellIndex && ((Spell.bMaxDamage && Each->bMinDamage) || (Spell.bMinDamage && Each->bMaxDamage)
+					|| (Spell.SpeedAdd > 0 && Each->SpeedShare < 1.0f) || (Spell.SpeedShare < 1.0f && Each->SpeedAdd > 0));
+			});
+			// a blind stack strikes back no more
+			if (Spell.bBlind)
+			{
+				Unit.RetaliationsLeft = 0;
 			}
 		}
 		break;
@@ -1409,6 +1793,14 @@ bool FHexBattle::Cast(int32 Side, int32 SpellIndex, const FHexCoord& Hex)
 		EndTurn();
 	}
 	return true;
+}
+
+void FHexBattle::WakeUp(int32 UnitIndex)
+{
+	if (Units.IsValidIndex(UnitIndex))
+	{
+		Units[UnitIndex].Effects.RemoveAll([this](const FHexBattleEffect& Effect) { const FHexSpell* Spell = GetSpell(Effect.Spell); return Spell && Spell->bBlind; });
+	}
 }
 
 void FHexBattle::Retreat(int32 Side)
@@ -1500,15 +1892,11 @@ FHexStrikePreview FHexBattle::PreviewStrike(int32 UnitIndex, int32 Target, bool 
 	const FHexBattleUnit& Attacker = Units[UnitIndex];
 	const FHexBattleUnit& Struck = Units[Target];
 	const float Factor = GetDamageFactor(Attacker, Struck, bShot, HexesRun);
-	bool bBlessed = false;
-	for (const FHexBattleEffect& Effect : Attacker.Effects)
-	{
-		const FHexSpell* Spell = GetSpell(Effect.Spell);
-		bBlessed |= Spell && Spell->bMaxDamage;
-	}
+	const bool bBlessed = HasFlag(Attacker, &FHexSpell::bMaxDamage);
+	const bool bCursed = HasFlag(Attacker, &FHexSpell::bMinDamage);
 	const int32 Strikes = Attacker.Has(EHexAbility::DoubleStrike) ? 2 : 1;
 	Preview.DamageMin = FMath::Max(FMath::FloorToInt32((bBlessed ? Attacker.Stats.DamageMax : Attacker.Stats.DamageMin) * Attacker.Count * Factor), 1) * Strikes;
-	Preview.DamageMax = FMath::Max(FMath::FloorToInt32(Attacker.Stats.DamageMax * Attacker.Count * Factor), 1) * Strikes;
+	Preview.DamageMax = FMath::Max(FMath::FloorToInt32((bCursed ? Attacker.Stats.DamageMin : Attacker.Stats.DamageMax) * Attacker.Count * Factor), 1) * Strikes;
 	const auto Kills = [&Struck](int32 Damage)
 	{
 		const int32 Total = FMath::Max(Struck.GetTotalHealth() - Damage, 0);
@@ -1545,40 +1933,30 @@ FHexSpellPreview FHexBattle::PreviewSpell(int32 Side, int32 SpellIndex, const FH
 	{
 		return Preview;
 	}
-	const int32 Power = Spell->Power + Spell->PowerPerSpellPower * FMath::Max(Setup.Sides[Side].SpellPower, 0);
-	const auto Hit = [&](const FHexBattleUnit& Unit)
+	const int32 Power = GetSpellPower(Side, SpellIndex);
+	TArray<TPair<int32, float>> Targets;
+	GatherSpellTargets(Side, SpellIndex, Hex, Targets);
+	Preview.Units = Targets.Num();
+	for (const TPair<int32, float>& Each : Targets)
 	{
-		const int32 Total = FMath::Max(Unit.GetTotalHealth() - Power, 0);
-		Preview.Kills += Unit.Count - (Total > 0 ? (Total + Unit.Stats.Health - 1) / Unit.Stats.Health : 0);
-		++Preview.Units;
-	};
-	const int32 At = FindUnitAt(Hex);
-	switch (Spell->Kind)
-	{
-	case EHexSpellKind::Damage:
-		Preview.Damage = Power;
-		if (At != INDEX_NONE)
+		const FHexBattleUnit& Unit = Units[Each.Key];
+		if (Spell->IsDamage())
 		{
-			Hit(Units[At]);
+			const int32 Damage = GetSpellDamageTo(*Spell, FMath::RoundToInt32(Power * Each.Value), Unit);
+			Preview.Damage = FMath::Max(Preview.Damage, Damage);
+			const int32 Total = FMath::Max(Unit.GetTotalHealth() - Damage, 0);
+			Preview.Kills += Unit.Count - (Total > 0 ? (Total + Unit.Stats.Health - 1) / Unit.Stats.Health : 0);
 		}
-		break;
-	case EHexSpellKind::AreaDamage:
-		Preview.Damage = Power;
-		for (const FHexBattleUnit& Unit : Units)
+		else if (Spell->Kind == EHexSpellKind::Heal)
 		{
-			if (Unit.IsAlive() && Unit.Hex.DistanceTo(Hex) <= Spell->Radius)
-			{
-				Hit(Unit);
-			}
+			Preview.Heal += FMath::Max(FMath::Min(Power, Unit.Stats.Health - Unit.TopHealth), 0);
 		}
-		break;
-	case EHexSpellKind::Heal:
-		Preview.Heal = At != INDEX_NONE ? FMath::Max(FMath::Min(Power, Units[At].Stats.Health - Units[At].TopHealth), 0) : 0;
-		Preview.Units = At != INDEX_NONE ? 1 : 0;
-		break;
-	case EHexSpellKind::Effect:
-		Preview.Units = At != INDEX_NONE ? 1 : 0;
-		break;
+		else if (Spell->Kind == EHexSpellKind::Raise)
+		{
+			const int32 Raised = FMath::Min(Power, Unit.StartCount * Unit.Stats.Health - Unit.GetTotalHealth());
+			const int32 Total = Unit.GetTotalHealth() + FMath::Max(Raised, 0);
+			Preview.Raised += (Total + Unit.Stats.Health - 1) / Unit.Stats.Health - Unit.Count;
+		}
 	}
 	return Preview;
 }
@@ -1590,7 +1968,7 @@ float FHexBattle::RateSpell(int32 Side, int32 SpellIndex, const FHexCoord& Hex) 
 	{
 		return 0.0f;
 	}
-	const int32 Power = Spell->Power + Spell->PowerPerSpellPower * FMath::Max(Setup.Sides[Side].SpellPower, 0);
+	const int32 Power = GetSpellPower(Side, SpellIndex);
 	const auto KilledWorth = [&](const FHexBattleUnit& Unit, int32 Damage)
 	{
 		const int32 Total = FMath::Max(Unit.GetTotalHealth() - Damage, 0);
@@ -1598,47 +1976,85 @@ float FHexBattle::RateSpell(int32 Side, int32 SpellIndex, const FHexCoord& Hex) 
 		// a share of a creature counts too, so a strike that kills none is still worth a little
 		return GetWorth(Unit, Unit.Count - Left) + GetWorth(Unit, 1) * FMath::Min(float(Damage) / Unit.Stats.Health, 1.0f) * 0.25f;
 	};
-	const int32 UnitIndex = FindUnitAt(Hex);
-	switch (Spell->Kind)
+	if (Spell->Kind == EHexSpellKind::Earthquake)
 	{
-	case EHexSpellKind::Damage:
-		return UnitIndex != INDEX_NONE ? KilledWorth(Units[UnitIndex], Power) : 0.0f;
-	case EHexSpellKind::AreaDamage:
+		// worth something to the attacker while the wall stands
+		return Side == 0 ? GetSidePower(0) * 0.04f : 0.0f;
+	}
+	TArray<TPair<int32, float>> Targets;
+	GatherSpellTargets(Side, SpellIndex, Hex, Targets);
+	float Worth = 0.0f;
+	for (const TPair<int32, float>& Each : Targets)
+	{
+		const FHexBattleUnit& Unit = Units[Each.Key];
+		const bool bOwn = Unit.Side == Side;
+		switch (Spell->Kind)
 		{
-			float Worth = 0.0f;
-			for (const FHexBattleUnit& Unit : Units)
+		case EHexSpellKind::Damage:
+		case EHexSpellKind::AreaDamage:
+		case EHexSpellKind::RingDamage:
+		case EHexSpellKind::FieldDamage:
+		case EHexSpellKind::ChainDamage:
+			Worth += (bOwn ? -1.5f : 1.0f) * KilledWorth(Unit, GetSpellDamageTo(*Spell, FMath::RoundToInt32(Power * Each.Value), Unit));
+			break;
+		case EHexSpellKind::Heal:
 			{
-				if (Unit.IsAlive() && Unit.Hex.DistanceTo(Hex) <= Spell->Radius)
+				float Share = FMath::Min(Power, Unit.Stats.Health - Unit.TopHealth) / float(Unit.Stats.Health);
+				if (Spell->bCure && HasEffect(Unit, [](const FHexSpell& Other) { return !Other.IsHelpful(); }))
 				{
-					Worth += (Unit.Side == Side ? -1.5f : 1.0f) * KilledWorth(Unit, Power);
+					Share += 0.15f * Unit.Count;
+				}
+				Worth += GetWorth(Unit, 1) * Share;
+			}
+			break;
+		case EHexSpellKind::Raise:
+			{
+				const int32 Raised = FMath::Min(Power, Unit.StartCount * Unit.Stats.Health - Unit.GetTotalHealth());
+				Worth += GetWorth(Unit, 1) * FMath::Max(Raised, 0) / float(Unit.Stats.Health);
+			}
+			break;
+		case EHexSpellKind::Dispel:
+			// what the spells on a stack are worth to its side: taken off a foe that is helped or a friend that is harmed
+			for (const FHexBattleEffect& Effect : Unit.Effects)
+			{
+				if (const FHexSpell* Other = GetSpell(Effect.Spell))
+				{
+					Worth += (Other->IsHelpful() != bOwn ? 0.12f : -0.12f) * GetWorth(Unit, Unit.Count);
 				}
 			}
-			return Worth;
-		}
-	case EHexSpellKind::Heal:
-		return UnitIndex != INDEX_NONE ? GetWorth(Units[UnitIndex], 1) * FMath::Min(Power, Units[UnitIndex].Stats.Health - Units[UnitIndex].TopHealth) / float(Units[UnitIndex].Stats.Health) : 0.0f;
-	case EHexSpellKind::Effect:
-		{
-			if (UnitIndex == INDEX_NONE || Units[UnitIndex].Effects.ContainsByPredicate([SpellIndex](const FHexBattleEffect& Each) { return Each.Spell == SpellIndex; }))
+			break;
+		case EHexSpellKind::Effect:
 			{
-				return 0.0f;
+				if (!Spell->bPermanent && Unit.Effects.ContainsByPredicate([SpellIndex](const FHexBattleEffect& Other) { return Other.Spell == SpellIndex; }))
+				{
+					break;
+				}
+				// a share of what the stack is worth, by how much the spell changes it
+				float Share = 0.0f;
+				Share += FMath::Abs(Spell->SpeedAdd) * 0.04f + FMath::Abs(1.0f - Spell->SpeedShare) * 0.3f;
+				Share += FMath::Abs(Spell->AttackAdd + Spell->DefenseAdd) * 0.03f;
+				Share += FMath::Abs(Spell->MeleeAttackAdd) * (Unit.bShoots ? 0.005f : 0.03f) + FMath::Abs(Spell->RangedAttackAdd) * (Unit.bShoots ? 0.04f : 0.0f);
+				Share += FMath::Abs(Spell->MoraleAdd + Spell->LuckAdd) * 0.04f;
+				Share += Spell->bMaxDamage || Spell->bMinDamage ? 0.15f : 0.0f;
+				Share += Spell->DamageTakenCut * 0.5f + Spell->MeleeTakenCut * 0.4f + Spell->RangedTakenCut * 0.25f + Spell->ReflectShare * 0.4f;
+				Share += Spell->RetaliationsAdd * 0.08f + Spell->FrenzyShare * (Unit.bShoots ? 0.0f : 0.15f);
+				Share += Spell->bBlind ? 0.35f : 0.0f;
+				Share += Spell->bNoShooting && Unit.bShoots && Unit.ShotsLeft > 0 ? 0.35f : 0.0f;
+				Share += Spell->bSpellImmune ? 0.08f : 0.0f;
+				Share += Spell->bWardsSchool ? 0.03f : 0.0f;
+				// a shooter gains nothing from speed
+				if (Unit.bShoots && (Spell->SpeedAdd != 0 || Spell->SpeedShare != 1.0f))
+				{
+					Share *= 0.2f;
+				}
+				Worth += GetWorth(Unit, Unit.Count) * Share;
 			}
-			// a share of what the stack is worth, by how much the spell changes it
-			const FHexBattleUnit& Unit = Units[UnitIndex];
-			float Share = 0.0f;
-			Share += FMath::Abs(Spell->SpeedAdd) * 0.04f + FMath::Abs(1.0f - Spell->SpeedShare) * 0.3f;
-			Share += FMath::Abs(Spell->AttackAdd + Spell->DefenseAdd) * 0.03f;
-			Share += Spell->bMaxDamage ? 0.15f : 0.0f;
-			Share += Spell->DamageTakenCut * 0.5f;
-			// a shooter gains nothing from speed
-			if (Unit.bShoots && (Spell->SpeedAdd != 0 || Spell->SpeedShare != 1.0f))
-			{
-				Share *= 0.2f;
-			}
-			return GetWorth(Unit, Unit.Count) * Share;
+			break;
+		default:
+			break;
 		}
 	}
-	return 0.0f;
+	return Worth;
 }
 
 bool FHexBattle::ChooseSpell(int32 Side, int32& OutSpell, FHexCoord& OutHex) const
@@ -1651,23 +2067,40 @@ bool FHexBattle::ChooseSpell(int32 Side, int32& OutSpell, FHexCoord& OutHex) con
 	for (int32 Spell = 0; Spell < Config->Spells.Num(); ++Spell)
 	{
 		const FHexSpell& Each = Config->Spells[Spell];
-		if (Each.ManaCost > Mana[Side])
+		const int32 Cost = GetManaCost(Side, Spell);
+		if (!KnowsSpell(Side, Spell) || Cost > Mana[Side])
 		{
 			continue;
 		}
-		for (const FHexBattleUnit& Unit : Units)
+		// where it may go: the stacks, the dead of its own for a raise, or any hex for one that takes the field or the wall
+		TArray<FHexCoord> Hexes;
+		if (Each.Kind == EHexSpellKind::FieldDamage || Each.Kind == EHexSpellKind::Earthquake)
 		{
-			if (!Unit.IsAlive() || !CanCast(Side, Spell, Unit.Hex))
+			Hexes.Add(Units.IsValidIndex(Active) ? Units[Active].Hex : FHexCoord());
+		}
+		else
+		{
+			for (const FHexBattleUnit& Unit : Units)
+			{
+				if (Unit.IsAlive() || (Each.Kind == EHexSpellKind::Raise && Unit.Side == Side))
+				{
+					Hexes.AddUnique(Unit.Hex);
+				}
+			}
+		}
+		for (const FHexCoord& Hex : Hexes)
+		{
+			if (!CanCast(Side, Spell, Hex))
 			{
 				continue;
 			}
-			const float Worth = RateSpell(Side, Spell, Unit.Hex);
+			const float Worth = RateSpell(Side, Spell, Hex);
 			// worth its mana: so much of the power of the stacks for each point of it
-			if (Worth > Best && Worth >= Config->AiSpellWorth * Each.ManaCost)
+			if (Worth > Best && Worth >= Config->AiSpellWorth * Cost)
 			{
 				Best = Worth;
 				OutSpell = Spell;
-				OutHex = Unit.Hex;
+				OutHex = Hex;
 			}
 		}
 	}
@@ -1709,7 +2142,7 @@ void FHexBattle::PlayAi()
 		}
 	}
 	// a shooter shoots what it kills most of
-	if (Unit.bShoots && Unit.ShotsLeft > 0 && !HasEnemyBeside(Me))
+	if (Unit.bShoots && Unit.ShotsLeft > 0 && !HasFlag(Unit, &FHexSpell::bNoShooting) && !HasEnemyBeside(Me))
 	{
 		int32 Target = INDEX_NONE;
 		float Best = -1.0f;

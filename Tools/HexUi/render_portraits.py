@@ -8,6 +8,7 @@ which import_portraits.py imports. Run with Blender:
 """
 import math
 import os
+import sys
 
 import bpy
 from mathutils import Vector
@@ -22,7 +23,7 @@ CASTLES = os.path.join(ROOT, 'Saved', 'HexPlanetCastles')
 OUT = os.path.join(ROOT, 'Saved', 'HexUi', 'Portraits')
 SIZE = 256
 FIGURES = ['Sentinel', 'Huntsman', 'Glowwing', 'Oathsworn', 'Pilgrim', 'SkyWarden', 'BoneWarrior', 'Decayed', 'Shade', 'BloodDrinker', 'AshMage', 'BoneSerpent']
-BUILDINGS = ['Hall1', 'Hall2', 'Hall3', 'Fort1', 'Fort2', 'Fort3'] + ['Dwelling%d' % level for level in range(1, 8)] + ['Upgrade']
+BUILDINGS = ['Hall1', 'Hall2', 'Hall3', 'Fort1', 'Fort2', 'Fort3'] + ['Dwelling%d' % level for level in range(1, 8)] + ['Upgrade'] + ['Guild%d' % level for level in range(1, 6)] + ['Merchant']
 
 
 def scene_setup():
@@ -175,6 +176,14 @@ def building(name):
 
 
 def main():
+    # words after -- render only the pictures whose names hold one
+    only = sys.argv[sys.argv.index('--') + 1:] if '--' in sys.argv else []
+    if only:
+        for name in BUILDINGS:
+            if any(word in name for word in only) and os.path.exists(os.path.join(CASTLES, 'SM_PlanetCastle%s.glb' % name)):
+                building(name)
+        print('PORTRAITS DONE')
+        return
     for name in FIGURES:
         path = os.path.join(UNITS, 'SK_Unit%s.glb' % name)
         if os.path.exists(path):

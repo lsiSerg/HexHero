@@ -42,6 +42,9 @@ namespace HexSiteGenerator
 	{
 		int32 Layer = 0;
 		int32 Cell = INDEX_NONE;
+		/** A castle, from a cell before it: only the mines every player needs (bNearStart), and only those of which none lies that near yet,
+		 *  as the developer asked on 2026-11-15 that every town have an ore mine and a sawmill beside it */
+		bool bMinesOnly = false;
 	};
 
 	struct FInput
@@ -52,10 +55,15 @@ namespace HexSiteGenerator
 		/** The cells that take no site though a hero walks them: an entrance and what lies around it, where a hero stands, a meadow */
 		TBitArray<> Avoid[NumPlanetLayers];
 
-		/** Where the first hero of each player stands */
+		/** Where the first hero of each player stands, and after them the castles (bMinesOnly) */
 		TArray<FStart> Starts;
 
 		TArray<FKind> Kinds;
+
+		/** The kinds, by their index in Kinds, that a pentagon of land of the surface holds: the first where closing its cell cuts no way, else
+		 *  the second, which lies on it (UHexSiteConfig::PentagonKind) */
+		int32 PentagonKind = INDEX_NONE;
+		int32 PentagonFallbackKind = INDEX_NONE;
 
 		/** Its Shares are not read, as Kinds holds them */
 		FHexSiteGeneration Settings;
@@ -78,6 +86,11 @@ namespace HexSiteGenerator
 		/** The sites placed near where the players start, and those that found no room there or anywhere */
 		int32 NearStarts = 0;
 		int32 NoRoom = 0;
+
+		/** The piles that lie beside another (PileClusterChance) */
+		int32 Clustered = 0;
+		/** The pentagons that took a site */
+		int32 Pentagons = 0;
 	};
 
 	void Generate(const FHexSphereGrid& Grid, const FInput& Input, TArray<FSite>& OutSites, FReport* OutReport = nullptr);

@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "HexHeroes.h"
+#include "HexPlanetPlayerController.h"
 #include "HexBattles.h"
 #include "HexBattleConfig.h"
 #include "HexNeutrals.h"
@@ -129,7 +130,9 @@ const FHexHero* UHexHeroes::FindHeroAlongRay(EHexPlanetLayer Layer, const FVecto
 
 float UHexHeroes::GetMaxMovePoints(const FHexHero& Hero) const
 {
-	return Config ? Config->MovePoints : 1.0f;
+	// Logistics gives more
+	// and the artifacts it wears
+	return Config ? Config->MovePoints * (1.0f + GetSkillValue(Hero, EHexSkill::Logistics)) + GetArtifactBonus(Hero).Movement : 1.0f;
 }
 
 void UHexHeroes::ResetHero(FHexHero& Hero) const
@@ -142,6 +145,20 @@ void UHexHeroes::ResetHero(FHexHero& Hero) const
 	Hero.Mana = Class.Knowledge * Config->ManaPerKnowledge;
 	Hero.Level = 1;
 	Hero.Experience = 0;
+	// the spells and the skill its class starts with
+	Hero.Spells = Class.StartSpells;
+	Hero.CastsToday.Reset();
+	Hero.Skills.Reset();
+	Hero.PendingLevelUps.Reset();
+	if (Class.StartSkill != EHexSkill::Num)
+	{
+		Hero.Skills.Add({Class.StartSkill, 1});
+	}
+	// no artifacts yet, and on land
+	Hero.Worn.Init(INDEX_NONE, NumWornSlots);
+	Hero.Backpack.Reset();
+	Hero.BoatId = 0;
+	Hero.bOnDeck = false;
 	Hero.MovePoints = GetMaxMovePoints(Hero);
 	Hero.Layer = Hero.StartLayer;
 	Hero.Cell = Hero.StartCell;
@@ -543,7 +560,8 @@ void UHexHeroes::BeginTurn(int32 Player)
 		// with no person in the game the players it moves take their turns a second apart, and the fog of war and the light shown are those of
 		// whose turn it is, so its heroes open the maze as they walk it, as the developer watched a game of the game alone on 2026-11-14 and saw
 		// the heroes of all but the first in the dark
-		const bool bPerson = Heroes.ContainsByPredicate([this](const FHexHero& Each) { return !IsPlayerAi(Each.Player); });
+		// a player the game plays for a while (Auto) is still a person who watches, and the view stays its own
+		const bool bPerson = Heroes.ContainsByPredicate([this](const FHexHero& Each) { return !AiPlayers.Contains(Each.Player); });
 		AiTurnWait = bPerson ? 0.0f : 1.0f;
 		if (!bPerson)
 		{
@@ -607,6 +625,8 @@ void UHexHeroes::BeginDay()
 	{
 		Hero.MovePoints = GetMaxMovePoints(Hero);
 		Hero.bSkipped = false;
+		RestoreMana(Hero);
+		Hero.CastsToday.Reset();
 	}
 	++ListRevision;
 	// the mines give their owners their resources
@@ -804,7 +824,10 @@ int32 UHexHeroes::GetWeek() const
 
 float UHexHeroes::GetStepCost(const AHexPlanet& Planet, const FHexHero* Hero, int32 From, int32 To) const
 {
-	const float Cost = GetCellCost(Planet, To);
+	// at sea, aboard and ashore by the rules of the sea
+	float Sea = 0.0f;
+	const bool bSea = GetSeaStep(Hero, Planet, From, To, Sea);
+	const float Cost = bSea ? Sea : AdjustForPathfinding(Hero, GetCellCost(Planet, To));
 	if (Cost < 0.0f)
 	{
 		return -1.0f;
@@ -823,7 +846,7 @@ float UHexHeroes::GetStepCost(const AHexPlanet& Planet, const FHexHero* Hero, in
 	{
 		return 0.0f;
 	}
-	const UHexPlanetRivers* Rivers = Layer == EHexPlanetLayer::Surface ? Planet.GetRivers() : nullptr;
+	const UHexPlanetRivers* Rivers = Layer == EHexPlanetLayer::Surface && !bSea ? Planet.GetRivers() : nullptr;
 	return Cost * (Rivers ? Rivers->GetCrossingFactor(From, To) : 1.0f);
 }
 
@@ -875,7 +898,7 @@ bool UHexHeroes::CanStand(EHexPlanetLayer Layer, int32 Cell, int32 IgnoreHero, F
 		const bool bGround = Layer == EHexPlanetLayer::Underground ? HexPlanetUnderground::IsPassage(int8(Level)) : Level >= 0 && Level <= 1;
 		if (!bGround)
 		{
-			return Fail(Layer == EHexPlanetLayer::Underground ? TEXT("nothing crosses the void") : Level < 0 ? TEXT("a hero does not cross the sea yet") : TEXT("mountains cannot be crossed"));
+			return Fail(Layer == EHexPlanetLayer::Underground ? TEXT("nothing crosses the void") : Level < 0 ? TEXT("a hero crosses the sea only in a boat") : TEXT("mountains cannot be crossed"));
 		}
 		// what stands on the cell, by its name, as a kind that blocks may look as if one could walk through it
 		const FString Blocker = Planet->GetObjects() ? Planet->GetObjects()->GetBlockerName(Cell) : FString();
@@ -931,6 +954,10 @@ bool UHexHeroes::RemoveHero(int32 Id)
 		return false;
 	}
 	UE_LOG(LogHexHero, Log, TEXT("Heroes: %s leaves the planet"), *Heroes[Index].Name);
+	if (Heroes[Index].BoatId != 0 && Sites)
+	{
+		Sites->LeaveBoat(Heroes[Index].BoatId, Heroes[Index].Cell);
+	}
 	RemoveBody(Id);
 	Heroes.RemoveAt(Index);
 	UpdateEdited();
@@ -1059,9 +1086,9 @@ void UHexHeroes::CheckGameEnd()
 		return;
 	}
 	const TArray<int32> Active = GetActivePlayers();
-	const bool bPersons = StartPlayers.ContainsByPredicate([this](int32 Player) { return !IsPlayerAi(Player); });
-	const bool bPersonLeft = Active.ContainsByPredicate([this](int32 Player) { return !IsPlayerAi(Player); });
-	const bool bAiLeft = Active.ContainsByPredicate([this](int32 Player) { return IsPlayerAi(Player); });
+	const bool bPersons = StartPlayers.ContainsByPredicate([this](int32 Player) { return !AiPlayers.Contains(Player); });
+	const bool bPersonLeft = Active.ContainsByPredicate([this](int32 Player) { return !AiPlayers.Contains(Player); });
+	const bool bAiLeft = Active.ContainsByPredicate([this](int32 Player) { return AiPlayers.Contains(Player); });
 	FString Text;
 	bool bWon = false;
 	if (bPersons && !bPersonLeft)
@@ -1296,7 +1323,7 @@ UHexHeroes::EClick UHexHeroes::Click(EHexPlanetLayer Layer, int32 Cell, const FH
 	return EClick::Targeted;
 }
 
-bool UHexHeroes::GetMapTip(EHexPlanetLayer Layer, int32 Cell, const FHexHero* Under, FHexMapTip& OutTip) const
+bool UHexHeroes::GetMapTip(EHexPlanetLayer Layer, int32 Cell, const FHexHero* Under, FHexMapTip& OutTip, bool bHeroOnly) const
 {
 	OutTip = FHexMapTip();
 	const AHexPlanet* Planet = GetPlanet(Layer);
@@ -1368,16 +1395,27 @@ bool UHexHeroes::GetMapTip(EHexPlanetLayer Layer, int32 Cell, const FHexHero* Un
 	const auto PlayerColor = [this](int32 Of) { return Of >= 0 ? FLinearColor::LerpUsingHSV(Config->GetPlayer(Of).Color, FLinearColor::White, 0.35f) : FLinearColor(0.8f, 0.8f, 0.8f, 1.0f); };
 
 	// a castle, also by the body of the hero that guards it
-	if (const FHexCastle* Castle = Under && Under->CastleId != 0 ? Castles->FindCastle(Under->CastleId) : Castles->FindCastleAt(Layer, Cell))
+	if (const FHexCastle* Castle = bHeroOnly ? nullptr : Under && Under->CastleId != 0 ? Castles->FindCastle(Under->CastleId) : Castles->FindCastleAt(Layer, Cell))
 	{
 		const bool bOwn = Castle->Owner == Player;
 		const FHexHero* Guard = Castles->FindGuard(*Castle);
-		OutTip.Title = FString::Printf(TEXT("%s castle"), *CastleConfig->Factions[Castle->Faction].DisplayName);
+		// its name, its faction and owner, the hero in it, its war machine and its garrison, as the developer asked on 2026-11-15
+		OutTip.Title = Castles->GetCastleName(*Castle);
 		OutTip.TitleColor = PlayerColor(Castle->Owner);
-		OutTip.Lines.Add(FString::Printf(TEXT("Of %s"), *PlayerName(Castle->Owner)));
+		OutTip.Picture = Castles->GetCastlePicture(*Castle);
+		OutTip.PictureTint = Castles->GetCastleTint(*Castle);
+		OutTip.Lines.Add(FString::Printf(TEXT("A castle of the %s, of %s"), *CastleConfig->Factions[Castle->Faction].DisplayName, *PlayerName(Castle->Owner)));
 		if (Guard)
 		{
-			OutTip.Lines.Add(FString::Printf(TEXT("%s guards it"), *Guard->Name));
+			OutTip.Lines.Add(FString::Printf(TEXT("Hero: %s, %s of level %d"), *Guard->Name, *Config->GetClass(Guard->Class).DisplayName, Guard->Level));
+		}
+		if (Castle->bCatapult)
+		{
+			OutTip.Lines.Add(TEXT("War machine: a catapult"));
+		}
+		if (const int32 Guild = Castles->GetGuildLevel(*Castle); Guild > 0 && bOwn)
+		{
+			OutTip.Lines.Add(FString::Printf(TEXT("Mage guild of level %d"), Guild));
 		}
 		OutTip.Lines.Add(UHexCastles::HasCreatures(Castle->Garrison) ? TEXT("Garrison:") : TEXT("No garrison"));
 		SetArmy(Castle->Garrison, bOwn);
@@ -1392,12 +1430,22 @@ bool UHexHeroes::GetMapTip(EHexPlanetLayer Layer, int32 Cell, const FHexHero* Un
 		const bool bOwn = Under->Player == Player;
 		OutTip.Title = FString::Printf(TEXT("%s, %s of %s"), *Under->Name, *Config->GetClass(Under->Class).DisplayName, *PlayerName(Under->Player));
 		OutTip.TitleColor = PlayerColor(Under->Player);
+		OutTip.Picture = GetHeroPortrait(*Under);
 		if (bOwn)
 		{
-			OutTip.Lines.Add(FString::Printf(TEXT("Level %d. Movement %.0f of %.0f. Mana %d of %d"), Under->Level, Under->MovePoints, GetMaxMovePoints(*Under), Under->Mana,
-				Under->Knowledge * 10));
-			OutTip.Lines.Add(FString::Printf(TEXT("Attack %d, defense %d, spell power %d, knowledge %d%s"), Under->Attack, Under->Defense, Under->SpellPower, Under->Knowledge,
-				Under->bCatapult ? TEXT(". Has a catapult") : TEXT("")));
+			// its attributes beside their icons, as the developer asked on 2026-11-15, and its skills
+			OutTip.Stats.Add({EHexStatIcon::Experience, FString::Printf(TEXT("%d"), Under->Level), TEXT("Level")});
+			OutTip.Stats.Add({EHexStatIcon::Attack, FString::FromInt(Under->Attack), TEXT("Attack")});
+			OutTip.Stats.Add({EHexStatIcon::Defense, FString::FromInt(Under->Defense), TEXT("Defense")});
+			OutTip.Stats.Add({EHexStatIcon::SpellPower, FString::FromInt(Under->SpellPower), TEXT("Spell power")});
+			OutTip.Stats.Add({EHexStatIcon::Knowledge, FString::FromInt(Under->Knowledge), TEXT("Knowledge")});
+			OutTip.Stats.Add({EHexStatIcon::Mana, FString::Printf(TEXT("%d/%d"), Under->Mana, GetMaxMana(*Under)), TEXT("Mana")});
+			OutTip.Stats.Add({EHexStatIcon::Movement, FString::Printf(TEXT("%.0f/%.0f"), Under->MovePoints, GetMaxMovePoints(*Under)), TEXT("Movement")});
+			OutTip.Skills = Under->Skills;
+			if (Under->bCatapult)
+			{
+				OutTip.Lines.Add(TEXT("Has a catapult"));
+			}
 		}
 		SetArmy(Under->Army, bOwn);
 		if (!bOwn)
@@ -1422,6 +1470,32 @@ bool UHexHeroes::GetMapTip(EHexPlanetLayer Layer, int32 Cell, const FHexHero* Un
 		const int32 Resource = Sites->GetResourceOf(*Site);
 		const FString ResourceName = SiteConfig->Resources.IsValidIndex(Resource) ? SiteConfig->Resources[Resource].DisplayName : FString(TEXT("?"));
 		OutTip.Title = Kind.DisplayName;
+		if (Kind.Type == EHexSiteType::Artifact)
+		{
+			// which artifact lies there is seen from afar, as in Heroes III
+			const FHexArtifact* Artifact = GetArtifact(GetSiteArtifact(*Site));
+			OutTip.TitleColor = Kind.ArtifactRankMin >= EHexArtifactRank::Major ? SiteConfig->GreatArtifactColor : SiteConfig->ArtifactColor;
+			if (Artifact)
+			{
+				OutTip.Title = Artifact->DisplayName;
+				OutTip.Lines.Add(FString::Printf(TEXT("%s artifact, worn on the %s"), *GetArtifactRankName(Artifact->Rank), *GetArtifactSlotName(Artifact->Slot).ToLower()));
+				OutTip.Lines.Add(Artifact->DescribeEffect());
+			}
+			if (UHexCastles::HasCreatures(Site->Guard))
+			{
+				OutTip.Lines.Add(TEXT("Guarded by:"));
+				SetArmy(Site->Guard, false);
+				SetForecast(Castles->GetPower(Site->Guard));
+			}
+			return true;
+		}
+		if (Kind.Type == EHexSiteType::Shipyard || Kind.Type == EHexSiteType::Boat)
+		{
+			OutTip.TitleColor = FLinearColor(0.55f, 0.8f, 1.0f, 1.0f);
+			OutTip.Lines.Add(Kind.Type == EHexSiteType::Boat ? TEXT("A hero goes aboard it from the coast; going aboard or ashore takes the rest of a day")
+				: FString::Printf(TEXT("Builds a boat for %s onto the sea beside it"), *Sites->DescribeCost(SiteConfig->BoatCost)));
+			return true;
+		}
 		if (Kind.Type == EHexSiteType::Pile)
 		{
 			OutTip.TitleColor = SiteConfig->Resources.IsValidIndex(Resource) ? FLinearColor::LerpUsingHSV(SiteConfig->Resources[Resource].Color, FLinearColor::White, 0.4f) : FLinearColor::White;
@@ -1590,21 +1664,37 @@ UHexHeroes::EOrder UHexHeroes::GetOrderAt(EHexPlanetLayer Layer, int32 Cell, con
 	{
 		return EOrder::Portal;
 	}
+	// from a boat onto the land, to fight there or not
+	const bool bAshore = Hero->BoatId != 0 && !IsSea(Layer, Cell);
 	if (!bHidden)
 	{
 		if (IsFoeAt(Player, Layer, Cell))
 		{
-			return EOrder::Attack;
+			return bAshore ? EOrder::LandAttack : EOrder::Attack;
 		}
 		if (Castle)
 		{
 			// a castle a garrison or a hero defends is fought for
-			return UHexCastles::HasCreatures(Castle->Garrison) || Castles->FindGuard(*Castle) ? EOrder::Attack : EOrder::Castle;
+			return UHexCastles::HasCreatures(Castle->Garrison) || Castles->FindGuard(*Castle) ? (bAshore ? EOrder::LandAttack : EOrder::Attack) : EOrder::Castle;
+		}
+		// a mine or an artifact its guard holds is fought for first
+		if (IsGuardedSiteAt(Player, Layer, Cell))
+		{
+			return bAshore ? EOrder::LandAttack : EOrder::Attack;
 		}
 		if (Sites && (Sites->FindBlockerAt(Layer, Cell) || Sites->FindPileAt(Layer, Cell)))
 		{
 			return EOrder::Visit;
 		}
+	}
+	// aboard a boat that lies there, or ashore
+	if (Hero->BoatId == 0 && Sites && Sites->FindBoatAt(Layer, Cell))
+	{
+		return EOrder::Board;
+	}
+	if (bAshore)
+	{
+		return EOrder::Land;
 	}
 	return Cost <= Hero->MovePoints + 1.0e-3f ? EOrder::Move : EOrder::MoveLater;
 }
@@ -1696,8 +1786,28 @@ bool UHexHeroes::IsWayUnknown(const FHexHero& Hero, TConstArrayView<int32> Path,
 	return bUnknown;
 }
 
+void UHexHeroes::SetAimCells(int32 HeroId, TConstArrayView<int32> Cells)
+{
+	const FHexHero* Hero = FindHero(HeroId);
+	AimHeroId = Hero ? HeroId : 0;
+	// the outline of the reach shows where it may step, on its layer alone, and the reach of its walk again once the aim is gone
+	ReachHero = -1;
+	for (int32 Layer = 0; Layer < NumPlanetLayers; ++Layer)
+	{
+		if (AHexPlanet* Planet = GetPlanet(EHexPlanetLayer(Layer)); Planet && Planet->IsBuilt())
+		{
+			Planet->SetReach(Hero && Hero->Layer == EHexPlanetLayer(Layer) ? Cells : TConstArrayView<int32>());
+		}
+	}
+}
+
 void UHexHeroes::UpdateReach()
 {
+	// a spell of the planet being aimed shows its own cells
+	if (AimHeroId != 0)
+	{
+		return;
+	}
 	const FHexHero* Hero = bPlaying && IsPersonTurn() && Config->bShowReach ? GetSelected() : nullptr;
 	if (Hero && Hero->Player != TurnPlayer)
 	{
@@ -1891,6 +2001,11 @@ void UHexHeroes::FindFieldFor(const FHexHero& Hero, HexHeroPath::FField& OutFiel
 	};
 	const auto GetCost = [&](int32 Layer, int32 From, int32 Side, int32 To)
 	{
+		// at sea, aboard and ashore by the rules of the sea, which hang on where the step comes from
+		if (float Sea = 0.0f; Layer == 0 && GetSeaStep(&Hero, *Planets[0], From, To, Sea))
+		{
+			return Sea < 0.0f || Occupied.Contains(To) ? -1.0f : Sea;
+		}
 		float& Cost = CellCosts[Layer * NumCells + To];
 		if (!IsKnown(Layer, To))
 		{
@@ -1910,7 +2025,7 @@ void UHexHeroes::FindFieldFor(const FHexHero& Hero, HexHeroPath::FField& OutFiel
 		{
 			return 0.0f;
 		}
-		return Cost < 0.0f ? -1.0f : Cost * (Layer == 0 && Rivers ? Rivers->GetCrossingFactor(From, To) : 1.0f);
+		return Cost < 0.0f ? -1.0f : AdjustForPathfinding(&Hero, Cost) * (Layer == 0 && Rivers ? Rivers->GetCrossingFactor(From, To) : 1.0f);
 	};
 	// a hero may go through an entrance or exit its player has seen, to the same cell of the other layer, where no hero it knows of stands;
 	// a hero the game moves too where its player has not seen the other side, which then is as far as its way goes there, as it keeps to what
@@ -2007,6 +2122,21 @@ bool UHexHeroes::IsFoeAt(int32 Player, EHexPlanetLayer Layer, int32 Cell) const
 {
 	const FHexHero* Other = FindHeroAt(Layer, Cell);
 	return (Neutrals && Neutrals->FindAt(Layer, Cell)) || (Other && Other->Player != Player && Other->CastleId == 0);
+}
+
+bool UHexHeroes::IsGuardedSiteAt(int32 Player, EHexPlanetLayer Layer, int32 Cell) const
+{
+	if (!Sites)
+	{
+		return false;
+	}
+	if (const FHexSite* Building = Sites->FindBlockerAt(Layer, Cell))
+	{
+		return Building->Owner != Player && UHexCastles::HasCreatures(Building->Guard) && !FindHeroAt(Layer, Cell);
+	}
+	const FHexSite* Pile = Sites->FindPileAt(Layer, Cell);
+	return Pile && (Sites->GetConfig()->Kinds[Pile->Kind].Type == EHexSiteType::Artifact || Sites->GetConfig()->Kinds[Pile->Kind].Type == EHexSiteType::Chest)
+		&& UHexCastles::HasCreatures(Pile->Guard);
 }
 
 float UHexHeroes::GetSiteWayCost(const HexHeroPath::FField& Ways, EHexPlanetLayer Layer, int32 SiteCell, int32* OutNode, int32 ForPlayer) const
@@ -2213,6 +2343,26 @@ bool UHexHeroes::VisitSite(FHexHero& Hero, FString& OutMessage)
 	// a mine of another player its guard holds, with no hero on it
 	const FHexSite* Guarded = !Castle && !Foe && !Neutral ? Sites->FindBlockerAt(Hero.Layer, SiteCell) : nullptr;
 	Guarded = Guarded && Guarded->Owner != Hero.Player && UHexCastles::HasCreatures(Guarded->Guard) && !FindHeroAt(Hero.Layer, SiteCell) ? Guarded : nullptr;
+	// neutral creatures much weaker than its army may offer to join it, as the developer asked on 2026-11-15 for Diplomacy
+	FHexHeroOffer Join;
+	if (Neutral && !RefusedJoins.Contains(Neutral->Id) && MakeJoinOffer(Hero, *Neutral, Join))
+	{
+		Join.Cost = Cost;
+		Hero.VisitCell = INDEX_NONE;
+		Hero.TargetCell = INDEX_NONE;
+		Hero.Route.Reset();
+		PendingOffer = Join;
+		if (bPlaying && !IsPlayerAi(Hero.Player))
+		{
+			OnOffer.Broadcast();
+			return true;
+		}
+		// the game takes them when it can
+		const UHexSiteConfig* SiteConfig = Sites->GetConfig();
+		const int32 GoldIndex = SiteConfig->FindResource(TEXT("Gold"));
+		const bool bTake = Join.bFree || Sites->GetAmount(Hero.Player, FMath::Max(GoldIndex, 0)) >= Join.Gold * 2;
+		return AnswerOffer(bTake, OutMessage);
+	}
 	if (Battles && (Neutral || Foe || bDefended || Guarded))
 	{
 		FHexBattleRequest Request;
@@ -2234,6 +2384,34 @@ bool UHexHeroes::VisitSite(FHexHero& Hero, FString& OutMessage)
 			OutMessage = Problem.IsEmpty() ? FString(TEXT("there is nothing to fight")) : Problem;
 			return false;
 		}
+		++MapRevision;
+		return true;
+	}
+	// a shipyard offers to build a boat onto the sea beside it, for a person; the game builds none
+	if (const FHexSite* Yard = !Castle ? Sites->FindBlockerAt(Hero.Layer, SiteCell) : nullptr; Yard && Sites->GetConfig()->Kinds[Yard->Kind].Type == EHexSiteType::Shipyard)
+	{
+		Hero.VisitCell = INDEX_NONE;
+		Hero.TargetCell = INDEX_NONE;
+		Hero.Route.Reset();
+		if (!bPlaying || IsPlayerAi(Hero.Player))
+		{
+			return true;
+		}
+		FHexHeroOffer Offer;
+		Offer.HeroId = Hero.Id;
+		Offer.ShipyardId = Yard->Id;
+		Offer.Layer = Hero.Layer;
+		Offer.Cell = SiteCell;
+		Offer.BoatCell = FindBoatCell(Hero.Layer, SiteCell);
+		Offer.BoatCost = Sites->GetConfig()->BoatCost;
+		Offer.Cost = Cost;
+		if (Offer.BoatCell == INDEX_NONE)
+		{
+			OutMessage = TEXT("The shipyard has no free water beside it");
+			return true;
+		}
+		PendingOffer = Offer;
+		OnOffer.Broadcast();
 		++MapRevision;
 		return true;
 	}
@@ -2292,12 +2470,82 @@ bool UHexHeroes::VisitSite(FHexHero& Hero, FString& OutMessage)
 
 void UHexHeroes::TakePile(FHexHero& Hero)
 {
-	if (!Sites || !Sites->FindPileAt(Hero.Layer, Hero.Cell))
+	const FHexSite* Pile = Sites ? Sites->FindPileAt(Hero.Layer, Hero.Cell) : nullptr;
+	if (!Pile)
 	{
 		return;
 	}
 	// of what a hero the game moves does the person hears what it sees
 	const bool bTold = !bPlaying || !IsPlayerAi(Hero.Player) || IsCellSeen(Hero.Layer, Hero.Cell);
+	const EHexSiteType Type = Sites->GetConfig()->Kinds[Pile->Kind].Type;
+	// an artifact its guard holds is fought for first, as a guarded mine is, and taken once the guard is beaten (UHexBattles)
+	if ((Type == EHexSiteType::Artifact || Type == EHexSiteType::Chest) && UHexCastles::HasCreatures(Pile->Guard) && Battles)
+	{
+		FHexBattleRequest Request;
+		Request.Kind = EHexBattleKind::Site;
+		Request.SiteId = Pile->Id;
+		Request.Attacker = Hero.Id;
+		Request.Layer = Hero.Layer;
+		Request.Cell = Hero.Cell;
+		FString Problem;
+		if (Battles->Begin(Request, Problem))
+		{
+			Hero.Route.Reset();
+			++MapRevision;
+			return;
+		}
+	}
+	// an artifact, or a chest that holds one, goes to the hero, as far as its backpack holds it
+	if (const int32 Held = GetSiteArtifact(*Pile); Held != INDEX_NONE && (Type == EHexSiteType::Artifact || Type == EHexSiteType::Chest))
+	{
+		const FHexArtifact* Artifact = GetArtifact(Held);
+		if (!GiveArtifact(Hero, Held))
+		{
+			if (bTold)
+			{
+				OnMessage.Broadcast(FString::Printf(TEXT("%s cannot carry the %s: the backpack is full"), *Hero.Name, *Artifact->DisplayName.ToLower()));
+			}
+			return;
+		}
+		const UHexSiteConfig* SiteConfig = Sites->GetConfig();
+		Sites->TakePickup(Hero.Layer, Hero.Cell, FString::Printf(TEXT("+ %s"), *Artifact->DisplayName),
+			Artifact->Rank >= EHexArtifactRank::Major ? SiteConfig->GreatArtifactColor : SiteConfig->ArtifactColor, bTold);
+		const FString Found = FString::Printf(TEXT("%s %s the %s: %s"), *Hero.Name, Type == EHexSiteType::Chest ? TEXT("opens a chest and finds") : TEXT("finds"),
+			*Artifact->DisplayName.ToLower(), *Artifact->DescribeEffect());
+		if (bTold)
+		{
+			OnMessage.Broadcast(Found);
+		}
+		UE_LOG(LogHexHero, Log, TEXT("Heroes: %s"), *Found);
+		++MapRevision;
+		return;
+	}
+	// a chest gives gold or experience, as the developer asked on 2026-11-15: the person chooses, the game takes gold while it is short of it
+	if (Type == EHexSiteType::Chest)
+	{
+		FHexHeroOffer Chest;
+		Chest.HeroId = Hero.Id;
+		Chest.Layer = Hero.Layer;
+		Chest.Cell = Hero.Cell;
+		Chest.Gold = Sites->GetPileAmountOf(*Pile);
+		Chest.Experience = Sites->GetChestExperience(*Pile);
+		if (bPlaying && !IsPlayerAi(Hero.Player))
+		{
+			PendingOffer = Chest;
+			OnOffer.Broadcast();
+			return;
+		}
+		const int32 Gold = Sites->GetConfig()->FindResource(TEXT("Gold"));
+		const bool bGold = Sites->GetAmount(Hero.Player, FMath::Max(Gold, 0)) < 8000;
+		const FString Found = Sites->TakeChest(Hero.Player, Hero.Name, Hero.Layer, Hero.Cell, bGold, bTold);
+		if (!bGold)
+		{
+			AddExperience(Hero, Chest.Experience);
+		}
+		UE_LOG(LogHexHero, Log, TEXT("Heroes: %s"), *Found);
+		++MapRevision;
+		return;
+	}
 	const FString Found = Sites->Visit(Hero.Player, Hero.Name, Hero.Layer, Hero.Cell, GetWeek(), bTold);
 	if (Found.IsEmpty())
 	{
@@ -2537,7 +2785,19 @@ bool UHexHeroes::StartNextStep(FHexHero& Hero)
 		return false;
 	}
 	Hero.bOutOfPoints = false;
+	Hero.StepPaid = FMath::Min(Cost, Hero.MovePoints);
 	Hero.MovePoints = FMath::Max(Hero.MovePoints - Cost, 0.0f);
+	// aboard a boat, or ashore from one, which takes what is left of the day and ends its way
+	const bool bBoards = Hero.BoatId == 0 && IsSea(Hero.Layer, Next);
+	const bool bLands = Hero.BoatId != 0 && !IsSea(Hero.Layer, Next);
+	if (bBoards)
+	{
+		Board(Hero, Next);
+	}
+	else if (bLands)
+	{
+		GoAshore(Hero);
+	}
 	// the cells it left stay on the way shown until it stops
 	if (!(Castles && Castles->FindCastleAt(Hero.Layer, Hero.Cell)))
 	{
@@ -2546,6 +2806,10 @@ bool UHexHeroes::StartNextStep(FHexHero& Hero)
 	Hero.FromCell = Hero.Cell;
 	Hero.Cell = Next;
 	Hero.Route.RemoveAt(0);
+	if (bBoards || bLands)
+	{
+		Hero.Route.Reset();
+	}
 	// out of the castle it guarded, by the gate nearest where it goes, which opens for it: it waits for the door to lift
 	Hero.GateStepFrom = INDEX_NONE;
 	if (Hero.CastleId != 0)
@@ -2640,7 +2904,7 @@ void UHexHeroes::UpdatePendingNext(float DeltaTime)
 		PendingNextFrom = 0;
 		return;
 	}
-	PendingNextTime -= DeltaTime;
+	PendingNextTime -= bHoldNext ? 0.0f : DeltaTime;
 	if (PendingNextTime > 0.0f)
 	{
 		return;
@@ -2976,6 +3240,8 @@ void UHexHeroes::Restart()
 {
 	Day = 1;
 	PendingNextFrom = 0;
+	PendingOffer = FHexHeroOffer();
+	RefusedJoins.Reset();
 	if (Castles)
 	{
 		Castles->Restart();
@@ -3041,9 +3307,15 @@ void UHexHeroes::PlaceHero(FHexHero& Hero)
 	const FVector3d From = bStep ? GetStandDirection(*Planet, Hero, Hero.FromCell) : To;
 	const FVector3d Up = bStep ? FMath::Lerp(From, To, double(FMath::Clamp(Hero.StepAlpha, 0.0f, 1.0f))).GetSafeNormal() : To;
 
-	// on the ground under it, of whichever cell that is on the way from one middle to the next
-	double Ground = Planet->FindGroundRadius(bStep ? Planet->GetGrid().FindCell(Up, Hero.Cell) : Hero.Cell, Up);
-	if (bStep)
+	// on the ground under it, of whichever cell that is on the way from one middle to the next, or over the sea on the deck of its boat
+	const int32 Under = bStep ? Planet->GetGrid().FindCell(Up, Hero.Cell) : Hero.Cell;
+	double Ground = Planet->FindGroundRadius(Under, Up);
+	Hero.bOnDeck = IsSea(Hero.Layer, Under);
+	if (Hero.bOnDeck)
+	{
+		Ground = FMath::Max(Ground, Planet->GetRadius() + double(Config->BoatDeckLift * Config->BoatScale));
+	}
+	if (bStep && !Hero.bOnDeck)
 	{
 		Ground += Config->WalkBob * FMath::Abs(FMath::Sin(double(Hero.StepAlpha) * UE_DOUBLE_PI * Config->WalkBobsPerCell));
 	}
@@ -3129,6 +3401,11 @@ void UHexHeroes::RemoveBody(int32 Id)
 	Bodies.Remove(Id);
 	BodyStates.Remove(Id);
 	BodyMaterials.Remove(Id);
+	if (TObjectPtr<UInstancedStaticMeshComponent>* Boat = BoatBodies.Find(Id); Boat && *Boat)
+	{
+		(*Boat)->DestroyComponent();
+	}
+	BoatBodies.Remove(Id);
 }
 
 void UHexHeroes::UpdateBody(FHexHero& Hero)
@@ -3144,6 +3421,7 @@ void UHexHeroes::UpdateBody(FHexHero& Hero)
 		{
 			Body->SetVisibility(false);
 		}
+		UpdateBoatBody(Hero, false);
 		return;
 	}
 
@@ -3213,13 +3491,29 @@ void UHexHeroes::UpdateBody(FHexHero& Hero)
 	const FVector3d Up = Hero.Position.GetSafeNormal();
 	USkeletalMeshComponent* Animated = Cast<USkeletalMeshComponent>(Body);
 	const FQuat Turn = Animated ? FRotator(0.0, double(Config->RiderYaw), 0.0).Quaternion() : FQuat::Identity;
-	const FTransform Transform(FRotationMatrix::MakeFromZX(FVector(Up), FVector(Hero.Facing)).ToQuat() * Turn, FVector(Hero.Position),
-		FVector(Config->HeroScale * Hero.ViewScale * Hero.PassScale * (Animated ? Config->RiderScale : 1.0f)));
+	FTransform Transform(FRotationMatrix::MakeFromZX(FVector(Up), FVector(Hero.Facing)).ToQuat() * Turn, FVector(Hero.Position),
+		FVector(Config->HeroScale * Hero.ViewScale * Hero.PassScale * (Animated ? Config->RiderScale : 1.0f) * (Hero.bOnDeck ? Config->BoatHeroScale : 1.0f)));
+	// in its boat it stands towards the bow, clear of the sail, and rises, falls and rolls with the boat, as the developer asked on 2026-11-15
+	if (Hero.bOnDeck && Hero.BoatId != 0 && Planet)
+	{
+		const UWorld* World = Planet->GetWorld();
+		const double Time = World ? World->GetTimeSeconds() : 0.0;
+		const double Phase = Time * double(Config->BoatBobSpeed) * UE_DOUBLE_TWO_PI + Hero.Id * 1.7;
+		const double Bob = double(Config->BoatBob) * FMath::Sin(Phase);
+		const FVector3d Facing = Hero.Facing.GetSafeNormal();
+		const FQuat Roll(FVector(Facing), FMath::DegreesToRadians(double(Config->BoatRoll) * FMath::Sin(Phase * 0.8)));
+		const FVector3d BoatOrigin = Up * (Planet->GetRadius() + Bob);
+		const FVector3d OnDeck = Hero.Position + Up * Bob + Facing * double(Config->BoatHeroForward * Config->BoatScale * Hero.ViewScale);
+		Transform.SetLocation(FVector(BoatOrigin) + Roll.RotateVector(FVector(OnDeck - BoatOrigin)));
+		Transform.SetRotation(Roll * Transform.GetRotation());
+	}
+	UpdateBoatBody(Hero, true);
 	if (UHexHeroAnimInstance* Anim = Animated ? Cast<UHexHeroAnimInstance>(Animated->GetAnimInstance()) : nullptr)
 	{
 		// it stands, sets out, walks and stops, and answers being chosen while it stands
 		FBodyState& State = BodyStates.FindOrAdd(Hero.Id);
-		const bool bMoving = Hero.bWalking || Hero.bGliding;
+		// in a boat it stands on the deck while the boat sails, as the developer asked on 2026-11-15
+		const bool bMoving = (Hero.bWalking || Hero.bGliding) && !Hero.bOnDeck;
 		const bool bChosen = bPlaying && SelectedId == Hero.Id;
 		UAnimSequence* Idle = Config->IdleAnimation.LoadSynchronous();
 		UAnimSequence* Move = Config->MoveAnimation.LoadSynchronous();
@@ -3489,7 +3783,8 @@ double UHexHeroes::GetGroundRadius(const AHexPlanet& Planet, int32 Cell)
 	{
 		return *Found;
 	}
-	const double Ground = Planet.FindGroundRadius(Cell, Planet.GetGrid().GetCells()[Cell].Center);
+	// over the sea on its water, as the marks of a hero in a boat lay on the seabed until 2026-11-15
+	const double Ground = FMath::Max(Planet.FindGroundRadius(Cell, Planet.GetGrid().GetCells()[Cell].Center), GetWaterRadius(Planet));
 	Radii.Add(Cell, Ground);
 	return Ground;
 }
@@ -3543,7 +3838,14 @@ FVector3d UHexHeroes::FindGroundPoint(const AHexPlanet& Planet, int32 Cell, int3
 	{
 		Ground = Planet.GetCellTopRadius(Cell);
 	}
-	return Up * (Ground + Lift);
+	// the ring and the way of a hero in a boat lie on the water and not on the seabed, as the developer asked on 2026-11-15
+	return Up * (FMath::Max(Ground, GetWaterRadius(Planet)) + Lift);
+}
+
+double UHexHeroes::GetWaterRadius(const AHexPlanet& Planet)
+{
+	// the sea of the surface; the underground has none, its voids lie below its passages
+	return Planet.GetLayer() == EHexPlanetLayer::Surface && Planet.GetSettings() && Planet.GetSettings()->bSea ? Planet.GetRadius() : 0.0;
 }
 
 FVector3d UHexHeroes::FindGroundUp(const AHexPlanet& Planet, int32 Cell, double Reach)
@@ -3929,6 +4231,12 @@ void UHexHeroes::UpdatePath()
 			// a hero of its own it goes to, to exchange armies or swap places
 			Outlined = {Path.Last()};
 		}
+	}
+	// a mine its guard holds, which it visits from beside, or an artifact a guard holds, whose cell it walks onto, is a foe as well
+	if (!Path.IsEmpty() && Outlined.IsEmpty() && IsGuardedSiteAt(Hero->Player, TargetLayer, Path.Last()) && !IsHidden(Hero->Player, TargetLayer, Path.Last()))
+	{
+		Outlined = {Path.Last()};
+		bOutlineFoe = true;
 	}
 	// with Ctrl to a castle of its own the way ends before its gate, and the castle is outlined, as the developer asked on 2026-11-13
 	if (const FHexCastle* Own = !bVisit && Hero->bAltOrder && !Hero->bWalking && Castles ? Castles->FindCastleAt(TargetLayer, Hero->TargetCell) : nullptr;
@@ -4342,7 +4650,9 @@ bool UHexHeroes::NoteSeen(FHexHero& Hero)
 		const AHexPlanet* Planet = GetPlanet(Hero.Layer);
 		// longer where it comes out of an entrance or exit
 		const float Hold = bSeen && bCameThrough ? FMath::Max(Config->AiFogHoldTime, Config->AiEntranceHoldTime) : Config->AiFogHoldTime;
-		if (IsShroudOn() && Hold > 0.0f && Planet && Planet->IsPresented() && Planet->GetGrid().GetCells().IsValidIndex(Hero.Cell))
+		// and only where the person sees: a hero that comes out of the fog onto a cell it sees, or went into it from one
+		const bool bAtSeen = IsCellSeen(Hero.Layer, Hero.Cell) || (Hero.bWalking && IsCellSeen(Hero.Layer, Hero.FromCell));
+		if (IsShroudOn() && Hold > 0.0f && bAtSeen && Planet && Planet->IsPresented() && Planet->GetGrid().GetCells().IsValidIndex(Hero.Cell))
 		{
 			// the camera stays where it went into the fog, or goes where it is about to come out of it
 			WatchHold = Hold;
@@ -4967,6 +5277,11 @@ bool UHexHeroes::MoveAiHome(int32 Id, const HexHeroPath::FField& Ways, bool bAny
 		return false;
 	}
 	FString Message;
+	// by a Town portal when it would not reach it today
+	if (AiPortalInto(Id, Best->Id, BestCost))
+	{
+		return true;
+	}
 	if (Send(Id, Best->Layer, BestCell, Message))
 	{
 		UE_LOG(LogHexHero, Log, TEXT("Heroes: %s, moved by the game, goes home to castle %d for its army, %.1f points away"), *Hero->Name, Best->Id, BestCost);
@@ -4987,6 +5302,13 @@ bool UHexHeroes::MoveAi(int32 Id)
 	FindHeroMutable(Id)->AiSiteId = 0;
 	const TArray<FHexSphereCell>& Cells = Planet->GetGrid().GetCells();
 	const int32 NumCells = Cells.Num();
+
+	// a view of a layer much of which around it lies unexplored, as the developer asked on 2026-11-15 that the game cast the spells of the
+	// planet too
+	if (AiCastViews(Id))
+	{
+		return true;
+	}
 
 	HexHeroPath::FField Ways;
 	FindFieldFor(*Hero, Ways, false);
@@ -5028,6 +5350,12 @@ bool UHexHeroes::MoveAi(int32 Id)
 			}
 		}
 		FString Fled;
+		// by a Town portal when it would not reach it today
+		if (Refuge && AiPortalInto(Id, Refuge->Id, RefugeCost))
+		{
+			UE_LOG(LogHexHero, Log, TEXT("Heroes: %s, moved by the game, flees into castle %d by a town portal"), *FindHero(Id)->Name, Refuge->Id);
+			return true;
+		}
 		if (Refuge && Send(Id, Refuge->Layer, RefugeCell, Fled))
 		{
 			UE_LOG(LogHexHero, Log, TEXT("Heroes: %s, moved by the game, flees into castle %d from a hero far stronger"), *Hero->Name, Refuge->Id);
@@ -5044,6 +5372,11 @@ bool UHexHeroes::MoveAi(int32 Id)
 	}
 	if (MoveAiToSite(Id, Ways, bSent))
 	{
+		// a Dimension door along a way of more than today
+		if (bSent)
+		{
+			AiDoorAhead(Id, Ways);
+		}
 		return bSent;
 	}
 
@@ -5108,6 +5441,11 @@ bool UHexHeroes::MoveAi(int32 Id)
 			BestNode = Node;
 			bBestToday = bToday;
 		}
+	}
+	// over a forest or mountains by a spell that steps, when it explores nothing today on foot
+	if (!bBestToday && AiJumpTo(Id, Ways, Near))
+	{
+		return true;
 	}
 	if (BestNode != INDEX_NONE)
 	{
@@ -5411,7 +5749,16 @@ namespace
 		}
 		else if (Action.Equals(TEXT("play"), ESearchCase::IgnoreCase))
 		{
-			if (!Heroes->StartPlay(Message))
+			// as P does, with the camera put over the hero chosen
+			if (AHexPlanetPlayerController* Controller = Cast<AHexPlanetPlayerController>(World->GetFirstPlayerController()))
+			{
+				Controller->SetPlayMode(true);
+				if (!Heroes->IsPlaying())
+				{
+					UE_LOG(LogHexHero, Warning, TEXT("hex.Hero: the game does not start"));
+				}
+			}
+			else if (!Heroes->StartPlay(Message))
 			{
 				UE_LOG(LogHexHero, Warning, TEXT("hex.Hero: %s"), *Message);
 			}
@@ -5490,6 +5837,39 @@ namespace
 			FString Problem;
 			const bool bDone = From != 0 && To != 0 && Heroes->ArrangeArmy(From, FCString::Atoi(*Args[2]), To, FCString::Atoi(*Args[4]), Args.Num() >= 6 ? FCString::Atoi(*Args[5]) : 0, Problem);
 			UE_LOG(LogHexHero, Log, TEXT("hex.Hero arrange: %s"), bDone ? TEXT("done") : *Problem);
+		}
+		else if (Action.Equals(TEXT("cast"), ESearchCase::IgnoreCase) && Args.Num() >= 2)
+		{
+			// a spell of the planet by the hero chosen: cast <Spell> [Cell for a door | Castle for a portal]
+			const FHexHero* Hero = Heroes->GetSelected();
+			const UHexBattleConfig* Battle = UHexBattleConfig::Load();
+			const int32 Spell = Battle ? Battle->FindSpell(Args[1]) : int32(INDEX_NONE);
+			int32 Target = Args.Num() >= 3 ? FCString::Atoi(*Args[2]) : 0;
+			const bool bDoor = Battle && Battle->Spells.IsValidIndex(Spell) && IsStepSpell(Battle->Spells[Spell].Adventure);
+			// a door without a cell steps to the furthest it reaches
+			if (bDoor && Hero && Target == 0 && !Heroes->GetDoorCells(*Hero, Spell).IsEmpty())
+			{
+				Target = Heroes->GetDoorCells(*Hero, Spell).Last();
+			}
+			FString Cast = TEXT("no hero chosen, or no such spell");
+			const bool bDone = Hero && Spell != INDEX_NONE && Heroes->CastAdventure(Hero->Id, Spell, bDoor ? Target : INDEX_NONE, bDoor ? 0 : Target, Cast);
+			UE_LOG(LogHexHero, Log, TEXT("hex.Hero cast: %s %s"), bDone ? TEXT("done") : TEXT("not cast:"), *Cast);
+			Heroes->OnMessage.Broadcast(Cast);
+		}
+		else if (Action.Equals(TEXT("answer"), ESearchCase::IgnoreCase))
+		{
+			// what the choice dialog answers: yes takes the creatures, the gold or the boat; a skill of a level risen, yes the first, no the second
+			// or its number from 1
+			FString Answer;
+			const bool bYes = Args.Num() < 2 || !Args[1].Equals(TEXT("no"), ESearchCase::IgnoreCase);
+			const FHexHero* Rising = !Heroes->GetOffer().IsSet() ? Heroes->FindPendingLevelUp() : nullptr;
+			const int32 Pick = Args.Num() >= 2 && Args[1].IsNumeric() ? FCString::Atoi(*Args[1]) - 1 : bYes ? 0 : 1;
+			const bool bDone = Rising ? Heroes->ChooseLevelUp(Rising->Id, Pick, Answer) : Heroes->AnswerOffer(bYes, Answer);
+			UE_LOG(LogHexHero, Log, TEXT("hex.Hero answer: %s %s"), bDone ? TEXT("done") : TEXT("nothing"), *Answer);
+			if (!Answer.IsEmpty())
+			{
+				Heroes->OnMessage.Broadcast(Answer);
+			}
 		}
 		else if (Action.Equals(TEXT("skip"), ESearchCase::IgnoreCase))
 		{

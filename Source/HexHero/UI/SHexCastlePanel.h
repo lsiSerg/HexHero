@@ -34,6 +34,8 @@ public:
 	SLATE_BEGIN_ARGS(SHexCastlePanel) {}
 		/** A line for the player: what was built or hired, or why not */
 		SLATE_ARGUMENT(TFunction<void(const FString&)>, OnMessage)
+		/** The spell book of a hero is asked for, by its Id */
+		SLATE_ARGUMENT(TFunction<void(int32)>, OnSpellBook)
 	SLATE_END_ARGS()
 
 	void Construct(const FArguments& InArgs);
@@ -55,12 +57,28 @@ public:
 
 	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
 
+	/** While it is open nothing of the game takes the keys; Escape closes it */
+	virtual bool SupportsKeyboardFocus() const override { return true; }
+	virtual FReply OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
+
 private:
 
 	TWeakObjectPtr<UHexHeroes> Heroes;
 	TSharedPtr<SWidget> Frame;
 	TSharedPtr<SVerticalBox> Body;
 	TFunction<void(const FString&)> OnMessage;
+	TFunction<void(int32)> OnSpellBook;
+
+	/** The skills of a hero as their pictures, MaxSkills slots, its level and experience, and a button that opens its spell book */
+	TSharedRef<SWidget> MakeHeroSheet(const struct FHexHero& Hero, int32 OtherId = 0);
+
+	/** The artifacts of a hero, as the developer asked on 2026-11-15: the slots it wears them in, a click taking one off, and its backpack, a
+	 *  click putting one on; with Ctrl a click gives it to the other hero of an exchange, OtherId */
+	TSharedRef<SWidget> MakeArtifacts(const struct FHexHero& Hero, int32 OtherId);
+
+	/** The picture of an artifact, and what it is, gives and was */
+	TSharedRef<SWidget> MakeArtifactIcon(int32 Artifact, float Size);
+	FString DescribeArtifact(int32 Artifact) const;
 
 	/** The castle shown, 0 for none, and what it was made for last */
 	int32 OpenId = 0;
@@ -86,7 +104,7 @@ private:
 	float PanelLeft = 240.0f;
 
 	/** The tab shown, the hero chosen among those in or beside the castle, and whether what is hired goes to the garrison instead */
-	enum class ETab : uint8 { Buildings, Recruit, Armies };
+	enum class ETab : uint8 { Buildings, Recruit, Armies, Market };
 	ETab Tab = ETab::Buildings;
 	int32 ChosenHero = 0;
 	bool bHireToGarrison = false;

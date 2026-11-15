@@ -70,7 +70,15 @@ public:
 	/** A battle is on the field */
 	bool IsShown() const { return bShown; }
 
+	/** Every battle on the deck of a ship while it is on, to try battles at sea anywhere (hex.Cheat seabattle), as the developer asked on
+	 *  2026-11-15; else a battle is at sea when a hero of it is in a boat */
+	void SetForceSea(bool bOn) { bForceSea = bOn; }
+	bool IsForceSea() const { return bForceSea; }
+
 	FHexBattle& GetBattle() { return Battle; }
+
+	/** Gives the side of a hero in the battle shown the spells it knows now and MoreMana more mana (FHexBattle::RefreshMagic), after a cheat */
+	void RefreshMagic(int32 HeroId, int32 MoreMana);
 	const FHexBattle& GetBattle() const { return Battle; }
 	const FHexBattleRequest& GetRequest() const { return Request; }
 
@@ -130,6 +138,7 @@ private:
 	FHexBattle Battle;
 	FHexBattleRequest Request;
 	bool bShown = false;
+	bool bForceSea = false;
 	bool bPending = false;
 	bool bAuto[2] = {false, false};
 	TCHAR GroundLetter = 0;

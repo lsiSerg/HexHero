@@ -31,6 +31,8 @@ public:
 		SLATE_ARGUMENT(FLocate, OnLocate)
 		/** True while the marks must not show, as while the menu or a dialog is open, which they would stand over */
 		SLATE_ATTRIBUTE(bool, IsBlocked)
+		/** Where the camera looks, as a direction from the center of the planet, for the reach of the marks of hex.Cheat show */
+		SLATE_ARGUMENT(TFunction<bool(FVector3d&)>, OnFocus)
 	SLATE_END_ARGS()
 
 	void Construct(const FArguments& InArgs);
@@ -68,6 +70,7 @@ private:
 
 	TWeakObjectPtr<UHexHeroes> Heroes;
 	FLocate OnLocate;
+	TFunction<bool(FVector3d&)> OnFocus;
 	TAttribute<bool> IsBlocked;
 
 	/** Hit while the cursor is on the marks, else let through */

@@ -5,6 +5,8 @@
 #include "CoreMinimal.h"
 #include "UObject/Object.h"
 #include "HexCastleConfig.h"
+#include "HexHeroConfig.h"
+#include "HexUiConfig.h"
 #include "HexHeroPath.h"
 #include "HexPlanetFile.h"
 #include "HexPlanetLayers.h"
@@ -18,6 +20,10 @@ class UHexShroud;
 class UHexBattles;
 class UHexNeutrals;
 struct FHexNeutral;
+struct FHexSite;
+struct FHexBattleSideSetup;
+class UHexBattleConfig;
+enum class EHexAdventureSpell : uint8;
 class UInstancedStaticMeshComponent;
 class UProceduralMeshComponent;
 class UMaterialInstanceDynamic;
@@ -29,6 +35,22 @@ class UStaticMeshComponent;
  *  Defense are added to those of every unit of its army, its Spell Power is the strength of its spells and its Knowledge its mana, as the
  *  developer described on 2026-11-10; they count in battles (UHexBattles), and nothing levels up yet
  */
+/** A secondary skill a hero has, at its level: 1 Basic, 2 Advanced, 3 Expert */
+struct FHexHeroSkill
+{
+	EHexSkill Skill = EHexSkill::Sorcery;
+	int32 Level = 1;
+	bool operator==(const FHexHeroSkill& Other) const { return Skill == Other.Skill && Level == Other.Level; }
+};
+
+/** A level a hero rose to: the attribute it raised and the skills it may choose from, a new one or one a level higher */
+struct FHexLevelUp
+{
+	int32 Level = 2;
+	FString Raised;
+	TArray<FHexHeroSkill> Offers;
+};
+
 struct FHexHero
 {
 	/** Number of the hero on its planet, from 1, which never changes */
@@ -62,6 +84,28 @@ struct FHexHero
 	int32 Level = 1;
 	int32 Experience = 0;
 
+	/** Its secondary skills, at most MaxSkills of DA_HexHeroes, which it chooses as it rises in level (UHexHeroes::AddExperience) */
+	TArray<FHexHeroSkill> Skills;
+
+	/** The spells it knows, by their Ids in DA_HexBattle: those of its class and those it learned in mage guilds (UHexCastles) */
+	TArray<FName> Spells;
+
+	/** How many times it cast each spell of the planet today, by its Id, which CastsPerDay of a spell limits */
+	TMap<FName, int32> CastsToday;
+
+	/** The levels it rose to whose skill its person has not chosen yet, the first first; the game chooses at once for a player it moves */
+	TArray<FHexLevelUp> PendingLevelUps;
+
+	/** The artifacts it wears, by their index in Artifacts of DA_HexHeroes, a slot each of NumWornSlots (GetWornSlotKind), INDEX_NONE for an
+	 *  empty one, and those it carries besides; what they give its attributes is in Attack, Defense, SpellPower and Knowledge already
+	 *  (UHexHeroes::Wear) */
+	TArray<int32> Worn;
+	TArray<int32> Backpack;
+
+	/** The boat it sails in, by the Id of its site (EHexSiteType::Boat), 0 on land, and whether it stands over the sea now, on the deck of a boat */
+	int32 BoatId = 0;
+	bool bOnDeck = false;
+
 	/** The cells it still walks to after the step it takes now, the next first */
 	TArray<int32> Route;
 
@@ -69,6 +113,9 @@ struct FHexHero
 	bool bWalking = false;
 	int32 FromCell = INDEX_NONE;
 	float StepAlpha = 0.0f;
+
+	/** The points the step it takes paid as it set out, which the list of heroes shows spent along the step (UHexHeroes::GetShownMovePoints) */
+	float StepPaid = 0.0f;
 
 	/** How fast it walks now, in cells a second: it sets out and stops smoothly (WalkStartTime, WalkStopTime) */
 	float Speed = 0.0f;
@@ -184,6 +231,30 @@ struct FHexHero
 	float ViewScale = 1.0f;
 };
 
+/** Neutral creatures that offer to join a hero instead of fighting it (Diplomacy), for nothing or for gold, or a chest a hero opened, which
+ *  gives gold or experience: what waits for the person to answer */
+struct FHexHeroOffer
+{
+	int32 HeroId = 0;
+	/** The stack that offers to join, by its Id, 0 for a chest */
+	int32 NeutralId = 0;
+	FHexStack Stack;
+	int32 Gold = 0;
+	int32 Experience = 0;
+	bool bFree = false;
+	EHexPlanetLayer Layer = EHexPlanetLayer::Surface;
+	int32 Cell = INDEX_NONE;
+	/** The points of movement the visit took, given back when the battle cannot begin */
+	float Cost = 0.0f;
+	/** A shipyard that offers to build a boat, by the Id of its site, with what it costs and the water cell it would lie on */
+	int32 ShipyardId = 0;
+	int32 BoatCell = INDEX_NONE;
+	TMap<FName, int32> BoatCost;
+	bool IsSet() const { return HeroId != 0; }
+	bool IsChest() const { return IsSet() && NeutralId == 0 && ShipyardId == 0; }
+	bool IsShipyard() const { return IsSet() && ShipyardId != 0; }
+};
+
 /** The light of a hero for the planet: where it stands and how far its light reaches on the ground in cells, 0 for HeroLightReach of the layer */
 struct FHexHeroLight
 {
@@ -213,19 +284,35 @@ constexpr int32 MaxHeroLights = 8;
  */
 /** What the panel at the cursor says while the game is played (UHexHeroes::GetMapTip, SHexMapTip): a title, lines, an army as portraits with
  *  their numbers or ranges (ArmyCounts, one a stack, empty for the numbers), and a rough forecast of a battle there */
+/** A stat of a hero in the panel at the cursor: its icon, its value and its name */
+struct FHexMapTipStat
+{
+	EHexStatIcon Icon = EHexStatIcon::Attack;
+	FString Value;
+	FString Name;
+	bool operator==(const FHexMapTipStat& Other) const { return Icon == Other.Icon && Value == Other.Value; }
+};
+
 struct FHexMapTip
 {
 	FString Title;
 	FLinearColor TitleColor = FLinearColor::White;
 	TArray<FString> Lines;
+	/** The attributes of a hero with their icons, and its skills */
+	TArray<FHexMapTipStat> Stats;
+	TArray<FHexHeroSkill> Skills;
 	TArray<FHexStack> Army;
 	TArray<FString> ArmyCounts;
 	FString Forecast;
 	FLinearColor ForecastColor = FLinearColor::White;
+	/** The portrait of a hero or the picture of a castle beside the title, framed in TitleColor, as the developer asked on 2026-11-15 */
+	class UTexture2D* Picture = nullptr;
+	FLinearColor PictureTint = FLinearColor::White;
 
 	bool operator==(const FHexMapTip& Other) const
 	{
-		if (!(Title == Other.Title && Lines == Other.Lines && ArmyCounts == Other.ArmyCounts && Forecast == Other.Forecast && Army.Num() == Other.Army.Num()))
+		if (!(Title == Other.Title && Picture == Other.Picture && Lines == Other.Lines && ArmyCounts == Other.ArmyCounts && Forecast == Other.Forecast && Army.Num() == Other.Army.Num()
+			&& Stats == Other.Stats && Skills == Other.Skills))
 		{
 			return false;
 		}
@@ -347,12 +434,154 @@ public:
 	/** Returns true if a hero could stand on a cell of a layer were no hero and no site there: the ground alone and what blocks on it */
 	bool IsOpenGround(EHexPlanetLayer Layer, int32 Cell) const;
 
-	/** Returns the points of movement a hero has each day */
+	/** Returns the points of movement a hero has each day, more with Logistics */
 	float GetMaxMovePoints(const FHexHero& Hero) const;
+
+	/** The level of a skill of a hero, 0 without it, and its value there (FHexSkillInfo::Values, or SecondValues) */
+	int32 GetSkillLevel(const FHexHero& Hero, EHexSkill Skill) const;
+	float GetSkillValue(const FHexHero& Hero, EHexSkill Skill, bool bSecond = false) const;
+
+	/** The mana a hero has at most, by its Knowledge */
+	int32 GetMaxMana(const FHexHero& Hero) const;
+
+	/** The points of movement a hero has as the list shows them, spent as it walks along its step and not at once as it sets out on it, as the
+	 *  developer asked on 2026-11-15 */
+	float GetShownMovePoints(const FHexHero& Hero) const
+	{
+		return Hero.MovePoints + (Hero.bWalking ? Hero.StepPaid * FMath::Clamp(1.0f - Hero.StepAlpha, 0.0f, 1.0f) : 0.0f);
+	}
+
+	/** The panel at the cursor of a hero a player would hire of a class: its portrait, attributes, first skill and the army it comes with */
+	void GetClassTip(int32 Class, int32 Player, FHexMapTip& OutTip) const;
+
+	/** The portrait of a hero, that of its class (FHexHeroClass::Portrait), or null */
+	class UTexture2D* GetHeroPortrait(const FHexHero& Hero) const;
+
+	/** The spells of the planet, as the developer asked on 2026-11-15 (EHexSpellKind::Adventure of DA_HexBattle, HexHeroMagic.cpp): those a
+	 *  hero knows, by their index in DA_HexBattle */
+	TArray<int32> GetAdventureSpells(const FHexHero& Hero) const;
+
+	/** What a spell of the planet costs a hero, less what the skill of its school takes off, and how far it reaches in cells, more with that
+	 *  skill; a view at Expert reaches the whole layer (INT32_MAX) */
+	int32 GetAdventureManaCost(const FHexHero& Hero, int32 Spell) const;
+	int32 GetAdventureReach(const FHexHero& Hero, int32 Spell) const;
+
+	/** Whether a hero may cast a spell of the planet now: it knows it, it is its turn, it stands, it has the mana, the points of movement and
+	 *  the casts of the day it takes, and there is something to cast it on; else why not */
+	bool CanCastAdventure(const FHexHero& Hero, int32 Spell, FString* OutWhy = nullptr) const;
+
+	/** Where a hero may step with a Dimension door: cells of its layer within its reach that it may stand on, that its player has explored and
+	 *  where nothing lies */
+	TArray<int32> GetDoorCells(const FHexHero& Hero, int32 Spell) const;
+
+	/** The castles a Town portal takes a hero into: those of its player that no hero guards, nearest first; from Advanced of its school any of
+	 *  them, below that the nearest alone */
+	TArray<int32> GetPortalCastles(const FHexHero& Hero, int32 Spell) const;
+
+	/** Casts a spell of the planet: a Dimension door onto TargetCell, a Town portal into the castle TargetCastle (0 for the first it may go
+	 *  to); returns false and why not */
+	bool CastAdventure(int32 HeroId, int32 Spell, int32 TargetCell, int32 TargetCastle, FString& OutMessage);
+
+	/** While a person aims a spell of the planet (a Dimension door), the outline of the reach shows the cells it may be cast on in place of
+	 *  where the hero walks today; no hero (0) gives that back */
+	void SetAimCells(int32 HeroId, TConstArrayView<int32> Cells);
+
+	/** A hero cast a spell of the planet that changes where it is, for the camera of the person */
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnHeroTeleported, int32);
+	FOnHeroTeleported OnHeroTeleported;
+
+	/** A hero gains experience, as the developer asked on 2026-11-15 for skills gained as heroes rise: each level it reaches raises one of its
+	 *  attributes by the chances of its class and offers two skills, a new one and one a level higher, which the game chooses for a player it
+	 *  moves and the person chooses in a dialog (PendingLevelUps, ChooseLevelUp) */
+	void AddExperience(FHexHero& Hero, int32 Amount);
+	void AddExperience(int32 HeroId, int32 Amount);
+
+	/** The person chooses the skill of the first level a hero rose to, by its offer */
+	bool ChooseLevelUp(int32 HeroId, int32 Offer, FString& OutMessage);
+
+	/** The hero of the person who plays whose level waits for its skill to be chosen, or null */
+	const FHexHero* FindPendingLevelUp() const;
+
+	/** A hero learns spells by their Ids, those it knew already left out; returns how many it learned */
+	int32 LearnSpells(FHexHero& Hero, const TArray<FName>& Spells);
+
+	/** What the spells and the skills of magic of a hero give a side of a battle it leads */
+	void FillBattleMagic(const FHexHero& Hero, FHexBattleSideSetup& Side, const UHexBattleConfig* Battle) const;
+
+	/** A cost of ground for a hero: what lies over that of plains, less what its Pathfinding takes off */
+	float AdjustForPathfinding(const FHexHero* Hero, float Cost) const;
+
+	/** A hero rose to a level, by its Id */
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnLevelUp, int32);
+	FOnLevelUp OnLevelUp;
+
+	/** Whether neutral creatures offer to join a hero, as the developer asked on 2026-11-15 for Diplomacy: when its army counts JoinPowerRatio
+	 *  times theirs, for nothing by the chance of its Diplomacy and else for their price less what Diplomacy takes off; and the offer */
+	bool MakeJoinOffer(const FHexHero& Hero, const FHexNeutral& Neutral, FHexHeroOffer& OutOffer) const;
+
+	/** What waits for the person to answer: creatures that offer to join, or a chest; and the answer, true to take the creatures or the gold,
+	 *  false to fight or to take the experience */
+	const FHexHeroOffer& GetOffer() const { return PendingOffer; }
+	bool AnswerOffer(bool bYes, FString& OutMessage);
+
+	/** An offer came for the person to answer */
+	DECLARE_MULTICAST_DELEGATE(FOnOffer);
+	FOnOffer OnOffer;
+
+	/** The artifacts of a hero, as the developer asked on 2026-11-15 (HexHeroArtifacts.cpp): an artifact of DA_HexHeroes by its index, or null */
+	const FHexArtifact* GetArtifact(int32 Index) const;
+
+	/** What the artifacts a hero wears give together */
+	FHexArtifactBonus GetArtifactBonus(const FHexHero& Hero) const;
+
+	/** Gives a hero an artifact: it wears it in a free slot of its kind, else carries it in its backpack. Returns false when the backpack is full */
+	bool GiveArtifact(FHexHero& Hero, int32 Artifact);
+	bool GiveArtifact(int32 HeroId, int32 Artifact);
+
+	/** A hero puts on the artifact of a place in its backpack, taking off what wears its slot when all of its kind are full, and takes one off
+	 *  into the backpack; false and why not */
+	bool WearArtifact(int32 HeroId, int32 BackpackIndex, FString& OutMessage);
+	bool TakeOffArtifact(int32 HeroId, int32 WornSlot, FString& OutMessage);
+
+	/** A hero gives an artifact it wears (bWorn, by its slot) or carries to another of its player beside it, into its backpack */
+	bool PassArtifact(int32 FromHero, bool bWorn, int32 Index, int32 ToHero, FString& OutMessage);
+
+	/** What a beaten hero wore and carried goes to the hero that beat it, as far as its backpack holds; returns how many */
+	int32 TakeArtifacts(int32 WinnerId, int32 LoserId);
+
+	/** An artifact of a rank between Low and High, by a hash, or INDEX_NONE without one */
+	int32 PickArtifact(uint32 Hash, EHexArtifactRank Low, EHexArtifactRank High) const;
+
+	/** The artifact a site holds: one that lies on the map, or a chest that holds one instead of gold, INDEX_NONE for none */
+	int32 GetSiteArtifact(const FHexSite& Site) const;
+
+	/** Whether a cell of a layer is sea, which only a hero in a boat crosses */
+	bool IsSea(EHexPlanetLayer Layer, int32 Cell) const;
+
+	/** A cheat (hex.Cheat boat), as the developer asked on 2026-11-15: a boat on the free sea nearest a hero, within a few cells of it, as a
+	 *  shipyard builds one. Returns false and why not */
+	bool SummonBoat(int32 HeroId, FString& OutMessage, int32 MaxRings = 4);
+
+	/** The free sea nearest a hero within so many rings of cells, where nothing lies and nobody stands, INDEX_NONE for none */
+	int32 FindFreeSea(const FHexHero& Hero, int32 MaxRings) const;
+
+	/** A cheat (hex.Cheat teleport), as the developer asked on 2026-11-15: a hero on a cell of a layer at once, where it may stand; and the
+	 *  ground nearest it on its layer beside free sea, where a boat may be summoned, INDEX_NONE for none */
+	bool CheatTeleport(int32 HeroId, EHexPlanetLayer Layer, int32 Cell, FString& OutMessage);
+	int32 FindCoastCell(const FHexHero& Hero) const;
+
+	/** The rules of the sea for a step of a hero, as the developer asked on 2026-11-15 for boats: true when they decide the step, with its cost,
+	 *  negative for none. A hero on land steps onto the sea only onto a boat nobody sails, and its way ends there; a hero in a boat sails the sea
+	 *  and steps ashore onto ground it may stand on, where its way ends; each costs SeaStepCost, and going aboard or ashore takes the points
+	 *  left that day (StartNextStep) */
+	bool GetSeaStep(const FHexHero* Hero, const AHexPlanet& Planet, int32 From, int32 To, float& OutCost) const;
 
 	/** What the cheapest step onto a cell beside a hero costs, or -1 where it can step nowhere, so the panel says when the points left pay for
 	 *  no step, as the developer found heroes stop with 1 of 10 left on sand on 2026-11-14 */
 	float GetCheapestStep(const FHexHero& Hero) const;
+
+	/** The list of heroes changed, so the panels make it again */
+	void NoteListChanged() { ++ListRevision; }
 
 	/** Returns the hero chosen, or null */
 	/** Returns the hero chosen, null while a castle is chosen in its place: either a hero or a castle is chosen, as the developer decided on
@@ -403,7 +632,7 @@ public:
 	/** What the panel at the cursor says of a cell of a layer while the game is played, with the hero whose body is under the cursor: a hero of
 	 *  the person, what it leads and has left; a pile or a mine; a neutral stack, a hero of another player or a castle with how many it seems
 	 *  to have and a rough forecast of a battle against it, as the developer asked on 2026-11-13. False for nothing to say */
-	bool GetMapTip(EHexPlanetLayer Layer, int32 Cell, const FHexHero* Under, FHexMapTip& OutTip) const;
+	bool GetMapTip(EHexPlanetLayer Layer, int32 Cell, const FHexHero* Under, FHexMapTip& OutTip, bool bHeroOnly = false) const;
 
 	/** A neutral stack beside the castle a hero guards, which that hero sent onto it fights there as a siege, the hero behind its walls, as the
 	 *  developer asked on 2026-11-13; null for none, and the cell of the castle beside it */
@@ -453,6 +682,10 @@ public:
 		Swap,
 		/** Walk to a hero of its own it is pointed to and exchange the armies */
 		Exchange,
+		/** Go aboard a boat, go ashore from one, and go ashore onto a foe to fight it, as the developer asked on 2026-11-15 */
+		Board,
+		Land,
+		LandAttack,
 	};
 	EOrder GetOrderAt(EHexPlanetLayer Layer, int32 Cell, const FHexHero* Under, bool bMouth, bool bAlt = false);
 
@@ -735,6 +968,9 @@ private:
 	int32 PendingNextFrom = 0;
 	float PendingNextTime = 0.0f;
 
+	/** A panel lies over the map (the panel of a castle the hero went into, its army): the next hero waits until it closes */
+	bool bHoldNext = false;
+
 	/** Counts the changes of the map of any planet (NoteMapChanged) and of where heroes stand */
 	static int32 MapRevision;
 
@@ -774,6 +1010,11 @@ private:
 	/** Whether a cell holds what a hero of a player fights rather than walks onto: a neutral stack, or a hero of another player out of a castle */
 	bool IsFoeAt(int32 Player, EHexPlanetLayer Layer, int32 Cell) const;
 
+	/** Whether a site on a cell is held by a guard a hero of a player fights before it takes it: a mine or mill of nobody or of another player
+	 *  whose guard has creatures and on which no hero stands, or an artifact its guard holds (TakePile), so the cursor and the end of a way
+	 *  show an attack there, as the developer asked on 2026-11-15 */
+	bool IsGuardedSiteAt(int32 Player, EHexPlanetLayer Layer, int32 Cell) const;
+
 	/** Sends a hero the game moves to the best of the sites its player has seen and wants (UHexSites::GetGoal) within the reach of its kind,
 	 *  or to fight a castle, a hero or a neutral stack it beats in battles fought in advance (UHexBattles::Forecast): a neutral stack only for
 	 *  losses of AiNeutralLossShare, or of AiLossShare with bBreakThrough, when nothing else is left for it, as a guard of a way to another
@@ -784,7 +1025,30 @@ private:
 	 *  counts AiReinforceShare of its army, or anything at all with bAny. Returns true if it went */
 	bool MoveAiHome(int32 Id, const HexHeroPath::FField& Ways, bool bAny);
 
+	/** The spells of the planet for a hero the game moves (HexHeroMagic.cpp): a view of a layer when much of it around lies unexplored, once a
+	 *  day; a Dimension door to the furthest cell of the way it was just sent on that it reaches, when that way takes more than today; and
+	 *  a Town portal into a castle it would go to but not reach today. Each returns true if it cast */
+	bool AiCastViews(int32 Id);
+	bool AiDoorAhead(int32 Id, const HexHeroPath::FField& Ways);
+
+	/** A hero the game moves that explores no cell today on foot jumps by a spell that steps (Teleport, Dimension door) over the forest or the
+	 *  mountains around it, to the cell it may land on nearest ground its player has not explored (Near, steps by node), which its feet do
+	 *  not reach today, as the developer asked on 2026-11-15 that the game leave or enter a closed place so */
+	bool AiJumpTo(int32 Id, const HexHeroPath::FField& Ways, const TArray<int8>& Near);
+	bool AiPortalInto(int32 Id, int32 CastleId, float WayCost);
+
+	/** The index of the spell of a kind of the planet that a hero knows, INDEX_NONE for none */
+	int32 FindAdventureSpell(const FHexHero& Hero, EHexAdventureSpell What) const;
+
+	/** Puts a hero on a cell of a layer at once, out of any castle, its way gone, and lets it see around it, as a spell of the planet does */
+	void Teleport(FHexHero& Hero, EHexPlanetLayer Layer, int32 Cell);
+
 public:
+
+	/** The next hero is not chosen while the person looks at a panel over the map, as the panel of a castle a hero that ran out of steps went
+	 *  into, which choosing another would close (AHexPlanetPlayerController) */
+	void HoldPendingNext(bool bHold) { bHoldNext = bHold; }
+
 	/** The hero of a player the game moves that leads its army: the strongest, which alone takes the creatures of its castles, so the army is
 	 *  not spread over its heroes, while the others gather and explore. 0 for none */
 	int32 GetAiMainHero(int32 Player) const;
@@ -828,6 +1092,9 @@ private:
 
 	/** What the cells shown were found for: the hero, where it stood, its points and the map */
 	int32 ReachHero = 0;
+
+	/** The hero a person aims a spell of the planet for, whose cells the reach shows meanwhile (SetAimCells), 0 for none */
+	int32 AimHeroId = 0;
 	int32 ReachNode = INDEX_NONE;
 	float ReachPoints = -1.0f;
 	int32 ReachRevision = -1;
@@ -959,6 +1226,53 @@ private:
 	/** Gives a hero the attributes its class starts with and the points of a day */
 	void ResetHero(FHexHero& Hero) const;
 
+	/** What waits for the person to answer, and the stacks that offered to join and were sent away, which offer no more this game */
+	FHexHeroOffer PendingOffer;
+	TSet<int32> RefusedJoins;
+
+	/** The neutral stack of an offer joins its hero, or is fought */
+	bool JoinNeutral(FString& OutMessage);
+	bool FightNeutral(FString& OutMessage);
+
+	/** The skills a level offers a hero: one a level higher of those it has and one it lacks, while it has room, by the weights of its class */
+	TArray<FHexHeroSkill> MakeLevelOffers(const FHexHero& Hero, FRandomStream& Random) const;
+
+	/** Gives a hero the skill of an offer, a new one at Basic or one of its own a level higher */
+	void ApplySkill(FHexHero& Hero, const FHexHeroSkill& Offer) const;
+
+	/** Mana back at the start of a day: ManaPerDay and Mysticism, all of it in a castle of its own with a mage guild */
+	void RestoreMana(FHexHero& Hero) const;
+
+	/** Adds what an artifact gives to the attributes of a hero, or takes it off with a Sign of -1, as it puts it on or takes it off */
+	void Wear(FHexHero& Hero, int32 Artifact, int32 Sign) const;
+
+	/** A hero goes aboard the boat of a cell, or ashore from its boat, which then lies on the cell of the sea it left */
+	void Board(FHexHero& Hero, int32 BoatCell);
+	void GoAshore(FHexHero& Hero);
+
+	/** The shipyard of an offer builds its boat, for what it costs */
+	bool BuildBoat(const FHexHeroOffer& Offer, FString& OutMessage);
+
+	/** A shipyard beside a hero offers to build a boat: the cell of the sea beside it a boat would lie on, INDEX_NONE for none */
+	int32 FindBoatCell(EHexPlanetLayer Layer, int32 ShipyardCell) const;
+
+	/** The boat a hero sails in, drawn where it goes, by its Id */
+	UPROPERTY(Transient)
+	TMap<int32, TObjectPtr<UInstancedStaticMeshComponent>> BoatBodies;
+
+	/** Draws the boat a hero sails in under it, or hides it */
+	void UpdateBoatBody(const FHexHero& Hero, bool bShown);
+
+	/** The rings of foam the boats leave behind them on each layer (WakeSize and the rest of DA_HexHeroes), given out in turn, and when each
+	 *  hero's boat laid its last */
+	UPROPERTY(Transient)
+	TObjectPtr<UInstancedStaticMeshComponent> Wakes[2];
+	int32 WakeNext[2] = {0, 0};
+	TMap<int32, double> WakeTimes;
+
+	/** Lays a ring of foam behind the boat of a hero that sails, every WakeInterval */
+	void DropWake(const FHexHero& Hero, AHexPlanet& Planet, const FVector3d& Where, const FVector3d& Up, const FVector3d& Facing, double Time);
+
 	/** Returns the name a new hero of a class takes */
 	FString MakeName(int32 Class, int32 Id) const;
 
@@ -970,6 +1284,9 @@ private:
 	/** Returns the point of the ground of a cell, or of the other cell where the first has none there, in a direction from the center, Lift
 	 *  above it; the top of the cell where neither has ground there */
 	FVector3d FindGroundPoint(const AHexPlanet& Planet, int32 Cell, int32 OtherCell, const FVector3d& Direction, double Lift);
+
+	/** The radius of the water a mark over the sea lies on, the sea of the surface, else 0 */
+	static double GetWaterRadius(const AHexPlanet& Planet);
 
 	/** Returns the up of the ground around the middle of a cell, from three points of it Reach away, so a flat mark lies on a slope */
 	FVector3d FindGroundUp(const AHexPlanet& Planet, int32 Cell, double Reach);
